@@ -88,16 +88,27 @@ sample; N=12; curated event dates. A pilot, not a study.
 
 ## Verdict
 
-The free survivorship correction worked, and it delivered the evidence the
-calibration report and the investment committee said did not exist: **on
-companies that actually failed, the engine elevated before the event far above
-base rate, and the result did not depend on excluding the dead.** That is a real
-strengthening of the project's evidence base — the cheap experiment that could
-have killed it instead supported it.
+> **CORRECTION (see [distressed_control.md](distressed_control.md)):** the
+> distressed-survivor control has since been run, and it changes the reading of
+> this pilot. The correct baseline is not the 13.5% general base rate but
+> distressed *peers* — and near-death companies that SURVIVED flag at ~70% ≥p90,
+> essentially the same as the dead set's 75%. **The engine detects distress, not
+> death.** The result below (that the signal is strong on the dead) still holds;
+> what does not hold is that this represents *predictive discrimination*. Read
+> the two documents together.
 
-The honest qualifier stands: this is largely *distress* detection, weakest
-exactly where the "forensic accounting" framing is strongest (restatements), and
-it lacks a distressed-survivor control. The next move is that control group and,
-if warranted, the paid delisting-inclusive *price* data for the returns-based
-version — but only now, with a free positive result already in hand, rather than
-on spec.
+The free survivorship correction worked, and it delivered part of the evidence
+the calibration report and the investment committee wanted: **on companies that
+actually failed, the engine elevated before the event, and the result did not
+depend on excluding the dead** — so the flags are not survivor-flattered
+artifacts. But the follow-up control shows this is **distress detection**: the
+same elevation appears on distressed companies that lived. The honest, corrected
+claim is: *the engine reliably flags financial stress (dead and alive) far above
+the general population, and does not distinguish which stressed company fails.*
+
+Consistent with the pilot's own qualifier: weakest exactly where the "forensic
+accounting" framing is strongest (the two restatement cases), with the
+litigation/off-balance-sheet blind spot (Rite Aid, echoing GE). The paid
+delisting-inclusive *price* data for a returns-based version is not warranted on
+this evidence — a distress thermometer does not need return calibration to be
+understood; it needs to be positioned honestly as triage, not prediction.
