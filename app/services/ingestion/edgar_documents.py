@@ -144,12 +144,23 @@ def fetch_documents(
     facts_json: dict,
     n_filings: int = 8,
     include_earnings_releases: bool = True,
+    cik: int | None = None,
+    before: date | None = None,
 ) -> ExtractionResult:
     """Fetch the latest 10-K/10-Q MD&A + Risk Factors sections and 8-K
-    (item 2.02) earnings releases, labeled with structural fiscal labels."""
+    (item 2.02) earnings releases, labeled with structural fiscal labels.
+
+    `cik` bypasses ticker resolution (required for delisted companies absent
+    from the current registry). `before` restricts to filings filed on or
+    before that date — point-in-time document discipline, so a pre-event view
+    cannot see filings that did not yet exist.
+    """
     result = ExtractionResult()
-    subs = _get_submissions(client, ticker)
-    cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
+    if cik is not None:
+        subs = client.submissions_by_cik(cik)
+    else:
+        subs = _get_submissions(client, ticker)
+        cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
     fye_month = fiscal_year_end_month(facts_json)
     recent = subs.get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
@@ -157,6 +168,8 @@ def fetch_documents(
     primaries = recent.get("primaryDocument", [])
     report_dates = recent.get("reportDate", [])
     items_list = recent.get("items", [])
+    filing_dates = recent.get("filingDate", [])
+    cutoff = before.isoformat() if before else None
 
     known_quarter_ends = select_quarter_ends(facts_json, 40)
 
@@ -180,6 +193,8 @@ def fetch_documents(
     for i in range(len(forms)):
         if statements_done >= n_filings and (not include_earnings_releases or releases_done >= n_filings):
             break
+        if cutoff is not None and i < len(filing_dates) and filing_dates[i] > cutoff:
+            continue  # point-in-time: this filing did not exist yet at `before`
         form = forms[i]
         try:
             if form in ("10-K", "10-Q") and statements_done < n_filings:
