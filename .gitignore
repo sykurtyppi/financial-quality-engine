@@ -6,3 +6,4 @@ __pycache__/
 data/*.db
 data/cache/
 .DS_Store
+reports/

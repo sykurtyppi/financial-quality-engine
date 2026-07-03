@@ -1,0 +1,76 @@
+ticker,name,sic,status,coverage,overall,direction,n_red_flags,top_block,top_block_score,red_flag_metrics
+NVDA,NVIDIA CORP,3674,ok,0.954,29.6,positive,1,Working Capital Stress,44.3,dio_trend
+GOOGL,ALPHABET INC.,7370,ok,0.852,44.7,mixed,3,Cash Conversion,65.3,fcf_to_net_income;capex_to_da;buyback_offset_ratio
+AAPL,Apple Inc.,3571,ok,0.852,30.7,positive,1,Working Capital Stress,56.1,inventory_growth_spread
+MSFT,MICROSOFT CORPORATION,7372,ok,0.986,32.7,mixed,2,Capex Discipline,58.4,incremental_revenue_per_capex;capex_to_da
+AMZN,AMAZON COM INC,5961,ok,0.852,47.1,negative,5,Cash Conversion,72.6,fcf_to_net_income;fcf_margin_trend;fcf_margin;incremental_revenue_per_capex;receivables_growth_spread
+AVGO,Broadcom Inc.,3674,ok,0.944,33.8,mixed,5,Working Capital Stress,73.6,intangibles_to_assets;asset_quality_proxy;dio_trend;net_debt_to_ebitda;inventory_growth_spread
+TSLA,"Tesla, Inc.",3711,ok,0.898,28.8,positive,0,Working Capital Stress,65.2,
+META,"Meta Platforms, Inc.",7370,ok,0.815,34.7,mixed,4,Capex Discipline,58.6,capex_intensity_regime_shift;incremental_revenue_per_capex;capex_to_da;buyback_offset_ratio
+MU,"Micron Technology, Inc.",3674,ok,0.94,33.0,mixed,2,Earnings Quality,55.5,capex_to_da;buyback_offset_ratio
+BRK-B,BERKSHIRE HATHAWAY INC,6331,excluded_financial,0.389,,,,,,
+LLY,ELI LILLY & Co,2834,ok,0.801,38.5,mixed,0,Cash Conversion,62.9,
+JPM,JPMORGAN CHASE & CO,6021,excluded_financial,0.394,,,,,,
+AMD,ADVANCED MICRO DEVICES INC,3674,ok,0.88,25.3,positive,1,Capex Discipline,41.1,capex_growth_spread
+WMT,WALMART INC.,5331,ok,0.856,41.0,mixed,2,Cash Conversion,63.2,fcf_to_net_income;current_ratio
+ASML,,,error: Could not establish at least 2 quarter-end dates for ASML; the filer may use cus,,,,,,,
+V,VISA INC.,7389,ok,0.741,41.7,mixed,2,Cash Conversion,62.9,fcf_margin_trend;cfo_to_net_income
+INTC,INTEL CORP,3674,ok,0.866,43.9,mixed,5,Cash Conversion,77.5,interest_coverage;incremental_revenue_per_capex;fcf_margin;fcf_margin_trend;dio_trend
+JNJ,Johnson & Johnson,2834,ok,0.843,42.6,mixed,3,Cash Conversion,72.3,fcf_margin_trend;cfo_to_net_income;fcf_to_net_income
+XOM,Exxon Mobil Corporation,2911,ok,0.63,39.7,mixed,4,Revenue Quality,73.9,incremental_revenue_per_capex;dso_trend;receivables_growth_spread;fcf_margin_trend
+AMAT,APPLIED MATERIALS INC /DE,3674,ok,0.972,48.4,negative,5,Cash Conversion,79.6,cfo_to_net_income;fcf_to_net_income;fcf_margin_trend;capex_to_da;accrual_trend
+LRCX,LAM RESEARCH CORPORATION,3559,ok,0.898,40.2,mixed,2,Cash Conversion,62.2,fcf_margin_trend;cfo_to_net_income
+MA,Mastercard Inc,7389,ok,0.792,38.9,mixed,1,Cash Conversion,50.2,fcf_margin_trend
+CSCO,"CISCO SYSTEMS, INC.",3576,ok,0.935,33.3,mixed,2,Working Capital Stress,60.9,asset_quality_proxy;dio_trend
+CAT,CATERPILLAR INC,3531,ok,0.926,39.2,mixed,1,Cash Conversion,62.9,fcf_margin_trend
+ABBV,AbbVie Inc.,2834,ok,0.917,35.4,mixed,5,Balance Sheet Stress,67.6,net_debt_to_ebitda;fcf_margin_trend;asset_quality_proxy;intangibles_to_assets;current_ratio
+CYATY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0002070829.,,,,,,,
+BAC,BofA Finance LLC,6021,excluded_financial,0.509,,,,,,
+ORCL,Oracle Corporation,7372,ok,0.884,37.8,mixed,6,Capex Discipline,65.8,fcf_to_net_income;capex_intensity_regime_shift;incremental_revenue_per_capex;capex_to_da;fcf_margin;buyback_offset_ratio
+COST,COSTCO WHOLESALE CORP /NEW,5331,ok,0.884,26.1,positive,0,Capex Discipline,36.0,
+GE,GENERAL ELECTRIC COMPANY,3600,ok,0.745,32.8,mixed,0,Revenue Quality,41.2,
+UNH,UnitedHealth Group Incorporated,6324,excluded_financial,0.963,,,,,,
+ARM,ARM HOLDINGS PLC /UK,3674,ok,0.806,42.1,mixed,3,Capital Integrity,63.3,sbc_to_cfo;fcf_margin_trend;deferred_revenue_growth_spread
+HD,"HOME DEPOT, INC.",5211,ok,0.977,27.7,positive,1,Balance Sheet Stress,51.0,net_debt_to_ebitda
+KO,COCA COLA CO,2080,ok,0.88,37.2,mixed,1,Cash Conversion,51.6,cfo_to_net_income
+KLAC,KLA CORPORATION,3827,ok,0.875,37.6,mixed,2,Cash Conversion,60.1,fcf_margin_trend;cfo_to_net_income
+PG,PROCTER & GAMBLE CO,2840,ok,0.917,32.8,mixed,1,Balance Sheet Stress,42.0,current_ratio
+MS,MORGAN STANLEY,6211,excluded_financial,0.398,,,,,,
+CVX,Chevron Corp,2911,ok,0.741,44.5,mixed,5,Revenue Quality,69.7,fcf_to_net_income;fcf_margin_trend;incremental_revenue_per_capex;receivables_growth_spread;working_capital_swing_to_income
+HSBC,,,error: Could not establish at least 2 quarter-end dates for HSBC; the filer may use cus,,,,,,,
+NFLX,"Netflix, Inc.",7841,ok,0.833,25.6,positive,1,Balance Sheet Stress,30.0,asset_quality_proxy
+MRK,"Merck & Co., Inc.",2834,ok,0.843,31.9,positive,2,Balance Sheet Stress,45.1,fcf_margin_trend;incremental_revenue_per_capex
+GEV,GE Vernova Inc.,3600,ok,0.806,34.5,mixed,2,Working Capital Stress,77.3,dio_trend;dso_trend
+PLTR,Palantir Technologies Inc.,7372,ok,0.792,28.7,positive,0,Revenue Quality,46.9,
+SNDK,Sandisk Corporation,3572,ok,0.741,37.0,mixed,3,Earnings Quality,65.0,accrual_trend;dio_trend;beneish_m_score
+GS,"The Goldman Sachs Group, Inc.",6211,excluded_financial,0.505,,,,,,
+NVS,,,error: Could not establish at least 2 quarter-end dates for NVS; the filer may use cust,,,,,,,
+RY,,,error: Could not establish at least 2 quarter-end dates for RY; the filer may use custo,,,,,,,
+PANW,"PALO ALTO NETWORKS, INC",3577,ok,0.875,45.1,negative,6,Balance Sheet Stress,76.1,diluted_share_growth;asset_quality_proxy;fcf_margin_trend;intangibles_to_assets;dso_trend;sbc_to_revenue
+AZN,,,error: Could not establish at least 2 quarter-end dates for AZN; the filer may use cust,,,,,,,
+KXIAY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0002053383.,,,,,,,
+PM,Philip Morris International Inc.,2111,ok,0.769,59.2,negative,8,Cash Conversion,87.7,cfo_to_net_income;dio_trend;fcf_to_net_income;net_debt_to_ebitda;fcf_margin_trend;debt_to_assets;fcf_margin;accrual_trend
+DELL,Dell Technologies Inc.,3571,ok,0.972,33.7,mixed,2,Revenue Quality,57.8,deferred_revenue_growth_spread;net_debt_to_ebitda
+TXN,TEXAS INSTRUMENTS INCORPORATED,3674,ok,0.88,33.4,mixed,2,Balance Sheet Stress,41.2,net_debt_to_ebitda;incremental_revenue_per_capex
+IBM,INTERNATIONAL BUSINESS MACHINES CORP,3570,ok,0.88,29.6,positive,4,Balance Sheet Stress,67.0,asset_quality_proxy;inventory_growth_spread;intangibles_to_assets;current_ratio
+WFC,WELLS        FARGO & COMPANY/MN,6021,excluded_financial,0.403,,,,,,
+RTX,RTX CORPORATION,3724,ok,0.894,37.6,mixed,2,Balance Sheet Stress,58.7,net_debt_to_ebitda;buyback_offset_ratio
+LIN,LINDE PLC,2810,ok,0.954,36.1,mixed,3,Balance Sheet Stress,51.1,net_debt_to_ebitda;incremental_revenue_per_capex;fcf_margin_trend
+C,Citigroup Inc,6021,excluded_financial,0.519,,,,,,
+MRVL,"MARVELL TECHNOLOGY, INC",3674,ok,0.917,27.8,positive,3,Balance Sheet Stress,40.9,working_capital_swing_to_income;asset_quality_proxy;intangibles_to_assets
+AXP,AMERICAN EXPRESS CO,6199,excluded_financial,0.528,,,,,,
+BABA,Alibaba Group Holding Limited,7389,ok,0.333,,mixed,0,Balance Sheet Stress,41.5,
+MUFG,,,error: Could not establish at least 2 quarter-end dates for MUFG; the filer may use cus,,,,,,,
+NVO,,,error: Could not establish at least 2 quarter-end dates for NVO; the filer may use cust,,,,,,,
+SMTOY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0000095227.,,,,,,,
+APH,AMPHENOL CORP /DE/,3678,ok,0.917,31.7,positive,2,Balance Sheet Stress,53.0,net_debt_to_ebitda;fcf_margin_trend
+SHEL,,,error: Could not establish at least 2 quarter-end dates for SHEL; the filer may use cus,,,,,,,
+ANET,"Arista Networks, Inc.",3576,ok,0.866,25.9,positive,2,Capex Discipline,43.1,accrual_trend;buyback_offset_ratio
+BHP,,,error: Could not establish at least 2 quarter-end dates for BHP; the filer may use cust,,,,,,,
+STX,Seagate Technology Holdings plc,3572,ok,0.88,23.7,positive,0,Capex Discipline,39.8,
+WDC,WESTERN DIGITAL CORPORATION,3572,ok,0.875,45.2,negative,5,Earnings Quality,88.1,total_accruals;beneish_tata;cfo_to_net_income;accrual_trend;fcf_to_net_income
+TD,,,error: Could not establish at least 2 quarter-end dates for TD; the filer may use custo,,,,,,,
+TM,TOYOTA MOTOR CORP/,3711,ok,0.343,,mixed,0,Balance Sheet Stress,44.4,
+RTNTF,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0000887028.,,,,,,,
+SAN,,,error: Could not establish at least 2 quarter-end dates for SAN; the filer may use cust,,,,,,,
+CRWD,"CROWDSTRIKE HOLDINGS, INC.",7372,ok,0.833,28.0,positive,2,Capital Integrity,63.8,interest_coverage;sbc_to_revenue

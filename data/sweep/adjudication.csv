@@ -1,0 +1,6 @@
+ticker,name,overall,coverage,red_flag_metrics,auto_label,adjudication,notes
+AMZN,AMAZON COM INC,47.1,0.852,fcf_to_net_income;fcf_margin_trend;fcf_margin;incremental_revenue_per_capex;receivables_growth_spread,,,
+AMAT,APPLIED MATERIALS INC /DE,48.4,0.972,cfo_to_net_income;fcf_to_net_income;fcf_margin_trend;capex_to_da;accrual_trend,,,
+PANW,"PALO ALTO NETWORKS, INC",45.1,0.875,diluted_share_growth;asset_quality_proxy;fcf_margin_trend;intangibles_to_assets;dso_trend;sbc_to_revenue,,,
+PM,Philip Morris International Inc.,59.2,0.769,cfo_to_net_income;dio_trend;fcf_to_net_income;net_debt_to_ebitda;fcf_margin_trend;debt_to_assets;fcf_margin;accrual_trend,,,
+WDC,WESTERN DIGITAL CORPORATION,45.2,0.875,total_accruals;beneish_tata;cfo_to_net_income;accrual_trend;fcf_to_net_income,,,
