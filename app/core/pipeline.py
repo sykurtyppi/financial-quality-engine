@@ -12,8 +12,21 @@ from app.schemas.financials import CompanyDataset
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.schemas.report import AnalysisResult, EvidenceEntry, Flag
 from app.services.formulas.registry import MetricsBundle, compute_metrics
-from app.services.narrative.narrative_metrics import compute_narrative_metrics
-from app.services.scoring.engine import score_all
+from app.services.narrative.narrative_metrics import compute_narrative_layer
+from app.services.scoring.engine import interpolate_concern, score_all
+
+
+def _financial_concerns(metrics_by_name: dict[str, MetricResult]) -> dict[str, float]:
+    """Concern scores for OK financial metrics, straight from the config
+    anchors — used by the narrative layer's mismatch checks before full
+    scoring runs."""
+    concerns: dict[str, float] = {}
+    for block in cfg.BLOCKS:
+        for ms in block.metrics:
+            m = metrics_by_name.get(ms.metric_name)
+            if m is not None and m.status is MetricStatus.OK and m.value is not None:
+                concerns.setdefault(ms.metric_name, interpolate_concern(m.value, ms.anchors))
+    return concerns
 
 RED_FLAG_CONCERN = 70.0
 GREEN_FLAG_CONCERN = 20.0
@@ -146,8 +159,32 @@ def _evidence_ledger(metrics: list[MetricResult]) -> list[EvidenceEntry]:
     return entries
 
 
-def _analyst_questions(red_flags: list[Flag], narrative_findings) -> list[str]:
+_MISMATCH_QUESTIONS = {
+    "demand_narrative_vs_working_capital": (
+        "Management describes demand as strong; what explains the concurrent "
+        "receivables/inventory build relative to revenue?"
+    ),
+    "profitability_narrative_vs_cash_conversion": (
+        "Reported profitability is emphasized; why is operating/free cash flow "
+        "not converting at a comparable rate, and when should it?"
+    ),
+    "buyback_narrative_vs_share_count": (
+        "Repurchases are highlighted while net share count rose; how much of the "
+        "program offsets compensation issuance versus reducing the float?"
+    ),
+    "growth_capex_narrative_vs_fcf": (
+        "Capex is framed as growth investment; what unit-level returns support it "
+        "given the compression in free-cash-flow margin?"
+    ),
+}
+
+
+def _analyst_questions(red_flags: list[Flag], narrative_findings, mismatches=()) -> list[str]:
     questions: list[str] = []
+    for mm in mismatches:
+        q = _MISMATCH_QUESTIONS.get(mm.kind)
+        if q and q not in questions:
+            questions.append(q)
     templates = {
         "Receivables outpacing revenue": (
             "What drove receivables growth ahead of revenue this period — payment-term "
@@ -206,7 +243,13 @@ def analyze(dataset: CompanyDataset) -> AnalysisResult:
         )
 
     bundle = compute_metrics(dataset)
-    narrative_metrics, narrative_findings = compute_narrative_metrics(dataset.documents)
+    financial_by_name = {m.name: m for m in bundle.latest}
+    narrative = compute_narrative_layer(
+        dataset.documents,
+        metrics_by_name=financial_by_name,
+        concern_by_name=_financial_concerns(financial_by_name),
+    )
+    narrative_metrics, narrative_findings = narrative.metrics, narrative.findings
     all_metrics = bundle.latest + narrative_metrics
 
     sgi = bundle.get_latest("beneish_sgi")
@@ -232,5 +275,7 @@ def analyze(dataset: CompanyDataset) -> AnalysisResult:
         changes=_what_changed(bundle),
         evidence=_evidence_ledger(all_metrics),
         narrative_findings=narrative_findings,
-        analyst_questions=_analyst_questions(red, narrative_findings),
+        narrative_evidence=narrative.evidence,
+        mismatches=narrative.mismatches,
+        analyst_questions=_analyst_questions(red, narrative_findings, narrative.mismatches),
     )

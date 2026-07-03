@@ -102,6 +102,7 @@ class DocumentType(str, Enum):
     EARNINGS_RELEASE = "earnings_release"
     TRANSCRIPT = "transcript"
     MDNA = "mdna"
+    RISK_FACTORS = "risk_factors"
     TEN_K = "10-K"
     TEN_Q = "10-Q"
 

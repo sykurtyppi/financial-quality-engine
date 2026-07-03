@@ -34,6 +34,27 @@ report. It states: automated formula-driven analysis of public data; opinions,
 not allegations; not investment advice; elevated scores are review prompts,
 not conclusions; heuristic thresholds.
 
+## Narrative layer rules (v0.4)
+
+The narrative engine compares management language across periods and checks
+it against computed metrics. Additional rules for this layer:
+
+1. **Mismatches are framed as questions.** "Management emphasizes demand
+   strength while receivables outgrew revenue; requires joint review" —
+   never "management is misrepresenting demand." The mismatch section states
+   explicitly that the narrative may be fully justified.
+2. **Quotes are verbatim and bounded.** Excerpts are short (≤400 chars),
+   attributed to the filing, and used to show what was said — not paraphrased
+   into stronger claims.
+3. **High-severity disclosure terms** (material weakness, going concern,
+   restatement, …) are reported as the company's OWN disclosure resurfaced,
+   with the excerpt — the engine adds no characterization beyond "requires
+   review."
+4. **The LLM grounding validator enforces this in code**
+   (app/services/narrative/grounding.py): banned vocabulary, off-vocabulary
+   classifications, uncited evidence, and ungrounded numbers are rejected.
+   Tests assert all four rejections.
+
 ## Note names, not intent
 
 Good: "Receivables grew 38% while revenue grew 11%; cash conversion and

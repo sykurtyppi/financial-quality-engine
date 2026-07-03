@@ -4,11 +4,11 @@
 
 ## 1. Executive Summary
 
-Overall Quality Risk Score: **58/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
+Overall Quality Risk Score: **57/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
 
 Weighted average of 8 block scores. Highest concern: Cash Conversion (88). Lowest concern: Balance Sheet Stress (38).
 
-The screen flagged 10 elevated-concern item(s) and 1 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
+The screen flagged 10 elevated-concern item(s) and 3 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
 
 > Caveat: Scores use v0.3 weights informed by a small, survivorship-biased 2021-2025 backtest (~70 companies, point-in-time fundamentals); anchor thresholds remain judgment-based heuristics and are not sector-normalized. Directional evidence only — treat as a screening aid, not a calibrated probability. Methodology and limits: docs/calibration_report.md.
 
@@ -25,7 +25,7 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 | Capital Integrity | 64 | Negative | high | 100% | 7% |
 | Capex Discipline | 54 | Negative | high | 100% | 15% |
 | Balance Sheet Stress | 38 | Mixed | high | 100% | 14% |
-| Narrative Drift | 72 | Negative | high | 100% | 10% |
+| Narrative Drift | 57 | Negative | high | 80% | 10% |
 
 > Earnings Quality: Beneish M-score note: Estimated on annual data; quarterly application is a screening convenience.
 
@@ -44,7 +44,9 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 
 ## 4. Top Green Flags
 
+- **Supportive: disclosure_volume_change** (FY2025Q4): disclosure_volume_change = 1.26 (formula: latest period word count / mean(prior period word counts); period FY2025Q4; concern 15/100). Supportive indicator.
 - **Supportive: current_ratio** (FY2025Q4): current_ratio = 2.37 (formula: Current Assets / Current Liabilities; period FY2025Q4; concern 17/100). Supportive indicator.
+- **Supportive: defensive_tone_change** (FY2025Q4): defensive_tone_change = 0 (formula: defensive-term density per 1k words vs trailing baseline; period FY2025Q4; concern 20/100). Supportive indicator.
 
 ## 5. What Changed This Period
 
@@ -56,7 +58,9 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 - Capex / Revenue: 10.0% (FY2025Q3) -> 11.0% (FY2025Q4)
 - FCF margin: -8.0% (FY2025Q3) -> -10.5% (FY2025Q4)
 
-### Narrative & Disclosure Observations
+## 6. Narrative Drift Summary
+
+Deterministic language analysis across the documented periods (QoQ, YoY, and trailing-8-quarter baselines where available). Findings are review prompts; each cites its evidence in §8.
 
 - *adjustment_recurrence* (FY2025Q4): Adjustment term "restructuring" appears in 4 of 4 analyzed periods; repeated presentation of items as non-recurring warrants review.
   - Evidence: [FY2025Q1] …Results this quarter include restructuring charges related to our transformation program, which we believe are o…
@@ -82,7 +86,17 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 - *kpi_removed* (FY2025Q4): KPI "Net revenue retention" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review.
 - *kpi_removed* (FY2025Q4): KPI "RPO" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review.
 
-## 6. Evidence Ledger
+## 7. Metric/Narrative Mismatches
+
+Places where management narrative and deterministic metrics point in different directions. A mismatch is a question to resolve, not a conclusion — the narrative may be fully justified.
+
+- **demand_narrative_vs_working_capital** (FY2025Q4, confidence high): Management emphasizes demand strength while receivables_growth_spread, dso_trend indicate working-capital deterioration. The demand narrative and the receivables/inventory build require joint review.
+  - Metrics: receivables_growth_spread=0.357, dso_trend=224
+  - Narrative evidence: NE-010 (§8b)
+
+## 8. Evidence Ledger
+
+### 8a. Metric evidence
 
 | Metric | Period | Value | Formula | Inputs |
 |---|---|---|---|---|
@@ -131,10 +145,26 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 | incremental_revenue_per_capex | FY2025Q4 | 0.2059 | (Rev_t - Rev_t-4) / sum(Capex over last 4 periods) | revenue_end=1.15e+03, revenue_start=1.06e+03, total_capex=425 |
 | adjustment_recurrence_ratio | FY2025Q4 | 1 | periods with adjustment language / periods analyzed | periods_analyzed=4 |
 | recurring_adjustment_terms | FY2025Q4 | 7 | count of terms appearing in >= 3 periods | restructuring=4, transformation=4, optimization=4, impairment=4, one-time=4, non-recurring=4, adjusted ebitda=4 |
-| kpi_removals | FY2025Q4 | 2 | KPIs discussed in prior periods absent from latest |  |
-| disclosure_volume_change | FY2025Q4 | 0.9048 | latest period word count / mean(prior period word counts) | latest_words=38, prior_mean_words=42 |
+| kpi_removals | FY2025Q4 | 2 | KPIs in prior periods absent from latest |  |
+| disclosure_volume_change | FY2025Q4 | 1.262 | latest period word count / mean(prior period word counts) | latest_words=53, prior_mean_words=42 |
+| defensive_tone_change | FY2025Q4 | 0 | defensive-term density per 1k words vs trailing baseline | current_density=0, baseline_density=0 |
 
-## 7. Metric Detail and Data Quality
+### 8b. Narrative evidence
+
+| ID | Detector | Period | Basis | Confidence | Linked metrics | Excerpt |
+|---|---|---|---|---|---|---|
+| NE-001 | adjustment_recurrence | FY2025Q4 | trailing8 | medium | — | [FY2025Q1] …Results this quarter include restructuring charges related to our transformation program, which we believe are o… \| [FY2025Q2] …Results this quarter include restructuring charges related to our transformation program, which we believe are o… |
+| NE-002 | adjustment_recurrence | FY2025Q4 | trailing8 | medium | — | [FY2025Q1] …Results this quarter include restructuring charges related to our transformation program, which we believe are one-time in nature. Adjusted EBITDA exc… \| [FY2025Q2] …Results this quarter include restructuring charges related to our transformation program, which we believe are one-time in nature. Adjusted EBITDA exc… |
+| NE-003 | adjustment_recurrence | FY2025Q4 | trailing8 | medium | — | [FY2025Q1] …ntion was 108 percent and remaining performance obligations grew. Our optimization initiatives continue.… \| [FY2025Q2] …ntion was 108 percent and remaining performance obligations grew. Our optimization initiatives continue.… |
+| NE-004 | adjustment_recurrence | FY2025Q4 | trailing8 | medium | — | [FY2025Q1] …ime in nature. Adjusted EBITDA excludes these non-recurring costs and impairment charges. Net revenue retention was 108 percent and remaining performa… \| [FY2025Q2] …ime in nature. Adjusted EBITDA excludes these non-recurring costs and impairment charges. Net revenue retention was 108 percent and remaining performa… |
+| NE-005 | adjustment_recurrence | FY2025Q4 | trailing8 | medium | — | [FY2025Q1] …g charges related to our transformation program, which we believe are one-time in nature. Adjusted EBITDA excludes these non-recurring costs and imp… \| [FY2025Q2] …g charges related to our transformation program, which we believe are one-time in nature. Adjusted EBITDA excludes these non-recurring costs and imp… |
+| NE-006 | adjustment_recurrence | FY2025Q4 | trailing8 | medium | — | [FY2025Q1] …ich we believe are one-time in nature. Adjusted EBITDA excludes these non-recurring costs and impairment charges. Net revenue retention was 108 percent a… \| [FY2025Q2] …ich we believe are one-time in nature. Adjusted EBITDA excludes these non-recurring costs and impairment charges. Net revenue retention was 108 percent a… |
+| NE-007 | adjustment_recurrence | FY2025Q4 | trailing8 | medium | — | [FY2025Q1] …our transformation program, which we believe are one-time in nature. Adjusted EBITDA excludes these non-recurring costs and impairment charges. Net revenu… \| [FY2025Q2] …our transformation program, which we believe are one-time in nature. Adjusted EBITDA excludes these non-recurring costs and impairment charges. Net revenu… |
+| NE-008 | kpi_removed | FY2025Q4 | qoq | medium | — | KPI "Net revenue retention" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review. |
+| NE-009 | kpi_removed | FY2025Q4 | qoq | medium | — | KPI "RPO" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review. |
+| NE-010 | mismatch:demand_narrative_vs_working_capital | FY2025Q4 | point | high | receivables_growth_spread, dso_trend | …Demand remains strong across our end markets and we saw strong momentum with enterprise customers. Results this… |
+
+## 9. Metric Detail and Data Quality
 
 How to read this section — four distinct situations, never conflated:
 
@@ -143,7 +173,7 @@ How to read this section — four distinct situations, never conflated:
 - **Not meaningful** — inputs exist but the ratio is undefined for this company's situation (e.g. earnings-based ratios during a loss period). The note says why; review the underlying levels directly.
 - **Sector/model caveats** — quoted lines under the scorecard (§2); they qualify interpretation (e.g. high-growth profile) without changing computed values.
 
-Coverage: **47 computed**, 0 not meaningful, 0 with data unavailable (out of 47 metrics).
+Coverage: **48 computed**, 0 not meaningful, 2 with data unavailable (out of 50 metrics).
 
 ### Computed metrics
 
@@ -195,15 +225,24 @@ Coverage: **47 computed**, 0 not meaningful, 0 with data unavailable (out of 47 
 | adjustment_recurrence_ratio | FY2025Q4 | 1 |  |
 | recurring_adjustment_terms | FY2025Q4 | 7 |  |
 | kpi_removals | FY2025Q4 | 2 | Removed: Net revenue retention, RPO |
-| disclosure_volume_change | FY2025Q4 | 0.9048 |  |
+| disclosure_volume_change | FY2025Q4 | 1.262 |  |
+| defensive_tone_change | FY2025Q4 | 0 |  |
 
-## 8. Analyst Review Questions
+### Data unavailable (reported, not silently dropped)
 
+| Metric | Period | Missing inputs |
+|---|---|---|
+| guidance_shift | n/a | guidance discussion in >= 2 periods |
+| risk_factor_expansion | n/a | risk-factor sections for >= 2 comparable periods |
+
+## 10. Analyst Review Questions
+
+- Management describes demand as strong; what explains the concurrent receivables/inventory build relative to revenue?
 - Which accrual items explain the gap between net income and operating cash flow, and are they expected to reverse?
 - Why have adjustment categories described as one-time recurred across multiple periods, and what would make them stop?
 - Regarding FY2025Q4: KPI "Net revenue retention" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review.
 - Regarding FY2025Q4: KPI "RPO" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review.
 
-## 9. Disclaimer
+## 11. Disclaimer
 
 This report is an automated, formula-driven screening analysis of publicly reported financial data. It expresses opinions about earnings quality and presentation risk derived from the disclosed formulas herein. It does not allege fraud, misconduct, or wrongdoing by any company or person, and it is not investment advice. Elevated scores identify areas that warrant analyst review; they are not conclusions. Data may contain errors; formulas use v0 heuristic thresholds that are not backtested or sector-normalized.

@@ -131,10 +131,11 @@ _STRETCH_DOC_EARLY = (
 )
 
 _STRETCH_DOC_LATE = (
-    "Results this quarter include restructuring charges related to our transformation "
-    "program, which we believe are one-time in nature. Adjusted EBITDA excludes these "
-    "non-recurring costs and impairment charges. Our optimization initiatives continue "
-    "to position the business for long-term efficiency."
+    "Demand remains strong across our end markets and we saw strong momentum with "
+    "enterprise customers. Results this quarter include restructuring charges related "
+    "to our transformation program, which we believe are one-time in nature. Adjusted "
+    "EBITDA excludes these non-recurring costs and impairment charges. Our optimization "
+    "initiatives continue to position the business for long-term efficiency."
 )
 
 

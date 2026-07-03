@@ -135,12 +135,19 @@ BLOCKS: list[BlockSpec] = [
         ],
     ),
     BlockSpec(
+        # ENTIRELY UNCALIBRATED: this block had no historical document corpus
+        # in the v0.3 backtest. All anchors here are judgment-based.
         name="Narrative Drift",
         metrics=[
-            MetricSpec("adjustment_recurrence_ratio", 0.30, [(0.0, 10), (0.3, 30), (0.6, 55), (0.9, 80), (1.0, 88)]),
-            MetricSpec("recurring_adjustment_terms", 0.25, [(0.0, 15), (1.0, 35), (3.0, 60), (6.0, 85)]),
-            MetricSpec("kpi_removals", 0.25, [(0.0, 15), (1.0, 45), (2.0, 65), (4.0, 88)]),
-            MetricSpec("disclosure_volume_change", 0.20, [(0.5, 80), (0.75, 60), (0.9, 40), (1.0, 28), (1.2, 15)]),
+            MetricSpec("adjustment_recurrence_ratio", 0.20, [(0.0, 10), (0.3, 30), (0.6, 55), (0.9, 80), (1.0, 88)]),
+            MetricSpec("recurring_adjustment_terms", 0.15, [(0.0, 15), (1.0, 35), (3.0, 60), (6.0, 85)]),
+            MetricSpec("kpi_removals", 0.15, [(0.0, 15), (1.0, 45), (2.0, 65), (4.0, 88)]),
+            MetricSpec("disclosure_volume_change", 0.15, [(0.5, 80), (0.75, 60), (0.9, 40), (1.0, 28), (1.2, 15)]),
+            # v0.4 detectors (defensive-tone delta per 1k words; guidance stance
+            # deterioration; risk-factor word-count ratio):
+            MetricSpec("defensive_tone_change", 0.15, [(0.0, 20), (1.0, 40), (3.0, 65), (6.0, 85)]),
+            MetricSpec("guidance_shift", 0.10, [(0.0, 25), (2.0, 45), (4.0, 70), (7.0, 88)]),
+            MetricSpec("risk_factor_expansion", 0.10, [(1.0, 20), (1.15, 45), (1.4, 70), (1.8, 88)]),
         ],
     ),
 ]

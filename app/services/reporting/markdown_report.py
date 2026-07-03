@@ -147,18 +147,50 @@ def render(result: AnalysisResult, generated_on: str) -> str:
         add("- Insufficient period history to report changes.")
     add("")
 
-    # Narrative findings
+    # 6. Narrative drift summary
+    add("## 6. Narrative Drift Summary")
+    add("")
     if result.narrative_findings:
-        add("### Narrative & Disclosure Observations")
+        add(
+            "Deterministic language analysis across the documented periods "
+            "(QoQ, YoY, and trailing-8-quarter baselines where available). "
+            "Findings are review prompts; each cites its evidence in §8."
+        )
         add("")
         for nf in result.narrative_findings:
             add(f"- *{nf.kind}* ({nf.fiscal_label}): {nf.detail}")
             for snip in nf.evidence_snippets[:2]:
                 add(f"  - Evidence: {snip}")
-        add("")
+    else:
+        add(
+            "No narrative drift findings — either the language profile is stable "
+            "or insufficient documents were provided (see §9 data gaps)."
+        )
+    add("")
 
-    # 6. Evidence ledger
-    add("## 6. Evidence Ledger")
+    # 7. Metric/narrative mismatches
+    add("## 7. Metric/Narrative Mismatches")
+    add("")
+    if result.mismatches:
+        add(
+            "Places where management narrative and deterministic metrics point in "
+            "different directions. A mismatch is a question to resolve, not a "
+            "conclusion — the narrative may be fully justified."
+        )
+        add("")
+        for mm in result.mismatches:
+            values = ", ".join(f"{k}={_fmt(v, 3)}" for k, v in mm.metric_values.items())
+            add(f"- **{mm.kind}** ({mm.fiscal_label}, confidence {mm.confidence}): {mm.detail}")
+            add(f"  - Metrics: {values or ', '.join(mm.metric_names)}")
+            add(f"  - Narrative evidence: {mm.narrative_evidence_id} (§8b)")
+    else:
+        add("- No metric/narrative mismatches detected this period.")
+    add("")
+
+    # 8. Evidence ledger
+    add("## 8. Evidence Ledger")
+    add("")
+    add("### 8a. Metric evidence")
     add("")
     add("| Metric | Period | Value | Formula | Inputs |")
     add("|---|---|---|---|---|")
@@ -166,9 +198,21 @@ def render(result: AnalysisResult, generated_on: str) -> str:
         inputs = ", ".join(f"{k}={_fmt(v)}" for k, v in e.inputs.items())
         add(f"| {e.metric_name} | {e.fiscal_label} | {_fmt(e.value, 4)} | {e.formula} | {inputs} |")
     add("")
+    if result.narrative_evidence:
+        add("### 8b. Narrative evidence")
+        add("")
+        add("| ID | Detector | Period | Basis | Confidence | Linked metrics | Excerpt |")
+        add("|---|---|---|---|---|---|---|")
+        for ne in result.narrative_evidence:
+            excerpt = ne.excerpt.replace("|", "\\|")
+            add(
+                f"| {ne.evidence_id} | {ne.detector} | {ne.fiscal_label} | {ne.comparison} | "
+                f"{ne.confidence} | {', '.join(ne.linked_metrics) or '—'} | {excerpt} |"
+            )
+        add("")
 
-    # 7. Metric detail incl. data gaps, grouped by status
-    add("## 7. Metric Detail and Data Quality")
+    # 9. Metric detail incl. data gaps, grouped by status
+    add("## 9. Metric Detail and Data Quality")
     add("")
     add("How to read this section — four distinct situations, never conflated:")
     add("")
@@ -222,15 +266,15 @@ def render(result: AnalysisResult, generated_on: str) -> str:
             add(f"| {m.name} | {m.fiscal_label} | {', '.join(m.missing_fields) or '—'} |")
         add("")
 
-    # 8. Analyst review questions
-    add("## 8. Analyst Review Questions")
+    # 10. Analyst review questions
+    add("## 10. Analyst Review Questions")
     add("")
     for q in result.analyst_questions:
         add(f"- {q}")
     add("")
 
-    # 9. Disclaimer
-    add("## 9. Disclaimer")
+    # 11. Disclaimer
+    add("## 11. Disclaimer")
     add("")
     add(DISCLAIMER)
     return "\n".join(lines) + "\n"

@@ -24,7 +24,7 @@ def test_report_endpoint_returns_markdown():
     resp = client.post("/report", json=payload)
     assert resp.status_code == 200
     assert "# Earnings Quality & Narrative Drift Report" in resp.text
-    assert "## 9. Disclaimer" in resp.text
+    assert "## 11. Disclaimer" in resp.text
 
 
 def test_analyze_rejects_single_period():

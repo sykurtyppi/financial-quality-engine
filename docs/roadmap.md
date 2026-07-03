@@ -43,7 +43,27 @@
   reproducibility snapshot tests, committed backtest artifact
 - Full account: docs/calibration_report.md
 
-## Next: v0.4 — ingestion depth + archetype anchors
+## Done (v0.4) — narrative drift & evidence layer
+
+- EDGAR document ingestion: 10-K/10-Q MD&A + Risk Factors extraction
+  (TOC-skip, Unicode normalization, cross-reference-safe boundaries), 8-K
+  EX-99 earnings releases with event-date quarter snapping; validated live on
+  AAPL/KO/CRM (MD&A 4/4 each)
+- New deterministic detectors: guidance shift, defensive tone vs trailing
+  baseline, risk-factor expansion (YoY-preferred), high-severity disclosure
+  emergence, KPI definition-change candidates (token-similarity)
+- QoQ / YoY / trailing-8Q comparison discipline (baselines.py)
+- Narrative evidence ledger (NE-nnn ids: detector, period, basis, source,
+  verbatim excerpt, linked metrics, confidence) — report §8b
+- Four metric-narrative mismatch checks (demand/working-capital,
+  profitability/cash-conversion, buyback/share-count, growth-capex/FCF) with
+  analyst questions
+- LLM grounding contract + validator (unknown ids, banned vocabulary,
+  off-vocabulary classifications, ungrounded numbers all rejected; tested)
+- Docs: narrative_methodology.md, evidence_policy.md, legal_framing update
+- Narrative Drift block remains uncalibrated (no historical document corpus)
+
+## Next: v0.5 — ingestion depth + archetype anchors
 
 1. Point-in-time storage in DuckDB (`services/normalization/`), keyed by
    (ticker, period, filing date) so restatements are visible, not overwritten
@@ -58,20 +78,19 @@
 4. Custom-tag/extension mapping for low-coverage sectors (energy first — XOM
    at 63%); utilities and REITs untested.
 
-## v0.5 — narrative engine, LLM-assisted
+## v0.6 — LLM annotator + document corpus
 
+- Live LLM annotator implementing the grounding contract
+  (grounding.validate_annotations already enforces no-invention): drafts the
+  executive summary, classifies ledger evidence, and upgrades KPI
+  definition-change candidates from token-similarity to semantic comparison.
 - Transcript ingestion (indie-priced transcript APIs exist; check
   redistribution terms before quoting at length).
-- LLM layer as *consumer only*: given computed metrics + retrieved passages,
-  draft the executive summary and analyst questions with citations to the
-  evidence ledger. Hard rule: the LLM may not introduce numbers or claims not
-  present in its inputs; validate outputs against the ledger.
-- KPI definition-change detection (semantic comparison of KPI definitions
-  across periods) — the piece deliberately not faked deterministically in v1.
-- Build a historical document corpus so Narrative Drift can join the next
-  calibration round (currently the only untested block).
+- Build a historical document corpus (EDGAR filings are fetchable
+  retroactively) so Narrative Drift can join the next calibration round —
+  currently the only untested block.
 
-## v0.6 — full calibration (the credibility unlock)
+## v0.7 — full calibration (the credibility unlock)
 
 - Delisting-inclusive historical fundamentals (e.g. Sharadar) to remove the
   survivorship bias that dominates the v0.3 backtest's limitations.
@@ -80,7 +99,7 @@
   actually occur; re-run the v0.3 harness unchanged on the bigger sample.
 - Until then, the uncalibrated-thresholds caveat stays on every output.
 
-## v0.7+ — product surface (only if calibration supports it)
+## v0.8+ — product surface (only if calibration supports it)
 
 - Batch screening, peer-relative ranking, quarter-over-quarter drift monitor,
   watchlist alerts.

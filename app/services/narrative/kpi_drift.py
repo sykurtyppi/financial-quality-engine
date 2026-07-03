@@ -1,10 +1,15 @@
 """Deterministic KPI drift detection.
 
-v1 approach: a curated dictionary of common disclosed KPIs is matched per
-period; additions and removals are computed against the union of the prior
-two documented periods. Definition-change detection requires semantic
-comparison and is deferred to the LLM-assisted layer (see docs/roadmap.md) —
-it is NOT approximated here to avoid false precision.
+A curated dictionary of common disclosed KPIs is matched per period;
+additions and removals are computed against the union of the prior two
+documented periods.
+
+v0.4 adds DEFINITION-CHANGE CANDIDATES: when a KPI's surrounding definitional
+sentence (one containing cues like "defined as", "excludes", "represents")
+differs materially between the current period and the most recent prior
+period that defined it, the pair of excerpts is surfaced for analyst review.
+This is a candidate flagger — token overlap, not semantics — and is labeled
+medium/low confidence accordingly.
 """
 
 from __future__ import annotations
@@ -49,6 +54,75 @@ def detect_kpis(text: str) -> set[str]:
                 found.add(kpi)
                 break
     return found
+
+
+DEFINITION_CUES = ("defined as", "we define", "we calculate", "calculated as", "represents", "excludes", "excluding", "includes")
+_DEFINITION_SIMILARITY_THRESHOLD = 0.55
+_STOPWORDS = frozenset(
+    "the a an and or of to in for as is are we our by with on that which".split()
+)
+
+
+def _definition_sentence(text: str, kpi: str) -> str | None:
+    """First sentence mentioning the KPI that also contains a definitional cue."""
+    patterns = KPI_DICTIONARY[kpi]
+    for sentence in re.split(r"(?<=[.;])\s+", text):
+        low = sentence.lower()
+        if not any(cue in low for cue in DEFINITION_CUES):
+            continue
+        if any(re.search(pat, sentence, re.IGNORECASE) for pat in patterns):
+            return " ".join(sentence.split())
+    return None
+
+
+def _token_similarity(a: str, b: str) -> float:
+    ta = {w for w in re.findall(r"[a-z]+", a.lower()) if w not in _STOPWORDS}
+    tb = {w for w in re.findall(r"[a-z]+", b.lower()) if w not in _STOPWORDS}
+    if not ta or not tb:
+        return 1.0
+    return len(ta & tb) / len(ta | tb)
+
+
+@dataclass
+class DefinitionChange:
+    kpi: str
+    current_definition: str
+    prior_definition: str
+    prior_label: str
+    similarity: float
+
+
+def detect_definition_changes(
+    texts_by_label: dict[str, str], order: list[str]
+) -> list[DefinitionChange]:
+    """Compare the latest period's KPI definition sentences against the most
+    recent prior period that defined the same KPI."""
+    if len(order) < 2:
+        return []
+    latest_label = order[-1]
+    latest_text = texts_by_label[latest_label]
+    out: list[DefinitionChange] = []
+    for kpi in sorted(detect_kpis(latest_text)):
+        cur_def = _definition_sentence(latest_text, kpi)
+        if cur_def is None:
+            continue
+        for label in reversed(order[:-1]):
+            prior_def = _definition_sentence(texts_by_label[label], kpi)
+            if prior_def is None:
+                continue
+            sim = _token_similarity(cur_def, prior_def)
+            if sim < _DEFINITION_SIMILARITY_THRESHOLD:
+                out.append(
+                    DefinitionChange(
+                        kpi=kpi,
+                        current_definition=cur_def[:300],
+                        prior_definition=prior_def[:300],
+                        prior_label=label,
+                        similarity=sim,
+                    )
+                )
+            break  # only compare against the most recent period that defined it
+    return out
 
 
 @dataclass
