@@ -80,3 +80,18 @@ class SecClient:
             f"companyfacts_{ticker.upper()}.json",
             COMPANYFACTS_URL.format(cik=cik),
         )
+
+    def company_facts_by_cik(self, cik: int) -> dict:
+        """Fetch companyfacts by CIK directly — required for delisted companies,
+        which are absent from the current ticker->CIK registry but retain their
+        filings on EDGAR."""
+        return self._cached_json(
+            f"companyfacts_CIK{cik:010d}.json",
+            COMPANYFACTS_URL.format(cik=cik),
+        )
+
+    def submissions_by_cik(self, cik: int) -> dict:
+        return self._cached_json(
+            f"submissions_CIK{cik:010d}.json",
+            f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
+        )
