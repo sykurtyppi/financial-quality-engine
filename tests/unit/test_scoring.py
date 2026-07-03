@@ -71,10 +71,11 @@ class TestBlockScoring:
         assert bs.confidence is Confidence.LOW
         assert "Insufficient data" in bs.rationale
 
-    def test_v0_caveat_always_attached(self):
+    def test_uncalibrated_caveat_always_attached(self):
         metrics = {"a": ok_metric("a", 1.0), "b": ok_metric("b", 1.0)}
         bs = score_block(self._spec(), metrics)
-        assert any("v0 heuristic" in c for c in bs.caveats)
+        assert cfg.V0_WEIGHTS_CAVEAT in bs.caveats
+        assert "not a calibrated probability" in cfg.V0_WEIGHTS_CAVEAT
 
     def test_direction_thresholds(self):
         metrics = {"a": ok_metric("a", 0.0), "b": ok_metric("b", 0.0)}

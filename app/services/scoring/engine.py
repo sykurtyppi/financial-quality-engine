@@ -44,9 +44,12 @@ def interpolate_concern(value: float, anchors: cfg.Anchors) -> float:
 
 
 def _direction(score: float) -> Direction:
-    if score < 35:
+    """Bands set from the empirical backtest score distribution (v0.3):
+    scores compress to ~17-67 in practice, so the original 35/60 bands almost
+    never labelled anything negative. positive < p50, negative > p90."""
+    if score < cfg.DIRECTION_POSITIVE_BELOW:
         return Direction.POSITIVE
-    if score <= 60:
+    if score <= cfg.DIRECTION_NEGATIVE_ABOVE:
         return Direction.MIXED
     return Direction.NEGATIVE
 

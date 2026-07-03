@@ -1,12 +1,20 @@
 # Scoring Methodology
 
-## Status: v0 heuristic — read this first
+## Status: v0.3 — partially calibrated, read this first
 
-Every weight, threshold, and anchor point in `app/config/scoring_config.py` is
-a **judgment-based starting point**. Nothing is backtested, nothing is
-sector-calibrated. The engine attaches this caveat to every score it emits.
-Do not remove that caveat until the calibration work in `docs/roadmap.md` is
-done and reviewed.
+Block weights, two component exclusions, and the direction bands were
+adjusted from a 2021–2025 point-in-time walk-forward backtest
+(**docs/calibration_report.md** — methodology, hit rates, false-positive
+rates, and biases). Anchor points remain **judgment-based heuristics**, the
+backtest universe is survivorship-biased, and the engine still attaches an
+uncalibrated-thresholds caveat to every score. What the evidence supports:
+the overall score as a top-quintile tail screen (hit rate 55.5% vs base 45.7%
+for 12-month benchmark-relative underperformance, i.e. a 44.5% false-positive
+rate); accrual metrics as forward margin-deterioration signals; capex-regime
+metrics as the most consistently right-signed family. What it does not
+support: calibrated probabilities, ranking power below the top quintile, or
+SBC/dilution as a predictor in growth universes (kept as descriptive at
+reduced weight).
 
 ## Score convention
 
@@ -14,7 +22,10 @@ All scores are **0–100 concern scores**: 0 = no concern, 100 = maximum
 concern. This uniform orientation makes aggregation trivial and prevents the
 classic mixed-direction scoring bug. Derived fields:
 
-- **Direction**: `< 35` positive · `35–60` mixed · `> 60` negative
+- **Direction** (v0.3, from the empirical score distribution — p50 ≈ 32,
+  p90 ≈ 45, observed max ≈ 67): `< 32` positive · `32–45` mixed · `> 45`
+  negative. The original 35/60 bands assumed the full 0–100 range is used;
+  in practice scores compress to roughly 17–67.
 - **Confidence** (per block): high if ≥ 70% of block weight computed with ≥ 3
   OK metrics; medium if ≥ 40% with ≥ 2; low otherwise.
 
@@ -35,16 +46,20 @@ fabricates a midpoint for missing data.
 
 ## Blocks and v0 overall weights
 
-| Block | Weight | Core question |
-|---|---|---|
-| Earnings Quality | 18% | Are accruals inflating reported earnings? |
-| Cash Conversion | 15% | Does cash confirm the income statement? |
-| Revenue Quality | 13% | Is revenue supported by receivables/deferred behavior? |
-| Capital Integrity | 12% | Is SBC/dilution eroding shareholders quietly? |
-| Narrative Drift | 12% | Is disclosure/language drifting defensively? |
-| Working Capital Stress | 10% | Is working capital masking demand softness? |
-| Capex Discipline | 10% | Is capex outrunning the revenue it should create? |
-| Balance Sheet Stress | 10% | Can the balance sheet absorb stress? |
+| Block | Weight (v0.3) | v0 | Core question / calibration verdict |
+|---|---|---|---|
+| Earnings Quality | 20% | 18% | Are accruals inflating earnings? — margin-deterioration signal confirmed |
+| Cash Conversion | 17% | 15% | Does cash confirm the income statement? — return signal confirmed |
+| Capex Discipline | 15% | 10% | Is capex outrunning revenue? — right-signed on all outcomes |
+| Balance Sheet Stress | 14% | 10% | Can the balance sheet absorb stress? — return signal (rate-cycle caveat) |
+| Revenue Quality | 10% | 13% | Is revenue supported by receivables/deferred behavior? — near-zero measured signal |
+| Narrative Drift | 10% | 12% | Is disclosure drifting defensively? — untestable in backtest, uncalibrated |
+| Working Capital Stress | 7% | 10% | Is working capital masking softness? — weak/wrong-signed components |
+| Capital Integrity | 7% | 12% | Is SBC/dilution eroding shareholders? — descriptive only; wrong-signed as predictor |
+
+Two components are computed and reported but excluded from scoring (weight 0):
+`buyback_offset_ratio` and `working_capital_swing_to_income` — both
+wrong-signed in the backtest.
 
 The Overall Quality Risk Score is the weighted average over blocks that scored;
 below 50% available weight it is `None`.

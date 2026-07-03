@@ -4,13 +4,13 @@
 
 ## 1. Executive Summary
 
-Overall Quality Risk Score: **60/100** (Negative, confidence high). Assessment: elevated earnings-quality risk indicators; analyst review recommended.
+Overall Quality Risk Score: **58/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
 
 Weighted average of 8 block scores. Highest concern: Cash Conversion (88). Lowest concern: Balance Sheet Stress (38).
 
 The screen flagged 10 elevated-concern item(s) and 1 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
 
-> Caveat: Scores use v0 heuristic weights and thresholds that are neither backtested nor sector-normalized. Treat as a screening aid, not a calibrated probability.
+> Caveat: Scores use v0.3 weights informed by a small, survivorship-biased 2021-2025 backtest (~70 companies, point-in-time fundamentals); anchor thresholds remain judgment-based heuristics and are not sector-normalized. Directional evidence only — treat as a screening aid, not a calibrated probability. Methodology and limits: docs/calibration_report.md.
 
 ## 2. Scorecard
 
@@ -18,14 +18,14 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 
 | Block | Score | Direction | Confidence | Coverage | Weight |
 |---|---|---|---|---|---|
-| Earnings Quality | 42 | Mixed | high | 100% | 18% |
-| Revenue Quality | 70 | Negative | high | 100% | 13% |
-| Cash Conversion | 88 | Negative | high | 100% | 15% |
-| Working Capital Stress | 57 | Mixed | high | 100% | 10% |
-| Capital Integrity | 58 | Mixed | high | 100% | 12% |
-| Capex Discipline | 54 | Mixed | high | 100% | 10% |
-| Balance Sheet Stress | 38 | Mixed | high | 100% | 10% |
-| Narrative Drift | 72 | Negative | high | 100% | 12% |
+| Earnings Quality | 42 | Mixed | high | 100% | 20% |
+| Revenue Quality | 70 | Negative | high | 100% | 10% |
+| Cash Conversion | 88 | Negative | high | 100% | 17% |
+| Working Capital Stress | 40 | Mixed | high | 100% | 7% |
+| Capital Integrity | 64 | Negative | high | 100% | 7% |
+| Capex Discipline | 54 | Negative | high | 100% | 15% |
+| Balance Sheet Stress | 38 | Mixed | high | 100% | 14% |
+| Narrative Drift | 72 | Negative | high | 100% | 10% |
 
 > Earnings Quality: Beneish M-score note: Estimated on annual data; quarterly application is a screening convenience.
 

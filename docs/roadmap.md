@@ -26,18 +26,39 @@
   concern / caveat
 - Full account: docs/real_data_validation.md
 
-## Next: v0.3 — remaining ingestion depth
+## Done (v0.3) — calibration & validation
+
+- Walk-forward backtesting framework: true point-in-time fundamentals (filed-
+  date filtering), Yahoo dividend-adjusted relative returns, 8-K Item 4.02
+  detection, SIC-based financial-institution auto-exclusion
+- 75-company stratified universe (six archetypes + controls + known stress
+  cases), 1,275 company-quarter rows, 2021Q1–2025Q1 as-ofs
+- Findings: overall score works as a top-quintile tail screen (+10 pp hit-rate
+  lift, 44.5% FP rate); accruals predict margin deterioration; capex-regime
+  metrics right-signed everywhere; SBC/dilution family wrong-signed in growth
+  universes; score bands were compressed and re-anchored to the empirical
+  distribution; PTON/SMCI/CVNA carried the sample's top scores at the right
+  times; restatement prediction untestable (zero events, survivorship bias)
+- Evidence-based reweighting (provenance-commented), two component exclusions,
+  reproducibility snapshot tests, committed backtest artifact
+- Full account: docs/calibration_report.md
+
+## Next: v0.4 — ingestion depth + archetype anchors
 
 1. Point-in-time storage in DuckDB (`services/normalization/`), keyed by
    (ticker, period, filing date) so restatements are visible, not overwritten
-   (currently latest-filed silently wins).
-2. SIC-code lookup (SEC submissions API) to auto-flag financial institutions
-   instead of relying on the caller.
-3. Custom-tag/extension mapping for low-coverage sectors (energy first — XOM
+   (currently latest-filed silently wins in live mode; the backtester already
+   PIT-filters).
+2. Wire SIC-based financial-institution auto-exclusion (built for the
+   backtester in `backtesting/events.py`) into the live ingestion path.
+3. Archetype-aware anchors for the measured false-positive concentrations:
+   serial acquirers (70% FP — goodwill/intangibles anchors), healthcare (69%),
+   capex-heavy AI infrastructure (62%). Requires a larger sample to avoid
+   fitting the archetypes that produced the finding.
+4. Custom-tag/extension mapping for low-coverage sectors (energy first — XOM
    at 63%); utilities and REITs untested.
-4. Widen the sweep to 20–30 companies including small caps and recent IPOs.
 
-## v0.4 — narrative engine, LLM-assisted
+## v0.5 — narrative engine, LLM-assisted
 
 - Transcript ingestion (indie-priced transcript APIs exist; check
   redistribution terms before quoting at length).
@@ -47,16 +68,19 @@
   present in its inputs; validate outputs against the ledger.
 - KPI definition-change detection (semantic comparison of KPI definitions
   across periods) — the piece deliberately not faked deterministically in v1.
+- Build a historical document corpus so Narrative Drift can join the next
+  calibration round (currently the only untested block).
 
-## v0.5 — calibration (the credibility unlock)
+## v0.6 — full calibration (the credibility unlock)
 
-- Delisting-inclusive historical fundamentals (e.g. Sharadar) for
-  survivorship-free backtesting.
+- Delisting-inclusive historical fundamentals (e.g. Sharadar) to remove the
+  survivorship bias that dominates the v0.3 backtest's limitations.
 - Per-sector percentile anchors replacing hand-set anchors.
-- Backtest block scores vs forward restatements/underperformance; publish the
-  calibration report. Until this exists, the v0-heuristic caveat stays.
+- Restatement prediction testing at a universe size where 8-K 4.02 events
+  actually occur; re-run the v0.3 harness unchanged on the bigger sample.
+- Until then, the uncalibrated-thresholds caveat stays on every output.
 
-## v0.6+ — product surface (only if calibration supports it)
+## v0.7+ — product surface (only if calibration supports it)
 
 - Batch screening, peer-relative ranking, quarter-over-quarter drift monitor,
   watchlist alerts.

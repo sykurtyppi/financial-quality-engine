@@ -7,6 +7,7 @@ which is what the golden-report tests assert.
 
 from __future__ import annotations
 
+from app.config import scoring_config
 from app.schemas.metrics import MetricStatus
 from app.schemas.report import AnalysisResult
 from app.schemas.scoring import Direction
@@ -35,14 +36,16 @@ def _fmt(value: float | None, digits: int = 3) -> str:
 
 
 def _overall_assessment(result: AnalysisResult) -> str:
+    # Bands aligned with the empirical score distribution (v0.3 calibration:
+    # p50 ~ 32, p90 ~ 45, observed max ~ 67).
     if result.overall is None or result.overall.score is None:
         return "insufficient data for an overall assessment"
     s = result.overall.score
-    if s < 30:
+    if s < 32:
         return "no elevated earnings-quality concerns identified by the screen"
-    if s <= 50:
+    if s <= 45:
         return "mixed profile; selected items warrant analyst review"
-    if s <= 70:
+    if s <= 55:
         return "elevated earnings-quality risk indicators; analyst review recommended"
     return "multiple elevated risk indicators; thorough analyst review recommended"
 
@@ -109,7 +112,7 @@ def render(result: AnalysisResult, generated_on: str) -> str:
         )
     add("")
     for bs in result.block_scores:
-        block_caveats = [c for c in bs.caveats if "v0 heuristic" not in c]
+        block_caveats = [c for c in bs.caveats if c != scoring_config.V0_WEIGHTS_CAVEAT]
         for caveat in block_caveats:
             add(f"> {bs.name}: {caveat}")
     add("")
