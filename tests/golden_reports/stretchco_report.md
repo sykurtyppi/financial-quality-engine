@@ -134,57 +134,68 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 | kpi_removals | FY2025Q4 | 2 | KPIs discussed in prior periods absent from latest |  |
 | disclosure_volume_change | FY2025Q4 | 0.9048 | latest period word count / mean(prior period word counts) | latest_words=38, prior_mean_words=42 |
 
-## 7. Metric Detail (including data gaps)
+## 7. Metric Detail and Data Quality
 
-| Metric | Period | Status | Value | Note |
-|---|---|---|---|---|
-| total_accruals | FY2025Q4 | ok | 0.02193 |  |
-| cfo_to_net_income | FY2025Q4 | ok | 0.05 |  |
-| fcf_to_net_income | FY2025Q4 | ok | -1.05 |  |
-| fcf_margin | FY2025Q4 | ok | -0.105 |  |
-| receivables_growth_spread | FY2025Q4 | ok | 0.357 |  |
-| inventory_growth_spread | FY2025Q4 | ok | 0.03923 |  |
-| deferred_revenue_growth_spread | FY2025Q4 | ok | -0.03732 |  |
-| dso | FY2025Q4 | ok | 371.8 |  |
-| dio | FY2025Q4 | ok | 73.71 |  |
-| dpo | FY2025Q4 | ok | 45.5 |  |
-| working_capital_swing_to_income | FY2025Q4 | ok | 11.39 |  |
-| net_debt_to_ebitda | FY2025Q4 | ok | 4.611 |  |
-| interest_coverage | FY2025Q4 | ok | 7.255 |  |
-| debt_to_assets | FY2025Q4 | ok | 0.2139 |  |
-| current_ratio | FY2025Q4 | ok | 2.369 |  |
-| asset_quality_proxy | FY2025Q4 | ok | 0.2851 |  |
-| intangibles_to_assets | FY2025Q4 | ok | 0.2337 |  |
-| goodwill_growth | FY2025Q4 | ok | 0.03846 |  |
-| leverage_change | FY2025Q4 | ok | 0.001616 |  |
-| sbc_to_revenue | FY2025Q4 | ok | 0.13 |  |
-| sbc_to_cfo | FY2025Q4 | ok | 26 |  |
-| diluted_share_growth | FY2025Q4 | ok | 0.01 |  |
-| net_share_count_change | FY2025Q4 | ok | 0.01 |  |
-| buyback_offset_ratio | FY2025Q4 | ok | 0.5 |  |
-| issuance_pressure | FY2025Q4 | ok | 4.179 |  |
-| capex_to_revenue | FY2025Q4 | ok | 0.11 |  |
-| capex_growth_spread | FY2025Q4 | ok | 0.102 |  |
-| capex_to_da | FY2025Q4 | ok | 3.159 |  |
-| beneish_dsri | FY2025Q4 | ok | 1.35 |  |
-| beneish_gmi | FY2025Q4 | ok | 1 |  |
-| beneish_aqi | FY2025Q4 | ok | 0.984 |  |
-| beneish_sgi | FY2025Q4 | ok | 1.02 |  |
-| beneish_depi | FY2025Q4 | ok | 1.038 |  |
-| beneish_sgai | FY2025Q4 | ok | 1 |  |
-| beneish_tata | FY2025Q4 | ok | 0.02161 |  |
-| beneish_lvgi | FY2025Q4 | ok | 1.002 |  |
-| beneish_m_score | FY2025Q4 | ok | -2.042 | Estimated on annual data; quarterly application is a screening convenience. |
-| accrual_trend | FY2025Q4 | ok | 0.01183 |  |
-| dso_trend | FY2025Q4 | ok | 224 |  |
-| dio_trend | FY2025Q4 | ok | 9.555 |  |
-| fcf_margin_trend | FY2025Q4 | ok | -0.0875 |  |
-| capex_intensity_regime_shift | FY2025Q4 | ok | 0.04 |  |
-| incremental_revenue_per_capex | FY2025Q4 | ok | 0.2059 | Capex-to-revenue conversion lags may exceed the window; low values prompt review, not verdicts. |
-| adjustment_recurrence_ratio | FY2025Q4 | ok | 1 |  |
-| recurring_adjustment_terms | FY2025Q4 | ok | 7 |  |
-| kpi_removals | FY2025Q4 | ok | 2 | Removed: Net revenue retention, RPO |
-| disclosure_volume_change | FY2025Q4 | ok | 0.9048 |  |
+How to read this section — four distinct situations, never conflated:
+
+- **Computed** — the metric was calculated; whether it is a concern is judged in the scorecard (§2) and red flags (§3), not by its mere presence here.
+- **Data unavailable** — the filer does not disclose an input (or our mapping could not locate it). This is a coverage gap, NOT evidence of a problem.
+- **Not meaningful** — inputs exist but the ratio is undefined for this company's situation (e.g. earnings-based ratios during a loss period). The note says why; review the underlying levels directly.
+- **Sector/model caveats** — quoted lines under the scorecard (§2); they qualify interpretation (e.g. high-growth profile) without changing computed values.
+
+Coverage: **47 computed**, 0 not meaningful, 0 with data unavailable (out of 47 metrics).
+
+### Computed metrics
+
+| Metric | Period | Value | Note |
+|---|---|---|---|
+| total_accruals | FY2025Q4 | 0.02193 |  |
+| cfo_to_net_income | FY2025Q4 | 0.05 |  |
+| fcf_to_net_income | FY2025Q4 | -1.05 |  |
+| fcf_margin | FY2025Q4 | -0.105 |  |
+| receivables_growth_spread | FY2025Q4 | 0.357 |  |
+| inventory_growth_spread | FY2025Q4 | 0.03923 |  |
+| deferred_revenue_growth_spread | FY2025Q4 | -0.03732 |  |
+| dso | FY2025Q4 | 371.8 |  |
+| dio | FY2025Q4 | 73.71 |  |
+| dpo | FY2025Q4 | 45.5 |  |
+| working_capital_swing_to_income | FY2025Q4 | 11.39 |  |
+| net_debt_to_ebitda | FY2025Q4 | 4.611 |  |
+| interest_coverage | FY2025Q4 | 7.255 |  |
+| debt_to_assets | FY2025Q4 | 0.2139 |  |
+| current_ratio | FY2025Q4 | 2.369 |  |
+| asset_quality_proxy | FY2025Q4 | 0.2851 |  |
+| intangibles_to_assets | FY2025Q4 | 0.2337 |  |
+| goodwill_growth | FY2025Q4 | 0.03846 |  |
+| leverage_change | FY2025Q4 | 0.001616 |  |
+| sbc_to_revenue | FY2025Q4 | 0.13 |  |
+| sbc_to_cfo | FY2025Q4 | 26 |  |
+| diluted_share_growth | FY2025Q4 | 0.01 |  |
+| net_share_count_change | FY2025Q4 | 0.01 |  |
+| buyback_offset_ratio | FY2025Q4 | 0.5 |  |
+| issuance_pressure | FY2025Q4 | 4.179 |  |
+| capex_to_revenue | FY2025Q4 | 0.11 |  |
+| capex_growth_spread | FY2025Q4 | 0.102 |  |
+| capex_to_da | FY2025Q4 | 3.159 |  |
+| beneish_dsri | FY2025Q4 | 1.35 |  |
+| beneish_gmi | FY2025Q4 | 1 |  |
+| beneish_aqi | FY2025Q4 | 0.984 |  |
+| beneish_sgi | FY2025Q4 | 1.02 |  |
+| beneish_depi | FY2025Q4 | 1.038 |  |
+| beneish_sgai | FY2025Q4 | 1 |  |
+| beneish_tata | FY2025Q4 | 0.02161 |  |
+| beneish_lvgi | FY2025Q4 | 1.002 |  |
+| beneish_m_score | FY2025Q4 | -2.042 | Estimated on annual data; quarterly application is a screening convenience. |
+| accrual_trend | FY2025Q4 | 0.01183 |  |
+| dso_trend | FY2025Q4 | 224 |  |
+| dio_trend | FY2025Q4 | 9.555 |  |
+| fcf_margin_trend | FY2025Q4 | -0.0875 |  |
+| capex_intensity_regime_shift | FY2025Q4 | 0.04 |  |
+| incremental_revenue_per_capex | FY2025Q4 | 0.2059 | Capex-to-revenue conversion lags may exceed the window; low values prompt review, not verdicts. |
+| adjustment_recurrence_ratio | FY2025Q4 | 1 |  |
+| recurring_adjustment_terms | FY2025Q4 | 7 |  |
+| kpi_removals | FY2025Q4 | 2 | Removed: Net revenue retention, RPO |
+| disclosure_volume_change | FY2025Q4 | 0.9048 |  |
 
 ## 8. Analyst Review Questions
 

@@ -164,26 +164,59 @@ def render(result: AnalysisResult, generated_on: str) -> str:
         add(f"| {e.metric_name} | {e.fiscal_label} | {_fmt(e.value, 4)} | {e.formula} | {inputs} |")
     add("")
 
-    # 7. Metric detail incl. missing data
-    add("## 7. Metric Detail (including data gaps)")
+    # 7. Metric detail incl. data gaps, grouped by status
+    add("## 7. Metric Detail and Data Quality")
     add("")
-    add("| Metric | Period | Status | Value | Note |")
-    add("|---|---|---|---|---|")
-    for m in result.metrics:
-        note = m.note or (
-            "Missing: " + ", ".join(m.missing_fields) if m.missing_fields else ""
-        )
-        add(
-            f"| {m.name} | {m.fiscal_label} | {m.status.value} | "
-            f"{_fmt(m.value, 4)} | {note} |"
-        )
+    add("How to read this section — four distinct situations, never conflated:")
     add("")
-    n_missing = sum(1 for m in result.metrics if m.status is MetricStatus.MISSING_DATA)
-    if n_missing:
-        add(
-            f"*{n_missing} metric(s) could not be computed due to missing input data "
-            "and are reported above rather than silently dropped.*"
-        )
+    add(
+        "- **Computed** — the metric was calculated; whether it is a concern is "
+        "judged in the scorecard (§2) and red flags (§3), not by its mere presence here."
+    )
+    add(
+        "- **Data unavailable** — the filer does not disclose an input (or our "
+        "mapping could not locate it). This is a coverage gap, NOT evidence of a problem."
+    )
+    add(
+        "- **Not meaningful** — inputs exist but the ratio is undefined for this "
+        "company's situation (e.g. earnings-based ratios during a loss period). "
+        "The note says why; review the underlying levels directly."
+    )
+    add(
+        "- **Sector/model caveats** — quoted lines under the scorecard (§2); they "
+        "qualify interpretation (e.g. high-growth profile) without changing computed values."
+    )
+    add("")
+    ok_metrics = [m for m in result.metrics if m.status is MetricStatus.OK]
+    nm_metrics = [m for m in result.metrics if m.status is MetricStatus.NOT_MEANINGFUL]
+    missing_metrics = [m for m in result.metrics if m.status is MetricStatus.MISSING_DATA]
+    add(
+        f"Coverage: **{len(ok_metrics)} computed**, {len(nm_metrics)} not meaningful, "
+        f"{len(missing_metrics)} with data unavailable (out of {len(result.metrics)} metrics)."
+    )
+    add("")
+    add("### Computed metrics")
+    add("")
+    add("| Metric | Period | Value | Note |")
+    add("|---|---|---|---|")
+    for m in ok_metrics:
+        add(f"| {m.name} | {m.fiscal_label} | {_fmt(m.value, 4)} | {m.note or ''} |")
+    add("")
+    if nm_metrics:
+        add("### Not meaningful for this company/period")
+        add("")
+        add("| Metric | Period | Why |")
+        add("|---|---|---|")
+        for m in nm_metrics:
+            add(f"| {m.name} | {m.fiscal_label} | {m.note or 'undefined for these inputs'} |")
+        add("")
+    if missing_metrics:
+        add("### Data unavailable (reported, not silently dropped)")
+        add("")
+        add("| Metric | Period | Missing inputs |")
+        add("|---|---|---|")
+        for m in missing_metrics:
+            add(f"| {m.name} | {m.fiscal_label} | {', '.join(m.missing_fields) or '—'} |")
         add("")
 
     # 8. Analyst review questions

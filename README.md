@@ -62,9 +62,35 @@ python3 -m venv .venv
 Input format: the JSON serialization of `CompanyDataset`
 (`app/schemas/financials.py`) — company profile, ≥ 2 chronological periods of
 normalized statement data, and optional per-period documents (earnings
-releases, MD&A, transcripts) for the narrative engine. An EDGAR/XBRL adapter
-exists at `app/services/ingestion/edgar_adapter.py` (optional `[edgar]` extra;
-network-dependent, not yet covered by the offline suite).
+releases, MD&A, transcripts) for the narrative engine.
+
+### Real SEC data (v0.2)
+
+The engine ingests real EDGAR/XBRL data with no extra dependencies:
+
+```bash
+export EDGAR_IDENTITY="Your Name you@example.com"   # SEC fair-access rule
+.venv/bin/python - <<'EOF'
+from app.services.ingestion.edgar_adapter import fetch_dataset
+from app.core.pipeline import analyze
+from app.services.reporting.markdown_report import render
+from datetime import date
+
+dataset, diagnostics = fetch_dataset("AAPL", n_quarters=8)
+print(f"field coverage: {diagnostics.coverage():.0%}")
+print(render(analyze(dataset), generated_on=date.today().isoformat()))
+EOF
+```
+
+The mapper handles the real-world XBRL problems (QTD/YTD duration ambiguity,
+missing Q4 flows, cumulative cash-flow items, amendments, filer tag switches,
+cover-page share dates, unreliable fy/fp metadata) and reports per-field
+provenance and gaps in `IngestionDiagnostics`. It is validated to the dollar
+against source filings for AAPL/MSFT/KO — see
+[docs/real_data_validation.md](docs/real_data_validation.md) for the full
+validation account, verified coverage by sector, and remaining limitations
+(notably: energy-sector presentation gaps, and restatement point-in-time
+handling is roadmap work).
 
 ## Report contents
 

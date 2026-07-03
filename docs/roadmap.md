@@ -11,17 +11,33 @@
 - Markdown reporting with evidence ledger and non-removable disclaimer
 - FastAPI endpoints, JSON ingestion, CLI, 100-test suite incl. golden report
 
-## Next: v0.2 — real data
+## Done (v0.2) — real-data hardening
 
-1. Harden the EDGAR adapter (`services/ingestion/edgar_adapter.py`): map via
-   EdgarTools standardized concepts, handle fiscal-period alignment and
-   amended filings; record per-field provenance (which XBRL tag supplied it).
-2. Point-in-time storage in DuckDB (`services/normalization/`), keyed by
-   (ticker, period, filing date) so restatements are visible, not overwritten.
-3. Run the engine over 20–30 real companies; fix the formula assumptions that
-   real data breaks (they exist; find them empirically).
+- Replaced edgartools dependency with a dependency-free SEC companyfacts
+  client + pure offline-testable mapper (durations, Q4 derivation, YTD
+  differencing, amendment dedupe, coverage-scored tag selection, composite
+  SG&A/D&A/debt, cover-date share matching, structural fiscal labels)
+- Validated against 8 cross-sector companies (63–99% field coverage);
+  11 real-data bug classes found, fixed, and regression-tested
+- Verified to the dollar against source filings for AAPL, MSFT, KO
+  (spot values + annual reconciliation of derived quarterlies)
+- Real public-domain fixtures committed (AAPL/KO/CRM — three fiscal-calendar
+  shapes); report §7 now distinguishes data-unavailable / not-meaningful /
+  concern / caveat
+- Full account: docs/real_data_validation.md
 
-## v0.3 — narrative engine, LLM-assisted
+## Next: v0.3 — remaining ingestion depth
+
+1. Point-in-time storage in DuckDB (`services/normalization/`), keyed by
+   (ticker, period, filing date) so restatements are visible, not overwritten
+   (currently latest-filed silently wins).
+2. SIC-code lookup (SEC submissions API) to auto-flag financial institutions
+   instead of relying on the caller.
+3. Custom-tag/extension mapping for low-coverage sectors (energy first — XOM
+   at 63%); utilities and REITs untested.
+4. Widen the sweep to 20–30 companies including small caps and recent IPOs.
+
+## v0.4 — narrative engine, LLM-assisted
 
 - Transcript ingestion (indie-priced transcript APIs exist; check
   redistribution terms before quoting at length).
@@ -32,7 +48,7 @@
 - KPI definition-change detection (semantic comparison of KPI definitions
   across periods) — the piece deliberately not faked deterministically in v1.
 
-## v0.4 — calibration (the credibility unlock)
+## v0.5 — calibration (the credibility unlock)
 
 - Delisting-inclusive historical fundamentals (e.g. Sharadar) for
   survivorship-free backtesting.
@@ -40,7 +56,7 @@
 - Backtest block scores vs forward restatements/underperformance; publish the
   calibration report. Until this exists, the v0-heuristic caveat stays.
 
-## v0.5+ — product surface (only if calibration supports it)
+## v0.6+ — product surface (only if calibration supports it)
 
 - Batch screening, peer-relative ranking, quarter-over-quarter drift monitor,
   watchlist alerts.

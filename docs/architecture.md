@@ -36,7 +36,7 @@ CompanyDataset (profile + periods + documents)
 | Layer | Location | Responsibility |
 |---|---|---|
 | Schemas | `app/schemas/` | Pydantic contracts: financial data, metric results, scores, report |
-| Ingestion | `app/services/ingestion/` | Canonical JSON loader; optional EDGAR adapter (network-dependent) |
+| Ingestion | `app/services/ingestion/` | Canonical JSON loader; SEC companyfacts client (`sec_client.py`) + pure offline-testable XBRL mapper (`companyfacts_mapper.py`) with per-field provenance diagnostics |
 | Formulas | `app/services/formulas/` | Pure, testable formula functions under the metric contract |
 | Narrative | `app/services/narrative/` | Deterministic text analytics: adjustment recurrence, KPI drift, disclosure volume |
 | Scoring | `app/services/scoring/` + `app/config/scoring_config.py` | Concern mapping, block/overall scores, caveats |
