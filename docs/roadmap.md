@@ -73,10 +73,14 @@
    backtester in `backtesting/events.py`) into the live ingestion path.
 3. Archetype-aware anchors for the measured false-positive concentrations:
    serial acquirers (70% FP — goodwill/intangibles anchors), healthcare (69%),
-   capex-heavy AI infrastructure (62%). Requires a larger sample to avoid
-   fitting the archetypes that produced the finding.
-4. Custom-tag/extension mapping for low-coverage sectors (energy first — XOM
-   at 63%); utilities and REITs untested.
+   capex-heavy AI infrastructure (62%); the 2026-07 wide sweep added
+   regulated utilities (rate-base capex + structural leverage) and defense
+   primes (long-term-contract cash timing) as candidates. Spend the
+   evaluation window's adjudication labels here (data/sweep/adjudication.csv).
+4. IFRS/foreign-private-issuer taxonomy mapping (63 of the top-350 filers are
+   outside us-gaap and currently error out with a clear message).
+5. Custom-tag/extension mapping for low-coverage sectors (energy first — XOM
+   at 63%).
 
 ## v0.6 — LLM annotator + document corpus
 

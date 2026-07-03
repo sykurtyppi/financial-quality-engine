@@ -74,3 +74,278 @@ TM,TOYOTA MOTOR CORP/,3711,ok,0.343,,mixed,0,Balance Sheet Stress,44.4,
 RTNTF,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0000887028.,,,,,,,
 SAN,,,error: Could not establish at least 2 quarter-end dates for SAN; the filer may use cust,,,,,,,
 CRWD,"CROWDSTRIKE HOLDINGS, INC.",7372,ok,0.833,28.0,positive,2,Capital Integrity,63.8,interest_coverage;sbc_to_revenue
+AMGN,Amgen Inc.,2836,ok,0.88,40.1,mixed,5,Balance Sheet Stress,61.3,net_debt_to_ebitda;fcf_margin_trend;dso_trend;debt_to_assets;incremental_revenue_per_capex
+PEP,"PepsiCo, Inc.",2080,ok,0.889,56.1,negative,8,Cash Conversion,85.4,cfo_to_net_income;sbc_to_cfo;fcf_to_net_income;fcf_margin_trend;receivables_growth_spread;beneish_dsri;inventory_growth_spread;dio_trend
+QCOM,QUALCOMM INC/DE,3663,ok,0.944,55.9,negative,8,Earnings Quality,78.1,cfo_to_net_income;accrual_trend;fcf_margin_trend;incremental_revenue_per_capex;fcf_to_net_income;dio_trend;total_accruals;beneish_tata
+ADI,"Analog Devices, Inc.",3674,ok,0.917,41.9,mixed,4,Revenue Quality,66.9,fcf_margin_trend;intangibles_to_assets;asset_quality_proxy;receivables_growth_spread
+MCD,McDONALD’S CORPORATION,5812,ok,0.87,34.6,mixed,4,Balance Sheet Stress,54.5,net_debt_to_ebitda;capex_to_da;debt_to_assets;incremental_revenue_per_capex
+TMO,THERMO FISHER SCIENTIFIC INC.,3829,ok,0.917,43.6,mixed,4,Cash Conversion,62.2,net_debt_to_ebitda;fcf_margin_trend;intangibles_to_assets;asset_quality_proxy
+APP,AppLovin Corp,7370,ok,0.861,24.5,positive,0,Earnings Quality,29.0,
+GLW,CORNING INC /NY,3357,ok,0.944,38.2,mixed,3,Cash Conversion,62.5,net_debt_to_ebitda;fcf_to_net_income;fcf_margin_trend
+SAP,,,error: Could not establish at least 2 quarter-end dates for SAP; the filer may use cust,,,,,,,
+TMUS,"T-Mobile US, Inc.",4812,ok,0.852,28.5,positive,2,Balance Sheet Stress,51.7,asset_quality_proxy;incremental_revenue_per_capex
+NEE,"NEXTERA ENERGY, INC.",4911,ok,0.704,32.5,mixed,2,Balance Sheet Stress,61.7,net_debt_to_ebitda;current_ratio
+VZ,VERIZON COMMUNICATIONS INC,4813,ok,0.815,29.5,positive,2,Balance Sheet Stress,60.7,net_debt_to_ebitda;current_ratio
+BA,THE BOEING COMPANY,3721,ok,0.806,40.7,mixed,3,Cash Conversion,50.5,net_debt_to_ebitda;fcf_margin;receivables_growth_spread
+DE,DEERE & CO,3523,ok,0.583,26.1,positive,0,Capex Discipline,32.2,
+TJX,"THE TJX COMPANIES, INC.",5651,ok,0.806,44.3,mixed,2,Cash Conversion,59.8,fcf_to_net_income;receivables_growth_spread
+SCHW,SCHWAB CHARLES CORP,6211,excluded_financial,0.495,,,,,,
+TTE,,,error: Could not establish at least 2 quarter-end dates for TTE; the filer may use cust,,,,,,,
+DIS,WALT DISNEY CO/,7990,ok,0.917,27.0,positive,4,Balance Sheet Stress,56.5,net_debt_to_ebitda;current_ratio;incremental_revenue_per_capex;asset_quality_proxy
+UNP,UNION PACIFIC CORP,4011,ok,0.722,31.1,positive,3,Balance Sheet Stress,48.9,net_debt_to_ebitda;incremental_revenue_per_capex;buyback_offset_ratio
+UBS,,,error: Could not establish at least 2 quarter-end dates for UBS; the filer may use cust,,,,,,,
+WELL,WELLTOWER INC.,6798,excluded_financial,0.593,,,,,,
+ABT,ABBOTT LABORATORIES,2834,ok,0.917,36.6,mixed,4,Balance Sheet Stress,58.6,net_debt_to_ebitda;fcf_margin_trend;leverage_change;asset_quality_proxy
+BLK,"BlackRock, Inc.",6211,excluded_financial,0.569,,,,,,
+ETN,EATON CORPORATION plc,3590,ok,0.833,45.3,negative,6,Cash Conversion,69.6,fcf_margin_trend;leverage_change;intangibles_to_assets;cfo_to_net_income;asset_quality_proxy;fcf_to_net_income
+IBKR,"INTERACTIVE BROKERS GROUP, INC.",6211,excluded_financial,0.343,,,,,,
+SHOP,Shopify Inc.,7372,ok,0.639,23.5,positive,0,Cash Conversion,35.9,
+SMERY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0001830056.,,,,,,,
+GILD,"GILEAD SCIENCES, INC.",2836,ok,0.954,33.5,mixed,2,Working Capital Stress,63.4,net_debt_to_ebitda;dio_trend
+BUD,,,error: Could not establish at least 2 quarter-end dates for BUD; the filer may use cust,,,,,,,
+SMFG,,,error: Could not establish at least 2 quarter-end dates for SMFG; the filer may use cus,,,,,,,
+RIO,,,error: Could not establish at least 2 quarter-end dates for RIO; the filer may use cust,,,,,,,
+UBER,"UBER TECHNOLOGIES, INC.",7389,ok,0.838,23.6,positive,1,Balance Sheet Stress,38.7,asset_quality_proxy
+BX,Blackstone Inc.,6282,excluded_financial,0.509,,,,,,
+ISRG,"Intuitive Surgical, Inc.",3842,ok,0.843,27.0,positive,0,Working Capital Stress,41.5,
+T,AT&T INC.,4813,ok,0.838,37.2,mixed,2,Balance Sheet Stress,60.2,net_debt_to_ebitda;incremental_revenue_per_capex
+BKNG,Booking Holdings Inc.,4700,ok,0.769,30.3,positive,2,Balance Sheet Stress,41.8,net_share_count_change;debt_to_assets
+SCCO,SOUTHERN COPPER CORPORATION,1000,ok,0.75,27.2,positive,0,Capex Discipline,35.2,
+BBVA,,,error: Could not establish at least 2 quarter-end dates for BBVA; the filer may use cus,,,,,,,
+DHR,Danaher Corporation,3823,ok,0.926,34.7,mixed,5,Working Capital Stress,52.8,net_debt_to_ebitda;intangibles_to_assets;asset_quality_proxy;incremental_revenue_per_capex;buyback_offset_ratio
+CB,Chubb Limited,6331,excluded_financial,0.444,,,,,,
+PFE,Pfizer Inc.,2834,ok,0.838,41.5,mixed,3,Working Capital Stress,68.9,dio_trend;asset_quality_proxy;fcf_margin_trend
+ATEYY,,,error: Could not establish at least 2 quarter-end dates for ATEYY; the filer may use cu,,,,,,,
+DTEGY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0000946770.,,,,,,,
+CRM,"Salesforce, Inc.",7372,ok,0.875,28.1,positive,5,Balance Sheet Stress,76.8,net_debt_to_ebitda;leverage_change;asset_quality_proxy;intangibles_to_assets;current_ratio
+CVS,CVS HEALTH Corp,5912,ok,0.907,30.1,positive,2,Balance Sheet Stress,58.2,net_debt_to_ebitda;asset_quality_proxy
+HDB,HDFC BANK LIMITED,6029,excluded_financial,0.218,,,,,,
+PGR,PROGRESSIVE CORP/OH/,6331,excluded_financial,0.403,,,,,,
+UL,,,error: Could not establish at least 2 quarter-end dates for UL; the filer may use custo,,,,,,,
+BTI,,,error: Could not establish at least 2 quarter-end dates for BTI; the filer may use cust,,,,,,,
+PLD,"Prologis, Inc.",6798,excluded_financial,0.491,,,,,,
+VRTX,VERTEX PHARMACEUTICALS INC / MA,2834,ok,0.875,28.7,positive,1,Working Capital Stress,63.8,dio_trend
+COF,CAPITAL ONE FINANCIAL CORP,6021,excluded_financial,0.583,,,,,,
+COP,CONOCOPHILLIPS,2911,ok,0.639,21.6,positive,0,Balance Sheet Stress,28.7,
+LOW,"LOWE’S COMPANIES, INC.",5211,ok,0.907,25.6,positive,2,Balance Sheet Stress,52.6,net_debt_to_ebitda;debt_to_assets
+BMO,,,error: Could not establish at least 2 quarter-end dates for BMO; the filer may use cust,,,,,,,
+HTHIY,,,error: Could not establish at least 2 quarter-end dates for HTHIY; the filer may use cu,,,,,,,
+SPGI,S&P Global Inc.,7320,ok,0.917,37.1,mixed,5,Balance Sheet Stress,58.4,net_debt_to_ebitda;asset_quality_proxy;fcf_margin_trend;intangibles_to_assets;current_ratio
+PH,PARKER-HANNIFIN CORPORATION,3490,ok,0.917,29.6,positive,2,Balance Sheet Stress,48.6,intangibles_to_assets;asset_quality_proxy
+LMT,LOCKHEED MARTIN CORPORATION,3760,ok,0.889,50.4,negative,7,Cash Conversion,84.1,cfo_to_net_income;fcf_to_net_income;net_debt_to_ebitda;fcf_margin_trend;incremental_revenue_per_capex;inventory_growth_spread;buyback_offset_ratio
+SYK,STRYKER CORP,3841,ok,0.88,41.6,mixed,3,Cash Conversion,59.3,net_debt_to_ebitda;fcf_margin_trend;incremental_revenue_per_capex
+VRT,Vertiv Holdings Co,3679,ok,0.949,30.3,positive,3,Working Capital Stress,74.5,capex_to_da;dio_trend;inventory_growth_spread
+MO,"ALTRIA GROUP, INC.",2111,ok,0.806,42.0,mixed,5,Balance Sheet Stress,74.3,net_debt_to_ebitda;asset_quality_proxy;debt_to_assets;current_ratio;dio_trend
+MFG,,,error: Could not establish at least 2 quarter-end dates for MFG; the filer may use cust,,,,,,,
+SONY,,,error: Could not establish at least 2 quarter-end dates for SONY; the filer may use cus,,,,,,,
+SBUX,Starbucks Corporation,5810,ok,0.907,44.3,mixed,3,Cash Conversion,69.7,net_debt_to_ebitda;fcf_to_net_income;fcf_margin_trend
+PDD,PDD Holdings Inc.,7389,ok,0.343,,mixed,0,Balance Sheet Stress,18.0,
+FTNT,"FORTINET, INC.",3577,ok,0.977,20.6,positive,0,Capex Discipline,37.5,
+IFNNY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0001107457.,,,,,,,
+ENB,,,error: Could not establish at least 2 quarter-end dates for ENB; the filer may use cust,,,,,,,
+BMY,Bristol-Myers Squibb Company,2834,ok,0.819,45.1,negative,4,Cash Conversion,73.5,fcf_margin_trend;cfo_to_net_income;fcf_to_net_income;incremental_revenue_per_capex
+NOW,"ServiceNow, Inc.",7372,ok,0.843,27.6,positive,0,Balance Sheet Stress,55.9,
+BNS,,,error: Could not establish at least 2 quarter-end dates for BNS; the filer may use cust,,,,,,,
+SO,SOUTHERN CO,4911,ok,0.662,53.2,negative,7,Cash Conversion,70.5,fcf_to_net_income;net_debt_to_ebitda;fcf_margin_trend;incremental_revenue_per_capex;fcf_margin;current_ratio;capex_intensity_regime_shift
+TT,TRANE TECHNOLOGIES PLC,3822,ok,0.875,33.9,mixed,0,Revenue Quality,59.1,
+HWM,HOWMET AEROSPACE INC.,3350,ok,0.819,38.2,mixed,1,Revenue Quality,46.3,leverage_change
+CM,,,error: Could not establish at least 2 quarter-end dates for CM; the filer may use custo,,,,,,,
+CDNS,"CADENCE DESIGN SYSTEMS, INC.",7372,ok,0.917,35.3,mixed,4,Balance Sheet Stress,43.6,fcf_margin_trend;dso_trend;asset_quality_proxy;intangibles_to_assets
+IBN,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0001103838.,,,,,,,
+PWR,"Quanta Services, Inc.",1731,ok,0.954,36.8,mixed,4,Balance Sheet Stress,52.8,net_debt_to_ebitda;working_capital_swing_to_income;buyback_offset_ratio;dso_trend
+SNHIY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0002098326.,,,,,,,
+PBR,PETROBRAS - PETROLEO BRASILEIRO SA,1311,ok,0.699,35.8,mixed,4,Capex Discipline,52.4,fcf_to_net_income;net_debt_to_ebitda;capex_to_da;fcf_margin
+GSK,,,error: Could not establish at least 2 quarter-end dates for GSK; the filer may use cust,,,,,,,
+MDT,Medtronic plc,3845,ok,0.949,25.7,positive,3,Balance Sheet Stress,48.8,net_debt_to_ebitda;intangibles_to_assets;asset_quality_proxy
+PNC,"PNC FINANCIAL SERVICES GROUP, INC.",6021,excluded_financial,0.407,,,,,,
+BNY,THE BANK OF NEW YORK MELLON CORPORATION,6022,excluded_financial,0.514,,,,,,
+EQIX,EQUINIX INC,6798,excluded_financial,0.912,,,,,,
+SNY,,,error: Could not establish at least 2 quarter-end dates for SNY; the filer may use cust,,,,,,,
+NEM,NEWMONT CORPORATION,1040,ok,0.644,23.4,positive,0,Capex Discipline,29.0,
+GD,GENERAL DYNAMICS CORP,3730,ok,0.843,24.5,positive,0,Balance Sheet Stress,39.2,
+DUK,DUKE ENERGY CORPORATION,4931,ok,0.699,49.4,negative,6,Balance Sheet Stress,68.3,fcf_to_net_income;net_debt_to_ebitda;fcf_margin_trend;incremental_revenue_per_capex;fcf_margin;current_ratio
+HOOD,"Robinhood Markets, Inc.",6211,excluded_financial,0.583,,,,,,
+SPOT,,,error: Could not establish at least 2 quarter-end dates for SPOT; the filer may use cus,,,,,,,
+MAR,MARRIOTT INTERNATIONAL INC /MD/,7011,ok,0.773,30.2,positive,3,Balance Sheet Stress,64.9,current_ratio;asset_quality_proxy;debt_to_assets
+USB,US BANCORP \DE\,6021,excluded_financial,0.398,,,,,,
+BN,,,error: Could not establish at least 2 quarter-end dates for BN; the filer may use custo,,,,,,,
+ASX,,,error: Could not establish at least 2 quarter-end dates for ASX; the filer may use cust,,,,,,,
+MNST,Monster Beverage Corp,2086,ok,0.898,25.2,positive,0,Revenue Quality,40.4,
+CMI,CUMMINS INC,3510,ok,0.843,41.0,mixed,2,Cash Conversion,66.0,cfo_to_net_income;fcf_to_net_income
+DDOG,"Datadog, Inc.",7372,ok,0.806,26.5,positive,2,Capital Integrity,65.1,sbc_to_revenue;interest_coverage
+ADP,AUTOMATIC DATA PROCESSING INC,7374,ok,0.806,21.3,positive,0,Balance Sheet Stress,29.7,
+UPS,"United Parcel Service, Inc",4210,ok,0.815,29.3,positive,2,Capex Discipline,51.4,incremental_revenue_per_capex;buyback_offset_ratio
+BP,,,error: Could not establish at least 2 quarter-end dates for BP; the filer may use custo,,,,,,,
+BCS,,,error: Could not establish at least 2 quarter-end dates for BCS; the filer may use cust,,,,,,,
+SNOW,SNOWFLAKE INC.,7372,ok,0.88,39.4,mixed,4,Capital Integrity,75.5,sbc_to_cfo;interest_coverage;sbc_to_revenue;fcf_margin_trend
+ELV,"ELEVANCE HEALTH, INC.",6324,excluded_financial,0.843,,,,,,
+ING,,,error: Could not establish at least 2 quarter-end dates for ING; the filer may use cust,,,,,,,
+WM,"Waste Management, Inc",4953,ok,0.861,29.8,positive,2,Balance Sheet Stress,60.1,net_debt_to_ebitda;incremental_revenue_per_capex
+MCK,McKESSON CORPORATION,5122,ok,0.88,25.5,positive,1,Revenue Quality,37.2,working_capital_swing_to_income
+CSX,CSX CORPORATION,4011,ok,0.759,31.2,positive,2,Balance Sheet Stress,51.2,net_debt_to_ebitda;incremental_revenue_per_capex
+ITUB,,,error: Could not establish at least 2 quarter-end dates for ITUB; the filer may use cus,,,,,,,
+WMB,"WILLIAMS COMPANIES, INC.",4922,ok,0.824,38.1,mixed,4,Balance Sheet Stress,58.9,net_debt_to_ebitda;capex_intensity_regime_shift;incremental_revenue_per_capex;fcf_to_net_income
+JCI,JOHNSON CONTROLS INTERNATIONAL PLC,3585,ok,0.861,29.5,positive,1,Balance Sheet Stress,50.6,asset_quality_proxy
+MELI,"MercadoLibre, Inc.",7389,ok,0.838,31.0,positive,2,Working Capital Stress,47.9,net_debt_to_ebitda;fcf_margin_trend
+ABNB,"Airbnb, Inc.",7340,ok,0.681,20.9,positive,0,Capital Integrity,45.8,
+NET,"CLOUDFLARE, INC.",7372,ok,0.833,32.3,mixed,1,Capital Integrity,66.5,interest_coverage
+HCA,"HCA Healthcare, Inc.",8062,ok,0.694,36.8,mixed,3,Balance Sheet Stress,51.3,debt_to_assets;incremental_revenue_per_capex;fcf_margin_trend
+FCX,Freeport-McMoRan Inc.,1000,ok,0.778,28.9,positive,1,Capex Discipline,41.3,incremental_revenue_per_capex
+SNPS,SYNOPSYS INC,7372,ok,0.944,31.2,positive,5,Balance Sheet Stress,68.0,net_debt_to_ebitda;interest_coverage;asset_quality_proxy;intangibles_to_assets;working_capital_swing_to_income
+KKR,KKR & Co. Inc.,6282,excluded_financial,0.361,,,,,,
+LYG,,,error: Could not establish at least 2 quarter-end dates for LYG; the filer may use cust,,,,,,,
+SHW,THE SHERWIN-WILLIAMS COMPANY,5200,ok,0.861,49.6,negative,4,Cash Conversion,82.4,fcf_to_net_income;cfo_to_net_income;fcf_margin_trend;deferred_revenue_growth_spread
+SPG,"SIMON PROPERTY GROUP, INC.",6798,excluded_financial,0.458,,,,,,
+CMCSA,Comcast Corporation,4841,ok,0.769,31.4,positive,2,Balance Sheet Stress,63.2,net_debt_to_ebitda;incremental_revenue_per_capex
+CEG,CONSTELLATION ENERGY CORPORATION,4911,ok,0.75,47.9,negative,5,Cash Conversion,85.1,fcf_to_net_income;net_debt_to_ebitda;cfo_to_net_income;fcf_margin;fcf_margin_trend
+ADBE,ADOBE INC.,7372,ok,0.917,29.8,positive,2,Balance Sheet Stress,40.7,fcf_margin_trend;current_ratio
+MMM,3M COMPANY,3841,ok,0.921,34.8,mixed,2,Cash Conversion,43.9,net_debt_to_ebitda;incremental_revenue_per_capex
+CME,CME GROUP INC.,6200,excluded_financial,0.648,,,,,,
+NTES,"NETEASE, INC.",7372,ok,0.366,,mixed,0,Balance Sheet Stress,17.5,
+MRSH,"Marsh & McLennan Companies, Inc.",6411,excluded_financial,0.843,,,,,,
+DASH,"DOORDASH, INC.",7389,ok,0.769,28.0,positive,0,Balance Sheet Stress,45.3,
+RCL,ROYAL CARIBBEAN CRUISES LTD,4400,ok,0.926,35.0,mixed,5,Revenue Quality,59.4,net_debt_to_ebitda;receivables_growth_spread;current_ratio;incremental_revenue_per_capex;beneish_dsri
+MCO,Moody’s Corporation,7320,ok,0.88,28.8,positive,3,Balance Sheet Stress,64.8,net_debt_to_ebitda;asset_quality_proxy;intangibles_to_assets
+BE,BLOOM ENERGY CORPORATION,3620,ok,0.806,32.8,mixed,0,Working Capital Stress,42.5,
+CNQ,,,error: Could not establish at least 2 quarter-end dates for CNQ; the filer may use cust,,,,,,,
+MGCLY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0002039784.,,,,,,,
+ACN,Accenture plc,7389,ok,0.926,22.9,positive,0,Capex Discipline,30.6,
+VLO,VALERO ENERGY CORP/TX,2911,ok,0.787,31.5,positive,1,Revenue Quality,63.3,receivables_growth_spread
+NGG,,,error: Could not establish at least 2 quarter-end dates for NGG; the filer may use cust,,,,,,,
+EPD,ENTERPRISE PRODUCTS PARTNERS L.P.,4922,ok,0.815,38.5,mixed,2,Working Capital Stress,64.4,net_debt_to_ebitda;inventory_growth_spread
+ECL,ECOLAB INC.,2840,ok,0.921,40.4,mixed,3,Cash Conversion,57.3,net_debt_to_ebitda;fcf_margin_trend;fcf_to_net_income
+EMR,EMERSON ELECTRIC CO.,3600,ok,0.843,30.9,positive,2,Balance Sheet Stress,57.2,intangibles_to_assets;asset_quality_proxy
+EQNR,,,error: Could not establish at least 2 quarter-end dates for EQNR; the filer may use cus,,,,,,,
+AEM,AGNICO EAGLE MINES LIMITED,1040,ok,0.639,19.7,positive,1,Capital Integrity,29.9,buyback_offset_ratio
+ITW,ILLINOIS TOOL WORKS INC,3560,ok,0.917,37.7,mixed,2,Cash Conversion,49.9,net_debt_to_ebitda;fcf_margin_trend
+MPC,MARATHON PETROLEUM CORPORATION,2911,ok,0.898,40.4,mixed,2,Revenue Quality,70.2,net_debt_to_ebitda;receivables_growth_spread
+AMT,AMERICAN TOWER CORP /MA/,6798,excluded_financial,0.87,,,,,,
+AMX,,,error: Could not establish at least 2 quarter-end dates for AMX; the filer may use cust,,,,,,,
+ORLY,O Reilly Automotive Inc,5531,ok,0.889,27.9,positive,2,Balance Sheet Stress,47.4,net_debt_to_ebitda;current_ratio
+CP,,,error: Could not establish at least 2 quarter-end dates for CP; the filer may use custo,,,,,,,
+MDLZ,"Mondelez International, Inc.",2000,ok,0.917,42.0,mixed,6,Cash Conversion,64.6,net_debt_to_ebitda;current_ratio;fcf_margin_trend;fcf_to_net_income;asset_quality_proxy;buyback_offset_ratio
+HLT,Hilton Worldwide Holdings Inc.,7011,ok,0.815,29.2,positive,4,Balance Sheet Stress,72.8,net_debt_to_ebitda;asset_quality_proxy;debt_to_assets;current_ratio
+FDX,FedEx Corporation,4513,ok,0.815,31.9,positive,2,Balance Sheet Stress,50.0,net_debt_to_ebitda;buyback_offset_ratio
+CVNA,CARVANA CO.,5500,ok,0.815,38.8,mixed,2,Cash Conversion,73.1,cfo_to_net_income;fcf_to_net_income
+MDLN,Medline Inc.,3841,ok,0.568,28.9,positive,2,Balance Sheet Stress,56.3,net_debt_to_ebitda;buyback_offset_ratio
+ALAB,"Astera Labs, Inc.",3674,ok,0.741,38.8,mixed,4,Revenue Quality,79.9,receivables_growth_spread;fcf_margin_trend;dso_trend;beneish_dsri
+CL,COLGATE-PALMOLIVE COMPANY,2844,ok,0.917,33.4,mixed,2,Balance Sheet Stress,45.5,net_debt_to_ebitda;fcf_margin_trend
+NOC,NORTHROP GRUMMAN CORP /DE/,3812,ok,0.833,58.4,negative,8,Cash Conversion,88.8,cfo_to_net_income;fcf_to_net_income;net_debt_to_ebitda;receivables_growth_spread;fcf_margin_trend;fcf_margin;beneish_dsri;accrual_trend
+AEP,"American Electric Power Company, Inc.",4911,ok,0.699,43.5,mixed,5,Balance Sheet Stress,64.1,capex_intensity_regime_shift;fcf_margin_trend;current_ratio;incremental_revenue_per_capex;interest_coverage
+AON,Aon plc,6411,excluded_financial,0.843,,,,,,
+TDG,TransDigm Group Incorporated,3728,ok,0.917,43.9,mixed,7,Cash Conversion,79.5,net_debt_to_ebitda;cfo_to_net_income;fcf_margin_trend;fcf_to_net_income;debt_to_assets;intangibles_to_assets;interest_coverage
+CI,The Cigna Group,6324,excluded_financial,0.88,,,,,,
+BAESY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0000895564.,,,,,,,
+INTU,INTUIT INC.,7372,ok,0.852,18.4,positive,1,Balance Sheet Stress,28.9,deferred_revenue_growth_spread
+CNI,,,error: Could not establish at least 2 quarter-end dates for CNI; the filer may use cust,,,,,,,
+BAM,BROOKFIELD ASSET MANAGEMENT LTD.,6282,excluded_financial,0.264,,,,,,
+COHR,COHERENT CORP.,3827,ok,0.815,52.3,negative,7,Cash Conversion,88.8,cfo_to_net_income;dio_trend;fcf_to_net_income;fcf_margin_trend;capex_to_da;fcf_margin;capex_growth_spread
+NOK,,,error: Could not establish at least 2 quarter-end dates for NOK; the filer may use cust,,,,,,,
+HONA,,,error: Could not establish at least 2 quarter-end dates for HONA; the filer may use cus,,,,,,,
+ICE,"INTERCONTINENTAL EXCHANGE, INC.",6200,excluded_financial,0.843,,,,,,
+NSC,NORFOLK SOUTHERN CORP,4011,ok,0.731,46.1,negative,4,Cash Conversion,76.4,fcf_to_net_income;net_debt_to_ebitda;fcf_margin_trend;incremental_revenue_per_capex
+NWG,,,error: Could not establish at least 2 quarter-end dates for NWG; the filer may use cust,,,,,,,
+TRV,"Travelers Companies, Inc.",6331,excluded_financial,0.509,,,,,,
+KMI,"KINDER MORGAN, INC.",4922,ok,0.727,36.2,mixed,3,Balance Sheet Stress,61.4,net_debt_to_ebitda;current_ratio;incremental_revenue_per_capex
+NXPI,NXP Semiconductors N.V.,3674,ok,0.889,36.4,mixed,0,Revenue Quality,49.3,
+CRH,CRH public limited company,3241,ok,0.894,45.8,negative,2,Revenue Quality,61.3,net_debt_to_ebitda;interest_coverage
+HON,Honeywell International Inc,3724,ok,0.935,53.2,negative,7,Cash Conversion,88.6,cfo_to_net_income;capex_growth_spread;fcf_to_net_income;net_debt_to_ebitda;fcf_margin_trend;fcf_margin;incremental_revenue_per_capex
+PSX,Phillips 66,2911,ok,0.731,61.5,negative,3,Cash Conversion,95.0,cfo_to_net_income;inventory_growth_spread;receivables_growth_spread
+CTAS,Cintas Corporation,2320,ok,0.912,25.1,positive,0,Balance Sheet Stress,35.6,
+URI,"United Rentals, Inc.",7359,ok,0.829,30.2,positive,2,Balance Sheet Stress,61.5,net_debt_to_ebitda;dso_trend
+MSI,"MOTOROLA SOLUTIONS, INC.",3663,ok,0.977,39.3,mixed,4,Working Capital Stress,78.4,net_debt_to_ebitda;fcf_margin_trend;dio_trend;inventory_growth_spread
+EOG,"EOG RESOURCES, INC.",1311,ok,0.731,22.7,positive,0,Revenue Quality,44.6,
+TRP,,,error: Could not establish at least 2 quarter-end dates for TRP; the filer may use cust,,,,,,,
+GM,GENERAL MOTORS COMPANY,3711,ok,0.662,43.7,mixed,3,Revenue Quality,64.6,incremental_revenue_per_capex;receivables_growth_spread;fcf_margin_trend
+APO,"APOLLO GLOBAL MANAGEMENT, INC.",6282,excluded_financial,0.444,,,,,,
+ROST,"Ross Stores, Inc.",5651,ok,0.806,29.7,positive,1,Revenue Quality,56.3,receivables_growth_spread
+APD,"AIR PRODUCTS AND CHEMICALS, INC.",2810,ok,0.87,31.1,positive,2,Capex Discipline,47.4,fcf_to_net_income;incremental_revenue_per_capex
+MFC,,,error: Could not establish at least 2 quarter-end dates for MFC; the filer may use cust,,,,,,,
+SLB,SLB LIMITED/NV,1389,ok,0.694,45.5,negative,3,Cash Conversion,72.1,fcf_margin_trend;fcf_to_net_income;incremental_revenue_per_capex
+WBD,"Warner Bros. Discovery, Inc.",4841,ok,0.843,44.2,mixed,6,Cash Conversion,77.9,interest_coverage;asset_quality_proxy;fcf_margin_trend;incremental_revenue_per_capex;current_ratio;fcf_margin
+TER,"TERADYNE, INC.",3825,ok,0.88,39.1,mixed,1,Revenue Quality,63.0,dso_trend
+E,,,error: Could not establish at least 2 quarter-end dates for E; the filer may use custom,,,,,,,
+RSG,"REPUBLIC SERVICES, INC.",4953,ok,0.944,31.9,positive,3,Balance Sheet Stress,62.3,net_debt_to_ebitda;incremental_revenue_per_capex;current_ratio
+RACE,,,error: Could not establish at least 2 quarter-end dates for RACE; the filer may use cus,,,,,,,
+FIX,"COMFORT SYSTEMS USA, INC.",1731,ok,0.917,30.0,positive,1,Cash Conversion,38.5,capex_to_da
+ET,ENERGY TRANSFER LP,4922,ok,0.843,32.8,mixed,2,Revenue Quality,63.1,net_debt_to_ebitda;receivables_growth_spread
+REGN,"REGENERON PHARMACEUTICALS, INC.",2834,ok,0.88,26.7,positive,0,Capex Discipline,35.4,
+MPWR,MONOLITHIC POWER SYSTEMS INC,3674,ok,0.847,31.1,positive,1,Capex Discipline,53.7,capex_to_da
+CIEN,Ciena Corp,3661,ok,0.991,26.4,positive,1,Earnings Quality,33.0,deferred_revenue_growth_spread
+NU,,,error: Could not establish at least 2 quarter-end dates for NU; the filer may use custo,,,,,,,
+DB,,,error: Could not establish at least 2 quarter-end dates for DB; the filer may use custo,,,,,,,
+UMC,,,error: Could not establish at least 2 quarter-end dates for UMC; the filer may use cust,,,,,,,
+DLR,"DIGITAL REALTY TRUST, INC.",6798,excluded_financial,0.463,,,,,,
+BSX,BOSTON SCIENTIFIC CORP,3841,ok,0.912,45.4,negative,6,Cash Conversion,78.9,net_debt_to_ebitda;cfo_to_net_income;fcf_margin_trend;fcf_to_net_income;asset_quality_proxy;intangibles_to_assets
+PCAR,PACCAR Inc,3711,ok,0.454,26.7,positive,1,Capex Discipline,39.2,incremental_revenue_per_capex
+NKE,"NIKE, Inc.",3021,ok,0.764,34.8,mixed,2,Cash Conversion,55.0,incremental_revenue_per_capex;buyback_offset_ratio
+VALE,VALE S.A.,1000,ok,0.713,30.3,positive,2,Capex Discipline,59.3,incremental_revenue_per_capex;capex_to_da
+TFC,TRUIST FINANCIAL CORP,6021,excluded_financial,0.403,,,,,,
+SU,,,error: Could not establish at least 2 quarter-end dates for SU; the filer may use custo,,,,,,,
+GWW,"W.W. GRAINGER, INC.",5000,ok,0.843,26.4,positive,0,Capex Discipline,47.9,
+STM,STMicroelectronics N.V.,3674,ok,0.444,,mixed,0,Balance Sheet Stress,17.1,
+ALL,ALLSTATE CORP,6331,excluded_financial,0.481,,,,,,
+SE,Sea Limited,7380,ok,0.463,,mixed,0,Balance Sheet Stress,22.0,
+RKLB,Rocket Lab Corp,3760,ok,0.926,48.6,negative,6,Revenue Quality,67.7,receivables_growth_spread;interest_coverage;beneish_dsri;fcf_margin;capex_to_da;working_capital_swing_to_income
+LITE,Lumentum Holdings Inc.,3669,ok,0.796,34.3,mixed,5,Capital Integrity,57.0,net_debt_to_ebitda;diluted_share_growth;debt_to_assets;net_share_count_change;capex_to_da
+AJG,ARTHUR J. GALLAGHER & CO.,6411,excluded_financial,0.713,,,,,,
+B,BARRICK MINING CORP,1040,ok,0.395,,mixed,0,Balance Sheet Stress,20.1,
+DAL,"Delta Air Lines, Inc.",4512,ok,0.694,38.8,mixed,4,Revenue Quality,70.7,net_debt_to_ebitda;receivables_growth_spread;current_ratio;beneish_dsri
+AFL,AFLAC INC,6321,excluded_financial,0.407,,,,,,
+CARR,CARRIER GLOBAL CORPORATION,3585,ok,0.88,44.7,mixed,6,Cash Conversion,79.9,fcf_to_net_income;net_debt_to_ebitda;cfo_to_net_income;fcf_margin_trend;asset_quality_proxy;intangibles_to_assets
+SRE,SEMPRA,4932,ok,0.796,35.2,mixed,5,Capex Discipline,66.5,fcf_to_net_income;capex_intensity_regime_shift;incremental_revenue_per_capex;fcf_margin;capex_to_da
+D,"DOMINION ENERGY, INC",4911,ok,0.708,27.8,positive,2,Balance Sheet Stress,59.2,net_debt_to_ebitda;current_ratio
+TGT,TARGET CORPORATION,5331,ok,0.824,43.2,mixed,3,Cash Conversion,63.2,fcf_to_net_income;net_debt_to_ebitda;buyback_offset_ratio
+TEL,TE CONNECTIVITY PLC,5065,ok,0.926,30.4,positive,0,Balance Sheet Stress,37.8,
+HPE,HEWLETT PACKARD ENTERPRISE COMPANY,3570,ok,0.88,33.4,mixed,1,Balance Sheet Stress,55.9,net_debt_to_ebitda
+NBIS,NEBIUS GROUP N.V.,7370,ok,0.398,,mixed,1,Balance Sheet Stress,22.9,net_share_count_change
+O,REALTY INCOME CORP,6798,excluded_financial,0.491,,,,,,
+KEYS,"KEYSIGHT TECHNOLOGIES, INC.",3823,ok,0.954,22.4,positive,0,Revenue Quality,31.8,
+ARGX,,,error: Could not establish at least 2 quarter-end dates for ARGX; the filer may use cus,,,,,,,
+MPLX,MPLX LP,4610,ok,0.75,39.8,mixed,5,Capex Discipline,56.6,net_debt_to_ebitda;fcf_margin_trend;incremental_revenue_per_capex;capex_intensity_regime_shift;debt_to_assets
+PSA,Public Storage,6798,excluded_financial,0.523,,,,,,
+FLEX,FLEX LTD.,3672,ok,0.931,31.5,positive,1,Revenue Quality,51.5,working_capital_swing_to_income
+MET,"MetLife, Inc.",6311,excluded_financial,0.481,,,,,,
+COR,"CENCORA, INC.",5122,ok,0.87,35.3,mixed,1,Balance Sheet Stress,54.1,net_debt_to_ebitda
+CTVA,"Corteva, Inc.",100,ok,0.806,57.1,negative,9,Cash Conversion,88.8,cfo_to_net_income;fcf_to_net_income;accrual_trend;deferred_revenue_growth_spread;fcf_margin_trend;working_capital_swing_to_income;fcf_margin;beneish_tata;total_accruals
+CAH,"Cardinal Health, Inc.",5122,ok,0.917,29.0,positive,1,Balance Sheet Stress,45.3,net_debt_to_ebitda
+TRGP,TARGA RESOURCES CORP.,4922,ok,0.806,42.4,mixed,6,Balance Sheet Stress,57.2,fcf_to_net_income;net_debt_to_ebitda;incremental_revenue_per_capex;fcf_margin_trend;debt_to_assets;current_ratio
+IMO,,,error: Could not establish at least 2 quarter-end dates for IMO; the filer may use cust,,,,,,,
+RELX,,,error: Could not establish at least 2 quarter-end dates for RELX; the filer may use cus,,,,,,,
+FAST,FASTENAL CO,5200,ok,0.815,24.3,positive,0,Revenue Quality,36.2,
+AME,"AMETEK, Inc.",3823,ok,0.954,28.6,positive,2,Balance Sheet Stress,44.4,intangibles_to_assets;asset_quality_proxy
+F,Ford Motor Co,3711,ok,0.787,46.1,negative,3,Cash Conversion,79.5,fcf_to_net_income;fcf_margin_trend;cfo_to_net_income
+LHX,"L3HARRIS TECHNOLOGIES, INC.",3812,ok,0.921,58.9,negative,10,Cash Conversion,86.1,cfo_to_net_income;beneish_dsri;fcf_to_net_income;net_debt_to_ebitda;inventory_growth_spread;receivables_growth_spread;beneish_m_score;fcf_margin_trend;working_capital_swing_to_income;asset_quality_proxy
+TRMOY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0002071881.,,,,,,,
+OKE,ONEOK INC /NEW/,4923,ok,0.847,44.8,mixed,4,Balance Sheet Stress,56.1,net_debt_to_ebitda;fcf_to_net_income;fcf_margin_trend;current_ratio
+LSEGY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0001842726.,,,,,,,
+ROK,"Rockwell Automation, Inc.",3829,ok,0.907,31.7,positive,1,Balance Sheet Stress,50.1,net_debt_to_ebitda
+BKR,Baker Hughes Co,3533,ok,0.806,43.1,mixed,6,Cash Conversion,73.4,leverage_change;fcf_to_net_income;fcf_margin_trend;incremental_revenue_per_capex;cfo_to_net_income;buyback_offset_ratio
+EW,EDWARDS LIFESCIENCES CORPORATION,3842,ok,0.88,42.1,mixed,4,Cash Conversion,84.3,cfo_to_net_income;fcf_to_net_income;fcf_margin_trend;sbc_to_cfo
+ETR,ENTERGY CORP /DE/,4911,ok,0.727,49.9,negative,9,Balance Sheet Stress,73.0,fcf_to_net_income;net_debt_to_ebitda;capex_intensity_regime_shift;asset_quality_proxy;fcf_margin_trend;interest_coverage;incremental_revenue_per_capex;fcf_margin;capex_to_da
+AZO,AUTOZONE INC,5531,ok,0.806,33.3,mixed,1,Balance Sheet Stress,54.8,net_debt_to_ebitda
+EONGY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0001136808.,,,,,,,
+FITB,Fifth Third Bancorp,6022,excluded_financial,0.519,,,,,,
+GALDY,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0002021390.,,,,,,,
+VST,Vistra Corp.,4911,ok,0.87,37.2,mixed,3,Balance Sheet Stress,51.5,net_debt_to_ebitda;fcf_margin_trend;fcf_to_net_income
+EA,ELECTRONIC ARTS INC.,7372,ok,0.824,33.4,mixed,2,Balance Sheet Stress,59.9,asset_quality_proxy;buyback_offset_ratio
+GWLIF,,,error: SEC request failed for https://data.sec.gov/api/xbrl/companyfacts/CIK0000850918.,,,,,,,
+LNG,"CHENIERE ENERGY, INC.",4924,ok,0.852,40.0,mixed,4,Balance Sheet Stress,65.7,interest_coverage;deferred_revenue_growth_spread;fcf_margin_trend;current_ratio
+WPM,,,error: Could not establish at least 2 quarter-end dates for WPM; the filer may use cust,,,,,,,
+TAK,,,error: Could not establish at least 2 quarter-end dates for TAK; the filer may use cust,,,,,,,
+HEI,HEICO CORPORATION,3724,ok,0.861,26.8,positive,3,Balance Sheet Stress,49.1,net_debt_to_ebitda;intangibles_to_assets;asset_quality_proxy
+NUE,NUCOR CORPORATION,3312,ok,0.88,30.0,positive,1,Cash Conversion,39.6,fcf_to_net_income
+XEL,XCEL ENERGY INC,4931,ok,0.731,37.9,mixed,5,Balance Sheet Stress,62.9,fcf_to_net_income;net_debt_to_ebitda;capex_to_da;interest_coverage;current_ratio
+EBAY,eBay Inc.,7389,ok,0.903,24.2,positive,0,Balance Sheet Stress,42.0,
+CBRS,Cerebras Systems Inc.,3674,ok,0.593,,mixed,5,Capital Integrity,58.1,issuance_pressure;leverage_change;working_capital_swing_to_income;capex_to_da;fcf_margin
+HUM,HUMANA INC,6324,excluded_financial,0.88,,,,,,
+FANG,"Diamondback Energy, Inc.",1311,ok,0.778,30.8,positive,3,Revenue Quality,66.7,net_debt_to_ebitda;current_ratio;receivables_growth_spread
+CRDO,CREDO TECHNOLOGY GROUP HOLDING LTD,3674,ok,0.792,25.3,positive,1,Working Capital Stress,64.1,dio_trend
+FER,,,error: Could not establish at least 2 quarter-end dates for FER; the filer may use cust,,,,,,,
+MCHP,MICROCHIP TECHNOLOGY INCORPORATED,3674,ok,0.991,29.8,positive,4,Balance Sheet Stress,59.6,net_debt_to_ebitda;asset_quality_proxy;intangibles_to_assets;buyback_offset_ratio
+ABEV,,,error: Could not establish at least 2 quarter-end dates for ABEV; the filer may use cus,,,,,,,
+OXY,OCCIDENTAL PETROLEUM CORPORATION,1311,ok,0.731,45.1,negative,5,Cash Conversion,83.4,fcf_to_net_income;cfo_to_net_income;fcf_margin_trend;incremental_revenue_per_capex;accrual_trend
+AXON,"Axon Enterprise, Inc.",3480,ok,0.907,50.8,negative,6,Cash Conversion,87.5,cfo_to_net_income;fcf_to_net_income;net_debt_to_ebitda;interest_coverage;fcf_margin_trend;fcf_margin
+EXC,EXELON CORPORATION,4931,ok,0.694,41.0,mixed,5,Capex Discipline,54.3,fcf_to_net_income;net_debt_to_ebitda;incremental_revenue_per_capex;deferred_revenue_growth_spread;fcf_margin
+CCEP,,,error: Could not establish at least 2 quarter-end dates for CCEP; the filer may use cus,,,,,,,
+STT,STATE STREET CORPORATION,6022,excluded_financial,0.426,,,,,,
