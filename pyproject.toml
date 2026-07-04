@@ -34,3 +34,9 @@ include = ["app*"]
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["."]
+filterwarnings = [
+    # Upstream-only: Starlette's TestClient warns that a future httpx major ("httpx2")
+    # will be required. Not fixable in our code without a risky dependency swap; scope
+    # the suppression tightly to that one message so real deprecations still surface.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:UserWarning",
+]

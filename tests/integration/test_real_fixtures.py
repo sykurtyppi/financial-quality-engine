@@ -25,8 +25,9 @@ def load(ticker: str) -> dict:
 
 
 class TestAppleMapping:
+    @staticmethod
     @pytest.fixture(scope="class")
-    def built(self):
+    def built():
         return build_dataset(load("AAPL"), "AAPL", n_quarters=8)
 
     def test_spot_value_matches_filed_10q(self, built):
@@ -64,8 +65,9 @@ class TestAppleMapping:
 
 
 class TestCocaColaMapping:
+    @staticmethod
     @pytest.fixture(scope="class")
-    def built(self):
+    def built():
         return build_dataset(load("KO"), "KO", n_quarters=8)
 
     def test_calendar_fye_labels(self, built):
@@ -89,8 +91,9 @@ class TestSalesforceMapping:
     """CRM is the case that exposed SEC's unreliable fy/fp metadata: the
     FY-ending-2026-01-31 annual fact is stamped fy=2025 in companyfacts."""
 
+    @staticmethod
     @pytest.fixture(scope="class")
-    def built(self):
+    def built():
         return build_dataset(load("CRM"), "CRM", n_quarters=8)
 
     def test_january_fye_structural_labels_unique_and_ordered(self, built):

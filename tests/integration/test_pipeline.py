@@ -21,8 +21,9 @@ def quarter_end(i: int, start_year: int = 2024) -> date:
 
 
 class TestStretchCo:
+    @staticmethod
     @pytest.fixture(scope="class")
-    def result(self):
+    def result():
         return analyze(stretch_dataset())
 
     def test_overall_score_computed(self, result):
@@ -64,8 +65,9 @@ class TestStretchCo:
 
 
 class TestCleanCo:
+    @staticmethod
     @pytest.fixture(scope="class")
-    def result(self):
+    def result():
         return analyze(clean_dataset())
 
     def test_scores_lower_than_stretch(self, result):
