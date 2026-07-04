@@ -7,3 +7,5 @@ data/*.db
 data/cache/
 .DS_Store
 reports/
+data/kpi_pairs.json
+data/kpi_judgments.json

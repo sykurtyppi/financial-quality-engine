@@ -150,8 +150,13 @@ def _merged_filings(client: SecClient, subs: dict, before: date | None) -> dict:
 
 
 def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str:
+    cache = client.cache_dir / f"archive_{accession.replace('-', '')}_{doc.replace('/', '_')}"
+    if cache.exists():
+        return cache.read_text(errors="replace")
     url = ARCHIVES_URL.format(cik=cik, accession=accession.replace("-", ""), doc=doc)
-    return client._get(url).decode("utf-8", errors="replace")  # noqa: SLF001
+    text = client._get(url).decode("utf-8", errors="replace")  # noqa: SLF001
+    cache.write_text(text)
+    return text
 
 
 def _find_ex99(client: SecClient, cik: int, accession: str) -> str | None:
