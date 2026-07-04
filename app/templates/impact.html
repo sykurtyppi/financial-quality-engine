@@ -1,12 +1,25 @@
 {% extends "base.html" %}
 {% block body %}
-<h2>{{ entry.ticker }} — record impact</h2>
-<p class="sub">Fill the AFTER block now (after reading the report). The OUTCOME block is for weeks later.</p>
+<div class="toolbar">
+  <div>
+    <h2>{{ entry.ticker }} Impact</h2>
+    <p class="sub" style="margin:0">{{ entry.day }} · prior conviction {{ entry.conviction or "—" }}</p>
+  </div>
+  <div class="actions" style="margin:0">
+    <a class="btn ghost" href="/report/{{ entry.ticker }}?date={{ entry.day }}">Report</a>
+    <a class="btn ghost" href="/">Dashboard</a>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>Prior View</h3>
+  <p style="margin:0">{{ entry.thesis or "No thesis captured" }}</p>
+</div>
 
 <form class="panel" method="post" action="/impact/{{ entry.ticker }}">
   <input type="hidden" name="date" value="{{ entry.day }}">
 
-  <h3 style="margin-top:0">After — did the report move you?</h3>
+  <h3>After</h3>
   <div class="row">
     <div>
       <label for="impact">Impact</label>
@@ -23,11 +36,11 @@
     </div>
   </div>
   <label for="what_it_surfaced">What it surfaced</label>
-  <textarea id="what_it_surfaced" name="what_it_surfaced" placeholder="anything you didn't already know">{{ entry.what_it_surfaced or '' }}</textarea>
+  <textarea id="what_it_surfaced" name="what_it_surfaced" placeholder="new risk, evidence, or question">{{ entry.what_it_surfaced or '' }}</textarea>
   <label for="what_i_disagreed_with">What you disagreed with</label>
-  <textarea id="what_i_disagreed_with" name="what_i_disagreed_with" placeholder="flags you know are fine, and why">{{ entry.what_i_disagreed_with or '' }}</textarea>
+  <textarea id="what_i_disagreed_with" name="what_i_disagreed_with" placeholder="flag that was immaterial, stale, or already priced">{{ entry.what_i_disagreed_with or '' }}</textarea>
 
-  <h3>Outcome — weeks later</h3>
+  <h3 style="margin-top:26px">Outcome</h3>
   <div class="row">
     <div>
       <label for="outcome_date">Outcome date</label>
@@ -48,7 +61,7 @@
 
   <div class="actions">
     <button class="btn" type="submit">Save</button>
-    <a class="btn ghost" href="/">Back to dashboard</a>
+    <a class="btn ghost" href="/">Cancel</a>
   </div>
 </form>
 {% endblock %}

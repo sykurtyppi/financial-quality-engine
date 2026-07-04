@@ -1,18 +1,31 @@
 {% extends "base.html" %}
 {% block body %}
-<h2>{{ entry.ticker }} — report</h2>
-<p class="sub">Your locked thesis (conviction {{ entry.conviction }}): <i>{{ entry.thesis }}</i></p>
+<div class="toolbar">
+  <div>
+    <h2>{{ entry.ticker }} Report</h2>
+    <p class="sub" style="margin:0">{{ entry.day }} · conviction {{ entry.conviction or "—" }}</p>
+  </div>
+  <div class="actions" style="margin:0">
+    <a class="btn" href="/impact/{{ entry.ticker }}?date={{ entry.day }}">Record impact</a>
+    <a class="btn ghost" href="/">Dashboard</a>
+  </div>
+</div>
 
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 
-<div class="actions" style="margin-top:0;margin-bottom:20px">
-  <a class="btn" href="/impact/{{ entry.ticker }}?date={{ entry.day }}">Record impact →</a>
-  <a class="btn ghost" href="/">Back to dashboard</a>
+<div class="panel">
+  <h3>Locked Thesis</h3>
+  <p style="margin:0">{{ entry.thesis }}</p>
+  {% if entry.is_reported %}
+  <p class="note">Reported {{ entry.reported }}</p>
+  {% else %}
+  <p class="note">Report generation has not completed for this case.</p>
+  {% endif %}
 </div>
 
 {% if report_html %}
 <div class="panel report">{{ report_html | safe }}</div>
 {% else %}
-<div class="panel"><p class="sub" style="margin:0">No report file found. Set <code>EDGAR_IDENTITY</code> and try generating again from the dashboard.</p></div>
+<div class="panel"><p class="empty">No report file found. Set <code>EDGAR_IDENTITY</code> and generate this case again from the dashboard.</p></div>
 {% endif %}
 {% endblock %}

@@ -1,12 +1,17 @@
 {% extends "base.html" %}
 {% block body %}
-<h2>New case</h2>
-<p class="sub">Write your view <b>before</b> reading the report. This is the one rule — the entry locks once a report is generated.</p>
+<div class="toolbar">
+  <div>
+    <h2>New case</h2>
+    <p class="sub" style="margin:0">Capture the prior view before the report exists.</p>
+  </div>
+  <a class="btn ghost" href="/">Dashboard</a>
+</div>
 
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 
 <form class="panel" method="post" action="/open">
-  <div class="row">
+  <div class="field-grid">
     <div>
       <label for="ticker">Ticker</label>
       <input id="ticker" name="ticker" required autocomplete="off" placeholder="NVDA" style="text-transform:uppercase">
@@ -19,18 +24,31 @@
         <option value="5">5 — high</option>
       </select>
     </div>
+    <div>
+      <label for="action">Intended action</label>
+      <select id="action" name="action">
+        <option value="hold" selected>hold</option>
+        <option value="add">add</option>
+        <option value="trim">trim</option>
+        <option value="avoid">avoid</option>
+        <option value="no position">no position</option>
+      </select>
+    </div>
+    <div>
+      <label for="source">Case source</label>
+      <input id="source" disabled value="journal entry">
+    </div>
+
+    <div class="wide">
+      <label for="thesis">Thesis</label>
+      <textarea id="thesis" name="thesis" required placeholder="beat likely priced in; watching inventory build and margin quality"></textarea>
+    </div>
   </div>
-
-  <label for="thesis">Thesis — your prior view, 1–2 sentences</label>
-  <textarea id="thesis" name="thesis" required placeholder="e.g. beat likely priced in; watching inventory build and services margin"></textarea>
-
-  <label for="action">Intended action</label>
-  <input id="action" name="action" value="hold" placeholder="hold / trim / add / avoid / no position">
 
   <div class="actions">
-    <button class="btn" type="submit">Lock thesis</button>
+    <button class="btn" type="submit">Create case</button>
     <a class="btn ghost" href="/">Cancel</a>
   </div>
-  <p class="note">After this you'll generate the report from the dashboard — the thesis can't be edited once you do.</p>
+  <p class="note">The report action will lock this thesis once generation succeeds.</p>
 </form>
 {% endblock %}
