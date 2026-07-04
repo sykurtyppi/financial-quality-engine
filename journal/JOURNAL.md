@@ -13,6 +13,14 @@ journal, run blind over a real earnings season, can answer it.
 > theses must be yours: fabricated priors would defeat the one experiment designed
 > to be un-foolable.
 
+## Two ways to run it (same entry files)
+
+- **CLI** — the loop below.
+- **Web UI** — `.venv/bin/uvicorn app.web:app`, then open http://127.0.0.1:8000.
+  Same four steps in a browser (dashboard → new case → view report → record
+  impact), writing the identical `journal/entries/*.md` files. It's a dogfooding
+  convenience, not a product; the thesis-before-report lock is enforced there too.
+
 ## The daily loop
 
 ```

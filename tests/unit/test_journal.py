@@ -1,9 +1,9 @@
-"""Decision-impact journal CLI — regression tests for the thesis/report lock.
+"""Decision-impact journal CLI + store — regression tests for the thesis/report lock.
 
-The report-generation subprocess is mocked, so these run offline. The load-
-bearing case is `test_report_generates_on_fresh_entry`: the `reported:` guard
-once used `\\s*\\S`, whose `\\s` spanned the newline into the next heading and
-false-tripped on EVERY fresh entry — silently breaking the whole happy path.
+`build_report` is stubbed, so these run offline. The load-bearing case is
+`test_report_generates_on_fresh_entry`: the `reported:` guard once used `\\s*\\S`,
+whose `\\s` spanned the newline into the next heading and false-tripped on EVERY
+fresh entry — silently breaking the whole happy path.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 from pathlib import Path
+
+from app.services.journal import store
 
 ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("journal_cli", ROOT / "scripts" / "journal.py")
@@ -27,23 +29,28 @@ def _report(ticker: str) -> int:
     return journal.cmd_report(argparse.Namespace(ticker=ticker, date=None, no_docs=True))
 
 
+def _stub_build(monkeypatch, calls):
+    monkeypatch.setattr(journal, "build_report",
+                        lambda ticker, with_docs=True: calls.append(ticker) or (Path("x.md"), 31.2))
+
+
 def test_report_generates_on_fresh_entry(tmp_path, monkeypatch):
     calls: list = []
-    monkeypatch.setattr(journal, "ENTRIES", tmp_path)
-    monkeypatch.setattr(journal.subprocess, "call", lambda *a, **k: calls.append(a) or 0)
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, calls)
 
     _open("AAPL", "clean compounder; watching services margin and buyback pace")
     rc = _report("AAPL")
 
     assert rc == 0                 # regression: guard must NOT false-trip on a fresh entry
-    assert calls                   # report generation actually invoked
-    text = (tmp_path / f"AAPL_{journal._today()}.md").read_text()
+    assert calls == ["AAPL"]       # report generation actually invoked
+    text = (tmp_path / f"AAPL_{store.today()}.md").read_text()
     assert "reported: 2" in text   # thesis timestamp was stamped
 
 
 def test_report_refuses_second_time(tmp_path, monkeypatch):
-    monkeypatch.setattr(journal, "ENTRIES", tmp_path)
-    monkeypatch.setattr(journal.subprocess, "call", lambda *a, **k: 0)
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, [])
 
     _open("MSFT", "durable moat; cloud reacceleration")
     assert _report("MSFT") == 0
@@ -51,8 +58,26 @@ def test_report_refuses_second_time(tmp_path, monkeypatch):
 
 
 def test_report_refuses_without_thesis(tmp_path, monkeypatch):
-    monkeypatch.setattr(journal, "ENTRIES", tmp_path)
-    monkeypatch.setattr(journal.subprocess, "call", lambda *a, **k: 0)
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, [])
 
     _open("NVDA", None, conviction=None)  # placeholder thesis
     assert _report("NVDA") == 1           # empty BEFORE block -> refuse
+
+
+def test_store_tally_and_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "steady staple", conviction=3)
+    store.mark_reported(p)
+    store.set_field(p, "impact", "changed_confidence")
+    store.set_field(p, "conviction_after", "4")
+    store.set_field(p, "verdict", "helped")
+
+    parsed = store.parse_entry(p)
+    assert parsed["impact"] == "changed_confidence"
+    assert parsed["needs_after"] is False and parsed["needs_outcome"] is False
+
+    t = store.tally()
+    assert t["total"] == 1 and t["scored"] == 1
+    assert t["impact_counts"]["changed_confidence"] == 1
+    assert t["conv_moved"] == 1 and t["verdicts"]["helped"] == 1

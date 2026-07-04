@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block body %}
+<h2>Dashboard</h2>
+<p class="sub">Does the report change what you'd do? Log every case — including the boring ones.</p>
+
+<div class="panel">
+  <div class="grid">
+    <div class="stat"><b>{{ t.total }}</b><span>cases</span></div>
+    <div class="stat"><b>{{ t.scored }}</b><span>scored</span></div>
+    <div class="stat"><b>{{ t.with_outcome }}</b><span>with outcome</span></div>
+    <div class="stat"><b>{% if t.scored %}{{ (t.changed_any * 100 // t.scored) }}%{% else %}—{% endif %}</b><span>changed something</span></div>
+  </div>
+  {% if t.scored %}
+  <p class="note">Impact:
+    {% for code, n in t.impact_counts.items() %}{{ code }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+    &nbsp;|&nbsp; conviction moved {{ t.conv_moved }}, unchanged {{ t.conv_same }}</p>
+  {% endif %}
+  {% if t.gate_ready %}
+  <p class="note" style="color:var(--warn)">≥20 cases with outcomes — decision gate: would you keep using this voluntarily? (docs/evaluation_protocol.md)</p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  {% if t.entries %}
+  <table>
+    <thead><tr><th>Case</th><th>Conviction</th><th>Report</th><th>After</th><th>Outcome</th><th></th></tr></thead>
+    <tbody>
+      {% for e in t.entries %}
+      <tr>
+        <td><b>{{ e.ticker }}</b> <span class="note">{{ e.day }}</span></td>
+        <td>{{ e.conviction or "—" }}{% if e.conviction_after %} → {{ e.conviction_after }}{% endif %}</td>
+        <td>{% if e.is_reported %}<span class="pill ok">generated</span>{% else %}<span class="pill wait">pending</span>{% endif %}</td>
+        <td>{% if e.impact %}<span class="pill ok">{{ e.impact }}</span>{% else %}<span class="pill need">needs after</span>{% endif %}</td>
+        <td>{% if e.verdict %}<span class="pill ok">{{ e.verdict }}</span>{% else %}<span class="pill wait">later</span>{% endif %}</td>
+        <td style="white-space:nowrap">
+          <a href="/report/{{ e.ticker }}?date={{ e.day }}">{% if e.is_reported %}view{% else %}generate{% endif %}</a> ·
+          <a href="/impact/{{ e.ticker }}?date={{ e.day }}">record</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="sub" style="margin:0">No cases yet. <a href="/open">Open your first one</a> — write your prior view before reading anything.</p>
+  {% endif %}
+</div>
+{% endblock %}

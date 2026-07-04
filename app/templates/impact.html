@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block body %}
+<h2>{{ entry.ticker }} — record impact</h2>
+<p class="sub">Fill the AFTER block now (after reading the report). The OUTCOME block is for weeks later.</p>
+
+<form class="panel" method="post" action="/impact/{{ entry.ticker }}">
+  <input type="hidden" name="date" value="{{ entry.day }}">
+
+  <h3 style="margin-top:0">After — did the report move you?</h3>
+  <div class="row">
+    <div>
+      <label for="impact">Impact</label>
+      <select id="impact" name="impact">
+        <option value="">— select —</option>
+        {% for code in impact_codes %}
+        <option value="{{ code }}" {% if entry.impact == code %}selected{% endif %}>{{ code }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="conviction_after">Conviction after (1–5)</label>
+      <input id="conviction_after" name="conviction_after" value="{{ entry.conviction_after or '' }}" placeholder="{{ entry.conviction or '3' }}">
+    </div>
+  </div>
+  <label for="what_it_surfaced">What it surfaced</label>
+  <textarea id="what_it_surfaced" name="what_it_surfaced" placeholder="anything you didn't already know">{{ entry.what_it_surfaced or '' }}</textarea>
+  <label for="what_i_disagreed_with">What you disagreed with</label>
+  <textarea id="what_i_disagreed_with" name="what_i_disagreed_with" placeholder="flags you know are fine, and why">{{ entry.what_i_disagreed_with or '' }}</textarea>
+
+  <h3>Outcome — weeks later</h3>
+  <div class="row">
+    <div>
+      <label for="outcome_date">Outcome date</label>
+      <input id="outcome_date" name="outcome_date" value="{{ entry.outcome_date or '' }}" placeholder="2026-08-15">
+    </div>
+    <div>
+      <label for="verdict">Verdict</label>
+      <select id="verdict" name="verdict">
+        <option value="">— select —</option>
+        {% for v in verdicts %}
+        <option value="{{ v }}" {% if entry.verdict == v %}selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <label for="what_happened">What happened</label>
+  <textarea id="what_happened" name="what_happened" placeholder="what actually played out">{{ entry.what_happened or '' }}</textarea>
+
+  <div class="actions">
+    <button class="btn" type="submit">Save</button>
+    <a class="btn ghost" href="/">Back to dashboard</a>
+  </div>
+</form>
+{% endblock %}

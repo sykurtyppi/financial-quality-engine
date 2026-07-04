@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block body %}
+<h2>{{ entry.ticker }} — report</h2>
+<p class="sub">Your locked thesis (conviction {{ entry.conviction }}): <i>{{ entry.thesis }}</i></p>
+
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+<div class="actions" style="margin-top:0;margin-bottom:20px">
+  <a class="btn" href="/impact/{{ entry.ticker }}?date={{ entry.day }}">Record impact →</a>
+  <a class="btn ghost" href="/">Back to dashboard</a>
+</div>
+
+{% if report_html %}
+<div class="panel report">{{ report_html | safe }}</div>
+{% else %}
+<div class="panel"><p class="sub" style="margin:0">No report file found. Set <code>EDGAR_IDENTITY</code> and try generating again from the dashboard.</p></div>
+{% endif %}
+{% endblock %}

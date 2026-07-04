@@ -131,6 +131,25 @@ historical controls, each documented honestly (including the failures):
 - [kpi_llm_validation](docs/kpi_llm_validation.md) + [kpi_definition_isolation_spike](docs/kpi_definition_isolation_spike.md) — the KPI-drift signal, and why it was shelved
 - A decision-impact journal ([journal/JOURNAL.md](journal/JOURNAL.md)) tests the one open question no historical run can answer: does surfacing the validated signals change a real decision?
 
+### Running the journal
+
+The journal has a CLI and an optional local web UI over the *same* markdown
+entry files (`app/services/journal/` is the shared core, so the two never
+diverge). It is a dogfooding tool to reduce the friction of running the
+experiment — not a product surface.
+
+```bash
+export EDGAR_IDENTITY="Your Name you@example.com"
+
+# CLI: lock your prior view, then generate the report (refused until a thesis exists)
+.venv/bin/python scripts/journal.py open NVDA --thesis "your prior view" --conviction 3
+.venv/bin/python scripts/journal.py report NVDA
+.venv/bin/python scripts/journal.py tally
+
+# Or the web UI (pip install -e ".[web]"), same loop in a browser:
+.venv/bin/uvicorn app.web:app        # http://127.0.0.1:8000
+```
+
 ## LLM layer (grounded materiality adjudicator)
 
 The one place an LLM is used is as a *judge*, not an author: given the prior and

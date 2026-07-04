@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block body %}
+<h2>New case</h2>
+<p class="sub">Write your view <b>before</b> reading the report. This is the one rule — the entry locks once a report is generated.</p>
+
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+<form class="panel" method="post" action="/open">
+  <div class="row">
+    <div>
+      <label for="ticker">Ticker</label>
+      <input id="ticker" name="ticker" required autocomplete="off" placeholder="NVDA" style="text-transform:uppercase">
+    </div>
+    <div>
+      <label for="conviction">Conviction (1–5)</label>
+      <select id="conviction" name="conviction">
+        <option value="1">1 — low</option><option value="2">2</option>
+        <option value="3" selected>3</option><option value="4">4</option>
+        <option value="5">5 — high</option>
+      </select>
+    </div>
+  </div>
+
+  <label for="thesis">Thesis — your prior view, 1–2 sentences</label>
+  <textarea id="thesis" name="thesis" required placeholder="e.g. beat likely priced in; watching inventory build and services margin"></textarea>
+
+  <label for="action">Intended action</label>
+  <input id="action" name="action" value="hold" placeholder="hold / trim / add / avoid / no position">
+
+  <div class="actions">
+    <button class="btn" type="submit">Lock thesis</button>
+    <a class="btn ghost" href="/">Cancel</a>
+  </div>
+  <p class="note">After this you'll generate the report from the dashboard — the thesis can't be edited once you do.</p>
+</form>
+{% endblock %}
