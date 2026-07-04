@@ -24,7 +24,12 @@ def report_path(ticker: str, day: str | None = None) -> Path:
     return REPORTS / f"{ticker.upper()}_{day or date.today().isoformat()}.md"
 
 
-def build_report(ticker: str, with_docs: bool = True, quarters: int = 8) -> tuple[Path, float | None]:
+def build_report(
+    ticker: str,
+    with_docs: bool = True,
+    quarters: int = 8,
+    report_day: str | None = None,
+) -> tuple[Path, float | None]:
     """Generate and write the markdown report for ``ticker``. Returns (path, overall)."""
     ticker = ticker.upper()
     dataset, _ = fetch_dataset(ticker, n_quarters=quarters)
@@ -35,7 +40,7 @@ def build_report(ticker: str, with_docs: bool = True, quarters: int = 8) -> tupl
     result = analyze(dataset)
     report = render(result, generated_on=date.today().isoformat())
     REPORTS.mkdir(exist_ok=True)
-    out = report_path(ticker)
+    out = report_path(ticker, report_day)
     out.write_text(report)
     overall = result.overall.score if result.overall else None
     return out, overall

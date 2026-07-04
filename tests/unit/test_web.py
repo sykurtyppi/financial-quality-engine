@@ -19,8 +19,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
     monkeypatch.setattr(reporting, "REPORTS", tmp_path / "reports")
 
-    def fake_build(ticker, with_docs=True):
-        p = reporting.report_path(ticker)
+    def fake_build(ticker, with_docs=True, report_day=None):
+        p = reporting.report_path(ticker, report_day)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"# {ticker} report\n\n| Block | Score |\n|---|---|\n| Earnings Quality | 29 |\n")
         return p, 31.2
@@ -58,6 +58,34 @@ def test_report_requires_thesis(client):
     store.open_entry("XYZ")  # placeholder thesis
     r = client.get("/report/XYZ")
     assert r.status_code == 303 and "/open" in r.headers["location"]
+
+
+def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):
+    def fail_build(ticker, with_docs=True, report_day=None):
+        raise RuntimeError("missing EDGAR_IDENTITY")
+
+    monkeypatch.setattr(reporting, "build_report", fail_build)
+    client.post("/open", data={"ticker": "CRM", "thesis": "margin reset credible", "conviction": 3, "action": "hold"})
+
+    r = client.get("/report/CRM")
+
+    assert r.status_code == 200
+    assert "Report generation failed" in r.text
+    assert not store.parse_entry(store.find_entry("CRM"))["is_reported"]
+
+
+def test_report_for_dated_entry_reads_same_file_it_generates(client):
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    p = store.find_entry("KO")
+    old = p.with_name("KO_2026-01-15.md")
+    p.rename(old)
+
+    r = client.get("/report/KO?date=2026-01-15")
+
+    assert r.status_code == 200
+    assert "KO report" in r.text
+    assert reporting.report_path("KO", "2026-01-15").exists()
+    assert store.parse_entry(old)["is_reported"]
 
 
 def test_impact_saves_fields(client):

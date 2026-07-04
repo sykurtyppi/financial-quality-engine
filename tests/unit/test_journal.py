@@ -31,7 +31,8 @@ def _report(ticker: str) -> int:
 
 def _stub_build(monkeypatch, calls):
     monkeypatch.setattr(journal, "build_report",
-                        lambda ticker, with_docs=True: calls.append(ticker) or (Path("x.md"), 31.2))
+                        lambda ticker, with_docs=True, report_day=None:
+                        calls.append((ticker, report_day)) or (Path("x.md"), 31.2))
 
 
 def test_report_generates_on_fresh_entry(tmp_path, monkeypatch):
@@ -43,7 +44,7 @@ def test_report_generates_on_fresh_entry(tmp_path, monkeypatch):
     rc = _report("AAPL")
 
     assert rc == 0                 # regression: guard must NOT false-trip on a fresh entry
-    assert calls == ["AAPL"]       # report generation actually invoked
+    assert calls == [("AAPL", store.today())]  # report generation actually invoked
     text = (tmp_path / f"AAPL_{store.today()}.md").read_text()
     assert "reported: 2" in text   # thesis timestamp was stamped
 
@@ -63,6 +64,35 @@ def test_report_refuses_without_thesis(tmp_path, monkeypatch):
 
     _open("NVDA", None, conviction=None)  # placeholder thesis
     assert _report("NVDA") == 1           # empty BEFORE block -> refuse
+
+
+def test_report_failure_does_not_burn_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+
+    def fail_build(ticker, with_docs=True, report_day=None):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(journal, "build_report", fail_build)
+    _open("CRM", "margin reset looks credible")
+
+    assert _report("CRM") == 1
+    entry_path = tmp_path / f"CRM_{store.today()}.md"
+    assert not store.is_reported(entry_path.read_text())
+
+
+def test_report_uses_entry_date_for_dated_case(tmp_path, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, calls)
+    p = store.open_entry("KO", "steady staple")
+    old = tmp_path / "KO_2026-01-15.md"
+    p.rename(old)
+
+    rc = journal.cmd_report(argparse.Namespace(ticker="KO", date="2026-01-15", no_docs=True))
+
+    assert rc == 0
+    assert calls == [("KO", "2026-01-15")]
+    assert store.is_reported(old.read_text())
 
 
 def test_store_tally_and_fields(tmp_path, monkeypatch):

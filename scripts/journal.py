@@ -62,13 +62,15 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("This case's report was already generated; not regenerating "
               "(prevents peeking-then-editing).", file=sys.stderr)
         return 1
-    store.mark_reported(path)
-    print(f"Thesis locked at {store.now_iso()}. Generating report...")
+    print("Generating report...")
     try:
-        out, overall = build_report(args.ticker, with_docs=not args.no_docs)
+        entry = store.parse_entry(path)
+        out, overall = build_report(args.ticker, with_docs=not args.no_docs, report_day=entry["day"])
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
+    store.mark_reported(path)
+    print(f"Thesis locked at {store.now_iso()}.")
     print(f"overall: {overall} -> {out}")
     print(f"\nNow read the report and fill the AFTER block in {path}")
     print(f"  impact: one or more of {', '.join(store.IMPACT_CODES)}")

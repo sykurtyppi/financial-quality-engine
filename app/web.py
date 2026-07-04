@@ -66,10 +66,10 @@ def report_view(request: Request, ticker: str, date: str | None = None):
     report_file = reporting.report_path(ticker, entry["day"])
     error = None
     if not entry["is_reported"]:
-        # First view: lock the thesis, then generate (network; needs EDGAR_IDENTITY).
-        store.mark_reported(path)
+        # First view: generate the networked report, then lock the thesis.
         try:
-            reporting.build_report(ticker, with_docs=True)
+            reporting.build_report(ticker, with_docs=True, report_day=entry["day"])
+            store.mark_reported(path)
         except Exception as e:  # noqa: BLE001
             error = f"Report generation failed: {e}"
     html = md.markdown(report_file.read_text(), extensions=["tables", "sane_lists"]) if report_file.exists() else None
