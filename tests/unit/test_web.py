@@ -151,3 +151,33 @@ def test_dashboard_shows_stale_outcome_banner(client):
     r = client.get("/")
     assert "awaiting outcome" in r.text.lower()
     assert "outcome overdue" in r.text.lower()
+
+
+def test_dashboard_omits_reported_but_after_not_filled_from_stale_banner(client):
+    # Codex review catch: a reported case with a stale timestamp but an empty
+    # AFTER block must show as "after needed", never inflate the outcome banner.
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    p = store.find_entry("KO")
+    store.mark_reported(p)
+    store.set_field(p, "reported", "2020-01-01T00:00:00Z")  # old, AFTER left blank
+
+    r = client.get("/")
+    assert "awaiting outcome" not in r.text.lower()
+    assert "after needed" in r.text.lower()
+
+
+def test_impact_rejects_forged_conviction_after(client):
+    # Codex review catch: the <select> only ever submits 1-5, but a forged POST
+    # or curl call could send anything. The route must reject it at the boundary.
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    r = client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "99"})
+    assert r.status_code == 303
+    assert store.parse_entry(store.find_entry("KO"))["conviction_after"] is None
+
+    r2 = client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "not-a-number"})
+    assert r2.status_code == 303
+    assert store.parse_entry(store.find_entry("KO"))["conviction_after"] is None
+
+    # a legitimate value still writes normally
+    client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "4"})
+    assert store.parse_entry(store.find_entry("KO"))["conviction_after"] == "4"

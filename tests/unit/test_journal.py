@@ -170,6 +170,24 @@ def test_awaiting_outcome_sorted_oldest_first(tmp_path, monkeypatch):
     assert [e["ticker"] for e in t["awaiting_outcome"]] == ["AAA", "BBB"]
 
 
+def test_awaiting_outcome_excludes_reported_but_after_not_filled(tmp_path, monkeypatch):
+    """Codex review catch: `needs_outcome` alone is true for BOTH 'reported, AFTER
+    still blank' and 'reported, AFTER done, no verdict' — conflating two different
+    next-steps. A reported case whose AFTER block is empty needs THAT step, not an
+    outcome, and must not show up in the outcome queue even if old."""
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "steady staple", conviction=3)
+    store.mark_reported(p)
+    store.set_field(p, "reported", "2020-01-01T00:00:00Z")  # old, but AFTER left blank
+
+    entry = store.parse_entry(p)
+    assert entry["needs_after"] is True
+    assert entry["needs_outcome"] is True  # true, but must NOT drive the outcome queue
+
+    t = store.tally()
+    assert t["awaiting_outcome"] == []
+
+
 # --- audit-finding regressions ---------------------------------------------
 
 import pytest  # noqa: E402

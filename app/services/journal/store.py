@@ -18,6 +18,7 @@ ENTRIES = ROOT / "journal" / "entries"
 
 IMPACT_CODES = ("changed_thesis", "changed_confidence", "new_investigation", "no_value")
 VERDICTS = ("helped", "neutral", "hurt", "too_early")
+CONVICTION_CHOICES = tuple(str(n) for n in range(1, 6))
 
 # The protocol's biggest failure mode is forgetting to close the OUTCOME block
 # weeks later. An entry reported this long ago without a verdict is "stale".
@@ -205,9 +206,12 @@ def tally() -> dict:
             conv_moved += int(cb) != int(ca)
             conv_same += int(cb) == int(ca)
     changed_any = len(scored) - impact_counts["no_value"] if scored else 0
-    # Reported, no verdict yet, oldest first — the "don't forget to close this out" queue.
+    # AFTER already filled but no verdict yet, oldest first — the "don't forget to
+    # close this out" queue. Must require `impact` too: a reported case whose AFTER
+    # block is still blank needs THAT step first, not an outcome (needs_outcome
+    # alone is true for both states and would conflate them).
     awaiting_outcome = sorted(
-        (e for e in entries if e["is_reported"] and e["needs_outcome"]),
+        (e for e in entries if e["is_reported"] and e["impact"] and e["needs_outcome"]),
         key=lambda e: e["days_since_reported"] or 0,
         reverse=True,
     )

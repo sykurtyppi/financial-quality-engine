@@ -110,7 +110,8 @@ def impact_form(request: Request, ticker: str, date: str | None = None):
     return templates.TemplateResponse(
         request, "impact.html",
         {"entry": store.parse_entry(path),
-         "impact_codes": store.IMPACT_CODES, "verdicts": store.VERDICTS},
+         "impact_codes": store.IMPACT_CODES, "verdicts": store.VERDICTS,
+         "conviction_choices": store.CONVICTION_CHOICES},
     )
 
 
@@ -137,6 +138,14 @@ def impact_submit(
         ("what_it_surfaced", what_it_surfaced), ("what_i_disagreed_with", what_i_disagreed_with),
         ("outcome_date", outcome_date), ("what_happened", what_happened), ("verdict", verdict),
     ):
-        if val.strip():
-            store.set_field(path, key, val.strip())
+        val = val.strip()
+        if not val:
+            continue
+        # conviction_after is a <select>; the browser can only submit 1-5. Reject
+        # anything else at the boundary (a forged POST or hand-edited value)
+        # rather than trust the client — this is the one field a stray value would
+        # silently corrupt (see store.tally()'s isdigit()-guarded conviction math).
+        if key == "conviction_after" and val not in store.CONVICTION_CHOICES:
+            continue
+        store.set_field(path, key, val)
     return RedirectResponse("/", status_code=303)
