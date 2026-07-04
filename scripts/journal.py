@@ -39,6 +39,9 @@ from app.services.journal.reporting import build_report
 def cmd_open(args: argparse.Namespace) -> int:
     try:
         path = store.open_entry(args.ticker, args.thesis, args.conviction, args.action)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
     except FileExistsError as e:
         print(f"Entry already exists: {e}. Not overwriting.", file=sys.stderr)
         return 1
@@ -49,7 +52,11 @@ def cmd_open(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    path = store.find_entry(args.ticker, args.date)
+    try:
+        path = store.find_entry(args.ticker, args.date)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
     if path is None:
         print(f"No open entry for {args.ticker.upper()}. Run `journal.py open` first.", file=sys.stderr)
         return 1
@@ -73,12 +80,16 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(f"Thesis locked at {store.now_iso()}.")
     print(f"overall: {overall} -> {out}")
     print(f"\nNow read the report and fill the AFTER block in {path}")
-    print(f"  impact: one or more of {', '.join(store.IMPACT_CODES)}")
+    print(f"  impact: one of {', '.join(store.IMPACT_CODES)}")
     return 0
 
 
 def cmd_outcome(args: argparse.Namespace) -> int:
-    path = store.find_entry(args.ticker, args.date)
+    try:
+        path = store.find_entry(args.ticker, args.date)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
     if path is None:
         print(f"No entry found for {args.ticker.upper()}.", file=sys.stderr)
         return 1

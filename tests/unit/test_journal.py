@@ -111,3 +111,52 @@ def test_store_tally_and_fields(tmp_path, monkeypatch):
     assert t["total"] == 1 and t["scored"] == 1
     assert t["impact_counts"]["changed_confidence"] == 1
     assert t["conv_moved"] == 1 and t["verdicts"]["helped"] == 1
+
+
+# --- audit-finding regressions ---------------------------------------------
+
+import pytest  # noqa: E402
+
+
+def test_ticker_path_traversal_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    for bad in ("../../../tmp/pwned", "a/b", "..", "", "   ", "TICKERTOOLONGX"):
+        with pytest.raises(ValueError):
+            store.entry_path(bad)
+        with pytest.raises(ValueError):
+            store.open_entry(bad, "x")
+    # nothing escaped the entries dir
+    assert not list(tmp_path.parent.glob("*PWNED*")) and list(tmp_path.glob("*.md")) == []
+    assert store.safe_ticker("brk.b") == "BRK.B"  # legit dotted/hyphen tickers pass
+
+
+def test_blank_field_does_not_bleed_into_next_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "steady staple", conviction=3)
+    e = store.parse_entry(p)
+    # blank AFTER/OUTCOME fields must read as None, not the following field's label
+    assert e["what_it_surfaced"] is None
+    assert e["outcome_date"] is None
+    assert e["what_happened"] is None
+
+
+def test_whitespace_thesis_does_not_unlock(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "   ")            # whitespace-only -> placeholder
+    assert store.has_thesis(p.read_text()) is False   # lock must still refuse
+
+
+def test_hash_in_freetext_is_preserved(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "steady staple", conviction=3)
+    store.set_field(p, "what_it_surfaced", "found a #1 red flag in cost of revenue")
+    assert store.parse_entry(p)["what_it_surfaced"] == "found a #1 red flag in cost of revenue"
+
+
+def test_multiline_value_does_not_corrupt_structure(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "steady staple", conviction=3)
+    store.set_field(p, "what_it_surfaced", "line one\nline two\nline three")
+    e = store.parse_entry(p)
+    assert e["what_it_surfaced"] == "line one line two line three"  # collapsed to one line
+    assert e["what_i_disagreed_with"] is None                       # next field intact

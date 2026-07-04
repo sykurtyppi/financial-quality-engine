@@ -14,6 +14,7 @@ from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import fetch_dataset
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
+from app.services.journal.store import safe_ticker
 from app.services.reporting.markdown_report import render
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -21,7 +22,7 @@ REPORTS = ROOT / "reports"
 
 
 def report_path(ticker: str, day: str | None = None) -> Path:
-    return REPORTS / f"{ticker.upper()}_{day or date.today().isoformat()}.md"
+    return REPORTS / f"{safe_ticker(ticker)}_{day or date.today().isoformat()}.md"
 
 
 def build_report(

@@ -95,3 +95,31 @@ def test_impact_saves_fields(client):
     assert r.status_code == 303
     e = store.parse_entry(store.find_entry("KO"))
     assert e["impact"] == "changed_confidence" and e["conviction_after"] == "4" and e["verdict"] == "helped"
+
+
+def test_impact_form_renders(client):
+    # GET /impact renders impact.html — the template not otherwise exercised by tests.
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    r = client.get("/impact/KO")
+    assert r.status_code == 200
+    assert "Impact" in r.text and "Verdict" in r.text and "changed_thesis" in r.text
+
+
+def test_dashboard_with_entries_renders(client):
+    # Exercises the queue/table markup that only appears once cases exist.
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "KO" in r.text and "report pending" in r.text  # unreported case shows in the queue
+
+
+def test_missing_entry_redirects(client):
+    assert client.get("/impact/NOPE").status_code == 303
+    assert client.get("/report/NOPE").status_code == 303
+
+
+def test_open_rejects_traversal_ticker(client, tmp_path):
+    r = client.post("/open", data={"ticker": "../../../pwned", "thesis": "x", "conviction": 3, "action": "hold"})
+    assert r.status_code == 303 and "Invalid+ticker" in r.headers["location"]
+    # no file created anywhere outside the entries dir
+    assert not list(tmp_path.rglob("*pwned*")) and not list(tmp_path.rglob("*PWNED*"))

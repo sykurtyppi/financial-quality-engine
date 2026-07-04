@@ -19,6 +19,23 @@ ENTRIES = ROOT / "journal" / "entries"
 IMPACT_CODES = ("changed_thesis", "changed_confidence", "new_investigation", "no_value")
 VERDICTS = ("helped", "neutral", "hurt", "too_early")
 
+# Fields whose template line carries a trailing "# guidance" comment. Only these
+# get the comment stripped on read — never user free-text (which may contain '#').
+_COMMENT_FIELDS = frozenset({"conviction", "impact", "conviction_after", "verdict"})
+
+# Ticker must not escape the entries dir or break the filename scheme: leading
+# alphanumeric (rejects "..", ".", "-"), then A-Z/0-9/./- only, max 12 chars.
+_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
+
+
+def safe_ticker(ticker: str) -> str:
+    """Uppercased ticker restricted to a safe charset. Raises ValueError on
+    anything with path separators, `..`, or that could break `TICKER_DATE.md`."""
+    t = (ticker or "").strip().upper()
+    if not _TICKER_RE.match(t):
+        raise ValueError(f"invalid ticker: {ticker!r}")
+    return t
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -29,14 +46,14 @@ def today() -> str:
 
 
 def entry_path(ticker: str, day: str | None = None) -> Path:
-    return ENTRIES / f"{ticker.upper()}_{day or today()}.md"
+    return ENTRIES / f"{safe_ticker(ticker)}_{day or today()}.md"
 
 
 def find_entry(ticker: str, day: str | None = None) -> Path | None:
     if day:
         p = entry_path(ticker, day)
         return p if p.exists() else None
-    matches = sorted(ENTRIES.glob(f"{ticker.upper()}_*.md"))
+    matches = sorted(ENTRIES.glob(f"{safe_ticker(ticker)}_*.md"))
     return matches[-1] if matches else None
 
 
@@ -45,11 +62,17 @@ def list_entries() -> list[Path]:
 
 
 def field(text: str, key: str) -> str | None:
-    """Value of ``key:`` on its own line, with any trailing ``# comment`` stripped."""
-    m = re.search(rf"^{re.escape(key)}:\s*(.*)$", text, re.MULTILINE)
+    """Value of ``key:`` on its OWN line. Uses ``[ \\t]*`` (not ``\\s*``) so a blank
+    field does not bleed into the next line's text. The template's ``# guidance``
+    comment is stripped ONLY for the enum/numeric fields that carry one — never
+    from user free-text, which may legitimately contain ``#``."""
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", text, re.MULTILINE)
     if not m:
         return None
-    val = m.group(1).split("#")[0].strip()
+    val = m.group(1)
+    if key in _COMMENT_FIELDS:
+        val = val.split("#")[0]
+    val = val.strip()
     return val or None
 
 
@@ -70,16 +93,22 @@ def open_entry(
     conviction: int | str | None = None,
     action: str | None = None,
 ) -> Path:
-    """Create a new entry. Raises FileExistsError if one already exists for today."""
+    """Create a new entry. Raises ValueError on a bad ticker, FileExistsError if
+    one already exists for today."""
+    t = safe_ticker(ticker)
     ENTRIES.mkdir(parents=True, exist_ok=True)
-    path = entry_path(ticker)
+    path = entry_path(t)
     if path.exists():
         raise FileExistsError(path)
+    # Whitespace-only thesis -> placeholder, so the report lock still refuses it
+    # (unifies CLI and web, which both must treat a blank thesis as "no thesis").
+    if thesis is not None and not thesis.strip():
+        thesis = None
     thesis = thesis or "<one or two sentences: your view BEFORE reading the report>"
     conviction = conviction if conviction is not None else "<1-5>"
     action = action or "<hold / trim / add / avoid / no position>"
     path.write_text(
-        f"# {ticker.upper()} — {today()}\n"
+        f"# {t} — {today()}\n"
         f"opened: {now_iso()}\n"
         f"reported:\n\n"
         f"## BEFORE  (write before reading the report)\n"
@@ -106,9 +135,14 @@ def mark_reported(path: Path) -> None:
 
 
 def set_field(path: Path, key: str, value: str) -> None:
-    """Replace the same-line value for ``key`` (dropping any guiding comment)."""
+    """Write ``key: value`` on the field's single line. Newlines in ``value`` are
+    collapsed to spaces so a multiline textarea can't break the one-field-per-line
+    structure the parser assumes. A function replacement is used so backslashes or
+    ``\\g`` sequences in user text are treated literally, not as regex refs."""
+    value = re.sub(r"\s*\n\s*", " ", value).strip()
     text = path.read_text()
-    new, n = re.subn(rf"^{re.escape(key)}:.*$", f"{key}: {value}", text, count=1, flags=re.MULTILINE)
+    new, n = re.subn(rf"^{re.escape(key)}:.*$", lambda _m: f"{key}: {value}", text,
+                     count=1, flags=re.MULTILINE)
     if n:
         path.write_text(new)
 

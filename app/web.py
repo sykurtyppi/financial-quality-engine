@@ -11,6 +11,7 @@ only to reduce the friction of running the journal so it actually gets run.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import markdown as md
@@ -24,6 +25,16 @@ BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 app = FastAPI(title="Decision-Impact Journal", docs_url=None, redoc_url=None)
+
+# Per-entry locks so concurrent GET /report requests (double-click, tab prefetch)
+# don't each fire a redundant EDGAR fetch. Single-process local server only.
+_gen_locks: dict[str, threading.Lock] = {}
+_gen_guard = threading.Lock()
+
+
+def _gen_lock(key: str) -> threading.Lock:
+    with _gen_guard:
+        return _gen_locks.setdefault(key, threading.Lock())
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -47,16 +58,22 @@ def open_submit(
         return RedirectResponse("/open?error=Write+your+thesis+first.", status_code=303)
     try:
         store.open_entry(ticker.strip(), thesis.strip(), conviction, action.strip())
+    except ValueError:
+        return RedirectResponse("/open?error=Invalid+ticker+symbol.", status_code=303)
     except FileExistsError:
         return RedirectResponse(
-            f"/open?error=An+entry+for+{ticker.upper()}+today+already+exists.", status_code=303
+            f"/open?error=An+entry+for+{store.safe_ticker(ticker)}+today+already+exists.",
+            status_code=303,
         )
     return RedirectResponse("/", status_code=303)
 
 
 @app.get("/report/{ticker}", response_class=HTMLResponse)
 def report_view(request: Request, ticker: str, date: str | None = None):
-    path = store.find_entry(ticker, date)
+    try:
+        path = store.find_entry(ticker, date)
+    except ValueError:
+        return RedirectResponse("/", status_code=303)
     if path is None:
         return RedirectResponse("/", status_code=303)
     entry = store.parse_entry(path)
@@ -66,12 +83,15 @@ def report_view(request: Request, ticker: str, date: str | None = None):
     report_file = reporting.report_path(ticker, entry["day"])
     error = None
     if not entry["is_reported"]:
-        # First view: generate the networked report, then lock the thesis.
-        try:
-            reporting.build_report(ticker, with_docs=True, report_day=entry["day"])
-            store.mark_reported(path)
-        except Exception as e:  # noqa: BLE001
-            error = f"Report generation failed: {e}"
+        # First view: generate the networked report, then lock the thesis. Serialize
+        # per entry and re-check under the lock so a double-request generates once.
+        with _gen_lock(str(path)):
+            if not store.is_reported(path.read_text()):
+                try:
+                    reporting.build_report(ticker, with_docs=True, report_day=entry["day"])
+                    store.mark_reported(path)
+                except Exception as e:  # noqa: BLE001
+                    error = f"Report generation failed: {e}"
     html = md.markdown(report_file.read_text(), extensions=["tables", "sane_lists"]) if report_file.exists() else None
     return templates.TemplateResponse(
         request, "report.html",
@@ -81,7 +101,10 @@ def report_view(request: Request, ticker: str, date: str | None = None):
 
 @app.get("/impact/{ticker}", response_class=HTMLResponse)
 def impact_form(request: Request, ticker: str, date: str | None = None):
-    path = store.find_entry(ticker, date)
+    try:
+        path = store.find_entry(ticker, date)
+    except ValueError:
+        return RedirectResponse("/", status_code=303)
     if path is None:
         return RedirectResponse("/", status_code=303)
     return templates.TemplateResponse(
@@ -103,7 +126,10 @@ def impact_submit(
     what_happened: str = Form(""),
     verdict: str = Form(""),
 ):
-    path = store.find_entry(ticker, date)
+    try:
+        path = store.find_entry(ticker, date)
+    except ValueError:
+        return RedirectResponse("/", status_code=303)
     if path is None:
         return RedirectResponse("/", status_code=303)
     for key, val in (
