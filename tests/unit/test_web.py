@@ -123,3 +123,31 @@ def test_open_rejects_traversal_ticker(client, tmp_path):
     assert r.status_code == 303 and "Invalid+ticker" in r.headers["location"]
     # no file created anywhere outside the entries dir
     assert not list(tmp_path.rglob("*pwned*")) and not list(tmp_path.rglob("*PWNED*"))
+
+
+def test_conviction_after_is_a_validated_select(client):
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    r = client.get("/impact/KO")
+    assert '<select id="conviction_after"' in r.text
+    # options 1-5 present, free-text input is gone
+    for n in range(1, 6):
+        assert f'value="{n}"' in r.text
+    assert 'input id="conviction_after"' not in r.text
+
+
+def test_unreported_report_links_get_loading_class(client):
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    r = client.get("/")
+    assert "js-gen" in r.text and "data-loading-text" in r.text
+
+
+def test_dashboard_shows_stale_outcome_banner(client):
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    p = store.find_entry("KO")
+    store.mark_reported(p)
+    store.set_field(p, "impact", "no_value")
+    store.set_field(p, "reported", "2020-01-01T00:00:00Z")
+
+    r = client.get("/")
+    assert "awaiting outcome" in r.text.lower()
+    assert "outcome overdue" in r.text.lower()

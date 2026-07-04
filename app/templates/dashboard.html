@@ -15,7 +15,7 @@
   <div class="stat"><b>{% if t.scored %}{{ (t.changed_any * 100 // t.scored) }}%{% else %}—{% endif %}</b><span>changed something</span></div>
 </div>
 
-{% if t.scored or t.gate_ready %}
+{% if t.scored or t.gate_ready or t.awaiting_outcome %}
 <div class="panel">
   {% if t.scored %}
   <div class="case-title">
@@ -25,6 +25,12 @@
       · conviction moved {{ t.conv_moved }}, unchanged {{ t.conv_same }}
     </span>
   </div>
+  {% endif %}
+  {% if t.awaiting_outcome %}
+  <p class="note" {% if t.oldest_awaiting_days is not none and t.oldest_awaiting_days >= t.stale_outcome_days %}style="color:var(--warn)"{% endif %}>
+    {{ t.awaiting_outcome|length }} case{{ "s" if t.awaiting_outcome|length != 1 else "" }} awaiting outcome
+    — oldest reported {{ t.oldest_awaiting_days }}d ago{% if t.oldest_awaiting_days is not none and t.oldest_awaiting_days >= t.stale_outcome_days %} (overdue){% endif %}.
+  </p>
   {% endif %}
   {% if t.gate_ready %}
   <p class="note" style="color:var(--warn)">Decision gate reached: enough outcome data to judge whether this is still useful.</p>
@@ -46,7 +52,7 @@
               <div class="case-title"><b>{{ e.ticker }}</b><span class="muted">{{ e.day }}</span><span class="pill wait">report pending</span></div>
               <div class="note">{{ e.thesis or "No thesis captured" }}</div>
             </div>
-            <a class="btn small" href="/report/{{ e.ticker }}?date={{ e.day }}">Generate</a>
+            <a class="btn small js-gen" data-loading-text="Generating…" href="/report/{{ e.ticker }}?date={{ e.day }}">Generate</a>
           </div>
           {% elif not e.impact %}
           {% set queued.count = queued.count + 1 %}
@@ -59,9 +65,14 @@
           </div>
           {% elif not e.verdict %}
           {% set queued.count = queued.count + 1 %}
+          {% set stale = e.days_since_reported is not none and e.days_since_reported >= t.stale_outcome_days %}
           <div class="queue-item">
             <div>
-              <div class="case-title"><b>{{ e.ticker }}</b><span class="muted">{{ e.day }}</span><span class="pill wait">outcome later</span></div>
+              <div class="case-title">
+                <b>{{ e.ticker }}</b><span class="muted">{{ e.day }}</span>
+                {% if stale %}<span class="pill bad">outcome overdue · {{ e.days_since_reported }}d</span>
+                {% else %}<span class="pill wait">outcome later{% if e.days_since_reported is not none %} · {{ e.days_since_reported }}d{% endif %}</span>{% endif %}
+              </div>
               <div class="note">After: {{ e.impact }}{% if e.conviction_after %}; conviction {{ e.conviction }} → {{ e.conviction_after }}{% endif %}</div>
             </div>
             <a class="btn small ghost" href="/impact/{{ e.ticker }}?date={{ e.day }}">Update</a>
@@ -94,7 +105,7 @@
           </td>
           <td>{{ e.conviction or "—" }}{% if e.conviction_after %} → {{ e.conviction_after }}{% endif %}</td>
           <td style="white-space:nowrap">
-            <a href="/report/{{ e.ticker }}?date={{ e.day }}">Report</a> ·
+            <a {% if not e.is_reported %}class="js-gen" data-loading-text="Generating…"{% endif %} href="/report/{{ e.ticker }}?date={{ e.day }}">Report</a> ·
             <a href="/impact/{{ e.ticker }}?date={{ e.day }}">Impact</a>
           </td>
         </tr>

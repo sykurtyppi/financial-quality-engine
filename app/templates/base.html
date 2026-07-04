@@ -45,6 +45,7 @@
     .pill.ok { color: var(--good); border-color: #265a46; background: #10231d; }
     .pill.wait { color: var(--muted); background: #151820; }
     .pill.bad { color: var(--bad); border-color: #6b2637; background: #2a151c; }
+    .is-loading { opacity: .55; pointer-events: none; }
     label { display: block; margin: 16px 0 6px; font-size: 13px; color: var(--muted); }
     input, textarea, select {
       width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
@@ -100,5 +101,17 @@
     </nav>
   </header>
   <main>{% block body %}{% endblock %}</main>
+  <script>
+    // Report generation can take ~10s (live EDGAR fetch). Give immediate click
+    // feedback so a slow response doesn't read as "nothing happened" and invite
+    // a double-click. Plain navigation still proceeds — this only relabels the link.
+    document.addEventListener("click", function (e) {
+      var a = e.target.closest(".js-gen");
+      if (!a || a.dataset.loading) return;
+      a.dataset.loading = "1";
+      a.textContent = a.dataset.loadingText || "Generating…";
+      a.classList.add("is-loading");
+    });
+  </script>
 </body>
 </html>

@@ -32,7 +32,12 @@
     </div>
     <div>
       <label for="conviction_after">Conviction after (1–5)</label>
-      <input id="conviction_after" name="conviction_after" value="{{ entry.conviction_after or '' }}" placeholder="{{ entry.conviction or '3' }}">
+      <select id="conviction_after" name="conviction_after">
+        <option value="">— unchanged / select —</option>
+        {% for n in range(1, 6) %}
+        <option value="{{ n }}" {% if entry.conviction_after == n|string %}selected{% endif %}>{{ n }}{% if entry.conviction and n|string == entry.conviction %} (prior){% endif %}</option>
+        {% endfor %}
+      </select>
     </div>
   </div>
   <label for="what_it_surfaced">What it surfaced</label>

@@ -19,6 +19,10 @@ ENTRIES = ROOT / "journal" / "entries"
 IMPACT_CODES = ("changed_thesis", "changed_confidence", "new_investigation", "no_value")
 VERDICTS = ("helped", "neutral", "hurt", "too_early")
 
+# The protocol's biggest failure mode is forgetting to close the OUTCOME block
+# weeks later. An entry reported this long ago without a verdict is "stale".
+STALE_OUTCOME_DAYS = 14
+
 # Fields whose template line carries a trailing "# guidance" comment. Only these
 # get the comment stripped on read — never user free-text (which may contain '#').
 _COMMENT_FIELDS = frozenset({"conviction", "impact", "conviction_after", "verdict"})
@@ -85,6 +89,18 @@ def is_reported(text: str) -> bool:
     # A value on the SAME line only — `\s` would span the newline into the next
     # heading and false-trip on a fresh entry.
     return bool(re.search(r"^reported:[ \t]*\S", text, re.MULTILINE))
+
+
+def days_since(iso_ts: str | None, now: datetime | None = None) -> int | None:
+    """Whole days elapsed since ``iso_ts`` (as written by ``now_iso``), or None if
+    ``iso_ts`` is missing/unparseable. ``now`` is injectable for tests."""
+    if not iso_ts:
+        return None
+    try:
+        dt = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return ((now or datetime.now(timezone.utc)) - dt).days
 
 
 def open_entry(
@@ -170,6 +186,7 @@ def parse_entry(path: Path) -> dict:
         "is_reported": is_reported(text),
         "needs_after": impact is None,
         "needs_outcome": field(text, "verdict") is None,
+        "days_since_reported": days_since(field(text, "reported")),
     }
 
 
@@ -188,6 +205,12 @@ def tally() -> dict:
             conv_moved += int(cb) != int(ca)
             conv_same += int(cb) == int(ca)
     changed_any = len(scored) - impact_counts["no_value"] if scored else 0
+    # Reported, no verdict yet, oldest first — the "don't forget to close this out" queue.
+    awaiting_outcome = sorted(
+        (e for e in entries if e["is_reported"] and e["needs_outcome"]),
+        key=lambda e: e["days_since_reported"] or 0,
+        reverse=True,
+    )
     return {
         "entries": entries,
         "total": total,
@@ -198,5 +221,8 @@ def tally() -> dict:
         "conv_moved": conv_moved,
         "conv_same": conv_same,
         "verdicts": verdicts,
+        "awaiting_outcome": awaiting_outcome,
+        "oldest_awaiting_days": awaiting_outcome[0]["days_since_reported"] if awaiting_outcome else None,
+        "stale_outcome_days": STALE_OUTCOME_DAYS,
         "gate_ready": total >= 20 and sum(1 for e in entries if e["verdict"]) >= 15,
     }

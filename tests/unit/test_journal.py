@@ -113,6 +113,63 @@ def test_store_tally_and_fields(tmp_path, monkeypatch):
     assert t["conv_moved"] == 1 and t["verdicts"]["helped"] == 1
 
 
+# --- outcome-staleness tracking ---------------------------------------------
+
+def test_days_since_reported_none_when_unreported(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "steady staple", conviction=3)
+    assert store.parse_entry(p)["days_since_reported"] is None
+
+
+def test_stale_outcome_appears_in_awaiting_outcome(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    p = store.open_entry("KO", "steady staple", conviction=3)
+    store.mark_reported(p)
+    store.set_field(p, "impact", "no_value")          # AFTER filled, no verdict yet
+    store.set_field(p, "reported", "2020-01-01T00:00:00Z")  # force a very old timestamp
+
+    entry = store.parse_entry(p)
+    assert entry["days_since_reported"] is not None
+    assert entry["days_since_reported"] > store.STALE_OUTCOME_DAYS
+    assert entry["needs_outcome"] is True
+
+    t = store.tally()
+    assert len(t["awaiting_outcome"]) == 1
+    assert t["awaiting_outcome"][0]["ticker"] == "KO"
+    assert t["oldest_awaiting_days"] == entry["days_since_reported"]
+
+
+def test_awaiting_outcome_excludes_verdicted_and_unreported(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    closed = store.open_entry("AAA", "closed case", conviction=3)
+    store.mark_reported(closed)
+    store.set_field(closed, "impact", "no_value")
+    store.set_field(closed, "verdict", "neutral")       # already closed out
+
+    pending = store.open_entry("BBB", "no report yet", conviction=3)  # is_reported False
+
+    t = store.tally()
+    tickers = {e["ticker"] for e in t["awaiting_outcome"]}
+    assert tickers == set()
+    assert store.parse_entry(pending)["days_since_reported"] is None
+
+
+def test_awaiting_outcome_sorted_oldest_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    older = store.open_entry("AAA", "thesis one", conviction=3)
+    store.mark_reported(older)
+    store.set_field(older, "impact", "no_value")
+    store.set_field(older, "reported", "2020-01-01T00:00:00Z")
+
+    newer = store.open_entry("BBB", "thesis two", conviction=3)
+    store.mark_reported(newer)
+    store.set_field(newer, "impact", "no_value")
+    store.set_field(newer, "reported", "2024-01-01T00:00:00Z")
+
+    t = store.tally()
+    assert [e["ticker"] for e in t["awaiting_outcome"]] == ["AAA", "BBB"]
+
+
 # --- audit-finding regressions ---------------------------------------------
 
 import pytest  # noqa: E402
