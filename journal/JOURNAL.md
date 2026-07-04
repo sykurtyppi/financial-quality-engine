@@ -4,6 +4,15 @@ The experiment that decides whether this engine is worth keeping. Every strategy
 review converged on one gate — *does it change my decisions?* — and only this
 journal, run blind over a real earnings season, can answer it.
 
+> **Harness verified turnkey — 2026-07-04.** End-to-end smoke test passed: the
+> thesis-lock refuses `report` until a real BEFORE thesis exists; `generate_report.py`
+> runs (AAPL 31.2, 21 docs, all 11 sections incl. §2 scorecard = distress and
+> §6/§8b narrative = disclosure monitor — the two validated signals); `tally`
+> works. Nothing left to build — the only remaining input is your blind prior
+> views, entered live over your own coverage names during earnings season. The
+> theses must be yours: fabricated priors would defeat the one experiment designed
+> to be un-foolable.
+
 ## The daily loop
 
 ```
