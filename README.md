@@ -112,6 +112,7 @@ Golden sample: [tests/golden_reports/stretchco_report.md](tests/golden_reports/s
 
 ## Docs
 
+- **[What this engine can and cannot do](docs/what_this_engine_can_and_cannot_do.md) — capstone: the honest verdict, cross-validated against the literature (start here)**
 - [Architecture](docs/architecture.md)
 - [Formula specification](docs/formula_spec.md)
 - [Scoring methodology](docs/scoring_methodology.md)
