@@ -26,7 +26,7 @@ from app.services.ingestion.companyfacts_mapper import (
     fiscal_year_end_month,
     select_quarter_ends,
 )
-from app.services.ingestion.sec_client import SecClient
+from app.services.ingestion.sec_client import SecClient, SecClientError
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,42 @@ def _get_submissions(client: SecClient, ticker: str) -> dict:
     )
 
 
+_FILING_ARRAYS = ("form", "accessionNumber", "primaryDocument", "reportDate", "items", "filingDate")
+_HISTORY_LOOKBACK_YEARS = 4  # enough for >12 quarters of filings before a cutoff
+
+
+def _merged_filings(client: SecClient, subs: dict, before: date | None) -> dict:
+    """Return the filing arrays, merging older submission pages when a `before`
+    cutoff reaches past the 'recent' block (high-volume filers keep only their
+    latest ~1000 filings in 'recent'; older ones live in filings.files)."""
+    recent = subs.get("filings", {}).get("recent", {})
+    arrays: dict[str, list] = {k: list(recent.get(k, [])) for k in _FILING_ARRAYS}
+    if before is None:
+        return arrays
+    fds = arrays["filingDate"]
+    oldest = min(fds) if fds else None
+    if oldest is not None and oldest <= before.isoformat():
+        return arrays  # recent already reaches past the cutoff
+
+    lower = date(before.year - _HISTORY_LOOKBACK_YEARS, before.month, min(before.day, 28)).isoformat()
+    cutoff = before.isoformat()
+    for page in subs.get("filings", {}).get("files", []):
+        # Load a page only if it overlaps the [cutoff - 4y, cutoff] window.
+        if page.get("filingFrom", "9999") <= cutoff and page.get("filingTo", "0") >= lower:
+            try:
+                pdata = client.submissions_page(page["name"])
+            except SecClientError:
+                continue
+            # Older pages may lack 'items' / 'primaryDocument'; pad to length.
+            n = len(pdata.get("form", []))
+            for k in _FILING_ARRAYS:
+                vals = pdata.get(k, [])
+                if len(vals) < n:
+                    vals = list(vals) + [""] * (n - len(vals))
+                arrays[k].extend(vals)
+    return arrays
+
+
 def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str:
     url = ARCHIVES_URL.format(cik=cik, accession=accession.replace("-", ""), doc=doc)
     return client._get(url).decode("utf-8", errors="replace")  # noqa: SLF001
@@ -162,13 +198,13 @@ def fetch_documents(
         subs = _get_submissions(client, ticker)
         cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
     fye_month = fiscal_year_end_month(facts_json)
-    recent = subs.get("filings", {}).get("recent", {})
-    forms = recent.get("form", [])
-    accessions = recent.get("accessionNumber", [])
-    primaries = recent.get("primaryDocument", [])
-    report_dates = recent.get("reportDate", [])
-    items_list = recent.get("items", [])
-    filing_dates = recent.get("filingDate", [])
+    merged = _merged_filings(client, subs, before)
+    forms = merged["form"]
+    accessions = merged["accessionNumber"]
+    primaries = merged["primaryDocument"]
+    report_dates = merged["reportDate"]
+    items_list = merged["items"]
+    filing_dates = merged["filingDate"]
     cutoff = before.isoformat() if before else None
 
     known_quarter_ends = select_quarter_ends(facts_json, 40)

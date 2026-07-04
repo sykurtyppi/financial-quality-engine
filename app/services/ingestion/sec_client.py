@@ -95,3 +95,8 @@ class SecClient:
             f"submissions_CIK{cik:010d}.json",
             f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
         )
+
+    def submissions_page(self, name: str) -> dict:
+        """Fetch an older submissions page (referenced in filings.files) for
+        high-volume filers whose 'recent' block does not reach far enough back."""
+        return self._cached_json(name, f"https://data.sec.gov/submissions/{name}")
