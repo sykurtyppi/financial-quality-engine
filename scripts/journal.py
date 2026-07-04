@@ -104,7 +104,9 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("BEFORE block looks empty — write your thesis first. Refusing to generate the "
               "report (that is the whole point).", file=sys.stderr)
         return 1
-    if re.search(r"^reported:\s*\S", text, re.MULTILINE):
+    # Only a value on the SAME line means already-reported. `\s` would span the
+    # newline into the next heading and false-trip on every fresh entry.
+    if re.search(r"^reported:[ \t]*\S", text, re.MULTILINE):
         print("This case's report was already generated; not regenerating "
               "(prevents peeking-then-editing).", file=sys.stderr)
         return 1
