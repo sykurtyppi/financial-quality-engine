@@ -13,6 +13,10 @@ journal, run blind over a real earnings season, can answer it.
 > theses must be yours: fabricated priors would defeat the one experiment designed
 > to be un-foolable.
 
+> **Season prep:** [SEASON_2026Q2.md](SEASON_2026Q2.md) — the Q2 2026 calendar,
+> per-name consensus questions, and macro context (researched 2026-07-20).
+> Context only; the theses are yours, written blind per case.
+
 ## Two ways to run it (same entry files)
 
 - **CLI** — the loop below.
