@@ -31,7 +31,7 @@ would hunt are already documented under `docs/`. Start from `docs/what_this_engi
   via an injected `complete(system, user)` callable, validated against a grounding contract, with a
   deterministic fallback — **and it was ultimately shelved** (see §3).
 - **Web**: FastAPI. Entry points `app/main.py` (`/analyze`, `/report`), `app/web.py` (journal UI).
-- **Run**: `pytest` (237 tests); `scripts/run_analysis.py data/example_company.json`;
+- **Run**: `pytest` (269 tests at `d000720`); `scripts/run_analysis.py data/example_company.json`;
   `scripts/generate_report.py AAPL` with `EDGAR_IDENTITY` env var. Real data = SEC EDGAR/XBRL companyfacts
   (`app/services/ingestion/sec_client.py`, `companyfacts_mapper.py`).
 
@@ -71,9 +71,12 @@ multiplicity was controlled. All scoring/calibration/formula findings are **flag
 7. **Wrong-signed components excluded/descriptive-only.** `buyback_offset_ratio` and
    `working_capital_swing_to_income` are weight-0 (wrong-signed); Capital Integrity/SBC is wrong-signed in
    growth universes, kept "descriptive only" (`scoring_config.py`).
-8. **Narrative Drift block is fully uncalibrated** — no historical document corpus in the backtest; all anchors
-   are pure judgment. The 100% narrative hit rate on restaters is **not** discrimination
-   (`adjustment_recurrence`/`disclosure_reduction` are filing-length artifacts; no clean-company control run).
+8. **Narrative Drift block score is uncalibrated** — no historical document corpus in the backtest; all block
+   anchors are pure judgment. The 100% narrative hit rate on restaters is **not** discrimination by itself. A
+   clean-company control WAS run (`docs/clean_narrative_control.md`, n=11 usable): it shows exactly which
+   detectors discriminate (`high_severity_disclosure` 30% vs 0%, `kpi_definition_change` 60% vs 18%) and which
+   are noise (`adjustment_recurrence` 90% vs 91%; `disclosure_reduction` partly a 10-K-vs-10-Q length artifact).
+   Don't treat detector firings outside the two validated ones as evidence.
 9. **KPI-definition-drift signal SHELVED.** Looked predictive (3/6) but `docs/kpi_definition_isolation_spike.md`
    showed it was mostly extraction/windowing artifacts (~1 in 10 genuinely recoverable); hit its pre-committed
    STOP criterion.
