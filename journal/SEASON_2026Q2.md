@@ -16,6 +16,21 @@ or negative when guidance/capex disappoints (TSMC beat + raised capex → −3.6
 NFLX beat Q2, guided Q3 light, CUT engagement disclosure → −8% to 52-wk low).
 The quarter is the ante; guidance is the product.
 
+## Tristan's season base case — recorded 2026-07-21, pre-prints
+
+> The key watch item is capex spend. TSMC and ASML confirmed companies are still
+> raising capex — supportive, the "we have not peaked" narrative holds. But the
+> tape is not supportive, so we could see drawdown even after good earnings from
+> the tech giants. **Base case: even if the print is good, the market still goes
+> lower. An extreme beat is required to go higher.**
+
+Scoring note (pre-committed): with ~8 mega-cap prints this fortnight, the base
+case predicts most good-print names close DOWN. Count it at season end. To keep
+the "extreme beat" leg falsifiable, define the threshold IN each thesis at open
+time (e.g., magnitude vs consensus + guidance raise) — otherwise hindsight will
+relabel whatever rallied as "extreme." Per-name theses go in the entries as
+always; this is the season-level prior they instantiate.
+
 ## Calendar
 
 | Date | Event | Notes |
