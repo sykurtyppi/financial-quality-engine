@@ -31,6 +31,22 @@ time (e.g., magnitude vs consensus + guidance raise) — otherwise hindsight wil
 relabel whatever rallied as "extreme." Per-name theses go in the entries as
 always; this is the season-level prior they instantiate.
 
+### Season scorecard (base-case legs — score at CLOSE, not premarket)
+
+| Print | Good print? | Capex | First-day close | Base-case leg |
+|---|---|---|---|---|
+| GOOGL (Jul 22 AMC) | Yes — rev +24% to $119.8B, Cloud +82%. Asterisk: headline EPS $9.11 carried ~$6–7 of unrealized Anthropic/SpaceX gains; core op. EPS ~$2.90. FCF −$5.9B on record $44.9B capex. | RAISED: $195–205B (from $180–190B); 2027 "significantly higher" | pending (AH ~−5%, premkt Jul 23 ~−2.8%) | pending close |
+
+Addendum — recorded 2026-07-23 premarket, before the Jul 23 close:
+
+> GOOGL went about as expected: looked good, raised capex, which means the AI
+> trade is still alive. GOOGL down premarket, but the capex raise should give
+> SMH room to head up.
+
+That's a second falsifiable leg, distinct from the base case: single-name sells
+off on its own capex, but the *suppliers* (SMH) rally on the same news. Score it
+on SMH's close over the next few sessions vs the Jul 22 close.
+
 ## Calendar
 
 | Date | Event | Notes |
