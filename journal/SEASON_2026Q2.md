@@ -47,6 +47,13 @@ That's a second falsifiable leg, distinct from the base case: single-name sells
 off on its own capex, but the *suppliers* (SMH) rally on the same news. Score it
 on SMH's close over the next few sessions vs the Jul 22 close.
 
+Regime evidence (not a base-case leg — small-cap, but same texture): **MXL Jul 23
+AMC** — beat both lines (rev $168.8M vs $164.6M cons, non-GAAP EPS $0.35 vs
+$0.33) AND guided Q3 $210–220M (~+27% q/q, above street) → stock ~−10% after
+hours off a big run-in (~$91 close). Even a beat-and-huge-raise got sold.
+Score at Jul 24 close. 10-Q filed same night (rare same-day filing) — engine
+has Q2 data immediately.
+
 ## Calendar
 
 | Date | Event | Notes |
