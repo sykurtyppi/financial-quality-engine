@@ -61,9 +61,9 @@ has Q2 data immediately.
 | Tue Jul 21 | GM | |
 | **Wed Jul 22** | **GOOGL** (AMC), TSLA (5:30pm, 8-K-confirmed) | first mega-cap |
 | Thu Jul 23 | INTC (AMC, confirmed), MA (BMO, *unverified*) | |
-| Tue Jul 28 | V (AMC, *unverified*) · **FOMC begins** | |
-| **Wed Jul 29** | **MSFT** (AMC, IR-confirmed), **META** (AMC) · **FOMC decision 2pm** | the collision day |
-| **Thu Jul 30** | **AAPL** (AMC, IR-confirmed), **AMZN** (AMC) · Q2 GDP advance (am) | |
+| Tue Jul 28 | **BA** (BMO, cons. ≈ −$0.27/−$0.34 EPS, rev ~$24.1B), KO (BMO), F (AMC), V (AMC, *unverified*) · **FOMC begins** | |
+| **Wed Jul 29** | **MSFT** (AMC, cons. $4.24 / $87.7B), **META** (AMC, cons. $7.23 / $60.3B), ARM (AMC) · **FOMC decision 2pm** | the collision day |
+| **Thu Jul 30** | **AAPL** (AMC, cons. ~$1.88 / ~$109–110B), **AMZN** (AMC, cons. $1.82 / $196.7B) · Q2 GDP advance (am) | |
 | Fri Jul 24 or 31 | XOM — *date conflicts across sources* | |
 | Mon Aug 3 | CAT (BMO, *unverified*) | |
 | Tue Aug 4 | **AMD** (AMC, confirmed), MCD (*unverified*) | |
@@ -71,6 +71,15 @@ has Q2 data immediately.
 | Thu Aug 7 | **July jobs report** | labor cooling: June +57k, participation 61.5% |
 | Wed Aug 12 | **July CPI** | re-tests the "hold" pricing |
 | Wed Aug 26 | **NVDA** (FQ2-27) | season's verdict arrives without it |
+
+**FOMC pricing moved** (re-checked 2026-07-27): CME FedWatch ~**65%** hold for July
+(was ~87% on Jul 20); September hike odds ~**82%**. Hawkish drift into the collision day.
+
+**Engine data availability — verified on EDGAR 2026-07-27** (submissions API filing
+history): BA files its 10-Q the **same day** as earnings (Q1: 8-K and 10-Q both
+2026-04-22). MSFT / META / AAPL / AMZN each filed the **next morning** in the
+comparable prior quarter (e.g. AAPL earnings Jul 31 2025 → 10-Q Aug 1 2025). So
+unlike GOOGL, every name this week gives the engine Q2 data within ~24h of the print.
 
 ## Per-name: the consensus questions (write YOUR view against these)
 
