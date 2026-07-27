@@ -35,7 +35,7 @@ always; this is the season-level prior they instantiate.
 
 | Print | Good print? | Capex | First-day close | Base-case leg |
 |---|---|---|---|---|
-| GOOGL (Jul 22 AMC) | Yes — rev +24% to $119.8B, Cloud +82%. Asterisk: headline EPS $9.11 carried ~$6–7 of unrealized Anthropic/SpaceX gains; core op. EPS ~$2.90. FCF −$5.9B on record $44.9B capex. | RAISED: $195–205B (from $180–190B); 2027 "significantly higher" | pending (AH ~−5%, premkt Jul 23 ~−2.8%) | pending close |
+| GOOGL (Jul 22 AMC) | Yes — rev +24% to $119.8B, Cloud +82%. Asterisk: headline EPS $9.11 carried ~$6–7 of unrealized Anthropic/SpaceX gains; core op. EPS ~$2.90. FCF −$5.9B on record $44.9B capex. | RAISED: $195–205B (from $180–190B); 2027 "significantly higher" | **−6.17% (Jul 23 close)** | **CONFIRMED** — good print + capex raise closed sharply lower |
 
 Addendum — recorded 2026-07-23 premarket, before the Jul 23 close:
 
@@ -47,12 +47,37 @@ That's a second falsifiable leg, distinct from the base case: single-name sells
 off on its own capex, but the *suppliers* (SMH) rally on the same news. Score it
 on SMH's close over the next few sessions vs the Jul 22 close.
 
+**Scored 2026-07-27 — REFUTED so far.** SMH closed $580.17 (Jul 23) → **$561.19
+(Jul 24), −3.27%**, and is down ~8.2% over the trailing ten sessions. The capex
+raise did not lift the suppliers; semis sold off with the tape. (Jul 22 close not
+separately verified — direction is unambiguous regardless.) Leave open through the
+Jul 29–30 capex guides before final scoring, but the first read is against it.
+
 Regime evidence (not a base-case leg — small-cap, but same texture): **MXL Jul 23
 AMC** — beat both lines (rev $168.8M vs $164.6M cons, non-GAAP EPS $0.35 vs
 $0.33) AND guided Q3 $210–220M (~+27% q/q, above street) → stock ~−10% after
 hours off a big run-in (~$91 close). Even a beat-and-huge-raise got sold.
-Score at Jul 24 close. 10-Q filed same night (rare same-day filing) — engine
-has Q2 data immediately.
+10-Q filed same night (rare same-day filing) — engine has Q2 data immediately.
+
+**Scored 2026-07-27 — CONFIRMED, and worse than the after-hours print implied:**
+MXL closed **$74.22 on Jul 24, −18.65%** from $91.24. The −10% AH move roughly
+doubled by the close. Correct the earlier note: score the *close*, not the
+after-hours tape — they differed by ~9pp here.
+
+## Regime break — recorded 2026-07-27 (macro state changed mid-scorecard)
+
+The Jul 22–24 drawdown was **not** a clean "good prints get sold" tape. Brent
+spiked ~7% to settle **$100.69** (intraday $102, highest since May) on Houthi
+tanker attacks off Saudi Arabia; the **10Y hit 4.699–4.70%**, highest since
+Jan 15 2025; S&P −1.2%, Nasdaq −2.2% on Jul 23. Prep-sheet macro (oil $76–78,
+10Y ~4.57%) is **stale**.
+
+Consequence for scoring: the base case predicted the right *outcome* on GOOGL and
+MXL, but a rate/oil shock is a different *mechanism* than positioning-driven
+profit-taking on good prints. Both legs stay CONFIRMED on outcome; flag the
+mechanism as unresolved. If the drawdown was really an oil-and-yields event, the
+base case may keep printing wins for reasons unrelated to earnings quality — which
+would make it a weaker guide to Wednesday/Thursday than its hit rate suggests.
 
 ## Calendar
 
