@@ -96,6 +96,16 @@ would make it a weaker guide to Wednesday/Thursday than its hit rate suggests.
 | Thu Aug 7 | **July jobs report** | labor cooling: June +57k, participation 61.5% |
 | Wed Aug 12 | **July CPI** | re-tests the "hold" pricing |
 | Wed Aug 26 | **NVDA** (FQ2-27) | season's verdict arrives without it |
+| ~Oct 2026 | **Anthropic IPO** (per FT/Aschenbrenner note, date unconfirmed) | GOOGL + MSFT both carry mark-based Anthropic gains in reported EPS (MSFT Q4: $3.2B; GOOGL Q2: ~$6–7/sh with SpaceX) — an IPO converts private marks to a public tape those EPS lines then track. Supply event for the AI theme; SPCX precedent = run-in, sell-the-news |
+
+**Positioning-distress marker (recorded 2026-07-30):** FT reports Aschenbrenner's
+Situational Awareness fund (leveraged, AI-concentrated) seeking capital after the
+rout — margin-pressure forced selling confirmed at fund scale. UBS flow note
+(Cheong, 7/29): tech-only −$45bn excess sell flow in first 45min vs −$13bn S&P,
+retail 3%-tile first hour, then +$62bn absorption — strongest intraday tech buying
+since the mid-June unwind began. GT50SMH printed 0.00 on 7/29. All consistent with
+leverage unwind in a bull tape (RSP near highs), NOT a 2000-style de-rating —
+capex guides were RAISED into it (MSFT, META floors).
 
 **FOMC pricing moved** (re-checked 2026-07-27): CME FedWatch ~**65%** hold for July
 (was ~87% on Jul 20); September hike odds ~**82%**. Hawkish drift into the collision day.
