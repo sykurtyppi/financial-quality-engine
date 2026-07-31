@@ -228,3 +228,46 @@ pipelines. Plan changes:
    already implemented; add the Apple FY2024 fixture as a regression test.
 8. **Do-not-ship list adopted** (B&T magnitudes, 53rd-week "2%", "4x" citation,
    deferred-revenue effect sizes).
+
+## Addendum 4 (2026-07-31): survey 6 — insiders and offerings (program complete)
+
+[insider_offerings_survey_2026Q3.md](insider_offerings_survey_2026Q3.md) closes
+the last two flagged gaps (insider classification; sponsor sell-downs/offerings).
+Plan changes:
+
+1. **B2 (insider stream) restructured.** CMP routine/opportunistic stays but
+   with decay expectations (~60–70%, sell side dead) and 10b5-1-plan dedupe.
+   Two better cheap signals added ABOVE it: **cluster purchases** (≥2 insiders,
+   same/consecutive days, code P only — orthogonal to CMP, small build) and
+   **derived late Form 4** (>2 business days; measured base rate 8.71%;
+   never use `transactionTimeliness` — 99.5% blank). Plus the pre-8-K
+   disclosed-before/after sign-flip and the free pre-QEA window flag.
+2. **10b5-1 sub-stream added:** checkbox boolean lexical trap (== "1" drops
+   ~25%); Form 144 structured planAdoptionDate as early warning (fires at
+   order placement); Item 408 ecd: tags quarterly; **plan terminations are
+   the one surviving signal**; red flags reframed as compliance anomalies.
+   Regulatory date guards encoded (Apr 1 2023 structural break, et al.).
+3. **B1 (shipped reader) validated + extended:** >50%-secondary = academically
+   unusual (Billett screen) — our "supply without balance-sheet benefit" flag
+   gains a benchmark; add ATM-program detection (8-K Item 1.01 keyword set +
+   424B5 capacity; utilization vs 0.43/0.27); S-3 filing = early warning,
+   424B5 = fait accompli; lockup dates rendered as ceilings, never countdowns;
+   direct listings = no-lockup negative rule; PIPE floating-conversion terms
+   with d/(1−d) arithmetic, no return claims (contested).
+4. **Share-count reconciliation demoted to data-quality check** (no literature;
+   original heuristic, label as such); share-count GROWTH retained as
+   dilution evidence (survives the microcap critique). Verified traps:
+   cover-vs-balance-sheet date gaps, per-class axes, splits,
+   StockIssuedDuringPeriodSharesNewIssues sparsity.
+5. **Program-wide editorial adopted:** surface facts (float expansion,
+   dilution arithmetic, filing lag, cluster count) and link filing patterns
+   to governance/accounting risk, never to returns — the return effects have
+   decayed, been legislated away, or been challenged nearly everywhere.
+
+**The six-survey research program is complete.** All gaps flagged in surveys
+1–5 are now either closed with verified findings or explicitly marked
+do-not-build. Final consolidated Tier-1 build queue (cheap, evidenced, no
+return claims): adjustment ledger · segmentation harness + n-gram gates ·
+supplier-finance rules A–D · GrantsReceivable detector · cluster purchases ·
+derived late Form 4 · NT/4.02/4.01 rules · ATM detection · comment letters ·
+journal schema upgrade · reference-class base rates.
