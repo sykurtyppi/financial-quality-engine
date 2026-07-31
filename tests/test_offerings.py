@@ -93,6 +93,55 @@ class TestProspectusParsing:
         assert f.price_per_share is None
 
 
+# Amazon-style 424B5 bond cover (2026-07-08 filing was a note offering).
+AMZN_DEBT_424B5 = """
+$1,000,000,000 3.850% Notes due 2029 $1,250,000,000 4.100% Notes due 2031
+Amazon.com, Inc. is offering the notes described in this prospectus supplement.
+Interest on the notes is payable semi-annually in arrears.
+"""
+
+# Pathological cover where the secondary pattern would re-match the primary
+# tranche's number (observed on the FPS IPO cover).
+DUP_SPAN_COVER = """
+We are offering 16,586,427 shares of Class A common stock by us and the
+selling stockholders named herein at a public offering price of $27.00 per share.
+"""
+
+
+class TestSecurityType:
+    def test_debt_prospectus_classified_and_skipped(self):
+        f = _filing(form="424B5")
+        diags: list[str] = []
+        _parse_prospectus(AMZN_DEBT_424B5, f, diags)
+        assert f.security_type == "debt"
+        assert f.price_per_share is None
+        assert diags == []  # no misleading "price not found" for bonds
+
+    def test_equity_prospectus_classified(self):
+        f = _filing()
+        _parse_prospectus(FPS_424B4, f, [])
+        assert f.security_type == "equity"
+
+    def test_debt_takedowns_excluded_from_supply_summary(self):
+        f = _filing(form="424B5")
+        _parse_prospectus(AMZN_DEBT_424B5, f, [])
+        t = OfferingsTimeline(ticker="AMZN", cik=1018724, lookback_months=18, filings=[f])
+        md = render_offerings_section(t, current_price=232.0)
+        assert "0 equity takedown(s)" in md
+        assert "1 debt takedown(s)" in md
+        assert "supply without balance-sheet benefit" not in md
+
+
+class TestDoubleGrabGuard:
+    def test_overlapping_span_drops_secondary_with_diagnostic(self):
+        f = _filing()
+        diags: list[str] = []
+        _parse_prospectus(DUP_SPAN_COVER, f, diags)
+        assert f.primary_shares == 16_586_427
+        assert f.secondary_shares is None
+        assert any("same span" in d for d in diags)
+
+
 class TestTimeline:
     def test_counts_and_recency(self):
         t = OfferingsTimeline(ticker="KTOS", cik=1069258, lookback_months=18)

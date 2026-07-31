@@ -57,6 +57,14 @@ _SELLING_HOLDER_RE = re.compile(r"selling\s+(?:stock|share)holders?", re.I)
 _NO_PROCEEDS_RE = re.compile(
     r"will\s+not\s+receive\s+any\s+(?:of\s+the\s+)?(?:net\s+)?proceeds", re.I
 )
+# Debt vs equity: shelf takedowns (esp. 424B5/424B2) are routinely bond or
+# structured-note prospectuses (AMZN 2026-07-08; bank MTN programs). Labeling
+# them as equity supply is a correctness error, not a cosmetic one.
+_DEBT_RE = re.compile(
+    r"\bnotes?\s+due\b|\d(?:\.\d+)?%\s+(?:senior\s+)?notes|senior\s+notes|"
+    r"debt\s+securities|medium-?term\s+notes|subordinated\s+notes", re.I
+)
+_EQUITY_RE = re.compile(r"shares\s+of\s+(?:our\s+|class\s+[a-c]\s+)?common\s+stock", re.I)
 
 
 @dataclass
@@ -66,6 +74,7 @@ class OfferingFiling:
     accession: str
     primary_doc: str
     kind: str  # "takedown" | "shelf" | "registration"
+    security_type: str = "unknown"  # "equity" | "debt" | "unknown" (takedowns, parsed only)
     # Parsed detail (takedowns only; None = not found, see diagnostics)
     price_per_share: float | None = None
     primary_shares: int | None = None
@@ -117,6 +126,14 @@ def _parse_prospectus(text: str, filing: OfferingFiling, diagnostics: list[str])
     every miss is recorded in diagnostics rather than guessed."""
     head = text[:20000]  # cover-page facts live up front
 
+    # Classify the security first: bond/note prospectuses get no equity parsing.
+    is_debt = bool(_DEBT_RE.search(head))
+    is_equity = bool(_EQUITY_RE.search(head))
+    if is_debt and not is_equity:
+        filing.security_type = "debt"
+        return
+    filing.security_type = "equity" if is_equity else "unknown"
+
     for pat in _PRICE_PATTERNS:
         m = pat.search(head)
         if m:
@@ -129,14 +146,25 @@ def _parse_prospectus(text: str, filing: OfferingFiling, diagnostics: list[str])
     if filing.price_per_share is None:
         diagnostics.append(f"{filing.form} {filing.filing_date}: price not found")
 
+    primary_span: tuple[int, int] | None = None
     for pat in _PRIMARY_SHARES_PATTERNS:
         m = pat.search(head)
         if m:
             filing.primary_shares = _to_int(m.group(1))
+            primary_span = m.span(1)
             break
     m = _SECONDARY_SHARES_RE.search(head)
     if m:
-        filing.secondary_shares = _to_int(m.group(1))
+        # Guard against double-grabbing the same number for both columns
+        # (observed on the FPS IPO cover): overlapping spans mean the
+        # secondary pattern re-matched the primary tranche's figure.
+        if primary_span and m.span(1)[0] < primary_span[1] and m.span(1)[1] > primary_span[0]:
+            diagnostics.append(
+                f"{filing.form} {filing.filing_date}: primary/secondary share "
+                f"patterns matched the same span; secondary dropped"
+            )
+        else:
+            filing.secondary_shares = _to_int(m.group(1))
 
     filing.has_selling_stockholders = bool(_SELLING_HOLDER_RE.search(head))
     filing.company_receives_no_secondary_proceeds = bool(_NO_PROCEEDS_RE.search(head))
@@ -230,27 +258,36 @@ def render_offerings_section(timeline: OfferingsTimeline, current_price: float |
         lines.append("- No offering-related filings found in the window.")
         return "\n".join(lines)
 
-    lines.append("| Filed | Form | Kind | Price/sh | Primary sh | Secondary sh | Selling holders | Co. gets no 2ndary proceeds |")
-    lines.append("|---|---|---|---|---|---|---|---|")
-    for f in timeline.filings:
+    _MAX_ROWS = 20  # MTN-program filers produce hundreds of 424B2/B5 rows
+    lines.append("| Filed | Form | Kind | Security | Price/sh | Primary sh | Secondary sh | Selling holders | Co. gets no 2ndary proceeds |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
+    for f in timeline.filings[:_MAX_ROWS]:
         lines.append(
-            f"| {f.filing_date} | {f.form} | {f.kind} "
+            f"| {f.filing_date} | {f.form} | {f.kind} | {f.security_type if f.kind == 'takedown' else '—'} "
             f"| {f'${f.price_per_share:,.2f}' if f.price_per_share else '—'} "
             f"| {f'{f.primary_shares:,}' if f.primary_shares else '—'} "
             f"| {f'{f.secondary_shares:,}' if f.secondary_shares else '—'} "
             f"| {'yes' if f.has_selling_stockholders else '—'} "
             f"| {'yes' if f.company_receives_no_secondary_proceeds else '—'} |"
         )
+    if len(timeline.filings) > _MAX_ROWS:
+        lines.append(f"| … | +{len(timeline.filings) - _MAX_ROWS} more filings in window | | | | | | | |")
     lines.append("")
 
-    n = timeline.takedown_count
+    equity_takedowns = [f for f in timeline.takedowns if f.security_type == "equity"]
+    debt_takedowns = [f for f in timeline.takedowns if f.security_type == "debt"]
+    unknown_takedowns = [f for f in timeline.takedowns if f.security_type == "unknown"]
+    summary = f"- **{len(equity_takedowns)} equity takedown(s)** in the window"
+    if debt_takedowns:
+        summary += f"; {len(debt_takedowns)} debt takedown(s)"
+    if unknown_takedowns:
+        summary += f"; {len(unknown_takedowns)} unparsed/unknown"
     days = timeline.days_since_last_takedown()
-    summary = f"- **{n} takedown(s)** in the window"
     if days is not None:
-        summary += f"; last was {days} days ago"
+        summary += f"; last takedown of any type was {days} days ago"
     lines.append(summary + ".")
 
-    priced = [f for f in timeline.takedowns if f.price_per_share]
+    priced = [f for f in equity_takedowns if f.price_per_share]
     if priced and current_price:
         last = max(priced, key=lambda f: f.filing_date)
         delta = (current_price / last.price_per_share - 1.0) * 100.0
@@ -260,7 +297,7 @@ def render_offerings_section(timeline: OfferingsTimeline, current_price: float |
         )
 
     secondary_only = [
-        f for f in timeline.takedowns
+        f for f in equity_takedowns
         if f.has_selling_stockholders and f.company_receives_no_secondary_proceeds
     ]
     if secondary_only:
