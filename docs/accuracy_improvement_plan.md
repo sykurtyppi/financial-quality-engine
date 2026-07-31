@@ -112,3 +112,38 @@ filer's own words.
 
 All of A and C plus B1 are ungated correctness/evidence work under the existing
 architecture plan. B2–B4 add ingestion but no modeling — they extend plane 1.
+
+---
+
+## Addendum (2026-07-31): literature-survey merge
+
+The agent survey ([arxiv_survey_2026Q3.md](arxiv_survey_2026Q3.md)) upgrades this
+plan in four places and vindicates one decision:
+
+1. **A1 is upgraded.** The better fix for `adjustment_recurrence` is not novelty
+   detection alone but the **per-issuer non-GAAP adjustment ledger** (Doyle/Lundholm/
+   Soliman composition result): track named exclusion labels + dollar amounts from
+   reconciliation tables; fire on recurrence streaks and cumulative one-time charges
+   vs cumulative operating income. Novelty gating (survey #3) becomes the general
+   text-detector gate, with segmentation sanity checks (#12) beneath it — part of
+   the season's 11/11 may have been section-boundary artifacts, not detector logic.
+2. **A2 is superseded where disclosure exists.** Covenant-violation/waiver phrase
+   detection (Nini/Smith/Sufi) replaces the leverage-ratio flag with a disclosed
+   fact; the TTM denominator fix remains for filers with no covenant disclosure.
+3. **New evidence stream ranked above B2–B5: SEC comment letters (UPLOAD/CORRESP)**
+   — free, rare, high-specificity, regulator-authored, and directly in the
+   thesis-monitor frame. Also new: risk-factor ADD/REMOVE set-differencing
+   (Lyle/Riedl/Siano) strictly improves the existing word-count detector, and
+   NT 10-K/10-Q reason grading is a cheap high-signal event.
+4. **Presentation policy gains a citation.** Beneish & Vorst (2022): >100:1
+   false-to-true-positive ratios in the best published misstatement models —
+   the quantitative justification for the frozen composite and for per-finding
+   base-rate disclosure.
+
+**Survey gaps to respect:** failures 3 (non-operating funding) and 4 (sponsor
+sell-downs) have no verified literature yet — B1 (shipped) and C proceed as
+engineering, not as paper-backed rules; commission focused research before
+extending them. XBRL custom-tag rate: neutral context only, flag changes only.
+
+**Revised do-first:** (1) adjustment ledger, (2) n-gram gates + segmentation
+checks, (3) comment-letter stream, then the prior queue.
