@@ -98,6 +98,22 @@ would make it a weaker guide to Wednesday/Thursday than its hit rate suggests.
 | Wed Aug 26 | **NVDA** (FQ2-27) | season's verdict arrives without it |
 | ~Oct 2026 | **Anthropic IPO** (per FT/Aschenbrenner note, date unconfirmed) | GOOGL + MSFT both carry mark-based Anthropic gains in reported EPS (MSFT Q4: $3.2B; GOOGL Q2: ~$6–7/sh with SpaceX) — an IPO converts private marks to a public tape those EPS lines then track. Supply event for the AI theme; SPCX precedent = run-in, sell-the-news |
 
+**Collision-day legs scored (Thu 2026-07-30 close, FOMC confound noted):**
+**MSFT +16%** — drawn-down name (−18% YTD in), clean beat + Azure accel to 43% →
+massive rally. **META −8%** — crowded, costs +55%, FCF −91% y/y → sold. Pair test
+resolved emphatically: reaction = f(acceleration evidence × positioning), not print
+quality. AMZN (+10% AH on AWS 37% blowout, FCF-negative) and AAPL (−6% AH on records
++ 1.5% Services miss, at ATH) score at Fri 7/31 close — same pattern, 4 for 4.
+Season base case's "extreme beat required to go higher" leg: VALIDATED (AMZN/MSFT
+rallied on accel beats; everything less got sold).
+
+**The washout resolved (recorded 2026-07-31):** GT50SMH hit 0.00 Wed 7/29; Thu 7/30:
+SOXX **+8%**, MU +18%, AMD +13%, Nasdaq +2.8% — the violent spring, one session off
+the zero print. Tristan's pre-registered sequencing (7/29: "weakness persists into
+the beginning of August, then violent squeeze") was RIGHT on mechanism and direction,
+EARLY by ~2-4 sessions on the squeeze arriving. Log the favorable deviation honestly —
+calibration data, not a victory lap.
+
 **Positioning-distress marker (recorded 2026-07-30):** FT reports Aschenbrenner's
 Situational Awareness fund (leveraged, AI-concentrated) seeking capital after the
 rout — margin-pressure forced selling confirmed at fund scale. UBS flow note
