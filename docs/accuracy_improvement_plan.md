@@ -147,3 +147,47 @@ extending them. XBRL custom-tag rate: neutral context only, flag changes only.
 
 **Revised do-first:** (1) adjustment ledger, (2) n-gram gates + segmentation
 checks, (3) comment-letter stream, then the prior queue.
+
+## Addendum 2 (2026-07-31): all four survey threads delivered
+
+Three further companion surveys landed after the first merge:
+[calibration_journal_survey_2026Q3.md](calibration_journal_survey_2026Q3.md),
+[textual_measures_survey_2026Q3.md](textual_measures_survey_2026Q3.md),
+[deterministic_components_survey_2026Q3.md](deterministic_components_survey_2026Q3.md).
+What they change:
+
+1. **The journal itself gets a schema upgrade (evidence-based).** Bare
+   pre-registration does nothing (Brodeur et al. 2024); specificity is the
+   active ingredient across three literatures. BEFORE blocks move to
+   machine-checkable five-field assumptions (metric/threshold/window/source/
+   resolution-date) + required falsifier/confirmer fields (Arkes 1988 port)
+   + always-resolve-including-abandoned. Conviction input should not stay
+   coarse 1–5 (Mellers 2015 granularity correlate). NULL RESULT preserved:
+   no literature shows decision journals improve outcomes — never claim it.
+2. **Best-evidenced new feature anywhere: reference-class base rates from
+   XBRL peer sets** (Chang et al. 2016: comparison classes Brier 0.17 vs
+   0.49 control). Medium effort.
+3. **Honest value framing: the trades it prevents** (Barber & Odean gross/net
+   decomposition) — alerts must show "assumption NOT violated" as prominently
+   as violations.
+4. **Segmentation is a measured ~10% error floor under every text detector**
+   (rule-based 0.909 precision unconditioned; the public 3,737-filing
+   benchmark becomes our validation harness). Same-year cross-sectional
+   benchmarking (Brown & Tucker) suppresses standard-change FPs.
+5. **Cheap 8-K/NT wins added to B3:** 12b-25 + extension-date arithmetic,
+   NT→4.02 30-day join (the SEC's own heuristic), 4.01 resignation/dismissal
+   split, 8.01-is-not-boilerplate, 2.06-absence≠no-impairment.
+6. **Design principles now cited, not asserted:** change > level; density >
+   presence (Diction 70–83% misclassification precedent); ruleset recall
+   ceiling ~60–75% of filer behavior (FNXL tails) — disclose it.
+7. **Licensing ledger opened** (GPL-3.0 edgar-crawler, LM commercial license,
+   non-commercial datasets) — resolve before productization.
+8. **Lazy Prices corrected at the source:** headline 34–58bp/mo VW; 188bp is
+   Risk-Factors-only; 86% of changes negative → sign diffs with LM lists;
+   drop tables >15% numeric; cue-absence = highest-value alerts.
+
+**Consolidated do-first (supersedes prior orderings):**
+(1) adjustment ledger + XBRL special-item recurrence counter;
+(2) segmentation harness + n-gram gates + same-year benchmarking;
+(3) NT/4.02/4.01 8-K rules; (4) comment-letter stream;
+(5) journal schema upgrade; (6) reference-class base rates.
