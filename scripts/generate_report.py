@@ -51,6 +51,20 @@ def main() -> int:
 
     result = analyze(dataset)
     report = render(result, generated_on=date.today().isoformat())
+
+    # Capital-markets activity: evidence appendix, never a score input
+    # (docs/accuracy_improvement_plan.md B1).
+    try:
+        from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
+
+        timeline = fetch_offerings(SecClient(), ticker)
+        report += "\n\n" + render_offerings_section(timeline) + "\n"
+        if timeline.takedown_count:
+            print(f"offerings: {timeline.takedown_count} takedown(s) in last "
+                  f"{timeline.lookback_months} months")
+    except Exception as e:  # noqa: BLE001 - appendix must never break the report
+        print(f"offerings appendix skipped: {e}")
+
     out_dir = ROOT / "reports"
     out_dir.mkdir(exist_ok=True)
     out = out_dir / f"{ticker}_{date.today().isoformat()}.md"
