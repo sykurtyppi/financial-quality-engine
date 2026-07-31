@@ -191,3 +191,40 @@ What they change:
 (2) segmentation harness + n-gram gates + same-year benchmarking;
 (3) NT/4.02/4.01 8-K rules; (4) comment-letter stream;
 (5) journal schema upgrade; (6) reference-class base rates.
+
+## Addendum 3 (2026-07-31): survey 5 — XBRL quality, funding, normalization
+
+[xbrl_funding_normalization_survey_2026Q3.md](xbrl_funding_normalization_survey_2026Q3.md)
+closes the two threads every prior survey flagged unresearched, with live-verified
+pipelines. Plan changes:
+
+1. **C (funding-context pass) is now grounded and partly buildable TODAY:**
+   supplier-finance rules A–D run on companyfacts (P&G SFPO/AP 37.9% verified
+   live); `GrantsReceivable` is the working grant detector (n≈48; First Solar
+   income-before-cash pattern); text-primary/tags-confirm design (315 vs ~7–17).
+   Gross margin non-comparability across IRA beneficiaries is a new finding class.
+2. **B4 (USAspending) DOWNGRADED:** no deterministic CIK crosswalk exists; the
+   canonical method is fuzzy+manual (Samuels TAR 2021). Corroborating evidence
+   only, never a trigger; require Exhibit-21/former-names name match.
+3. **Phase-2 PIT store gains its academic backbone:** vintage diffing proven
+   live (Kraft Heinz); little r revisions (~12% of firms) are invisible to 4.02
+   monitoring but visible in vintage diffs and predict future reliability
+   problems (Choudhary et al. CAR 2021). Corroboration triggers: 4.02, /A,
+   SUB.prevrpt. Base rate 3–7% of period-groups, mostly benign — threshold+
+   corroborate, never raw.
+4. **A3 gets verified citations and two new rules:** Foster (1977) lag-4
+   baseline (r₄=−.121 read from the original); Binz-Kapons Q4 anomaly (−47.4%
+   mean, accrual-driven, CFO opposite-signed) → never compare Q4 to interim
+   quarters; Q4-concentrated CFO−NI divergence as a deterministic signature;
+   53-week/fiscal-change annotations.
+5. **A2 type guard confirmed by contract evidence** (668/2000 covenants use
+   4-quarter EBITDA; zero single-quarter). Cite no paper for the "4x" — it's
+   arithmetic.
+6. **New ingest path required:** FSDS (TAG.custom/crdr, NUM.qtrs/segments,
+   SUB.prevrpt, PRE.stmt) for extensions, custom funding tags, and
+   face-vs-footnote splits. DQC rules (202, license permits reimplementation
+   with attribution) as filing-hygiene evidence.
+7. **Mapper audit PASSED** — YTD differencing/Q4 derivation/(start,end) keying
+   already implemented; add the Apple FY2024 fixture as a regression test.
+8. **Do-not-ship list adopted** (B&T magnitudes, 53rd-week "2%", "4x" citation,
+   deferred-revenue effect sizes).
