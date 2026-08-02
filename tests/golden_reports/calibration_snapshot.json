@@ -12,48 +12,48 @@
   "companies": {
     "AAPL": {
       "blocks": {
-        "Balance Sheet Stress": 33.1,
-        "Capex Discipline": 24.5,
-        "Capital Integrity": 18.6,
-        "Cash Conversion": 15.9,
-        "Earnings Quality": 16.2,
+        "Balance Sheet Stress": 28.6,
+        "Capex Discipline": 23.7,
+        "Capital Integrity": 20.0,
+        "Cash Conversion": 16.3,
+        "Earnings Quality": 16.8,
         "Narrative Drift": null,
-        "Revenue Quality": 27.0,
+        "Revenue Quality": 21.8,
         "Working Capital Stress": 22.0
       },
       "direction": "positive",
-      "overall": 22.0
+      "overall": 20.9
     },
     "CRM": {
       "blocks": {
-        "Balance Sheet Stress": 65.3,
-        "Capex Discipline": 21.9,
-        "Capital Integrity": 24.1,
-        "Cash Conversion": 13.5,
-        "Earnings Quality": 16.2,
+        "Balance Sheet Stress": 58.7,
+        "Capex Discipline": 23.7,
+        "Capital Integrity": null,
+        "Cash Conversion": 14.7,
+        "Earnings Quality": 16.9,
         "Narrative Drift": null,
-        "Revenue Quality": 28.2,
+        "Revenue Quality": 25.8,
         "Working Capital Stress": null
       },
       "direction": "positive",
-      "overall": 27.1
+      "overall": 26.6
     },
     "KO": {
       "blocks": {
-        "Balance Sheet Stress": 39.4,
-        "Capex Discipline": 30.6,
-        "Capital Integrity": 17.9,
-        "Cash Conversion": 21.5,
-        "Earnings Quality": 20.3,
+        "Balance Sheet Stress": 27.7,
+        "Capex Discipline": 23.7,
+        "Capital Integrity": 24.6,
+        "Cash Conversion": 19.2,
+        "Earnings Quality": 19.0,
         "Narrative Drift": null,
-        "Revenue Quality": 21.2,
+        "Revenue Quality": 21.8,
         "Working Capital Stress": 22.0
       },
       "direction": "positive",
-      "overall": 25.3
+      "overall": 22.2
     }
   },
-  "config_version": "0.3.0",
+  "config_version": "0.4.0",
   "direction_bands": [
     32.0,
     45.0

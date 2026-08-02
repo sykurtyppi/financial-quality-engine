@@ -129,27 +129,12 @@ def compute_narrative_layer(
             confidence="medium",
         )
 
-    texts_by_label = {p.fiscal_label: p.all_text for p in periods}
-    order = [p.fiscal_label for p in periods]
-    for dc in kpi_drift.detect_definition_changes(texts_by_label, order):
-        detail = (
-            f'KPI "{dc.kpi}" definitional language changed vs {dc.prior_label} '
-            f"(token similarity {dc.similarity:.2f}). Definition drift can change "
-            "what a highlighted metric measures; requires review."
-        )
-        result.findings.append(
-            NarrativeFinding(kind="kpi_definition_change", detail=detail, fiscal_label=label,
-                             evidence_snippets=[dc.current_definition, dc.prior_definition])
-        )
-        ledger.add(
-            detector="kpi_definition_change",
-            fiscal_label=label,
-            comparison="trailing8",
-            source="period documents",
-            excerpt=f"NOW: {dc.current_definition} | PRIOR ({dc.prior_label}): {dc.prior_definition}",
-            detail=detail,
-            confidence="medium",
-        )
+    # P0-C (roadmap): kpi_definition_change UNWIRED from the live layer. The
+    # Phase-4 validation + isolation spike concluded the single-sentence
+    # extractor's hits are mostly extraction artifacts (~1/10 genuine); the
+    # signal is shelved (docs/kpi_definition_isolation_spike.md). The hardened
+    # extractor/adjudicator (kpi_extraction.py / kpi_adjudicator.py) remains
+    # available to validation scripts but does not feed reports.
 
     # --- disclosure volume --------------------------------------------------
     if n_periods >= 3:

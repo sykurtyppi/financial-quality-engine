@@ -4,11 +4,11 @@
 
 ## 1. Executive Summary
 
-Overall Quality Risk Score: **63/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
+Overall Quality Risk Score: **62/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
 
-Weighted average of 8 block scores. Highest concern: Cash Conversion (83). Lowest concern: Balance Sheet Stress (28).
+Weighted average of 8 block scores. Highest concern: Revenue Quality (90). Lowest concern: Balance Sheet Stress (28).
 
-The screen flagged 10 elevated-concern item(s) and 3 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
+The screen flagged 7 elevated-concern item(s) and 2 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
 
 > Caveat: Scores use v0.3 weights informed by a small, survivorship-biased 2021-2025 backtest (~70 companies, point-in-time fundamentals); anchor thresholds remain judgment-based heuristics and are not sector-normalized. Directional evidence only — treat as a screening aid, not a calibrated probability. Methodology and limits: docs/calibration_report.md.
 
@@ -18,35 +18,31 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 
 | Block | Score | Direction | Confidence | Coverage | Weight |
 |---|---|---|---|---|---|
-| Earnings Quality | 70 | Negative | high | 100% | 20% |
-| Revenue Quality | 81 | Negative | high | 100% | 10% |
-| Cash Conversion | 83 | Negative | high | 100% | 17% |
-| Working Capital Stress | 45 | Negative | high | 100% | 7% |
-| Capital Integrity | 64 | Negative | high | 100% | 7% |
-| Capex Discipline | 64 | Negative | high | 100% | 15% |
+| Earnings Quality | 71 | Negative | high | 100% | 20% |
+| Revenue Quality | 90 | Negative | medium | 100% | 10% |
+| Cash Conversion | 81 | Negative | high | 100% | 17% |
+| Working Capital Stress | 45 | Negative | medium | 100% | 7% |
+| Capital Integrity | 63 | Negative | medium | 100% | 7% |
+| Capex Discipline | 61 | Negative | high | 100% | 15% |
 | Balance Sheet Stress | 28 | Positive | high | 100% | 14% |
-| Narrative Drift | 57 | Negative | high | 80% | 10% |
+| Narrative Drift | 40 | Mixed | medium | 75% | 10% |
 
 > Earnings Quality: Beneish M-score note: Computed on TTM flows compared year-over-year; cutoffs are the annual-model cutoffs. TTM basis: flows summed over the 4 quarters ending this period.
 
 ## 3. Top Red Flags
 
-- **Elevated concern: sbc_to_cfo** (FY2025Q4): sbc_to_cfo = 26 (formula: SBC / CFO; period FY2025Q4; concern 92/100). Requires analyst review.
-- **Elevated concern: beneish_dsri** (TTM FY2025Q4): beneish_dsri = 3.32 (formula: (Receivables_t / Revenue_t) / (Receivables_t-1 / Revenue_t-1); period TTM FY2025Q4; concern 90/100). Requires analyst review.
 - **Elevated concern: dso_trend** (FY2025Q4): dso_trend = 260 (formula: latest - mean(same fiscal quarter, prior years); period FY2025Q4; concern 90/100). Requires analyst review.
-- **Elevated concern: fcf_to_net_income** (TTM FY2025Q4): fcf_to_net_income = -0.681 (formula: (CFO - Capex) / Net Income; period TTM FY2025Q4; concern 90/100). Requires analyst review.
 - **Receivables outpacing revenue** (FY2025Q4): receivables_growth_spread = 2.51 (formula: receivables growth - revenue growth; period FY2025Q4; concern 90/100). Requires analyst review.
 - **Operating cash flow lagging reported earnings** (TTM FY2025Q4): cfo_to_net_income = 0.271 (formula: CFO / Net Income; period TTM FY2025Q4; concern 88/100). Requires analyst review.
-- **Recurring 'non-recurring' adjustment language** (FY2025Q4): adjustment_recurrence_ratio = 1 (formula: periods with adjustment language / periods analyzed; period FY2025Q4; concern 88/100). Requires analyst review.
 - **Beneish screen in the elevated-attention zone** (TTM FY2025Q4): beneish_m_score = 0.0191 (formula: -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI; period TTM FY2025Q4; concern 85/100). Requires analyst review.
 - **Elevated concern: issuance_pressure** (FY2025Q4): issuance_pressure = 4.18 (formula: Issuance Proceeds / CFO; period FY2025Q4; concern 85/100). Requires analyst review.
-- **Elevated concern: recurring_adjustment_terms** (FY2025Q4): recurring_adjustment_terms = 7 (formula: count of terms appearing in >= 3 periods; period FY2025Q4; concern 85/100). Requires analyst review.
+- **Elevated concern: fcf_margin_trend** (TTM FY2025Q4): fcf_margin_trend = -0.0625 (formula: latest - mean(prior); period TTM FY2025Q4; concern 76/100). Requires analyst review.
+- **Weak free-cash-flow generation** (TTM FY2025Q4): fcf_margin = -0.0681 (formula: (CFO - Capex) / Revenue; period TTM FY2025Q4; concern 74/100). Requires analyst review.
 
 ## 4. Top Green Flags
 
 - **Supportive: disclosure_volume_change** (FY2025Q4): disclosure_volume_change = 1.26 (formula: latest period word count / mean(prior period word counts); period FY2025Q4; concern 15/100). Supportive indicator.
 - **Supportive: current_ratio** (FY2025Q4): current_ratio = 2.37 (formula: Current Assets / Current Liabilities; period FY2025Q4; concern 17/100). Supportive indicator.
-- **Supportive: defensive_tone_change** (FY2025Q4): defensive_tone_change = 0 (formula: defensive-term density per 1k words vs trailing baseline; period FY2025Q4; concern 20/100). Supportive indicator.
 
 ## 5. What Changed This Period
 
@@ -240,7 +236,6 @@ Coverage: **48 computed**, 0 not meaningful, 2 with data unavailable (out of 50 
 - Management describes demand as strong; what explains the concurrent receivables/inventory build relative to revenue?
 - What drove receivables growth ahead of revenue this period — payment-term changes, channel mix, or collection timing?
 - Which accrual items explain the gap between net income and operating cash flow, and are they expected to reverse?
-- Why have adjustment categories described as one-time recurred across multiple periods, and what would make them stop?
 - Regarding FY2025Q4: KPI "Net revenue retention" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review.
 - Regarding FY2025Q4: KPI "RPO" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review.
 

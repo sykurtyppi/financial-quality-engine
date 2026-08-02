@@ -38,13 +38,31 @@ class TestConfigIntegrity:
             "direction_bands"
         ]
 
-    def test_excluded_components_have_zero_weight_but_stay_visible(self):
-        by_name = {
-            ms.metric_name: ms.weight for b in cfg.BLOCKS for ms in b.metrics
+    def test_retired_metrics_absent_and_no_zero_weights(self):
+        """0.4.0 (P0-C): exclusion-by-zero-weight is banned — zero-weighted
+        specs still generated flags (P0-13). Retired metrics are deleted from
+        the config entirely; they remain computed and reported as evidence."""
+        by_name = {ms.metric_name: ms.weight for b in cfg.BLOCKS for ms in b.metrics}
+        retired = {
+            "buyback_offset_ratio",
+            "working_capital_swing_to_income",
+            "beneish_tata",
+            "beneish_dsri",
+            "fcf_to_net_income",
+            "sbc_to_revenue",
+            "sbc_to_cfo",
+            "net_share_count_change",
+            "deferred_revenue_growth_spread",
+            "incremental_revenue_per_capex",
+            "asset_quality_proxy",
+            "intangibles_to_assets",
+            "adjustment_recurrence_ratio",
+            "recurring_adjustment_terms",
+            "defensive_tone_change",
+            "guidance_shift",
         }
-        # v0.3 exclusions: computed and reported, but not scored.
-        assert by_name["buyback_offset_ratio"] == 0.0
-        assert by_name["working_capital_swing_to_income"] == 0.0
+        assert retired.isdisjoint(by_name), sorted(retired & set(by_name))
+        assert all(w > 0 for w in by_name.values())
 
     def test_block_weights_match_snapshot(self, snapshot):
         assert cfg.BLOCK_WEIGHTS == snapshot["block_weights"]

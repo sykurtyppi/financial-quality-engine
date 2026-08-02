@@ -37,7 +37,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 V0_HEURISTIC = True  # anchors are still heuristic; weights partially calibrated
-CONFIG_VERSION = "0.3.0"
+CONFIG_VERSION = "0.4.0"
+# 0.4.0 (P0-A/B/C, docs/ROADMAP_2026Q3.md): TTM/YoY bases; retirement of
+# measured-noise, wrong-signed, and duplicate-economics signals from scoring.
+# Retired metrics remain COMPUTED and REPORTED as evidence — they no longer
+# move any score or generate flags. Per-retirement rationale inline below.
 
 # Direction bands, set from the empirical backtest score distribution
 # (n=1141 point-in-time scores: p50=31.7, p90=45.1). The original 35/60 bands
@@ -68,15 +72,17 @@ BLOCKS: list[BlockSpec] = [
             MetricSpec("total_accruals", 0.30, [(-0.05, 10), (0.0, 25), (0.05, 55), (0.10, 80), (0.15, 95)]),
             MetricSpec("accrual_trend", 0.25, [(-0.02, 15), (0.0, 30), (0.03, 60), (0.08, 85)]),
             MetricSpec("beneish_m_score", 0.30, [(-3.0, 10), (-2.22, 35), (-1.78, 65), (-1.0, 85)]),
-            MetricSpec("beneish_tata", 0.15, [(-0.05, 12), (0.0, 28), (0.05, 58), (0.12, 88)]),
+            # 0.4.0 retired beneish_tata: identical economics to total_accruals
+            # and already the dominant m_score coefficient — was triple-counted.
         ],
     ),
     BlockSpec(
         name="Revenue Quality",
         metrics=[
             MetricSpec("receivables_growth_spread", 0.35, [(0.0, 20), (0.30, 45), (0.75, 70), (1.50, 90)]),  # YoY basis (P0-B): QoQ thresholds x3, judgment pending reference distributions
-            MetricSpec("beneish_dsri", 0.25, [(1.0, 20), (1.15, 45), (1.40, 70), (1.80, 90)]),
-            MetricSpec("deferred_revenue_growth_spread", 0.20, [(-0.80, 85), (-0.35, 60), (0.0, 35), (0.20, 20)]),  # YoY basis (P0-B): thresholds widened ~2-2.5x
+            # 0.4.0 retired beneish_dsri (same receivables move as the spread;
+            # still inside m_score) and deferred_revenue_growth_spread
+            # (unvalidated; evidence-only).
             MetricSpec("dso_trend", 0.20, [(0.0, 25), (5.0, 50), (15.0, 75), (30.0, 90)]),
         ],
     ),
@@ -84,7 +90,8 @@ BLOCKS: list[BlockSpec] = [
         name="Cash Conversion",
         metrics=[
             MetricSpec("cfo_to_net_income", 0.35, [(0.0, 95), (0.4, 85), (0.7, 65), (0.9, 45), (1.1, 20), (1.3, 10)]),
-            MetricSpec("fcf_to_net_income", 0.25, [(0.0, 90), (0.3, 75), (0.6, 55), (0.9, 30), (1.1, 10)]),
+            # 0.4.0 retired fcf_to_net_income: cfo_to_net_income minus a capex
+            # term Capex Discipline already scores; correlated double-count.
             MetricSpec("fcf_margin", 0.20, [(-0.10, 80), (0.0, 60), (0.05, 45), (0.12, 25), (0.20, 10)]),
             MetricSpec("fcf_margin_trend", 0.20, [(-0.08, 85), (-0.03, 60), (0.0, 35), (0.03, 20)]),
         ],
@@ -94,21 +101,22 @@ BLOCKS: list[BlockSpec] = [
         metrics=[
             MetricSpec("inventory_growth_spread", 0.60, [(0.0, 20), (0.30, 45), (0.90, 70), (1.80, 90)]),  # YoY basis (P0-B): QoQ thresholds x3, judgment pending reference distributions
             MetricSpec("dio_trend", 0.40, [(0.0, 25), (5.0, 45), (15.0, 70), (30.0, 90)]),
-            # Excluded from scoring in v0.3: wrong-signed vs forward margins and
-            # FCF in the backtest (IC +0.06..+0.15). Still computed and reported.
-            MetricSpec("working_capital_swing_to_income", 0.0, [(0.2, 15), (0.5, 35), (1.0, 60), (2.0, 85)]),
+            # 0.4.0 deleted working_capital_swing_to_income from the config
+            # (wrong-signed in backtest, IC +0.06..+0.15; zero weight still
+            # produced flags — P0-13). Computed and reported as evidence only.
         ],
     ),
     BlockSpec(
         name="Capital Integrity",
         metrics=[
-            MetricSpec("sbc_to_revenue", 0.25, [(0.02, 10), (0.05, 25), (0.10, 50), (0.20, 75), (0.30, 90)]),
-            MetricSpec("sbc_to_cfo", 0.20, [(0.1, 10), (0.3, 30), (0.6, 55), (1.0, 80), (1.5, 92)]),
+            # 0.4.0 retired sbc_to_revenue / sbc_to_cfo from scoring: measured
+            # WRONG-SIGNED vs forward fundamentals in the backtest ("descriptive,
+            # not predictive"). They remain first-class evidence (MXL 5.7x
+            # SBC/CFO was a real season finding — as evidence).
             MetricSpec("diluted_share_growth", 0.15, [(0.0, 20), (0.02, 35), (0.05, 60), (0.10, 85)]),
-            MetricSpec("net_share_count_change", 0.15, [(-0.02, 15), (0.0, 30), (0.03, 55), (0.08, 80)]),
-            # Excluded from scoring in v0.3: wrong-signed in the backtest — the
-            # anchors punished non-buyback companies. Still computed and reported.
-            MetricSpec("buyback_offset_ratio", 0.0, [(0.0, 70), (0.5, 55), (1.0, 40), (2.0, 20)]),
+            # 0.4.0 merged net_share_count_change into diluted_share_growth
+            # (co-moving pair; diluted is the more complete measure) and deleted
+            # the zero-weighted buyback_offset_ratio spec (P0-13).
             # Right-signed across all three outcome families -> weight up.
             MetricSpec("issuance_pressure", 0.25, [(0.0, 15), (0.2, 40), (0.5, 65), (1.0, 85)]),
         ],
@@ -119,7 +127,8 @@ BLOCKS: list[BlockSpec] = [
             MetricSpec("capex_growth_spread", 0.30, [(0.0, 25), (0.30, 50), (0.80, 75), (1.50, 90)]),
             MetricSpec("capex_to_da", 0.20, [(1.0, 20), (1.5, 35), (2.5, 60), (4.0, 80)]),
             MetricSpec("capex_intensity_regime_shift", 0.25, [(0.0, 25), (0.03, 45), (0.08, 70), (0.15, 88)]),
-            MetricSpec("incremental_revenue_per_capex", 0.25, [(0.0, 85), (0.3, 65), (0.8, 45), (1.5, 25), (3.0, 10)]),
+            # 0.4.0 retired incremental_revenue_per_capex from scoring: its own
+            # docstring calls it a coarse proxy whose lag exceeds its window.
         ],
     ),
     BlockSpec(
@@ -130,8 +139,9 @@ BLOCKS: list[BlockSpec] = [
             MetricSpec("current_ratio", 0.15, [(0.5, 85), (0.8, 70), (1.0, 55), (1.5, 30), (2.5, 15)]),
             MetricSpec("debt_to_assets", 0.10, [(0.1, 15), (0.3, 35), (0.5, 60), (0.7, 82)]),
             MetricSpec("leverage_change", 0.10, [(-0.02, 20), (0.0, 30), (0.05, 60), (0.12, 85)]),
-            MetricSpec("asset_quality_proxy", 0.15, [(0.2, 20), (0.4, 40), (0.6, 65), (0.8, 85)]),
-            MetricSpec("intangibles_to_assets", 0.10, [(0.1, 15), (0.3, 40), (0.5, 65), (0.7, 85)]),
+            # 0.4.0 retired asset_quality_proxy and intangibles_to_assets from
+            # scoring: levels with no sector norm measure sector membership, not
+            # quality (serial-acquirer FP profile). Evidence only.
         ],
     ),
     BlockSpec(
@@ -139,14 +149,15 @@ BLOCKS: list[BlockSpec] = [
         # in the v0.3 backtest. All anchors here are judgment-based.
         name="Narrative Drift",
         metrics=[
-            MetricSpec("adjustment_recurrence_ratio", 0.20, [(0.0, 10), (0.3, 30), (0.6, 55), (0.9, 80), (1.0, 88)]),
-            MetricSpec("recurring_adjustment_terms", 0.15, [(0.0, 15), (1.0, 35), (3.0, 60), (6.0, 85)]),
+            # 0.4.0 retired the adjustment-keyword pair: measured NOISE
+            # (clean control 91% vs restaters 90%; 11/11 live false positives,
+            # hand-discounted every time). Replacement is the adjustment-ledger
+            # + n-gram novelty design (roadmap P4), not a weight tweak.
+            # Also retired defensive_tone_change and guidance_shift: unvalidated
+            # hand lexicons (negation-blind); evidence-only until a corpus
+            # validation exists. Remaining detectors are all change-based.
             MetricSpec("kpi_removals", 0.15, [(0.0, 15), (1.0, 45), (2.0, 65), (4.0, 88)]),
             MetricSpec("disclosure_volume_change", 0.15, [(0.5, 80), (0.75, 60), (0.9, 40), (1.0, 28), (1.2, 15)]),
-            # v0.4 detectors (defensive-tone delta per 1k words; guidance stance
-            # deterioration; risk-factor word-count ratio):
-            MetricSpec("defensive_tone_change", 0.15, [(0.0, 20), (1.0, 40), (3.0, 65), (6.0, 85)]),
-            MetricSpec("guidance_shift", 0.10, [(0.0, 25), (2.0, 45), (4.0, 70), (7.0, 88)]),
             MetricSpec("risk_factor_expansion", 0.10, [(1.0, 20), (1.15, 45), (1.4, 70), (1.8, 88)]),
         ],
     ),

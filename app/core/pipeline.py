@@ -77,6 +77,10 @@ def _generate_flags(block_components, metrics_by_name: dict[str, MetricResult]) 
         for comp in block.components:
             if comp.concern_score is None or comp.metric_name in seen:
                 continue
+            # P0-13: a zero-weighted component must never generate a flag —
+            # exclusion from the score means exclusion from the flag list.
+            if comp.weight == 0:
+                continue
             m = metrics_by_name.get(comp.metric_name)
             if m is None or m.value is None:
                 continue
