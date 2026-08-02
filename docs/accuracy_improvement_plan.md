@@ -1,5 +1,16 @@
 # Accuracy Improvement Plan — researched 2026-07-31
 
+> **SUPERSEDED — 2026-08-01.** A full first-principles reassessment (three deep code
+> audits + a gap-driven research pass) replaced this plan's queue. The A-items below
+> are absorbed into P0 of [ROADMAP_2026Q3.md](ROADMAP_2026Q3.md); the B/C evidence
+> streams into P1/P3; the Tier-1 queue in Addendum 4 is re-prioritized there. This
+> document remains the authoritative record of the season's measured failures and
+> the research addenda, but the build order now lives in the roadmap. See
+> [PROJECT_STATE_ASSESSMENT.md](PROJECT_STATE_ASSESSMENT.md),
+> [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md),
+> [VALIDATION_STRATEGY.md](VALIDATION_STRATEGY.md),
+> [gap_research_2026Q3.md](gap_research_2026Q3.md).
+
 Every item maps to a measured failure or a manual discovery from the Q2 2026 live
 season ([season_2026Q2_engine_performance.md](season_2026Q2_engine_performance.md)).
 **Constraint honored throughout:** the modeling phase stays concluded — nothing here
