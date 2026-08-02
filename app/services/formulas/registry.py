@@ -1,6 +1,12 @@
 """Runs every formula over a company dataset and returns a traceable bundle:
 latest-period metrics (what gets scored) plus full per-period history
-(what the report uses for change detection)."""
+(what the report uses for change detection).
+
+Basis discipline (roadmap P0-A): stock-over-flow ratios and annually-anchored
+models (Sloan accruals, Beneish) are computed on TTM-annualized views from
+`ttm.annualize`, never on a single quarter's flow. Quarterly-basis metrics
+(same-period flow/flow ratios, instant ratios, QoQ spreads) remain quarterly.
+"""
 
 from __future__ import annotations
 
@@ -14,10 +20,34 @@ from app.services.formulas import (
     beneish,
     capex,
     capital_structure,
+    ttm,
     working_capital,
 )
 
 MIN_PERIODS = 2
+
+TTM_NOTE = "TTM basis: flows summed over the 4 quarters ending this period."
+
+#: Metrics that must never be computed on a single quarter's flow. The
+#: basis-lint test asserts registry wiring routes these through ttm.annualize.
+TTM_BASIS_METRICS = frozenset(
+    {
+        "total_accruals",
+        "cfo_to_net_income",
+        "fcf_to_net_income",
+        "fcf_margin",
+        "net_debt_to_ebitda",
+        "beneish_dsri",
+        "beneish_gmi",
+        "beneish_aqi",
+        "beneish_sgi",
+        "beneish_depi",
+        "beneish_sgai",
+        "beneish_lvgi",
+        "beneish_tata",
+        "beneish_m_score",
+    }
+)
 
 
 class MetricsBundle(BaseModel):
@@ -35,11 +65,9 @@ class MetricsBundle(BaseModel):
 
 
 def _pair_metrics(cur: PeriodFinancials, prev: PeriodFinancials) -> list[MetricResult]:
+    """Quarterly-basis metrics: same-period flow/flow ratios, instant ratios,
+    and QoQ spreads. Nothing here divides a stock by a sub-annual flow."""
     return [
-        accruals.total_accruals(cur, prev),
-        accruals.cfo_to_net_income(cur),
-        accruals.fcf_to_net_income(cur),
-        accruals.fcf_margin(cur),
         working_capital.receivables_growth_spread(cur, prev),
         working_capital.inventory_growth_spread(cur, prev),
         working_capital.deferred_revenue_growth_spread(cur, prev),
@@ -47,7 +75,6 @@ def _pair_metrics(cur: PeriodFinancials, prev: PeriodFinancials) -> list[MetricR
         working_capital.dio(cur),
         working_capital.dpo(cur),
         working_capital.working_capital_swing_to_income(cur, prev),
-        balance_sheet.net_debt_to_ebitda(cur),
         balance_sheet.interest_coverage(cur),
         balance_sheet.debt_to_assets(cur),
         balance_sheet.current_ratio(cur),
@@ -67,6 +94,65 @@ def _pair_metrics(cur: PeriodFinancials, prev: PeriodFinancials) -> list[MetricR
     ]
 
 
+def _empty_all(cur: PeriodFinancials) -> PeriodFinancials:
+    """A shell period carrying only dates/labels, used so formulas can emit
+    correctly-named MISSING_DATA results when no TTM window exists."""
+    return PeriodFinancials(
+        period_end=cur.period_end,
+        period_type=cur.period_type,
+        fiscal_label=f"{ttm.TTM_LABEL_PREFIX}{cur.fiscal_label}",
+    )
+
+
+def _mark_window_missing(m: MetricResult) -> MetricResult:
+    return m.model_copy(update={"missing_fields": [ttm.TTM_WINDOW_MISSING]})
+
+
+def _with_ttm_note(m: MetricResult) -> MetricResult:
+    note = f"{m.note} {TTM_NOTE}".strip() if m.note else TTM_NOTE
+    return m.model_copy(update={"note": note})
+
+
+def _ttm_metrics(periods: list[PeriodFinancials], i: int) -> list[MetricResult]:
+    """Annual-basis metrics at index i: TTM flows, quarter-end instants,
+    Beneish on year-over-year TTM windows."""
+    cur = periods[i]
+    ttm_cur = ttm.annualize(periods, i)
+
+    if ttm_cur is None:
+        stub = _empty_all(cur)
+        out = [
+            accruals.cfo_to_net_income(stub),
+            accruals.fcf_to_net_income(stub),
+            accruals.fcf_margin(stub),
+            balance_sheet.net_debt_to_ebitda(stub),
+            accruals.total_accruals(stub, stub),
+            *beneish.compute_all(stub, stub),
+        ]
+        return [_mark_window_missing(m) for m in out]
+
+    # Sloan average-assets base: quarter-end now vs one year ago. With exactly
+    # 4 quarters of history the year-ago instant doesn't exist; window-start
+    # assets (one quarter later) are the closest honest approximation.
+    prior_year_q = periods[i - 4] if i >= 4 else periods[i - 3]
+    out = [
+        accruals.cfo_to_net_income(ttm_cur),
+        accruals.fcf_to_net_income(ttm_cur),
+        accruals.fcf_margin(ttm_cur),
+        balance_sheet.net_debt_to_ebitda(ttm_cur),
+        accruals.total_accruals(ttm_cur, prior_year_q),
+    ]
+
+    ttm_prev = ttm.annualize(periods, i - 4)
+    if ttm_prev is not None:
+        out += beneish.compute_all(ttm_cur, ttm_prev)
+    else:
+        stub = _empty_all(cur)
+        out += [_mark_window_missing(m) for m in beneish.compute_all(stub, stub)]
+
+    return [_with_ttm_note(m) for m in out]
+
+
 def compute_metrics(dataset: CompanyDataset) -> MetricsBundle:
     periods = dataset.sorted_periods()
     if len(periods) < MIN_PERIODS:
@@ -80,7 +166,9 @@ def compute_metrics(dataset: CompanyDataset) -> MetricsBundle:
 
     for i in range(1, len(periods)):
         cur, prev = periods[i], periods[i - 1]
-        pair = _pair_metrics(cur, prev) + beneish.compute_all(cur, prev)
+        # TTM metrics first: preserves the long-standing flag tie-break order
+        # (accrual/cash-conversion evidence outranks later families at equal concern).
+        pair = _ttm_metrics(periods, i) + _pair_metrics(cur, prev)
         for m in pair:
             history.setdefault(m.name, []).append(m)
         if i == len(periods) - 1:

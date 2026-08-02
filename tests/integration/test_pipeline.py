@@ -36,8 +36,16 @@ class TestStretchCo:
             assert flag.evidence_metrics
             assert "review" in flag.detail.lower()
 
-    def test_cash_flow_gap_is_top_red_flag(self, result):
-        assert result.red_flags[0].title == "Operating cash flow lagging reported earnings"
+    def test_cash_flow_gap_is_flagged_on_ttm_basis(self, result):
+        """P0-A: the cash-conversion flag must fire on the TTM value, not the
+        collapsing single-quarter value. Exact rank among this fixture's
+        deliberately extreme values is not a design contract."""
+        flag = next(
+            f
+            for f in result.red_flags
+            if f.title == "Operating cash flow lagging reported earnings"
+        )
+        assert flag.fiscal_label.startswith("TTM ")
 
     def test_receivables_divergence_carries_elevated_concern(self, result):
         rq = next(b for b in result.block_scores if b.name == "Revenue Quality")

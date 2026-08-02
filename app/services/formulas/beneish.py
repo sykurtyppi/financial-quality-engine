@@ -10,8 +10,9 @@ Implementation notes / documented deviations:
   any short-term debt inside current_liabilities. Flagged in formula_spec.
 - TATA uses (Net Income - CFO) / Total Assets (the common post-SFAS-95 form)
   rather than the original balance-sheet delta form.
-- The model was estimated on annual data; applying it to quarterly series is a
-  screening convenience and is noted as a caveat by the scoring layer.
+- The model was estimated on annual data. The registry therefore feeds these
+  formulas TTM-annualized period views compared year-over-year (P0-A), so the
+  annual cutoffs (-2.22 / -1.78) apply on their intended scale.
 """
 
 from __future__ import annotations
@@ -260,7 +261,7 @@ def m_score(components: dict[str, MetricResult], fiscal_label: str) -> MetricRes
         status=MetricStatus.OK,
         value=value,
         inputs={k: components[k].value for k in expected},
-        note="Estimated on annual data; quarterly application is a screening convenience.",
+        note="Computed on TTM flows compared year-over-year; cutoffs are the annual-model cutoffs.",
     )
 
 
