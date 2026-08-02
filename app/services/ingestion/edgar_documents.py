@@ -159,6 +159,39 @@ def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str
     return text
 
 
+def _latest_calendar_quarter_end(fye_month: int, before_d: date) -> date | None:
+    """Latest fiscal-quarter-end month boundary strictly before `before_d`,
+    from calendar arithmetic (fye_month and each 3 months earlier). Used only
+    as the P0-E fallback when companyfacts hasn't seen the quarter yet; a
+    52/53-week filer's true end differs by a few days but maps to the same
+    fiscal label."""
+    import calendar as _cal
+
+    q_months = {(fye_month - 1 - 3 * k) % 12 + 1 for k in range(4)}
+    y, m = before_d.year, before_d.month
+    for _ in range(13):
+        if m in q_months:
+            end = date(y, m, _cal.monthrange(y, m)[1])
+            if end < before_d:
+                return end
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    return None
+
+
+def _ex99_sort_key(name: str) -> tuple[int, int, str]:
+    """Prefer the release itself (EX-99.1) over supplementary exhibits
+    (EX-99.2 financial tables, slides) — P0-D: candidates[0] of an unordered
+    index could silently ingest the tables exhibit and distort every
+    narrative density for the period."""
+    lower = name.lower()
+    m = re.search(r"99[._-]?(\d)", lower)
+    exhibit_no = int(m.group(1)) if m else 5
+    named_release = 0 if re.search(r"earnings|press|release", lower) else 1
+    return (exhibit_no, named_release, lower)
+
+
 def _find_ex99(client: SecClient, cik: int, accession: str) -> str | None:
     """Locate the EX-99 exhibit filename (earnings release) in a filing index."""
     import json as _json
@@ -176,7 +209,7 @@ def _find_ex99(client: SecClient, cik: int, accession: str) -> str | None:
         and it["name"].lower().endswith((".htm", ".html"))
         and "index" not in it["name"].lower()
     ]
-    return candidates[0] if candidates else None
+    return min(candidates, key=_ex99_sort_key) if candidates else None
 
 
 def fetch_documents(
@@ -217,16 +250,27 @@ def fetch_documents(
     def label_for(report_date: str, is_event_dated: bool = False) -> str | None:
         """10-K/10-Q reportDate IS the period end. 8-K reportDate is the EVENT
         date (weeks after the covered quarter): snap to the latest known
-        quarter end strictly before it."""
+        quarter end strictly before it.
+
+        P0-E: between the earnings 8-K and the subsequent 10-Q, the just-ended
+        quarter's balance-sheet date is usually absent from companyfacts, so
+        the known-quarter-end snap lands one quarter too early. When the snap
+        target is stale (>100 days before the event) fall back to fiscal
+        calendar arithmetic for the label."""
         try:
             d = datetime.strptime(report_date, "%Y-%m-%d").date()
         except ValueError:
             return None
         if is_event_dated:
             prior_ends = [q for q in known_quarter_ends if q < d]
-            if not prior_ends:
+            snapped = prior_ends[-1] if prior_ends else None
+            if snapped is None or (d - snapped).days > 100:
+                cal = _latest_calendar_quarter_end(fye_month, d)
+                if cal is not None and (snapped is None or cal > snapped):
+                    snapped = cal
+            if snapped is None:
                 return None
-            d = prior_ends[-1]
+            d = snapped
         return _fiscal_label(d, fye_month)
 
     statements_done = 0

@@ -22,6 +22,7 @@ def fetch_dataset(
     sector: str | None = None,
     cache_dir: str = "data/cache",
     identity: str | None = None,
+    client: SecClient | None = None,
 ) -> tuple[CompanyDataset, IngestionDiagnostics]:
     """Fetch quarterly fundamentals for `ticker` from SEC EDGAR and map them
     to the canonical dataset, returning per-field ingestion diagnostics.
@@ -29,6 +30,6 @@ def fetch_dataset(
     Documents (transcripts, releases) are not fetched; supply them via the
     canonical JSON format if narrative analysis is wanted.
     """
-    client = SecClient(cache_dir=cache_dir, identity=identity)
+    client = client or SecClient(cache_dir=cache_dir, identity=identity)
     facts = client.company_facts(ticker)
     return build_dataset(facts, ticker=ticker, n_quarters=n_quarters, sector=sector)

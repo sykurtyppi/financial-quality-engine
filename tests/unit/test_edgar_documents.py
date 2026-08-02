@@ -65,3 +65,45 @@ class TestExtractSection:
     def test_missing_section_returns_none_not_fabrication(self):
         text = html_to_text(f"<p>Item 1. Financial Statements</p><p>{LONG}</p>")
         assert extract_section(text, DocumentType.MDNA) is None
+
+
+class TestP0EQuarterLabeling:
+    """P0-E: 8-K labels must not snap to a stale quarter when companyfacts
+    hasn't seen the just-ended quarter yet."""
+
+    def test_calendar_quarter_end_dec_fye(self):
+        from datetime import date
+
+        from app.services.ingestion.edgar_documents import _latest_calendar_quarter_end
+
+        # Aug 1 earnings event, Dec FYE: latest fiscal quarter end is Jun 30.
+        assert _latest_calendar_quarter_end(12, date(2026, 8, 1)) == date(2026, 6, 30)
+        # Event the day after a quarter end snaps to that end, not the prior one.
+        assert _latest_calendar_quarter_end(12, date(2026, 7, 1)) == date(2026, 6, 30)
+        # On the quarter-end day itself: strictly-before -> prior quarter.
+        assert _latest_calendar_quarter_end(12, date(2026, 6, 30)) == date(2026, 3, 31)
+
+    def test_calendar_quarter_end_june_fye(self):
+        from datetime import date
+
+        from app.services.ingestion.edgar_documents import _latest_calendar_quarter_end
+
+        # June FYE (MSFT-style): quarters end Sep/Dec/Mar/Jun.
+        assert _latest_calendar_quarter_end(6, date(2026, 8, 1)) == date(2026, 6, 30)
+        assert _latest_calendar_quarter_end(6, date(2026, 11, 15)) == date(2026, 9, 30)
+
+
+class TestP0DEx99Selection:
+    """P0-D: prefer the release (EX-99.1) over tables/slides exhibits."""
+
+    def test_prefers_991_over_992(self):
+        from app.services.ingestion.edgar_documents import _ex99_sort_key
+
+        names = ["abc-ex99_2.htm", "abc-ex99_1.htm"]
+        assert min(names, key=_ex99_sort_key) == "abc-ex99_1.htm"
+
+    def test_prefers_named_release_when_no_number(self):
+        from app.services.ingestion.edgar_documents import _ex99_sort_key
+
+        names = ["q2supplement.htm", "pressrelease.htm"]
+        assert min(names, key=_ex99_sort_key) == "pressrelease.htm"
