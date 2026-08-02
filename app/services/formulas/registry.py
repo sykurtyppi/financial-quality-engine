@@ -2,10 +2,12 @@
 latest-period metrics (what gets scored) plus full per-period history
 (what the report uses for change detection).
 
-Basis discipline (roadmap P0-A): stock-over-flow ratios and annually-anchored
-models (Sloan accruals, Beneish) are computed on TTM-annualized views from
-`ttm.annualize`, never on a single quarter's flow. Quarterly-basis metrics
-(same-period flow/flow ratios, instant ratios, QoQ spreads) remain quarterly.
+Basis discipline (roadmap P0-A/P0-B): stock-over-flow ratios and
+annually-anchored models (Sloan accruals, Beneish) are computed on
+TTM-annualized views from `ttm.annualize`, never on a single quarter's flow;
+seasonal growth spreads compare to the same fiscal quarter one year earlier,
+never the sequential quarter. Only same-period flow/flow ratios, instant
+ratios, and non-seasonal stock changes remain quarterly.
 """
 
 from __future__ import annotations
@@ -27,6 +29,12 @@ from app.services.formulas import (
 MIN_PERIODS = 2
 
 TTM_NOTE = "TTM basis: flows summed over the 4 quarters ending this period."
+YOY_NOTE = "YoY basis: compared to the same fiscal quarter one year earlier."
+YOY_BASELINE_MISSING = "yoy_baseline (same quarter last year)"
+
+# Accepts 52/53-week fiscal years; rejects a mislabeled or skipped year.
+MIN_YEAR_GAP_DAYS = 330
+MAX_YEAR_GAP_DAYS = 400
 
 #: Metrics that must never be computed on a single quarter's flow. The
 #: basis-lint test asserts registry wiring routes these through ttm.annualize.
@@ -66,11 +74,9 @@ class MetricsBundle(BaseModel):
 
 def _pair_metrics(cur: PeriodFinancials, prev: PeriodFinancials) -> list[MetricResult]:
     """Quarterly-basis metrics: same-period flow/flow ratios, instant ratios,
-    and QoQ spreads. Nothing here divides a stock by a sub-annual flow."""
+    and QoQ changes in non-seasonal stocks. Nothing here divides a stock by a
+    sub-annual flow, and nothing here compares seasonal flows QoQ."""
     return [
-        working_capital.receivables_growth_spread(cur, prev),
-        working_capital.inventory_growth_spread(cur, prev),
-        working_capital.deferred_revenue_growth_spread(cur, prev),
         working_capital.dso(cur),
         working_capital.dio(cur),
         working_capital.dpo(cur),
@@ -89,9 +95,44 @@ def _pair_metrics(cur: PeriodFinancials, prev: PeriodFinancials) -> list[MetricR
         capital_structure.buyback_offset_ratio(cur),
         capital_structure.issuance_pressure(cur),
         capex.capex_to_revenue(cur),
-        capex.capex_growth_spread(cur, prev),
         capex.capex_to_da(cur),
     ]
+
+
+def _year_ago(periods: list[PeriodFinancials], i: int) -> PeriodFinancials | None:
+    if i < 4:
+        return None
+    prior = periods[i - 4]
+    gap = (periods[i].period_end - prior.period_end).days
+    return prior if MIN_YEAR_GAP_DAYS <= gap <= MAX_YEAR_GAP_DAYS else None
+
+
+def _yoy_metrics(periods: list[PeriodFinancials], i: int) -> list[MetricResult]:
+    """Seasonal growth spreads compared to the same fiscal quarter one year
+    earlier. Sequential-quarter comparison fabricated spread signals at every
+    seasonal boundary (roadmap P0-B)."""
+    cur = periods[i]
+    prior = _year_ago(periods, i)
+
+    def spreads(prev: PeriodFinancials) -> list[MetricResult]:
+        return [
+            working_capital.receivables_growth_spread(cur, prev),
+            working_capital.inventory_growth_spread(cur, prev),
+            working_capital.deferred_revenue_growth_spread(cur, prev),
+            capex.capex_growth_spread(cur, prev),
+        ]
+
+    if prior is None:
+        stub = PeriodFinancials(
+            period_end=cur.period_end,
+            period_type=cur.period_type,
+            fiscal_label=cur.fiscal_label,
+        )
+        return [
+            m.model_copy(update={"missing_fields": [YOY_BASELINE_MISSING]})
+            for m in spreads(stub)
+        ]
+    return [_with_note(m, YOY_NOTE) for m in spreads(prior)]
 
 
 def _empty_all(cur: PeriodFinancials) -> PeriodFinancials:
@@ -108,8 +149,8 @@ def _mark_window_missing(m: MetricResult) -> MetricResult:
     return m.model_copy(update={"missing_fields": [ttm.TTM_WINDOW_MISSING]})
 
 
-def _with_ttm_note(m: MetricResult) -> MetricResult:
-    note = f"{m.note} {TTM_NOTE}".strip() if m.note else TTM_NOTE
+def _with_note(m: MetricResult, extra: str) -> MetricResult:
+    note = f"{m.note} {extra}".strip() if m.note else extra
     return m.model_copy(update={"note": note})
 
 
@@ -150,7 +191,7 @@ def _ttm_metrics(periods: list[PeriodFinancials], i: int) -> list[MetricResult]:
         stub = _empty_all(cur)
         out += [_mark_window_missing(m) for m in beneish.compute_all(stub, stub)]
 
-    return [_with_ttm_note(m) for m in out]
+    return [_with_note(m, TTM_NOTE) for m in out]
 
 
 def compute_metrics(dataset: CompanyDataset) -> MetricsBundle:
@@ -168,7 +209,11 @@ def compute_metrics(dataset: CompanyDataset) -> MetricsBundle:
         cur, prev = periods[i], periods[i - 1]
         # TTM metrics first: preserves the long-standing flag tie-break order
         # (accrual/cash-conversion evidence outranks later families at equal concern).
-        pair = _ttm_metrics(periods, i) + _pair_metrics(cur, prev)
+        pair = (
+            _ttm_metrics(periods, i)
+            + _yoy_metrics(periods, i)
+            + _pair_metrics(cur, prev)
+        )
         for m in pair:
             history.setdefault(m.name, []).append(m)
         if i == len(periods) - 1:
@@ -177,8 +222,8 @@ def compute_metrics(dataset: CompanyDataset) -> MetricsBundle:
     # Series-level metrics computed on full history
     series_metrics = [
         accruals.accrual_trend(history.get("total_accruals", [])),
-        working_capital.trend_change("dso_trend", history.get("dso", [])),
-        working_capital.trend_change("dio_trend", history.get("dio", [])),
+        working_capital.seasonal_trend_change("dso_trend", history.get("dso", [])),
+        working_capital.seasonal_trend_change("dio_trend", history.get("dio", [])),
         working_capital.trend_change("fcf_margin_trend", history.get("fcf_margin", [])),
         capex.capex_intensity_regime_shift(periods),
         capex.incremental_revenue_per_capex(periods),

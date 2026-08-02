@@ -4,7 +4,7 @@
 
 ## 1. Executive Summary
 
-Overall Quality Risk Score: **61/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
+Overall Quality Risk Score: **63/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
 
 Weighted average of 8 block scores. Highest concern: Cash Conversion (83). Lowest concern: Balance Sheet Stress (28).
 
@@ -19,11 +19,11 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 | Block | Score | Direction | Confidence | Coverage | Weight |
 |---|---|---|---|---|---|
 | Earnings Quality | 70 | Negative | high | 100% | 20% |
-| Revenue Quality | 76 | Negative | high | 100% | 10% |
+| Revenue Quality | 81 | Negative | high | 100% | 10% |
 | Cash Conversion | 83 | Negative | high | 100% | 17% |
-| Working Capital Stress | 40 | Mixed | high | 100% | 7% |
+| Working Capital Stress | 45 | Negative | high | 100% | 7% |
 | Capital Integrity | 64 | Negative | high | 100% | 7% |
-| Capex Discipline | 54 | Negative | high | 100% | 15% |
+| Capex Discipline | 64 | Negative | high | 100% | 15% |
 | Balance Sheet Stress | 28 | Positive | high | 100% | 14% |
 | Narrative Drift | 57 | Negative | high | 80% | 10% |
 
@@ -33,14 +33,14 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 
 - **Elevated concern: sbc_to_cfo** (FY2025Q4): sbc_to_cfo = 26 (formula: SBC / CFO; period FY2025Q4; concern 92/100). Requires analyst review.
 - **Elevated concern: beneish_dsri** (TTM FY2025Q4): beneish_dsri = 3.32 (formula: (Receivables_t / Revenue_t) / (Receivables_t-1 / Revenue_t-1); period TTM FY2025Q4; concern 90/100). Requires analyst review.
-- **Elevated concern: dso_trend** (FY2025Q4): dso_trend = 224 (formula: latest - mean(prior); period FY2025Q4; concern 90/100). Requires analyst review.
+- **Elevated concern: dso_trend** (FY2025Q4): dso_trend = 260 (formula: latest - mean(same fiscal quarter, prior years); period FY2025Q4; concern 90/100). Requires analyst review.
 - **Elevated concern: fcf_to_net_income** (TTM FY2025Q4): fcf_to_net_income = -0.681 (formula: (CFO - Capex) / Net Income; period TTM FY2025Q4; concern 90/100). Requires analyst review.
+- **Receivables outpacing revenue** (FY2025Q4): receivables_growth_spread = 2.51 (formula: receivables growth - revenue growth; period FY2025Q4; concern 90/100). Requires analyst review.
 - **Operating cash flow lagging reported earnings** (TTM FY2025Q4): cfo_to_net_income = 0.271 (formula: CFO / Net Income; period TTM FY2025Q4; concern 88/100). Requires analyst review.
 - **Recurring 'non-recurring' adjustment language** (FY2025Q4): adjustment_recurrence_ratio = 1 (formula: periods with adjustment language / periods analyzed; period FY2025Q4; concern 88/100). Requires analyst review.
 - **Beneish screen in the elevated-attention zone** (TTM FY2025Q4): beneish_m_score = 0.0191 (formula: -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI; period TTM FY2025Q4; concern 85/100). Requires analyst review.
 - **Elevated concern: issuance_pressure** (FY2025Q4): issuance_pressure = 4.18 (formula: Issuance Proceeds / CFO; period FY2025Q4; concern 85/100). Requires analyst review.
 - **Elevated concern: recurring_adjustment_terms** (FY2025Q4): recurring_adjustment_terms = 7 (formula: count of terms appearing in >= 3 periods; period FY2025Q4; concern 85/100). Requires analyst review.
-- **Elevated concern: working_capital_swing_to_income** (FY2025Q4): working_capital_swing_to_income = 11.4 (formula: |Δ(Receivables + Inventory - Payables)| / |Net Income|; period FY2025Q4; concern 85/100). Requires analyst review.
 
 ## 4. Top Green Flags
 
@@ -52,7 +52,7 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 
 - Total accruals: 0.055 (TTM FY2025Q3) -> 0.068 (TTM FY2025Q4)
 - CFO / Net income: 0.42 (TTM FY2025Q3) -> 0.27 (TTM FY2025Q4)
-- Receivables-vs-revenue growth spread: +35.7% (FY2025Q3) -> +35.7% (FY2025Q4)
+- Receivables-vs-revenue growth spread: +251.3% (FY2025Q3) -> +251.3% (FY2025Q4)
 - Days sales outstanding: 275 (FY2025Q3) -> 372 (FY2025Q4)
 - SBC / Revenue: 12.0% (FY2025Q3) -> 13.0% (FY2025Q4)
 - Capex / Revenue: 10.0% (FY2025Q3) -> 11.0% (FY2025Q4)
@@ -91,7 +91,7 @@ Deterministic language analysis across the documented periods (QoQ, YoY, and tra
 Places where management narrative and deterministic metrics point in different directions. A mismatch is a question to resolve, not a conclusion — the narrative may be fully justified.
 
 - **demand_narrative_vs_working_capital** (FY2025Q4, confidence high): Management emphasizes demand strength while receivables_growth_spread, dso_trend indicate working-capital deterioration. The demand narrative and the receivables/inventory build require joint review.
-  - Metrics: receivables_growth_spread=0.357, dso_trend=224
+  - Metrics: receivables_growth_spread=2.51, dso_trend=260
   - Narrative evidence: NE-010 (§8b)
 
 ## 8. Evidence Ledger
@@ -114,9 +114,10 @@ Places where management narrative and deterministic metrics point in different d
 | beneish_tata | TTM FY2025Q4 | 0.06438 | (Net Income - CFO) / Total Assets | net_income=446, cfo=121, total_assets=5.05e+03 |
 | beneish_lvgi | TTM FY2025Q4 | 1.007 | [(Debt_t + CL_t)/TA_t] / [(Debt_t-1 + CL_t-1)/TA_t-1] | total_debt=1.08e+03, current_liabilities=840, total_assets=5.05e+03, total_debt_prior=920, current_liabilities_prior=760, total_assets_prior=4.45e+03 |
 | beneish_m_score | TTM FY2025Q4 | 0.01909 | -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI | dsri=3.32, gmi=1, aqi=0.933, sgi=1.08, depi=1.16, sgai=1, tata=0.0644, lvgi=1.01 |
-| receivables_growth_spread | FY2025Q4 | 0.357 | receivables growth - revenue growth | receivables=4.69e+03, receivables_prior=3.41e+03, revenue=1.15e+03, revenue_prior=1.13e+03 |
-| inventory_growth_spread | FY2025Q4 | 0.03923 | inventory growth - revenue growth | inventory=540, inventory_prior=509, revenue=1.15e+03, revenue_prior=1.13e+03 |
-| deferred_revenue_growth_spread | FY2025Q4 | -0.03732 | deferred_revenue growth - revenue growth | deferred_revenue=272, deferred_revenue_prior=277, revenue=1.15e+03, revenue_prior=1.13e+03 |
+| receivables_growth_spread | FY2025Q4 | 2.513 | receivables growth - revenue growth | receivables=4.69e+03, receivables_prior=1.31e+03, revenue=1.15e+03, revenue_prior=1.06e+03 |
+| inventory_growth_spread | FY2025Q4 | 0.1882 | inventory growth - revenue growth | inventory=540, inventory_prior=425, revenue=1.15e+03, revenue_prior=1.06e+03 |
+| deferred_revenue_growth_spread | FY2025Q4 | -0.1427 | deferred_revenue growth - revenue growth | deferred_revenue=272, deferred_revenue_prior=290, revenue=1.15e+03, revenue_prior=1.06e+03 |
+| capex_growth_spread | FY2025Q4 | 0.6185 | Capex growth - Revenue growth | capex=126, capex_prior=74.3, revenue=1.15e+03, revenue_prior=1.06e+03 |
 | dso | FY2025Q4 | 371.8 | (Receivables / Revenue) * days-in-period | receivables=4.69e+03, revenue=1.15e+03 |
 | dio | FY2025Q4 | 73.71 | (Inventory / COGS) * days-in-period | inventory=540, cost_of_revenue=666 |
 | dpo | FY2025Q4 | 45.5 | (Accounts Payable / COGS) * days-in-period | accounts_payable=333, cost_of_revenue=666 |
@@ -135,11 +136,10 @@ Places where management narrative and deterministic metrics point in different d
 | buyback_offset_ratio | FY2025Q4 | 0.5 | Buybacks / SBC | buybacks=74.7, stock_based_compensation=149 |
 | issuance_pressure | FY2025Q4 | 4.179 | Issuance Proceeds / CFO | share_issuance_proceeds=24, cfo=5.74 |
 | capex_to_revenue | FY2025Q4 | 0.11 | Capex / Revenue | capex=126, revenue=1.15e+03 |
-| capex_growth_spread | FY2025Q4 | 0.102 | Capex growth - Revenue growth | capex=126, capex_prior=113, revenue=1.15e+03, revenue_prior=1.13e+03 |
 | capex_to_da | FY2025Q4 | 3.159 | Capex / D&A | capex=126, depreciation_amortization=40 |
 | accrual_trend | TTM FY2025Q4 | 0.03441 | latest total_accruals - mean(prior total_accruals) | latest=0.0684, prior_mean=0.034, n_prior=4 |
-| dso_trend | FY2025Q4 | 224 | latest - mean(prior) | latest=372, prior_mean=148 |
-| dio_trend | FY2025Q4 | 9.555 | latest - mean(prior) | latest=73.7, prior_mean=64.2 |
+| dso_trend | FY2025Q4 | 259.9 | latest - mean(same fiscal quarter, prior years) | latest=372, same_quarter_prior_mean=112, n_prior_years=1 |
+| dio_trend | FY2025Q4 | 10.92 | latest - mean(same fiscal quarter, prior years) | latest=73.7, same_quarter_prior_mean=62.8, n_prior_years=1 |
 | fcf_margin_trend | TTM FY2025Q4 | -0.0625 | latest - mean(prior) | latest=-0.0681, prior_mean=-0.00562 |
 | capex_intensity_regime_shift | FY2025Q4 | 0.04 | mean(capex/revenue, last 4) - mean(capex/revenue, prior) | recent_mean=0.095, prior_mean=0.055 |
 | incremental_revenue_per_capex | FY2025Q4 | 0.2059 | (Rev_t - Rev_t-4) / sum(Capex over last 4 periods) | revenue_end=1.15e+03, revenue_start=1.06e+03, total_capex=425 |
@@ -193,9 +193,10 @@ Coverage: **48 computed**, 0 not meaningful, 2 with data unavailable (out of 50 
 | beneish_tata | TTM FY2025Q4 | 0.06438 | TTM basis: flows summed over the 4 quarters ending this period. |
 | beneish_lvgi | TTM FY2025Q4 | 1.007 | TTM basis: flows summed over the 4 quarters ending this period. |
 | beneish_m_score | TTM FY2025Q4 | 0.01909 | Computed on TTM flows compared year-over-year; cutoffs are the annual-model cutoffs. TTM basis: flows summed over the 4 quarters ending this period. |
-| receivables_growth_spread | FY2025Q4 | 0.357 |  |
-| inventory_growth_spread | FY2025Q4 | 0.03923 |  |
-| deferred_revenue_growth_spread | FY2025Q4 | -0.03732 |  |
+| receivables_growth_spread | FY2025Q4 | 2.513 | YoY basis: compared to the same fiscal quarter one year earlier. |
+| inventory_growth_spread | FY2025Q4 | 0.1882 | YoY basis: compared to the same fiscal quarter one year earlier. |
+| deferred_revenue_growth_spread | FY2025Q4 | -0.1427 | YoY basis: compared to the same fiscal quarter one year earlier. |
+| capex_growth_spread | FY2025Q4 | 0.6185 | YoY basis: compared to the same fiscal quarter one year earlier. |
 | dso | FY2025Q4 | 371.8 |  |
 | dio | FY2025Q4 | 73.71 |  |
 | dpo | FY2025Q4 | 45.5 |  |
@@ -214,11 +215,10 @@ Coverage: **48 computed**, 0 not meaningful, 2 with data unavailable (out of 50 
 | buyback_offset_ratio | FY2025Q4 | 0.5 |  |
 | issuance_pressure | FY2025Q4 | 4.179 |  |
 | capex_to_revenue | FY2025Q4 | 0.11 |  |
-| capex_growth_spread | FY2025Q4 | 0.102 |  |
 | capex_to_da | FY2025Q4 | 3.159 |  |
 | accrual_trend | TTM FY2025Q4 | 0.03441 |  |
-| dso_trend | FY2025Q4 | 224 |  |
-| dio_trend | FY2025Q4 | 9.555 |  |
+| dso_trend | FY2025Q4 | 259.9 |  |
+| dio_trend | FY2025Q4 | 10.92 |  |
 | fcf_margin_trend | TTM FY2025Q4 | -0.0625 |  |
 | capex_intensity_regime_shift | FY2025Q4 | 0.04 |  |
 | incremental_revenue_per_capex | FY2025Q4 | 0.2059 | Capex-to-revenue conversion lags may exceed the window; low values prompt review, not verdicts. |
@@ -238,6 +238,7 @@ Coverage: **48 computed**, 0 not meaningful, 2 with data unavailable (out of 50 
 ## 10. Analyst Review Questions
 
 - Management describes demand as strong; what explains the concurrent receivables/inventory build relative to revenue?
+- What drove receivables growth ahead of revenue this period — payment-term changes, channel mix, or collection timing?
 - Which accrual items explain the gap between net income and operating cash flow, and are they expected to reverse?
 - Why have adjustment categories described as one-time recurred across multiple periods, and what would make them stop?
 - Regarding FY2025Q4: KPI "Net revenue retention" was discussed in prior periods (FY2025Q2, FY2025Q3) but is not mentioned in FY2025Q4. Reduced disclosure of a previously highlighted metric warrants review.

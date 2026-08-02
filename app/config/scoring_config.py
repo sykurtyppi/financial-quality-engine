@@ -74,9 +74,9 @@ BLOCKS: list[BlockSpec] = [
     BlockSpec(
         name="Revenue Quality",
         metrics=[
-            MetricSpec("receivables_growth_spread", 0.35, [(0.0, 20), (0.10, 45), (0.25, 70), (0.50, 90)]),
+            MetricSpec("receivables_growth_spread", 0.35, [(0.0, 20), (0.30, 45), (0.75, 70), (1.50, 90)]),  # YoY basis (P0-B): QoQ thresholds x3, judgment pending reference distributions
             MetricSpec("beneish_dsri", 0.25, [(1.0, 20), (1.15, 45), (1.40, 70), (1.80, 90)]),
-            MetricSpec("deferred_revenue_growth_spread", 0.20, [(-0.40, 85), (-0.15, 60), (0.0, 35), (0.10, 20)]),
+            MetricSpec("deferred_revenue_growth_spread", 0.20, [(-0.80, 85), (-0.35, 60), (0.0, 35), (0.20, 20)]),  # YoY basis (P0-B): thresholds widened ~2-2.5x
             MetricSpec("dso_trend", 0.20, [(0.0, 25), (5.0, 50), (15.0, 75), (30.0, 90)]),
         ],
     ),
@@ -92,7 +92,7 @@ BLOCKS: list[BlockSpec] = [
     BlockSpec(
         name="Working Capital Stress",
         metrics=[
-            MetricSpec("inventory_growth_spread", 0.60, [(0.0, 20), (0.10, 45), (0.30, 70), (0.60, 90)]),
+            MetricSpec("inventory_growth_spread", 0.60, [(0.0, 20), (0.30, 45), (0.90, 70), (1.80, 90)]),  # YoY basis (P0-B): QoQ thresholds x3, judgment pending reference distributions
             MetricSpec("dio_trend", 0.40, [(0.0, 25), (5.0, 45), (15.0, 70), (30.0, 90)]),
             # Excluded from scoring in v0.3: wrong-signed vs forward margins and
             # FCF in the backtest (IC +0.06..+0.15). Still computed and reported.

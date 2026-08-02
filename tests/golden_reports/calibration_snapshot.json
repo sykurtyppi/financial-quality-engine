@@ -13,30 +13,30 @@
     "AAPL": {
       "blocks": {
         "Balance Sheet Stress": 33.1,
-        "Capex Discipline": 25.9,
+        "Capex Discipline": 24.5,
         "Capital Integrity": 18.6,
         "Cash Conversion": 15.9,
         "Earnings Quality": 16.2,
         "Narrative Drift": null,
-        "Revenue Quality": 22.2,
-        "Working Capital Stress": 56.1
+        "Revenue Quality": 27.0,
+        "Working Capital Stress": 22.0
       },
       "direction": "positive",
-      "overall": 24.3
+      "overall": 22.0
     },
     "CRM": {
       "blocks": {
         "Balance Sheet Stress": 65.3,
-        "Capex Discipline": 22.8,
+        "Capex Discipline": 21.9,
         "Capital Integrity": 24.1,
         "Cash Conversion": 13.5,
         "Earnings Quality": 16.2,
         "Narrative Drift": null,
-        "Revenue Quality": 31.3,
+        "Revenue Quality": 28.2,
         "Working Capital Stress": null
       },
       "direction": "positive",
-      "overall": 27.6
+      "overall": 27.1
     },
     "KO": {
       "blocks": {
@@ -46,11 +46,11 @@
         "Cash Conversion": 21.5,
         "Earnings Quality": 20.3,
         "Narrative Drift": null,
-        "Revenue Quality": 36.2,
-        "Working Capital Stress": 24.1
+        "Revenue Quality": 21.2,
+        "Working Capital Stress": 22.0
       },
       "direction": "positive",
-      "overall": 27.1
+      "overall": 25.3
     }
   },
   "config_version": "0.3.0",
