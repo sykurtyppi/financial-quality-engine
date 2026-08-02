@@ -181,19 +181,29 @@ def _latest_calendar_quarter_end(fye_month: int, before_d: date) -> date | None:
 
 
 def _ex99_sort_key(name: str) -> tuple[int, int, str]:
-    """Prefer the release itself (EX-99.1) over supplementary exhibits
-    (EX-99.2 financial tables, slides) — P0-D: candidates[0] of an unordered
-    index could silently ingest the tables exhibit and distort every
-    narrative density for the period."""
+    """Prefer the release itself over supplementary exhibits — P0-D:
+    candidates[0] of an unordered index could silently ingest the tables
+    exhibit and distort every narrative density for the period.
+
+    Semantics outrank exhibit number (review finding on PR #2: a filer can
+    ship 'ex99_1-tables.htm' + 'ex99_2-earnings-release.htm'): release-like
+    names first, table/slide/supplement-like names last, exhibit number only
+    as the tie-break among equally-named candidates."""
     lower = name.lower()
+    if re.search(r"earnings|press|release", lower):
+        semantic = 0
+    elif re.search(r"table|supplement|slide|presentation|infographic|deck", lower):
+        semantic = 2
+    else:
+        semantic = 1
     m = re.search(r"99[._-]?(\d)", lower)
     exhibit_no = int(m.group(1)) if m else 5
-    named_release = 0 if re.search(r"earnings|press|release", lower) else 1
-    return (exhibit_no, named_release, lower)
+    return (semantic, exhibit_no, lower)
 
 
-def _find_ex99(client: SecClient, cik: int, accession: str) -> str | None:
-    """Locate the EX-99 exhibit filename (earnings release) in a filing index."""
+def _find_ex99(client: SecClient, cik: int, accession: str) -> list[str]:
+    """EX-99 exhibit filenames in a filing index, best candidate first.
+    Callers take [0] and should surface the alternatives diagnostically."""
     import json as _json
 
     idx_raw = _fetch_archive(client, cik, accession, "index.json")
@@ -201,7 +211,7 @@ def _find_ex99(client: SecClient, cik: int, accession: str) -> str | None:
         idx = _json.loads(idx_raw)
         items = idx.get("directory", {}).get("item", [])
     except (ValueError, AttributeError):
-        return None
+        return []
     candidates = [
         it["name"]
         for it in items
@@ -209,7 +219,7 @@ def _find_ex99(client: SecClient, cik: int, accession: str) -> str | None:
         and it["name"].lower().endswith((".htm", ".html"))
         and "index" not in it["name"].lower()
     ]
-    return min(candidates, key=_ex99_sort_key) if candidates else None
+    return sorted(candidates, key=_ex99_sort_key)
 
 
 def fetch_documents(
@@ -254,9 +264,13 @@ def fetch_documents(
 
         P0-E: between the earnings 8-K and the subsequent 10-Q, the just-ended
         quarter's balance-sheet date is usually absent from companyfacts, so
-        the known-quarter-end snap lands one quarter too early. When the snap
-        target is stale (>100 days before the event) fall back to fiscal
-        calendar arithmetic for the label."""
+        the known-quarter-end snap lands one quarter too early. Whenever the
+        fiscal-calendar quarter end before the event is NEWER than the snap
+        target, the snap target is stale and the calendar end wins — no
+        staleness threshold, so early reporters (8-K a few days after quarter
+        end) are labeled correctly too (review finding on PR #2). Both dates
+        in the same fiscal quarter yield the same label, so the override is
+        harmless when companyfacts is current."""
         try:
             d = datetime.strptime(report_date, "%Y-%m-%d").date()
         except ValueError:
@@ -264,10 +278,9 @@ def fetch_documents(
         if is_event_dated:
             prior_ends = [q for q in known_quarter_ends if q < d]
             snapped = prior_ends[-1] if prior_ends else None
-            if snapped is None or (d - snapped).days > 100:
-                cal = _latest_calendar_quarter_end(fye_month, d)
-                if cal is not None and (snapped is None or cal > snapped):
-                    snapped = cal
+            cal = _latest_calendar_quarter_end(fye_month, d)
+            if cal is not None and (snapped is None or cal > snapped):
+                snapped = cal
             if snapped is None:
                 return None
             d = snapped
@@ -316,10 +329,17 @@ def fetch_documents(
                 label = label_for(report_dates[i], is_event_dated=True)
                 if label is None:
                     continue
-                ex99 = _find_ex99(client, cik, accessions[i])
-                if ex99 is None:
+                ex99_candidates = _find_ex99(client, cik, accessions[i])
+                if not ex99_candidates:
                     result.diagnostics.append(f"8-K {accessions[i]} ({label}): no EX-99 exhibit found")
                     continue
+                ex99 = ex99_candidates[0]
+                if len(ex99_candidates) > 1:
+                    result.diagnostics.append(
+                        f"8-K {accessions[i]} ({label}): chose {ex99} among "
+                        f"{len(ex99_candidates)} EX-99 candidates "
+                        f"({', '.join(ex99_candidates[1:])})"
+                    )
                 text = html_to_text(_fetch_archive(client, cik, accessions[i], ex99)).strip()
                 if len(text.split()) < 100:
                     result.diagnostics.append(f"8-K {accessions[i]} ({label}): exhibit too short")

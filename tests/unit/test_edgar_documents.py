@@ -107,3 +107,34 @@ class TestP0DEx99Selection:
 
         names = ["q2supplement.htm", "pressrelease.htm"]
         assert min(names, key=_ex99_sort_key) == "pressrelease.htm"
+
+
+class TestReviewFindings:
+    """Adversarial regressions from the PR #2 review."""
+
+    def test_ex99_release_semantics_outrank_exhibit_number(self):
+        """Finding 3: 'ex99_1-tables.htm' + 'ex99_2-earnings-release.htm'
+        must select the release."""
+        from app.services.ingestion.edgar_documents import _ex99_sort_key
+
+        names = ["issuer-ex99_1-tables.htm", "issuer-ex99_2-earnings-release.htm"]
+        assert min(names, key=_ex99_sort_key) == "issuer-ex99_2-earnings-release.htm"
+
+    def test_ex99_tables_penalized_even_unnamed_release(self):
+        from app.services.ingestion.edgar_documents import _ex99_sort_key
+
+        names = ["a-ex99_1-supplemental-tables.htm", "a-ex99_2.htm"]
+        assert min(names, key=_ex99_sort_key) == "a-ex99_2.htm"
+
+    def test_early_reporter_8k_labels_new_quarter(self):
+        """Finding 4: known ends only through Mar 31, earnings 8-K on Jul 5
+        (96-day gap — under the removed 100-day threshold) must label the
+        June quarter, not March."""
+        from datetime import date
+
+        from app.services.ingestion.edgar_documents import _latest_calendar_quarter_end
+
+        cal = _latest_calendar_quarter_end(12, date(2026, 7, 5))
+        assert cal == date(2026, 6, 30)
+        snapped = date(2026, 3, 31)  # freshest quarter end companyfacts knows
+        assert cal > snapped  # therefore the label logic overrides the snap

@@ -4,13 +4,13 @@
 
 ## 1. Executive Summary
 
-Overall Quality Risk Score: **62/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
+Overall Quality Risk Score: **61/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
 
 Weighted average of 8 block scores. Highest concern: Revenue Quality (90). Lowest concern: Balance Sheet Stress (28).
 
 The screen flagged 7 elevated-concern item(s) and 2 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
 
-> Caveat: Scores use v0.3 weights informed by a small, survivorship-biased 2021-2025 backtest (~70 companies, point-in-time fundamentals); anchor thresholds remain judgment-based heuristics and are not sector-normalized. Directional evidence only — treat as a screening aid, not a calibrated probability. Methodology and limits: docs/calibration_report.md.
+> Caveat: Scores use 0.4.0 config: v0.3 block weights from a small, survivorship-biased 2021-2025 backtest (~70 companies, point-in-time fundamentals), with the 2026-08 P0 corrections (TTM/YoY bases; measured-noise and wrong-signed signals retired to evidence). Anchor thresholds remain judgment-based heuristics and are not sector-normalized. Directional evidence only — treat as a screening aid, not a calibrated probability. Methodology and limits: docs/calibration_report.md.
 
 ## 2. Scorecard
 
@@ -18,7 +18,7 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 
 | Block | Score | Direction | Confidence | Coverage | Weight |
 |---|---|---|---|---|---|
-| Earnings Quality | 71 | Negative | high | 100% | 20% |
+| Earnings Quality | 70 | Negative | high | 100% | 20% |
 | Revenue Quality | 90 | Negative | medium | 100% | 10% |
 | Cash Conversion | 81 | Negative | high | 100% | 17% |
 | Working Capital Stress | 45 | Negative | medium | 100% | 7% |
@@ -133,7 +133,7 @@ Places where management narrative and deterministic metrics point in different d
 | issuance_pressure | FY2025Q4 | 4.179 | Issuance Proceeds / CFO | share_issuance_proceeds=24, cfo=5.74 |
 | capex_to_revenue | FY2025Q4 | 0.11 | Capex / Revenue | capex=126, revenue=1.15e+03 |
 | capex_to_da | FY2025Q4 | 3.159 | Capex / D&A | capex=126, depreciation_amortization=40 |
-| accrual_trend | TTM FY2025Q4 | 0.03441 | latest total_accruals - mean(prior total_accruals) | latest=0.0684, prior_mean=0.034, n_prior=4 |
+| accrual_trend | TTM FY2025Q4 | 0.02725 | latest total_accruals - mean(prior total_accruals) | latest=0.0684, prior_mean=0.0412, n_prior=3 |
 | dso_trend | FY2025Q4 | 259.9 | latest - mean(same fiscal quarter, prior years) | latest=372, same_quarter_prior_mean=112, n_prior_years=1 |
 | dio_trend | FY2025Q4 | 10.92 | latest - mean(same fiscal quarter, prior years) | latest=73.7, same_quarter_prior_mean=62.8, n_prior_years=1 |
 | fcf_margin_trend | TTM FY2025Q4 | -0.0625 | latest - mean(prior) | latest=-0.0681, prior_mean=-0.00562 |
@@ -212,7 +212,7 @@ Coverage: **48 computed**, 0 not meaningful, 2 with data unavailable (out of 50 
 | issuance_pressure | FY2025Q4 | 4.179 |  |
 | capex_to_revenue | FY2025Q4 | 0.11 |  |
 | capex_to_da | FY2025Q4 | 3.159 |  |
-| accrual_trend | TTM FY2025Q4 | 0.03441 |  |
+| accrual_trend | TTM FY2025Q4 | 0.02725 |  |
 | dso_trend | FY2025Q4 | 259.9 |  |
 | dio_trend | FY2025Q4 | 10.92 |  |
 | fcf_margin_trend | TTM FY2025Q4 | -0.0625 |  |

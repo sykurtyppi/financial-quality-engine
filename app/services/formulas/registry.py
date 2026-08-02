@@ -172,16 +172,24 @@ def _ttm_metrics(periods: list[PeriodFinancials], i: int) -> list[MetricResult]:
         ]
         return [_mark_window_missing(m) for m in out]
 
-    # Sloan average-assets base: quarter-end now vs one year ago. With exactly
-    # 4 quarters of history the year-ago instant doesn't exist; window-start
-    # assets (one quarter later) are the closest honest approximation.
-    prior_year_q = periods[i - 4] if i >= 4 else periods[i - 3]
+    # Sloan average-assets base: quarter-end now vs one year ago. The prior
+    # observation must be date-validated — an unvalidated periods[i-4] can be
+    # years stale across a history gap and silently poison the asset average
+    # (review finding on PR #2). No valid year-ago instant -> MISSING, never
+    # a substituted base.
+    prior_year_q = _year_ago(periods, i)
+    if prior_year_q is not None:
+        accruals_m = accruals.total_accruals(ttm_cur, prior_year_q)
+    else:
+        accruals_m = accruals.total_accruals(ttm_cur, _empty_all(cur)).model_copy(
+            update={"missing_fields": [ttm.PRIOR_YEAR_MISSING]}
+        )
     out = [
         accruals.cfo_to_net_income(ttm_cur),
         accruals.fcf_to_net_income(ttm_cur),
         accruals.fcf_margin(ttm_cur),
         balance_sheet.net_debt_to_ebitda(ttm_cur),
-        accruals.total_accruals(ttm_cur, prior_year_q),
+        accruals_m,
     ]
 
     ttm_prev = ttm.annualize(periods, i - 4)

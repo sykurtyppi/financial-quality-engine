@@ -30,13 +30,13 @@
         "Capex Discipline": 23.7,
         "Capital Integrity": null,
         "Cash Conversion": 14.7,
-        "Earnings Quality": 16.9,
+        "Earnings Quality": 16.6,
         "Narrative Drift": null,
         "Revenue Quality": 25.8,
         "Working Capital Stress": null
       },
       "direction": "positive",
-      "overall": 26.6
+      "overall": 26.5
     },
     "KO": {
       "blocks": {

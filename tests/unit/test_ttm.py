@@ -131,3 +131,35 @@ class TestRegistryTtmWiring:
             assert m is not None, f"{name} not computed at all"
             if m.status is MetricStatus.OK:
                 assert m.fiscal_label.startswith("TTM "), f"{name} computed on non-TTM basis"
+
+
+class TestReviewFindings:
+    """Adversarial regressions from the PR #2 review."""
+
+    def _dataset(self, quarters):
+        return CompanyDataset(profile=CompanyProfile(ticker="TEST"), periods=quarters)
+
+    def test_stale_prior_year_assets_refused(self):
+        """Finding 1: a valid TTM window preceded by a years-old observation
+        must NOT use the stale assets as the Sloan average base."""
+        stale = _q(
+            date(2020, 12, 31),
+            "FY2020Q4",
+            revenue=100.0, net_income=10.0, cfo=12.0, capex=5.0,
+            ebit=15.0, depreciation_amortization=8.0,
+            total_assets=10000.0, total_debt=200.0, cash_and_equivalents=50.0,
+        )
+        periods = [stale] + _four_quarters()
+        bundle = registry.compute_metrics(self._dataset(periods))
+        m = bundle.get_latest("total_accruals")
+        assert m is not None and m.status is MetricStatus.MISSING_DATA
+        assert m.missing_fields == [ttm.PRIOR_YEAR_MISSING]
+
+    def test_four_quarters_only_no_silent_asset_substitution(self):
+        """Finding 1b: with exactly 4 quarters there is no valid year-ago
+        instant; total_accruals must be MISSING, not computed on window-start
+        assets."""
+        bundle = registry.compute_metrics(self._dataset(_four_quarters()))
+        m = bundle.get_latest("total_accruals")
+        assert m is not None and m.status is MetricStatus.MISSING_DATA
+        assert m.missing_fields == [ttm.PRIOR_YEAR_MISSING]

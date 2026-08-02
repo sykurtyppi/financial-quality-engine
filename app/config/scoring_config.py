@@ -185,16 +185,18 @@ SECTOR_ANCHOR_OVERRIDES: dict[str, dict[str, Anchors]] = {}
 HIGH_GROWTH_SGI_THRESHOLD = 1.4
 GROWTH_SENSITIVE_BLOCKS = {"Revenue Quality", "Working Capital Stress", "Capex Discipline", "Capital Integrity"}
 HIGH_GROWTH_CAVEAT = (
-    "High-growth profile detected (revenue growth above 40% period-over-period): "
+    "High-growth profile detected (revenue growth above 40% year-over-year, TTM basis): "
     "working-capital build, capex acceleration, and SBC intensity may reflect "
     "scale-up dynamics rather than quality deterioration. Requires analyst review "
     "against unit economics before drawing conclusions."
 )
 
 V0_WEIGHTS_CAVEAT = (
-    "Scores use v0.3 weights informed by a small, survivorship-biased 2021-2025 "
-    "backtest (~70 companies, point-in-time fundamentals); anchor thresholds "
-    "remain judgment-based heuristics and are not sector-normalized. Directional "
+    "Scores use 0.4.0 config: v0.3 block weights from a small, survivorship-biased "
+    "2021-2025 backtest (~70 companies, point-in-time fundamentals), with the "
+    "2026-08 P0 corrections (TTM/YoY bases; measured-noise and wrong-signed "
+    "signals retired to evidence). Anchor thresholds remain judgment-based "
+    "heuristics and are not sector-normalized. Directional "
     "evidence only — treat as a screening aid, not a calibrated probability. "
     "Methodology and limits: docs/calibration_report.md."
 )

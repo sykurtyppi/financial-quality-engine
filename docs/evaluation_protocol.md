@@ -1,8 +1,34 @@
-# Evaluation Protocol (opened 2026-07-03)
+# Evaluation Protocol (opened 2026-07-03 · 0.3.0 window CLOSED 2026-08-02)
 
-## Config freeze
+## Window closure and rebaseline (2026-08-02)
 
-**Scoring config 0.3.0 is FROZEN for the duration of this evaluation window.**
+**The 0.3.0 evaluation window is formally closed and rebaselined at config
+0.4.0.** The 2026-08 first-principles reassessment
+([PROJECT_STATE_ASSESSMENT.md](PROJECT_STATE_ASSESSMENT.md),
+[ROADMAP_2026Q3.md](ROADMAP_2026Q3.md)) found correctness defects that made
+frozen-config measurement meaningless to continue: quarterly/annual basis
+mismatches (P0-A/B) put several scored values on the wrong scale, and
+detectors with a measured 100% live false-positive rate were still scoring.
+Freezing a config whose outputs are known-wrong does not protect an
+evaluation — it voids it in the other direction.
+
+What the closure means:
+
+- Scores produced under 0.3.0 (the 2026Q2 season reports, the calibration
+  report, the wide sweep) are **not comparable** to 0.4.0 scores. They remain
+  valid as records of what the engine said at the time.
+- Track 1 (journal) continues unchanged under 0.4.0 — its unit of account is
+  decisions, not scores; the one locked case (MXL) predates the change and
+  is 0.3.0-era.
+- Track 3's 0/29 unadjudicated flags were generated under 0.3.0; if
+  adjudicated, results describe 0.3.0 behavior only.
+- 0.4.0 is now the frozen baseline under the same rule below, with one
+  pre-declared exception: the YoY spread anchors are judgment-based pending
+  reference-class distributions (roadmap P2-E); replacing them with empirical
+  percentiles is a scheduled change, not mid-window tuning.
+
+## Config freeze (now applies to 0.4.0)
+
 No weight, anchor, threshold, or detector changes until the window closes —
 tuning during measurement fits the eval and voids the results. The freeze is
 enforced socially by this document and mechanically by
@@ -12,7 +38,11 @@ breaks the snapshot and must cite this protocol in the diff).
 Bug fixes that change *computation correctness* (not scoring judgment) are
 allowed but must be logged in the "Mid-window changes" section below.
 
-Mid-window changes: (none yet)
+Mid-window changes (0.4.0 window): (none yet)
+
+Mid-window changes (0.3.0 window, closed): the window ended with the P0
+correction program (PR #2) rather than by reaching its planned sample size —
+see closure note above.
 
 ## The three evaluation tracks
 

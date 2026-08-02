@@ -163,9 +163,11 @@ class TestExclusionsAndEdgeCases:
 
     def test_negative_earnings_company_handled(self):
         """Loss-making company: earnings-ratio metrics report not_meaningful,
-        pipeline still completes."""
+        pipeline still completes. Eight quarters so the TTM accrual metric has
+        a date-valid year-ago asset base (PR #2 review finding 1: no silent
+        asset substitution on short histories)."""
         periods = []
-        for i in range(4):
+        for i in range(8):
             periods.append(
                 PeriodFinancials(
                     period_end=quarter_end(i, start_year=2025),
