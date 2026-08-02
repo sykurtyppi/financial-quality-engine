@@ -161,14 +161,17 @@ def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str
 
 # Maximum accepted distance between an 8-K event and the quarter end it is
 # assumed to report, WHEN no fiscal calendar exists to cross-check (fye_month
-# is None). 91 days = the length of a standard 13-week fiscal quarter: if the
-# nearest known quarter end is further back than one full quarter, a newer
-# quarter end has necessarily passed in between, so the known end cannot be
-# the just-reported period. Boundary semantics: a lag of exactly 91 days is
-# accepted (a deadline-day annual straggler is plausible); 92+ is refused in
-# favor of the explicit cannot-assign diagnostic. When fye_month IS known,
-# this bound is unnecessary — the calendar fallback always supplies a quarter
-# end within the trailing quarter of the event.
+# is None). 91 days — the length of a standard 13-week fiscal quarter — is a
+# CONSERVATIVE reporting-lag heuristic, not a proof bound: 53-week calendars
+# contain a ~98-day quarter, so a longer lag does not strictly guarantee a
+# newer quarter end has passed. The deliberate trade-off is that unusual
+# late-reporter / 53-week cases may be explicitly omitted (with the
+# cannot-assign diagnostic) rather than risk a stale association of current
+# narrative with prior-quarter fundamentals. Boundary semantics: a lag of
+# exactly 91 days is accepted (a deadline-day annual straggler is plausible);
+# 92+ is refused. When fye_month IS known, this bound is unnecessary — the
+# calendar fallback always supplies a quarter end within the trailing quarter
+# of the event.
 EVENT_SNAP_MAX_LAG_DAYS = 91
 
 

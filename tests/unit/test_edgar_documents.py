@@ -273,8 +273,11 @@ class TestStaleSnapWithoutFye:
     """Final review blocker: with no derivable FYE, a stale known quarter end
     must not be accepted as the just-reported period — a Jul 5 release over a
     Mar 31 snap would silently attach current narrative to prior-quarter
-    fundamentals. Bound: EVENT_SNAP_MAX_LAG_DAYS = 91 (one standard 13-week
-    quarter; beyond it a newer quarter end has necessarily passed)."""
+    fundamentals. Bound: EVENT_SNAP_MAX_LAG_DAYS = 91 — a conservative
+    reporting-lag heuristic (one standard 13-week quarter). 53-week calendars
+    can contain a ~98-day quarter, so unusual late/53-week cases are
+    deliberately omitted with the explicit diagnostic rather than risking a
+    stale association."""
 
     def _run(self, tmp_path, event_date, instant_end):
         from app.services.ingestion.edgar_documents import fetch_documents
