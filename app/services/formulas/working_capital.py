@@ -128,6 +128,54 @@ def working_capital_swing_to_income(cur: PeriodFinancials, prev: PeriodFinancial
     )
 
 
+def seasonal_trend_change(name: str, series: list[MetricResult]) -> MetricResult:
+    """Latest OK value minus the mean of SAME-FISCAL-QUARTER prior observations
+    (positional stride of 4 through the per-period series).
+
+    Day-count levels (DSO/DIO) are strongly seasonal; comparing the latest
+    value to an unconditional trailing mean fabricates deterioration at every
+    seasonal peak (roadmap P0-B, the MSFT June-quarter receivables class).
+    """
+    label = series[-1].fiscal_label if series else "n/a"
+    formula = "latest - mean(same fiscal quarter, prior years)"
+    if (
+        not series
+        or series[-1].status is not MetricStatus.OK
+        or series[-1].value is None
+    ):
+        return MetricResult(
+            name=name,
+            formula=formula,
+            fiscal_label=label,
+            status=MetricStatus.MISSING_DATA,
+            missing_fields=["latest value"],
+        )
+    latest = series[-1]
+    priors = [series[i] for i in range(len(series) - 5, -1, -4)]
+    priors_ok = [m for m in priors if m.status is MetricStatus.OK and m.value is not None]
+    if not priors_ok:
+        return MetricResult(
+            name=name,
+            formula=formula,
+            fiscal_label=label,
+            status=MetricStatus.MISSING_DATA,
+            missing_fields=["same-quarter history (need >= 1 prior year)"],
+        )
+    prior_mean = sum(m.value for m in priors_ok) / len(priors_ok)  # type: ignore[misc]
+    return MetricResult(
+        name=name,
+        formula=formula,
+        fiscal_label=label,
+        status=MetricStatus.OK,
+        value=latest.value - prior_mean,  # type: ignore[operator]
+        inputs={
+            "latest": latest.value,
+            "same_quarter_prior_mean": prior_mean,
+            "n_prior_years": float(len(priors_ok)),
+        },
+    )
+
+
 def trend_change(name: str, series: list[MetricResult], min_periods: int = 3) -> MetricResult:
     """Latest OK value minus mean of prior OK values, for any day-count metric.
     Used for DSO/DIO trend deterioration."""

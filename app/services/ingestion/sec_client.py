@@ -40,10 +40,19 @@ def _identity(explicit: str | None) -> str:
 
 
 class SecClient:
-    def __init__(self, cache_dir: str | Path = "data/cache", identity: str | None = None):
+    def __init__(
+        self,
+        cache_dir: str | Path = "data/cache",
+        identity: str | None = None,
+        fresh: bool = False,
+    ):
+        """`fresh=True` bypasses JSON caches for this client (P0-D): on a
+        filing day a <24h cache can silently serve pre-filing data while the
+        report is dated today."""
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.identity = _identity(identity)
+        self.fresh = fresh
         self._last_request = 0.0
 
     def _get(self, url: str) -> bytes:
@@ -60,7 +69,7 @@ class SecClient:
 
     def _cached_json(self, cache_name: str, url: str, max_age_s: float = 86400.0) -> dict:
         path = self.cache_dir / cache_name
-        if path.exists() and (time.time() - path.stat().st_mtime) < max_age_s:
+        if not self.fresh and path.exists() and (time.time() - path.stat().st_mtime) < max_age_s:
             return json.loads(path.read_text())
         data = self._get(url)
         path.write_bytes(data)
