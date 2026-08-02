@@ -138,3 +138,100 @@ class TestReviewFindings:
         assert cal == date(2026, 6, 30)
         snapped = date(2026, 3, 31)  # freshest quarter end companyfacts knows
         assert cal > snapped  # therefore the label logic overrides the snap
+
+
+class _FakeClient:
+    """Offline SecClient stand-in for fetch_documents path tests."""
+
+    def __init__(self, tmp_path, subs, archives):
+        self.cache_dir = tmp_path
+        self._subs = subs
+        self._archives = archives  # url substring -> bytes
+
+    def submissions_by_cik(self, cik):
+        return self._subs
+
+    def _get(self, url):
+        for key, payload in self._archives.items():
+            if key in url:
+                return payload
+        raise AssertionError(f"unexpected fetch: {url}")
+
+
+def _one_802_subs():
+    return {
+        "cik": "1234",
+        "filings": {
+            "recent": {
+                "form": ["8-K"],
+                "accessionNumber": ["0001-26-000001"],
+                "primaryDocument": ["main8k.htm"],
+                "reportDate": ["2026-07-05"],
+                "items": ["2.02,9.01"],
+                "filingDate": ["2026-07-05"],
+            }
+        },
+    }
+
+
+def _release_archives():
+    import json
+
+    index = json.dumps(
+        {"directory": {"item": [{"name": "ex99_1.htm"}, {"name": "main8k.htm"}]}}
+    ).encode()
+    body = ("<html><body><p>"
+            + "Revenue increased and margins expanded across all segments this quarter. " * 30
+            + "</p></body></html>").encode()
+    return {"index.json": index, "ex99_1.htm": body}
+
+
+class TestNoFyeMonth:
+    """PR #2 review blocker: fiscal_year_end_month can be None; the calendar
+    fallback must not raise, the known-quarter snap must be preserved, and
+    the unlabelable case must degrade with an explicit diagnostic."""
+
+    def test_calendar_helper_handles_none_fye(self):
+        from datetime import date
+
+        from app.services.ingestion.edgar_documents import _latest_calendar_quarter_end
+
+        assert _latest_calendar_quarter_end(None, date(2026, 7, 5)) is None
+
+    def test_802_without_fye_or_quarter_ends_degrades_explicitly(self, tmp_path):
+        """The reviewer's reproduction: empty facts_json -> fye None AND no
+        known quarter ends. Previously TypeError swallowed by the broad
+        except; now: no exception diagnostic, one explicit cannot-label
+        diagnostic, release omitted knowingly."""
+        from app.services.ingestion.edgar_documents import fetch_documents
+
+        client = _FakeClient(tmp_path, _one_802_subs(), _release_archives())
+        result = fetch_documents(client, "FAKE", facts_json={}, cik=1234)
+        assert result.documents == []
+        assert not any("failed" in d for d in result.diagnostics), result.diagnostics
+        assert any("cannot assign a fiscal quarter" in d for d in result.diagnostics)
+
+    def test_802_without_fye_but_with_known_ends_uses_snap(self, tmp_path):
+        """fye None but companyfacts has quarter-end instants: the snap is
+        preserved and the release ingests under the P<date> fallback label."""
+        from app.services.ingestion.edgar_documents import fetch_documents
+
+        facts = {
+            "facts": {
+                "us-gaap": {
+                    "Assets": {
+                        "units": {
+                            "USD": [
+                                {"end": "2026-03-31", "val": 1000.0, "filed": "2026-05-01", "form": "10-Q"},
+                                {"end": "2026-06-30", "val": 1100.0, "filed": "2026-07-04", "form": "8-K"},
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        client = _FakeClient(tmp_path, _one_802_subs(), _release_archives())
+        result = fetch_documents(client, "FAKE", facts_json=facts, cik=1234)
+        assert len(result.documents) == 1
+        assert result.documents[0].doc_type.value == "earnings_release"
+        assert result.documents[0].fiscal_label == "P2026-06-30"

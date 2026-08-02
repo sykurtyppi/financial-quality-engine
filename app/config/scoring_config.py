@@ -1,13 +1,21 @@
 """Scoring configuration: blocks, weights, and concern-mapping anchors.
 
-STATUS: v0.3 — PARTIALLY CALIBRATED. Block weights and two component
-exclusions were adjusted from the 2021-2025 walk-forward backtest
-(docs/calibration_report.md): ~70 companies, point-in-time fundamentals,
-survivorship-biased universe. Anchor points remain judgment-based heuristics.
-This is directional evidence, NOT a statistically validated model; the engine
-still attaches an uncalibrated-thresholds caveat to every output.
+STATUS: 0.4.0 — v0.3 CALIBRATION + P0 CORRECTIONS. Block weights carry over
+from the 2021-2025 walk-forward backtest (docs/calibration_report.md: ~70
+companies, point-in-time fundamentals, survivorship-biased universe). The
+2026-08 P0 program (docs/ROADMAP_2026Q3.md; PR #2) changed the measurement
+bases the anchors receive — TTM for stock-over-flow and annually-anchored
+models, YoY for seasonal spreads and day-count trends — and RETIRED sixteen
+signals from scoring (measured noise, wrong-signed, duplicate economics, or
+unvalidated; each retirement documented inline below; all remain computed and
+reported as evidence). The YoY spread anchors are re-based by judgment
+pending reference-class distributions (roadmap P2-E). Note: 0.3.0-era scores
+are NOT comparable to 0.4.0 scores (docs/evaluation_protocol.md closure
+note). Anchor points remain judgment-based heuristics; this is directional
+evidence, NOT a statistically validated model, and the engine still attaches
+an uncalibrated-thresholds caveat to every output.
 
-Evidence summary driving the v0.3 weight changes:
+Evidence summary driving the v0.3 weight changes (weights unchanged in 0.4.0):
 - Capex Discipline: right-signed vs returns, margins, AND forward FCF -> up.
 - Earnings Quality (accrual family): strongest predictor of forward operating-
   margin deterioration (IC ~ -0.20 to -0.25) -> up.
@@ -18,7 +26,8 @@ Evidence summary driving the v0.3 weight changes:
   improving margins) -> down; kept as descriptive, not predictive.
 - Working Capital: near-zero signal; wc_swing wrong-signed -> down.
 - buyback_offset_ratio and working_capital_swing_to_income: excluded from
-  scoring (weight 0, still computed and reported).
+  scoring in v0.3 (weight 0); deleted from the config in 0.4.0 — zero weight
+  still generated flags (P0-13). Still computed and reported as evidence.
 - Narrative Drift: NOT testable in the backtest (no historical documents);
   weight kept moderate, fully uncalibrated.
 

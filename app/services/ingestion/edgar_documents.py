@@ -159,14 +159,19 @@ def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str
     return text
 
 
-def _latest_calendar_quarter_end(fye_month: int, before_d: date) -> date | None:
+def _latest_calendar_quarter_end(fye_month: int | None, before_d: date) -> date | None:
     """Latest fiscal-quarter-end month boundary strictly before `before_d`,
     from calendar arithmetic (fye_month and each 3 months earlier). Used only
     as the P0-E fallback when companyfacts hasn't seen the quarter yet; a
     52/53-week filer's true end differs by a few days but maps to the same
-    fiscal label."""
+    fiscal label. `fye_month` may be None (no annual-duration facts to derive
+    it from) — no calendar can be built, so no fallback (PR #2 review: this
+    previously raised TypeError, and the broad per-filing except silently
+    dropped the earnings release)."""
     import calendar as _cal
 
+    if fye_month is None:
+        return None
     q_months = {(fye_month - 1 - 3 * k) % 12 + 1 for k in range(4)}
     y, m = before_d.year, before_d.month
     for _ in range(13):
@@ -328,6 +333,11 @@ def fetch_documents(
             ):
                 label = label_for(report_dates[i], is_event_dated=True)
                 if label is None:
+                    result.diagnostics.append(
+                        f"8-K {accessions[i]}: earnings release NOT ingested — cannot "
+                        "assign a fiscal quarter (no known quarter ends before the event "
+                        "and no derivable fiscal year-end month)"
+                    )
                     continue
                 ex99_candidates = _find_ex99(client, cik, accessions[i])
                 if not ex99_candidates:
