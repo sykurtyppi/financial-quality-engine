@@ -159,6 +159,19 @@ def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str
     return text
 
 
+# Maximum accepted distance between an 8-K event and the quarter end it is
+# assumed to report, WHEN no fiscal calendar exists to cross-check (fye_month
+# is None). 91 days = the length of a standard 13-week fiscal quarter: if the
+# nearest known quarter end is further back than one full quarter, a newer
+# quarter end has necessarily passed in between, so the known end cannot be
+# the just-reported period. Boundary semantics: a lag of exactly 91 days is
+# accepted (a deadline-day annual straggler is plausible); 92+ is refused in
+# favor of the explicit cannot-assign diagnostic. When fye_month IS known,
+# this bound is unnecessary — the calendar fallback always supplies a quarter
+# end within the trailing quarter of the event.
+EVENT_SNAP_MAX_LAG_DAYS = 91
+
+
 def _latest_calendar_quarter_end(fye_month: int | None, before_d: date) -> date | None:
     """Latest fiscal-quarter-end month boundary strictly before `before_d`,
     from calendar arithmetic (fye_month and each 3 months earlier). Used only
@@ -286,6 +299,17 @@ def fetch_documents(
             cal = _latest_calendar_quarter_end(fye_month, d)
             if cal is not None and (snapped is None or cal > snapped):
                 snapped = cal
+            if (
+                snapped is not None
+                and fye_month is None
+                and (d - snapped).days > EVENT_SNAP_MAX_LAG_DAYS
+            ):
+                # Final review blocker: with no fiscal calendar to fill the
+                # gap, a stale known quarter end must not be accepted as the
+                # just-reported period — a Jul 5 release over a Mar 31 snap
+                # would silently attach current narrative to prior-quarter
+                # fundamentals. Prefer explicit omission.
+                return None
             if snapped is None:
                 return None
             d = snapped
@@ -335,8 +359,8 @@ def fetch_documents(
                 if label is None:
                     result.diagnostics.append(
                         f"8-K {accessions[i]}: earnings release NOT ingested — cannot "
-                        "assign a fiscal quarter (no known quarter ends before the event "
-                        "and no derivable fiscal year-end month)"
+                        "assign a fiscal quarter (no derivable fiscal year-end month, and "
+                        "no known quarter end recent enough to be the just-reported period)"
                     )
                     continue
                 ex99_candidates = _find_ex99(client, cik, accessions[i])

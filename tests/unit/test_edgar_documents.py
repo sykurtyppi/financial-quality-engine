@@ -235,3 +235,73 @@ class TestNoFyeMonth:
         assert len(result.documents) == 1
         assert result.documents[0].doc_type.value == "earnings_release"
         assert result.documents[0].fiscal_label == "P2026-06-30"
+
+
+def _subs_with_event(event_date: str):
+    return {
+        "cik": "1234",
+        "filings": {
+            "recent": {
+                "form": ["8-K"],
+                "accessionNumber": ["0001-26-000001"],
+                "primaryDocument": ["main8k.htm"],
+                "reportDate": [event_date],
+                "items": ["2.02,9.01"],
+                "filingDate": [event_date],
+            }
+        },
+    }
+
+
+def _facts_with_assets_instant(end: str):
+    return {
+        "facts": {
+            "us-gaap": {
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {"end": end, "val": 1000.0, "filed": end, "form": "10-Q"},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
+class TestStaleSnapWithoutFye:
+    """Final review blocker: with no derivable FYE, a stale known quarter end
+    must not be accepted as the just-reported period — a Jul 5 release over a
+    Mar 31 snap would silently attach current narrative to prior-quarter
+    fundamentals. Bound: EVENT_SNAP_MAX_LAG_DAYS = 91 (one standard 13-week
+    quarter; beyond it a newer quarter end has necessarily passed)."""
+
+    def _run(self, tmp_path, event_date, instant_end):
+        from app.services.ingestion.edgar_documents import fetch_documents
+
+        client = _FakeClient(tmp_path, _subs_with_event(event_date), _release_archives())
+        return fetch_documents(
+            client, "FAKE", facts_json=_facts_with_assets_instant(instant_end), cik=1234
+        )
+
+    def test_council_case_jul5_over_mar31_refused(self, tmp_path):
+        """Event 2026-07-05, latest known instant 2026-03-31 (96-day lag):
+        NOT labeled P2026-03-31; explicit cannot-assign diagnostic instead."""
+        result = self._run(tmp_path, "2026-07-05", "2026-03-31")
+        assert result.documents == []
+        assert not any(d.fiscal_label == "P2026-03-31" for d in result.documents)
+        assert any("cannot assign a fiscal quarter" in d for d in result.diagnostics)
+        assert not any("failed" in d for d in result.diagnostics)
+
+    def test_boundary_91_days_accepted(self, tmp_path):
+        """Lag of exactly 91 days (2026-03-31 -> 2026-06-30): a deadline-day
+        annual straggler is plausible; accepted at the boundary."""
+        result = self._run(tmp_path, "2026-06-30", "2026-03-31")
+        assert len(result.documents) == 1
+        assert result.documents[0].fiscal_label == "P2026-03-31"
+
+    def test_boundary_92_days_refused(self, tmp_path):
+        """Lag of 92 days (2026-03-31 -> 2026-07-01): past the bound, refused."""
+        result = self._run(tmp_path, "2026-07-01", "2026-03-31")
+        assert result.documents == []
+        assert any("cannot assign a fiscal quarter" in d for d in result.diagnostics)
