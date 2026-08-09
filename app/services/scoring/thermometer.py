@@ -23,24 +23,47 @@ eventual-failure capture at p90):
    missing data. This is the principled, thermometer-level form of the P0-9 fix:
    distress states raise the reading, they can never lower it.
 
-Not yet included (evidence-gated, later increments):
-- Own-history and same-year percentile framing needs the L5 reference-class
-  store (roadmap P2-E). Until then the reading is built from the existing
-  concern anchors and is HEURISTIC — labelled as such, like the block scores.
-- The equity<0 (OENEG) regime dummy needs a mapped stockholders-equity field
-  the ingestion layer does not yet produce; tracked as a follow-up.
+Own-history percentile framing (`history=` arg) is implemented: each ratio is
+ranked within the company's own history, oriented by the concern direction.
 
-The thermometer is additive: it does not remove or alter the composite. Removal
-is gated on a validation harness showing it discriminates better than the
-composite on the season archive + distressed controls (roadmap P1-C kill gate).
+EMPIRICAL FINDING (kill gate — recorded honestly, this is why the composite
+STAYS for now). Measured offline on real cached companyfacts, healthy vs
+stressed cohorts:
+- Anchor-based reading: separation +5.2 vs composite +1.8, BUT max-across-
+  clusters amplifies the single-metric Liquidity cluster (current_ratio), so
+  cash-efficient staples (PG 73) read falsely hot — an ABSOLUTE-level
+  miscalibration.
+- Own-history-percentile reading: separation −7.0 (WORSE). Own history measures
+  DETERIORATION, not absolute level; with ~8 quarters, every company has some
+  cluster at its own recent extreme, which max amplifies, and a stably-
+  distressed firm reads low because bad is normal for it.
+Neither passes. The two failures are complementary and confirm §7's spec, which
+calls for own-history AND same-year percentiles: the cross-sectional (peer)
+percentile supplies the absolute level own-history lacks. That needs the L5
+reference-class store (roadmap P2-E), which does not exist yet.
+
+=> The distress thermometer is BLOCKED on P2-E. This module is the aggregation
+machinery (AOM + regime dummies + percentile framing), correct and reusable —
+the same `_own_history_concern` logic applies to peer distributions once P2-E
+supplies them. It is additive and wired into no surface; the composite is NOT
+removed until a reference-class-backed reading beats it on the kill test.
+
+Also not yet included: the equity<0 (OENEG) regime dummy needs a mapped
+stockholders-equity field the ingestion layer does not yet produce.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.config import scoring_config as cfg
 from app.schemas.financials import PeriodFinancials
+from app.schemas.metrics import MetricResult, MetricStatus
 from app.schemas.scoring import BlockScore
+
+# Minimum OK observations before a ratio is judged against its own history
+# rather than the absolute anchor. Below this a percentile is meaningless.
+MIN_HISTORY_FOR_PERCENTILE = 5
 
 THERMOMETER_HEURISTIC_CAVEAT = (
     "Distress thermometer is a heuristic reading built from uncalibrated concern "
@@ -100,6 +123,56 @@ def _concern_by_metric(block_scores: list[BlockScore]) -> dict[str, float]:
     return out
 
 
+def _metric_directions() -> dict[str, float]:
+    """+1 if a higher metric value means more concern, -1 if lower means more,
+    derived from the concern-anchor slope in the config."""
+    out: dict[str, float] = {}
+    for block in cfg.BLOCKS:
+        for ms in block.metrics:
+            pts = sorted(ms.anchors, key=lambda p: p[0])
+            out[ms.metric_name] = 1.0 if pts[-1][1] >= pts[0][1] else -1.0
+    return out
+
+
+def _own_history_concern(values: list[float], direction: float) -> float:
+    """Percentile of the CURRENT value (last element) within the company's own
+    history, oriented so that 'more concerning than typical' scores high. A
+    structurally-low-but-stable ratio (P&G's current ratio) sits near its own
+    median -> ~50, not the false-high the absolute anchor produces; a genuine
+    deterioration to a new extreme scores near 100."""
+    current = values[-1]
+    n = len(values)
+    if direction >= 0:  # higher value = worse
+        less_bad = sum(1 for v in values if v < current)
+    else:  # lower value = worse
+        less_bad = sum(1 for v in values if v > current)
+    equal = sum(1 for v in values if v == current)
+    return round((less_bad + 0.5 * equal) / n * 100.0, 1)
+
+
+def _cluster_inputs(
+    members: tuple[str, ...],
+    concern: dict[str, float],
+    history: dict[str, list[MetricResult]] | None,
+    directions: dict[str, float],
+) -> tuple[list[float], bool]:
+    """Concern input per present member: own-history percentile when enough
+    history exists, else the absolute anchor concern. Returns (values,
+    used_percentile_for_any)."""
+    inputs: list[float] = []
+    used_percentile = False
+    for m in members:
+        if history is not None and m in history:
+            vals = [r.value for r in history[m] if r.status is MetricStatus.OK and r.value is not None]
+            if len(vals) >= MIN_HISTORY_FOR_PERCENTILE:
+                inputs.append(_own_history_concern(vals, directions.get(m, 1.0)))
+                used_percentile = True
+                continue
+        if m in concern:
+            inputs.append(concern[m])
+    return inputs, used_percentile
+
+
 def _regime_flags(periods: list[PeriodFinancials]) -> list[RegimeFlag]:
     """Ohlson-style dummies from the raw financials. NI<0 in both recent
     quarters supersedes the single-quarter flag (no double count)."""
@@ -127,20 +200,30 @@ def _regime_flags(periods: list[PeriodFinancials]) -> list[RegimeFlag]:
 
 
 def compute_thermometer(
-    block_scores: list[BlockScore], periods: list[PeriodFinancials]
+    block_scores: list[BlockScore],
+    periods: list[PeriodFinancials],
+    history: dict[str, list[MetricResult]] | None = None,
 ) -> DistressThermometer:
     """AOM over distress clusters + additive regime dummies -> a single 0-100
     distress reading. Returns reading=None only when neither a distress cluster
-    nor a regime dummy is computable."""
+    nor a regime dummy is computable.
+
+    When `history` is supplied, each ratio is judged against its own history
+    (percentile framing) rather than the absolute anchor — the fix for
+    structurally-low-but-stable ratios reading falsely hot. Without history it
+    falls back to the anchor concern scores.
+    """
     concern = _concern_by_metric(block_scores)
+    directions = _metric_directions()
 
     clusters: list[ClusterReadout] = []
     for name, members in DISTRESS_CLUSTERS.items():
-        present = [m for m in members if m in concern]
-        if not present:
+        present = tuple(m for m in members if m in concern or (history is not None and m in history))
+        inputs, _ = _cluster_inputs(members, concern, history, directions)
+        if not inputs:
             continue
-        mean = sum(concern[m] for m in present) / len(present)
-        clusters.append(ClusterReadout(name=name, concern=round(mean, 1), members=tuple(present)))
+        mean = sum(inputs) / len(inputs)
+        clusters.append(ClusterReadout(name=name, concern=round(mean, 1), members=present))
 
     regime_flags = _regime_flags(periods)
 

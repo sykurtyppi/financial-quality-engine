@@ -4,8 +4,16 @@
 from datetime import date
 
 from app.schemas.financials import PeriodFinancials, PeriodType
+from app.schemas.metrics import MetricResult, MetricStatus
 from app.schemas.scoring import BlockScore, ComponentContribution, Confidence, Direction
 from app.services.scoring.thermometer import compute_thermometer
+
+
+def _hist(name: str, values: list[float]) -> list[MetricResult]:
+    return [
+        MetricResult(name=name, formula="t", fiscal_label=f"Q{i}", status=MetricStatus.OK, value=v)
+        for i, v in enumerate(values)
+    ]
 
 
 def _component(name: str, concern: float | None) -> ComponentContribution:
@@ -95,6 +103,32 @@ class TestRegimeDummies:
         t = compute_thermometer([], distressed)
         assert t.reading is not None
         assert t.reading >= 25.0
+
+class TestOwnHistoryPercentile:
+    def test_deterioration_to_new_extreme_reads_high(self):
+        # net_debt_to_ebitda: higher = worse; current 8.0 is the worst ever.
+        blocks = [_block("Balance Sheet Stress", {"net_debt_to_ebitda": 50.0})]
+        history = {"net_debt_to_ebitda": _hist("net_debt_to_ebitda", [1.0, 1.2, 1.1, 1.3, 1.0, 8.0])}
+        t = compute_thermometer(blocks, HEALTHY, history)
+        cluster = next(c for c in t.clusters if c.name == "Leverage & Coverage")
+        assert cluster.concern > 80  # near the top of its own history
+
+    def test_stable_level_reads_near_median_not_false_high(self):
+        # current_ratio: lower = worse. Absolute anchor says 85 (false high) for a
+        # structurally-low-but-stable ~0.5; own history neutralizes that to ~median.
+        blocks = [_block("Balance Sheet Stress", {"current_ratio": 85.0})]
+        history = {"current_ratio": _hist("current_ratio", [0.52, 0.50, 0.51, 0.49, 0.50, 0.50])}
+        t = compute_thermometer(blocks, HEALTHY, history)
+        cluster = next(c for c in t.clusters if c.name == "Liquidity")
+        assert 40 <= cluster.concern <= 60
+
+    def test_short_history_falls_back_to_anchor(self):
+        # Below MIN_HISTORY_FOR_PERCENTILE the anchor concern is used.
+        blocks = [_block("Balance Sheet Stress", {"current_ratio": 85.0})]
+        history = {"current_ratio": _hist("current_ratio", [0.5, 0.5])}  # only 2 obs
+        t = compute_thermometer(blocks, HEALTHY, history)
+        cluster = next(c for c in t.clusters if c.name == "Liquidity")
+        assert cluster.concern == 85.0
 
     def test_reading_capped_at_100(self):
         blocks = [_block("Balance Sheet Stress", {"net_debt_to_ebitda": 95.0})]
