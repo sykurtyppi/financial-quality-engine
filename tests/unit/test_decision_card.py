@@ -2,7 +2,7 @@
 tiered flags and carries NO composite grade (§7)."""
 
 from app.schemas.financials import CompanyProfile
-from app.schemas.report import AnalysisResult, Flag
+from app.schemas.report import AnalysisResult, Flag, NarrativeFinding
 from app.services.reporting.decision_card import render_decision_card
 from app.services.scoring.thermometer import ClusterReadout, DistressThermometer, RegimeFlag
 
@@ -63,6 +63,26 @@ class TestCard:
         assert "Auditor non-reliance" in t1
         assert "Elevated leverage" in t2
         assert "Recurring adjustment language" in t3
+
+    def test_tier1_events_and_high_severity_populate_tier1(self):
+        result = _result(
+            narrative_findings=[
+                NarrativeFinding(
+                    kind="high_severity_disclosure",
+                    detail="going concern language emerged",
+                    fiscal_label="FY2025Q4",
+                )
+            ]
+        )
+        card = render_decision_card(
+            result,
+            _thermo(50.0),
+            generated_on="2026-08-09",
+            tier1_events=["8-K Item 4.02 non-reliance (restatement announced) filed 2026-06-01"],
+        )
+        t1 = card.split("Tier 1")[1].split("Tier 2")[0]
+        assert "8-K Item 4.02 non-reliance" in t1
+        assert "High-severity disclosure emergence" in t1
 
     def test_empty_state_is_graceful(self):
         card = render_decision_card(_result(), _thermo(None), generated_on="2026-08-09")

@@ -88,9 +88,16 @@ def render_decision_card(
     generated_on: str,
     coverage: float | None = None,
     event_lines: list[str] | None = None,
+    tier1_events: list[str] | None = None,
 ) -> str:
-    """Render the 90-second card. `event_lines` carries already-formatted
-    evidence from the capital-markets / restatement streams when available."""
+    """Render the 90-second card.
+
+    `tier1_events` carries validated event-stream items (8-K Item 4.02
+    non-reliance, restatement footprints) that render in Tier-1; high-severity
+    disclosure emergence is pulled from the narrative findings automatically.
+    `event_lines` carries capital-markets context (offerings) for the events
+    section.
+    """
     ticker = result.profile.ticker
     out: list[str] = [
         f"# Decision Card — {ticker}",
@@ -114,9 +121,13 @@ def render_decision_card(
 
     # 3. Attention flags — tiered
     out += ["## Attention flags", ""]
-    by_tier: dict[int, list[Flag]] = {1: [], 2: [], 3: []}
+    tier_items: dict[int, list[str]] = {1: list(tier1_events or []), 2: [], 3: []}
+    # High-severity disclosure emergence is a validated Tier-1 signal (§7).
+    for finding in result.narrative_findings:
+        if getattr(finding, "kind", "") == "high_severity_disclosure":
+            tier_items[1].append(f"High-severity disclosure emergence ({finding.fiscal_label})")
     for f in result.red_flags:
-        by_tier[_tier(f)].append(f)
+        tier_items[_tier(f)].append(f"{f.title} ({f.fiscal_label})")
     tier_titles = {
         1: "Tier 1 — validated (low false-positive)",
         2: "Tier 2 — directional (review in context)",
@@ -124,11 +135,8 @@ def render_decision_card(
     }
     for tier in (1, 2, 3):
         out.append(f"**{tier_titles[tier]}:**")
-        flags = by_tier[tier]
-        if flags:
-            out += [f"- {f.title} ({f.fiscal_label})" for f in flags]
-        else:
-            out.append("- none surfaced this run")
+        items = tier_items[tier]
+        out += [f"- {item}" for item in items] if items else ["- none surfaced this run"]
         out.append("")
 
     # 4. Events & capital markets

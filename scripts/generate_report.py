@@ -118,6 +118,24 @@ def main() -> int:
         fetched_at, args.fresh, diag.coverage(), diag.warnings, doc_diagnostics, offerings_error
     ) + "\n"
 
+    # Tier-1 validated events for the card: 8-K Item 4.02 non-reliance
+    # (restatement announcement) in the trailing two years.
+    tier1_events: list[str] = []
+    try:
+        from app.services.backtesting.events import fetch_entity_events
+
+        events = fetch_entity_events(client, ticker)
+        cutoff = date(date.today().year - 2, date.today().month, min(date.today().day, 28))
+        for d in sorted(events.non_reliance_8k_dates):
+            if d >= cutoff:
+                tier1_events.append(
+                    f"8-K Item 4.02 non-reliance (restatement announced) filed {d}"
+                )
+        if tier1_events:
+            print(f"events: {len(tier1_events)} non-reliance 8-K(s) in trailing 2y")
+    except Exception as e:  # noqa: BLE001 - card must never break on the event stream
+        print(f"event stream failed: {e}")
+
     # P1-D: the 90-second decision card leads (thermometer + tiered flags, no
     # composite grade). The full report follows as an appendix. The thermometer
     # is the kill-gate-passing config (block-score clusters + regime dummies).
@@ -125,6 +143,7 @@ def main() -> int:
     card = render_decision_card(
         result, thermometer, generated_on=generated_on,
         coverage=diag.coverage(), event_lines=event_lines or None,
+        tier1_events=tier1_events or None,
     )
     report = card + "\n\n---\n\n# Full report (appendix)\n\n" + body
 
