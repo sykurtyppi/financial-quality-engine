@@ -88,7 +88,8 @@ def main() -> int:
             print(f"document diagnostics: {len(doc_diagnostics)} (rendered in report appendix)")
 
     result = analyze(dataset)
-    report = render(result, generated_on=date.today().isoformat())
+    report_date = date.today()
+    report = render(result, generated_on=report_date.isoformat())
 
     # Capital-markets activity: evidence appendix, never a score input
     # (docs/accuracy_improvement_plan.md B1). A failure is rendered in the
@@ -97,7 +98,9 @@ def main() -> int:
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
 
-        timeline = fetch_offerings(client, ticker)
+        # as_of anchors the offerings window to the report's date (P0-12): a
+        # report dated today must not surface a filing that post-dates it.
+        timeline = fetch_offerings(client, ticker, as_of=report_date)
         report += "\n\n" + render_offerings_section(timeline) + "\n"
         if timeline.takedown_count:
             print(f"offerings: {timeline.takedown_count} takedown(s) in last "
@@ -112,7 +115,7 @@ def main() -> int:
 
     out_dir = ROOT / "reports"
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / f"{ticker}_{date.today().isoformat()}.md"
+    out = out_dir / f"{ticker}_{report_date.isoformat()}.md"
     out.write_text(report)
     overall = result.overall.score if result.overall else None
     print(f"overall: {overall} -> {out}")
