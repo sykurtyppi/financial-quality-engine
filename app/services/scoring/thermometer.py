@@ -42,22 +42,23 @@ healthy vs stressed cohorts):
   no anchor changes (composite/golden untouched). On hand-picked cohorts this
   looked strong (separation +15 vs +1, healthy ceiling 47 vs 73-90).
 
-- FORMAL kill-gate result (scripts/validate_thermometer.py, distressed-control
-  backtest: 95 stress_case vs 425 controls, threshold-free AUC):
-    composite                = 0.713
-    thermometer (clusters)   = 0.700   (ties — regime dummies excluded)
-    thermometer (+ regime)   = 0.856   (PASSES)
-  The regime dummies are the decisive lever: they fire on 71/95 stress cases
-  (75%) but only 26/425 controls (6%). This is the Ohlson insight measured — the
-  composite renormalizes NI<0/EBITDA<0 away (the P0-9 inversion), the thermometer
-  ADDS them, and that is exactly where the distress discrimination lives.
-
-=> On the distressed-control cohort the regime-inclusive thermometer clearly
-beats the composite (0.856 vs 0.713). The kill gate's quantitative half is
-PASSED. Still owed before the composite is retired from user surfaces: the
-season-archive ablation (would the 11 live cards have read differently) and the
-decision-card surface itself (P1-D). Cross-sectional peer percentiles (P2-E)
-remain a future precision upgrade; own-history percentiles stay available for it.
+STATUS: EXPERIMENTAL — NOT a validated replacement for the composite (review
+findings 1-3). scripts/validate_thermometer.py reports indicative, in-sample AUC
+on the distressed-control cohort (regime-inclusive: company-level 0.99 vs the
+composite's 0.95; company-quarter 0.856 vs 0.713). Every caveat matters:
+  - Tiny n: 6 stress companies (BYND, CVNA, LCID, PTON, SMCI, W) vs 25 controls.
+    The 95/425 "observations" are pseudo-replicated company-quarters; AUC on them
+    understates uncertainty, so company-level AUC is primary and at n=6 the gap
+    is within noise.
+  - In-sample and ex-post: the cohort is qualitative evidence ("not proof", per
+    universe.py), and the clustering/config were chosen after seeing the data.
+  - Not reproducible from a clean checkout: the regime dummies need the
+    git-ignored data/cache/*.json; only the cluster-only figure (which ties the
+    composite) is reproducible from the committed CSV.
+The regime dummies do carry the signal (Ohlson: the composite renormalizes
+NI<0/EBITDA<0 away — the P0-9 inversion — the thermometer ADDS them), but the
+above is NOT enough to retire the composite. It stays until out-of-sample and
+reference-class (P2-E) validation exist. Treat this module as experimental.
 
 Also not yet included: the equity<0 (OENEG) regime dummy needs a mapped
 stockholders-equity field the ingestion layer does not yet produce.
@@ -76,11 +77,17 @@ from app.schemas.scoring import BlockScore
 # rather than the absolute anchor. Below this a percentile is meaningless.
 MIN_HISTORY_FOR_PERCENTILE = 5
 
+# Minimum present members for a cluster to contribute (review finding 3). Under
+# max-across-clusters a lone available metric would otherwise become the whole
+# reading (e.g. current_ratio alone -> 90/100 at ~10% coverage). A cluster with
+# fewer than this many present members is treated as insufficient, not scored.
+MIN_CLUSTER_MEMBERS = 2
+
 THERMOMETER_HEURISTIC_CAVEAT = (
-    "Distress thermometer is a heuristic reading built from uncalibrated concern "
-    "anchors and regime dummies; it is not a calibrated probability of failure. "
-    "Percentile framing against own history and same-year peers is pending the "
-    "reference-class store."
+    "EXPERIMENTAL distress reading — not validated and not a calibrated "
+    "probability of failure. Built from uncalibrated concern anchors and regime "
+    "dummies; only tested in-sample on a tiny cohort. Reference-class percentile "
+    "framing (own-history and same-year peers) is pending."
 )
 
 # Correlated clusters for AOM aggregation. Two well-populated clusters, NOT one
@@ -239,8 +246,8 @@ def compute_thermometer(
     for name, members in DISTRESS_CLUSTERS.items():
         present = tuple(m for m in members if m in concern or (history is not None and m in history))
         inputs, _ = _cluster_inputs(members, concern, history, directions)
-        if not inputs:
-            continue
+        if len(inputs) < MIN_CLUSTER_MEMBERS:
+            continue  # a single available metric is not a reliable cluster
         mean = sum(inputs) / len(inputs)
         clusters.append(ClusterReadout(name=name, concern=round(mean, 1), members=present))
 
