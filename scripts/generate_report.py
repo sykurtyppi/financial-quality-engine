@@ -106,6 +106,27 @@ def main() -> int:
         offerings_error = str(e)
         print(f"offerings appendix failed: {e}")
 
+    # Prior-period restatements: evidence appendix, never a score input (P0-5).
+    # Scoped to recent periods so the live monitor surfaces revisions to the
+    # window it analyses, not decade-old reclassifications.
+    try:
+        from app.services.ingestion.restatements import (
+            detect_restatements,
+            render_restatements_section,
+        )
+
+        recent_cutoff = date(date.today().year - 3, 1, 1)
+        footprints = detect_restatements(
+            client.company_facts(ticker), period_since=recent_cutoff
+        )
+        report += "\n\n" + render_restatements_section(footprints) + "\n"
+        amended_n = sum(1 for f in footprints if f.is_amendment)
+        if footprints:
+            print(f"restatements: {len(footprints)} revised figure(s) since "
+                  f"{recent_cutoff}, {amended_n} via amended filings")
+    except Exception as e:  # noqa: BLE001 - appendix must never break the report
+        print(f"restatements appendix failed: {e}")
+
     report += "\n\n" + _data_quality_section(
         fetched_at, args.fresh, diag.coverage(), diag.warnings, doc_diagnostics, offerings_error
     ) + "\n"
