@@ -22,7 +22,9 @@ from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import fetch_dataset
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
+from app.services.reporting.decision_card import render_decision_card
 from app.services.reporting.markdown_report import render
+from app.services.scoring.thermometer import compute_thermometer
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -88,7 +90,9 @@ def main() -> int:
             print(f"document diagnostics: {len(doc_diagnostics)} (rendered in report appendix)")
 
     result = analyze(dataset)
-    report = render(result, generated_on=date.today().isoformat())
+    generated_on = date.today().isoformat()
+    body = render(result, generated_on=generated_on)
+    event_lines: list[str] = []
 
     # Capital-markets activity: evidence appendix, never a score input
     # (docs/accuracy_improvement_plan.md B1). A failure is rendered in the
@@ -98,24 +102,38 @@ def main() -> int:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
 
         timeline = fetch_offerings(client, ticker)
-        report += "\n\n" + render_offerings_section(timeline) + "\n"
+        body += "\n\n" + render_offerings_section(timeline) + "\n"
         if timeline.takedown_count:
+            event_lines.append(
+                f"{timeline.takedown_count} securities takedown(s) in the last "
+                f"{timeline.lookback_months} months (see Capital Markets Activity)"
+            )
             print(f"offerings: {timeline.takedown_count} takedown(s) in last "
                   f"{timeline.lookback_months} months")
     except Exception as e:  # noqa: BLE001 - appendix must never break the report
         offerings_error = str(e)
         print(f"offerings appendix failed: {e}")
 
-    report += "\n\n" + _data_quality_section(
+    body += "\n\n" + _data_quality_section(
         fetched_at, args.fresh, diag.coverage(), diag.warnings, doc_diagnostics, offerings_error
     ) + "\n"
 
+    # P1-D: the 90-second decision card leads (thermometer + tiered flags, no
+    # composite grade). The full report follows as an appendix. The thermometer
+    # is the kill-gate-passing config (block-score clusters + regime dummies).
+    thermometer = compute_thermometer(result.block_scores, dataset.periods)
+    card = render_decision_card(
+        result, thermometer, generated_on=generated_on,
+        coverage=diag.coverage(), event_lines=event_lines or None,
+    )
+    report = card + "\n\n---\n\n# Full report (appendix)\n\n" + body
+
     out_dir = ROOT / "reports"
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / f"{ticker}_{date.today().isoformat()}.md"
+    out = out_dir / f"{ticker}_{generated_on}.md"
     out.write_text(report)
-    overall = result.overall.score if result.overall else None
-    print(f"overall: {overall} -> {out}")
+    r = thermometer.reading
+    print(f"thermometer: {r:.0f}/100 -> {out}" if r is not None else f"thermometer: n/a -> {out}")
     return 0
 
 

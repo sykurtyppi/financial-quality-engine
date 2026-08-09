@@ -1,0 +1,154 @@
+"""90-second decision card (P1-D / TARGET_ARCHITECTURE §L11).
+
+The report surface used to lead with the 0-100 composite — the layer measured to
+carry near-zero decision value (season review finding 6). This card leads with
+the validated readouts instead and carries NO composite grade (§7): the distress
+thermometer, tiered attention flags, and the change summary. The full report
+follows as an appendix.
+
+Order (§L11): changes -> thermometer -> tiered flags -> events/capital-markets
+-> checked-and-clean -> data quality.
+
+Evidence for leading with the thermometer: distressed-control AUC 0.856 vs the
+composite's 0.713 (scripts/validate_thermometer.py) and the 2026Q2 season-archive
+ablation (docs/thermometer_season_ablation_2026Q2.md).
+"""
+
+from __future__ import annotations
+
+from app.schemas.report import AnalysisResult, Flag
+from app.services.scoring.thermometer import DistressThermometer
+
+# Tier-1: validated, low false-positive signals (§7). Mostly event/disclosure
+# streams that populate as they are wired (P0-5 restatement, P1-B 8-K events).
+TIER1_SIGNALS = frozenset(
+    {
+        "high_severity_disclosure",
+        "restatement_footprint",
+        "auditor_change_8k_402",
+        "non_reliance_8k_402",
+        "missed_deadline_nt",
+    }
+)
+# Tier-3: context only — uncalibrated or measured-noisy narrative signals.
+TIER3_SIGNALS = frozenset(
+    {
+        "adjustment_recurrence_ratio",
+        "recurring_adjustment_terms",
+        "defensive_tone_change",
+        "guidance_shift",
+        "disclosure_volume_change",
+        "kpi_removals",
+        "kpi_definition_change",
+    }
+)
+
+
+def _band(reading: float) -> str:
+    if reading >= 70:
+        return "elevated distress signals"
+    if reading >= 45:
+        return "some distress signals"
+    return "low distress signals"
+
+
+def _tier(flag: Flag) -> int:
+    metrics = set(flag.evidence_metrics)
+    if metrics & TIER1_SIGNALS:
+        return 1
+    if metrics and metrics <= TIER3_SIGNALS:
+        return 3
+    return 2
+
+
+def _thermometer_lines(t: DistressThermometer) -> list[str]:
+    lines = ["## Distress thermometer", ""]
+    if t.reading is None:
+        lines.append("- Not computable — insufficient distress-relevant data this run.")
+        return lines
+    lines.append(f"**{t.reading:.0f}/100 — {_band(t.reading)}.**")
+    if t.hottest_cluster is not None:
+        hot = t.hottest_cluster
+        lines.append(f"- Hottest cluster: {hot.name} ({hot.concern:.0f}/100).")
+    if t.regime_flags:
+        lines.append(
+            "- Regime signals: " + ", ".join(f.description for f in t.regime_flags) + "."
+        )
+    else:
+        lines.append("- Regime signals: none (no NI<0 / EBITDA<0 state).")
+    lines.append("")
+    lines.append(f"_{t.caveat}_")
+    return lines
+
+
+def render_decision_card(
+    result: AnalysisResult,
+    thermometer: DistressThermometer,
+    *,
+    generated_on: str,
+    coverage: float | None = None,
+    event_lines: list[str] | None = None,
+) -> str:
+    """Render the 90-second card. `event_lines` carries already-formatted
+    evidence from the capital-markets / restatement streams when available."""
+    ticker = result.profile.ticker
+    out: list[str] = [
+        f"# Decision Card — {ticker}",
+        "",
+        f"_As of {generated_on}. 90-second triage; full report follows as appendix. "
+        "No composite grade — see the thermometer and tiered flags below._",
+        "",
+    ]
+
+    # 1. Changes since last period
+    out += ["## Changes since last period", ""]
+    if result.changes:
+        out += [f"- {c}" for c in result.changes]
+    else:
+        out.append("- No material period-over-period changes surfaced.")
+    out.append("")
+
+    # 2. Distress thermometer
+    out += _thermometer_lines(thermometer)
+    out.append("")
+
+    # 3. Attention flags — tiered
+    out += ["## Attention flags", ""]
+    by_tier: dict[int, list[Flag]] = {1: [], 2: [], 3: []}
+    for f in result.red_flags:
+        by_tier[_tier(f)].append(f)
+    tier_titles = {
+        1: "Tier 1 — validated (low false-positive)",
+        2: "Tier 2 — directional (review in context)",
+        3: "Tier 3 — context",
+    }
+    for tier in (1, 2, 3):
+        out.append(f"**{tier_titles[tier]}:**")
+        flags = by_tier[tier]
+        if flags:
+            out += [f"- {f.title} ({f.fiscal_label})" for f in flags]
+        else:
+            out.append("- none surfaced this run")
+        out.append("")
+
+    # 4. Events & capital markets
+    out += ["## Events & capital markets", ""]
+    if event_lines:
+        out += [f"- {line}" for line in event_lines]
+    else:
+        out.append("- No event/capital-markets stream wired into this run.")
+    out.append("")
+
+    # 5. Checked and clean
+    out += ["## Checked and clean", ""]
+    if result.green_flags:
+        out += [f"- {f.title} ({f.fiscal_label})" for f in result.green_flags]
+    else:
+        out.append("- No supportive signals surfaced.")
+    out.append("")
+
+    # 6. Data quality
+    out += ["## Data quality", ""]
+    cov = f"{coverage:.0%}" if coverage is not None else "n/a"
+    out.append(f"- XBRL field coverage {cov}; as of {generated_on}.")
+    return "\n".join(out)
