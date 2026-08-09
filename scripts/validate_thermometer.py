@@ -112,36 +112,56 @@ def auc(positives: list[float], negatives: list[float]) -> float:
     return wins / (len(positives) * len(negatives))
 
 
+def _company_median(rows: list[dict], score_fn) -> list[float]:
+    """One value per COMPANY (median of its quarters) to avoid the pseudo-
+    replication that treating 95/425 company-quarters as independent creates."""
+    by_ticker: dict[str, list[float]] = {}
+    for r in rows:
+        v = score_fn(r)
+        if v is not None:
+            by_ticker.setdefault(r["ticker"], []).append(v)
+    out = []
+    for vals in by_ticker.values():
+        s = sorted(vals)
+        out.append(s[len(s) // 2])
+    return out
+
+
 def main() -> int:
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/backtest/backtest_results.csv")
     rows = [r for r in csv.DictReader(path.open()) if r["overall"] not in ("", "None")]
     stress = [r for r in rows if r["archetype"] == "stress_case"]
     control = [r for r in rows if r["archetype"].startswith("control_")]
     fin = _load_financials({r["ticker"] for r in stress + control})
+    reproducible = bool(fin)  # regime dummies need the git-ignored cache
 
-    comp = auc(
-        [float(r["overall"]) for r in stress],
-        [float(r["overall"]) for r in control],
-    )
-    cl = auc(
-        [b for r in stress if (b := cluster_base(r)) is not None],
-        [b for r in control if (b := cluster_base(r)) is not None],
-    )
-    th = auc(
-        [t for r in stress if (t := thermometer_from_row(r, fin)) is not None],
-        [t for r in control if (t := thermometer_from_row(r, fin)) is not None],
-    )
-    fired_s = sum(1 for r in stress if _regime_add(r, fin) > 0)
-    fired_c = sum(1 for r in control if _regime_add(r, fin) > 0)
+    n_s, n_c = len({r["ticker"] for r in stress}), len({r["ticker"] for r in control})
+    comp_row = lambda r: float(r["overall"])  # noqa: E731
+    th_row = lambda r: thermometer_from_row(r, fin)  # noqa: E731
 
-    print(f"cohort: {len(stress)} stress_case vs {len(control)} controls")
-    print(f"composite                 AUC = {comp:.3f}")
-    print(f"thermometer (clusters)    AUC = {cl:.3f}  (regime dummies excluded)")
-    print(f"thermometer (+ regime)    AUC = {th:.3f}")
-    print(f"regime dummies fired: {fired_s}/{len(stress)} stress, {fired_c}/{len(control)} control")
-    verdict = "PASSES" if th > comp + 0.02 else "TIE/FAIL"
-    print(f"kill gate ('discriminate better'): {verdict} -> "
-          f"{'thermometer justified over composite' if verdict == 'PASSES' else 'composite stays'}")
+    # Company-level (primary — honest n) and company-quarter (secondary).
+    comp_co = auc(_company_median(stress, comp_row), _company_median(control, comp_row))
+    th_co = auc(_company_median(stress, th_row), _company_median(control, th_row))
+    comp_q = auc([comp_row(r) for r in stress], [th for r in control if (th := comp_row(r)) is not None])
+    th_q = auc(
+        [t for r in stress if (t := th_row(r)) is not None],
+        [t for r in control if (t := th_row(r)) is not None],
+    )
+
+    print("=== EXPERIMENTAL — indicative only, NOT a formal validation ===")
+    print(f"cohort: {n_s} stress companies ({len(stress)} quarters) vs "
+          f"{n_c} control companies ({len(control)} quarters)")
+    print("company-quarters are pseudo-replicated (same firm, many quarters);")
+    print("AUC on them understates uncertainty. Company-level AUC is primary.\n")
+    print(f"composite   AUC: company-level {comp_co:.3f} | company-quarter {comp_q:.3f}")
+    print(f"thermometer AUC: company-level {th_co:.3f} | company-quarter {th_q:.3f}")
+    if not reproducible:
+        print("\nNOTE: regime dummies need data/cache/*.json (git-ignored, absent here),")
+        print("so the thermometer figures above are NOT reproducible from a clean checkout.")
+    print("\nCaveats: n=6 stress companies; in-sample; cohort is qualitative evidence")
+    print("(universe.py: 'not proof'); clustering/config chosen ex-post. This does NOT")
+    print("justify retiring the composite — treat the thermometer as experimental until")
+    print("out-of-sample and reference-class (P2-E) validation exist.")
     return 0
 
 
