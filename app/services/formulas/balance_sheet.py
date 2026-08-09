@@ -15,10 +15,21 @@ def net_debt_to_ebitda(cur: PeriodFinancials) -> MetricResult:
         "depreciation_amortization": cur.depreciation_amortization,
     }
 
+    def distress_guard() -> str | None:
+        ebitda = cur.ebit + cur.depreciation_amortization  # type: ignore[operator]
+        net_debt = cur.total_debt - cur.cash_and_equivalents  # type: ignore[operator]
+        if ebitda <= 0 and net_debt > 0:
+            # Negative EBITDA while carrying net debt: leverage cannot be
+            # covered by earnings at all — maximal leverage concern (P0-9).
+            return "Non-positive EBITDA with net debt: leverage uncoverable; maximum concern"
+        return None
+
     def guard() -> str | None:
         ebitda = cur.ebit + cur.depreciation_amortization  # type: ignore[operator]
         if ebitda <= 0:
-            return "Non-positive EBITDA: leverage multiple not meaningful; review debt level directly"
+            # Reaches here only with net cash: a temporary loss at a debt-free /
+            # net-cash balance sheet is genuinely not a leverage concern.
+            return "Non-positive EBITDA with net cash: leverage multiple not meaningful"
         return None
 
     return build_metric(
@@ -27,6 +38,7 @@ def net_debt_to_ebitda(cur: PeriodFinancials) -> MetricResult:
         cur.fiscal_label,
         inputs,
         guard=guard,
+        distress_guard=distress_guard,
         value_fn=lambda: (cur.total_debt - cur.cash_and_equivalents)  # type: ignore[operator]
         / (cur.ebit + cur.depreciation_amortization),  # type: ignore[operator]
     )

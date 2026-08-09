@@ -45,6 +45,15 @@ def cfo_to_net_income(cur: PeriodFinancials) -> MetricResult:
         formula="CFO / Net Income",
         fiscal_label=cur.fiscal_label,
         inputs=inputs,
+        # P0-9: a loss AND cash burn is unambiguous distress (max concern). A
+        # loss WITH positive operating cash flow is genuinely not an
+        # earnings-quality concern, so it stays a benign drop.
+        distress_guard=lambda: (
+            "Net loss with negative operating cash flow: cash and earnings both "
+            "negative; maximum concern"
+            if cur.net_income <= 0 and cur.cfo <= 0  # type: ignore[operator]
+            else None
+        ),
         guard=lambda: MIN_EARNINGS_BASE_NOTE if cur.net_income <= 0 else None,  # type: ignore[operator]
         value_fn=lambda: cur.cfo / cur.net_income,  # type: ignore[operator]
     )

@@ -16,6 +16,20 @@ def q(label: str = "Q4", **kw) -> PeriodFinancials:
     )
 
 
+class TestIssuancePressureDistress:
+    def test_negative_cfo_is_distress_signal(self):
+        # P0-9: negative CFO means the firm cannot self-fund; issuance
+        # dependence is total -> maximum concern, not a drop.
+        m = cs.issuance_pressure(q(share_issuance_proceeds=100.0, cfo=-10.0))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert m.distress_signal is True
+
+    def test_positive_cfo_computes_normally(self):
+        m = cs.issuance_pressure(q(share_issuance_proceeds=50.0, cfo=200.0))
+        assert m.status is MetricStatus.OK
+        assert m.value == pytest.approx(0.25)
+
+
 class TestSbc:
     def test_sbc_to_revenue(self):
         assert cs.sbc_to_revenue(q(stock_based_compensation=80.0, revenue=1000.0)).value == pytest.approx(0.08)

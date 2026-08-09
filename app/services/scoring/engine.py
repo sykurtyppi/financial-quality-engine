@@ -83,6 +83,30 @@ def score_block(
         weight_total += ms.weight
         m = metrics_by_name.get(ms.metric_name)
         anchors = _anchors_for(ms.metric_name, ms.anchors, sector)
+        if (
+            m is not None
+            and m.status is MetricStatus.NOT_MEANINGFUL
+            and m.distress_signal
+        ):
+            # P0-9: the ratio is undefined *because* the denominator signals
+            # distress. Score it at this metric's own maximum concern and keep
+            # its full weight — never let a distress state drop out and lift the
+            # block by renormalizing over less-alarming survivors.
+            concern = max(y for _, y in anchors)
+            weighted_sum += concern * ms.weight
+            weight_ok += ms.weight
+            components.append(
+                ComponentContribution(
+                    metric_name=ms.metric_name,
+                    metric_value=None,
+                    concern_score=round(concern, 1),
+                    weight=ms.weight,
+                    anchors=anchors,
+                    status=m.status.value,
+                    note=f"{m.note} [distress: scored at maximum concern, P0-9]",
+                )
+            )
+            continue
         if m is None or m.status is not MetricStatus.OK or m.value is None:
             components.append(
                 ComponentContribution(
@@ -134,12 +158,17 @@ def score_block(
     scored = [c for c in components if c.concern_score is not None]
     top = max(scored, key=lambda c: c.concern_score * c.weight)  # type: ignore[operator]
     low = min(scored, key=lambda c: c.concern_score * c.weight)  # type: ignore[operator]
+
+    def _value_str(c: ComponentContribution) -> str:
+        # Distress components (P0-9) carry a concern but no finite value.
+        return f"value {c.metric_value:.3g}, " if c.metric_value is not None else "distress, "
+
     rationale = (
         f"Score {score:.0f}/100 from {n_ok} metrics ({coverage:.0%} weight coverage). "
         f"Largest concern contributor: {top.metric_name} "
-        f"(value {top.metric_value:.3g}, concern {top.concern_score:.0f}). "
+        f"({_value_str(top)}concern {top.concern_score:.0f}). "
         f"Most supportive: {low.metric_name} "
-        f"(value {low.metric_value:.3g}, concern {low.concern_score:.0f})."
+        f"({_value_str(low)}concern {low.concern_score:.0f})."
     )
     return BlockScore(
         name=spec.name,

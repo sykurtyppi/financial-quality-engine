@@ -90,8 +90,11 @@ def issuance_pressure(cur: PeriodFinancials) -> MetricResult:
         "Issuance Proceeds / CFO",
         cur.fiscal_label,
         inputs,
-        guard=lambda: (
-            "Non-positive CFO: issuance dependence is total, ratio not meaningful"
+        # P0-9: negative operating cash flow means the company cannot self-fund;
+        # any equity issuance is total external dependence — maximum concern,
+        # not a metric to drop.
+        distress_guard=lambda: (
+            "Non-positive CFO: issuance dependence is total; maximum concern"
             if cur.cfo <= 0  # type: ignore[operator]
             else None
         ),

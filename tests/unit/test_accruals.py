@@ -22,6 +22,21 @@ def make_period(**overrides) -> PeriodFinancials:
     return PeriodFinancials(**base)
 
 
+class TestCfoToNetIncomeDistress:
+    def test_loss_with_cash_burn_is_distress_signal(self):
+        # P0-9: NI<=0 AND CFO<=0 is unambiguous distress, not a metric to drop.
+        m = accruals.cfo_to_net_income(make_period(net_income=-50.0, cfo=-20.0))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert m.distress_signal is True
+
+    def test_loss_with_positive_cash_is_benign_drop(self):
+        # A GAAP loss but positive operating cash flow is not an
+        # earnings-quality red flag; stays a benign drop (no false positive).
+        m = accruals.cfo_to_net_income(make_period(net_income=-50.0, cfo=80.0))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert m.distress_signal is False
+
+
 class TestTotalAccruals:
     def test_computes_expected_value(self):
         cur = make_period(net_income=100.0, cfo=80.0, total_assets=2100.0)
