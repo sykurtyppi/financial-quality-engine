@@ -144,12 +144,26 @@ def detect_restatements(
                 if period_since is not None and end < period_since:
                     continue
                 filings.sort(key=lambda f: f[0])  # earliest filed first
-                orig, rest = filings[0], filings[-1]
-                if orig[1] == rest[1]:
-                    continue  # re-reported unchanged
-                pct = None if orig[1] == 0 else abs(rest[1] - orig[1]) / abs(orig[1])
-                if pct is not None and pct < materiality_pct:
+                orig = filings[0]
+
+                # Review finding 7: do NOT collapse the chain to earliest-vs-
+                # latest. Walk every later filing, keep those that materially
+                # deviate from the originally reported value, and pick the one
+                # that INTRODUCED the largest revision — preferring an amendment
+                # (/A) when present. This surfaces a reverted revision (A->B->A)
+                # and correctly labels a mid-chain amendment.
+                def _pct(v: float) -> float | None:
+                    return None if orig[1] == 0 else abs(v - orig[1]) / abs(orig[1])
+
+                material = [
+                    f
+                    for f in filings[1:]
+                    if f[1] != orig[1] and ((p := _pct(f[1])) is None or p >= materiality_pct)
+                ]
+                if not material:
                     continue
+                amendments = [f for f in material if f[2].endswith("/A")]
+                rest = max(amendments or material, key=lambda f: abs(f[1] - orig[1]))
                 seen.add((qualified_tag, start, end))
                 footprints.append(
                     RestatementFootprint(

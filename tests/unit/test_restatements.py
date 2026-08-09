@@ -119,6 +119,36 @@ class TestDetection:
         assert recent[0].period_end == date(2024, 12, 31)
 
 
+class TestFilingTrail:
+    def test_amendment_in_middle_labeled_amendment(self):
+        # Review finding 7: 10-K -> 10-K/A (restates) -> 10-K (reverts). The
+        # amendment must be surfaced and labeled, not collapsed to earliest-vs-latest.
+        fj = _facts({"Assets": [
+            _fact("2024-12-31", 1000.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 1200.0, "2025-05-01", "10-K/A", accn="B"),
+            _fact("2024-12-31", 1000.0, "2025-08-01", "10-K", accn="C"),
+        ]})
+        fps = detect_restatements(fj)
+        assert len(fps) == 1
+        assert fps[0].is_amendment is True
+        assert fps[0].restated_form == "10-K/A"
+        assert fps[0].restated_value == 1200.0
+        assert fps[0].restated_accession == "B"
+
+    def test_reverted_revision_still_surfaces(self):
+        # A -> B -> A via regular filings: the revision happened; it must not
+        # vanish just because the latest value equals the original.
+        fj = _facts({"Assets": [
+            _fact("2024-12-31", 1000.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 1300.0, "2025-05-01", "10-Q", accn="B"),
+            _fact("2024-12-31", 1000.0, "2025-08-01", "10-Q", accn="C"),
+        ]})
+        fps = detect_restatements(fj)
+        assert len(fps) == 1
+        assert fps[0].restated_value == 1300.0
+        assert fps[0].restated_accession == "B"
+
+
 class TestRender:
     def test_render_section(self):
         fj = _facts({"Assets": [

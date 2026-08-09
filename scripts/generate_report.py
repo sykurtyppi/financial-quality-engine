@@ -34,6 +34,7 @@ def _data_quality_section(
     warnings: list[str],
     doc_diagnostics: list[str],
     offerings_error: str | None,
+    restatements_error: str | None = None,
 ) -> str:
     """P0-D: acquisition quality belongs in the artifact, not stdout. A fetch
     failure must be distinguishable from 'the filer didn't disclose'."""
@@ -52,6 +53,11 @@ def _data_quality_section(
         lines.append(
             f"- **Capital-markets appendix UNAVAILABLE** (fetch/parse failed: {offerings_error}). "
             "Absence of the offerings section is a data gap, not evidence of no activity."
+        )
+    if restatements_error is not None:
+        lines.append(
+            f"- **Restatement appendix UNAVAILABLE** (detection failed: {restatements_error}). "
+            "Absence of the restatement section is a data gap, not evidence of no revisions."
         )
     return "\n".join(lines)
 
@@ -109,6 +115,7 @@ def main() -> int:
     # Prior-period restatements: evidence appendix, never a score input (P0-5).
     # Scoped to recent periods so the live monitor surfaces revisions to the
     # window it analyses, not decade-old reclassifications.
+    restatements_error: str | None = None
     try:
         from app.services.ingestion.restatements import (
             detect_restatements,
@@ -125,10 +132,15 @@ def main() -> int:
             print(f"restatements: {len(footprints)} revised figure(s) since "
                   f"{recent_cutoff}, {amended_n} via amended filings")
     except Exception as e:  # noqa: BLE001 - appendix must never break the report
+        # Review finding 8: a detection failure must be visible in the report,
+        # not just stdout — readers cannot otherwise tell "no revisions" from
+        # "detector failed".
+        restatements_error = str(e)
         print(f"restatements appendix failed: {e}")
 
     report += "\n\n" + _data_quality_section(
-        fetched_at, args.fresh, diag.coverage(), diag.warnings, doc_diagnostics, offerings_error
+        fetched_at, args.fresh, diag.coverage(), diag.warnings, doc_diagnostics,
+        offerings_error, restatements_error,
     ) + "\n"
 
     out_dir = ROOT / "reports"
