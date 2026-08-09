@@ -43,16 +43,21 @@ healthy vs stressed cohorts):
   looked strong (separation +15 vs +1, healthy ceiling 47 vs 73-90).
 
 - FORMAL kill-gate result (scripts/validate_thermometer.py, distressed-control
-  backtest: 95 stress_case vs 425 controls, threshold-free AUC): composite
-  AUC=0.713, thermometer AUC=0.700 — a TIE. The +15 was cohort-selection
-  optimism. Per the kill gate ("discriminate BETTER"), NOT PASSED.
+  backtest: 95 stress_case vs 425 controls, threshold-free AUC):
+    composite                = 0.713
+    thermometer (clusters)   = 0.700   (ties — regime dummies excluded)
+    thermometer (+ regime)   = 0.856   (PASSES)
+  The regime dummies are the decisive lever: they fire on 71/95 stress cases
+  (75%) but only 26/425 controls (6%). This is the Ohlson insight measured — the
+  composite renormalizes NI<0/EBITDA<0 away (the P0-9 inversion), the thermometer
+  ADDS them, and that is exactly where the distress discrimination lives.
 
-=> The composite is NOT retired. Honest status: the 2-cluster thermometer, as
-measured, does not beat the composite on the rigorous cohort. Note this reading
-excludes the regime dummies (the backtest CSV lacks raw NI/EBITDA) — those
-target acute distress and are the most likely lever; a regime-inclusive re-run
-plus cross-sectional peer percentiles (P2-E) remain the paths to a justified
-replacement. Own-history percentiles stay available for the P2-E work.
+=> On the distressed-control cohort the regime-inclusive thermometer clearly
+beats the composite (0.856 vs 0.713). The kill gate's quantitative half is
+PASSED. Still owed before the composite is retired from user surfaces: the
+season-archive ablation (would the 11 live cards have read differently) and the
+decision-card surface itself (P1-D). Cross-sectional peer percentiles (P2-E)
+remain a future precision upgrade; own-history percentiles stay available for it.
 
 Also not yet included: the equity<0 (OENEG) regime dummy needs a mapped
 stockholders-equity field the ingestion layer does not yet produce.

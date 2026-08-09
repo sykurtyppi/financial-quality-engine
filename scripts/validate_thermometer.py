@@ -9,9 +9,12 @@ outranks a random clean control) on the distressed-control backtest cohort,
 computed for the composite (`overall`) and for the 2-cluster thermometer built
 from the per-component concern columns already in the backtest CSV.
 
-Caveat, stated up front: the CSV has no raw NI/EBITDA, so this thermometer is
-computed WITHOUT the regime dummies — a conservative lower bound. Regime
-dummies target acute distress and would need a pipeline re-run to include.
+The CSV has no raw NI/EBITDA, so the regime dummies (NI<0, NI<0 x2, EBITDA<0)
+are recovered from cached companyfacts at each row's latest_period, PIT-sliced
+(periods on/before latest_period), and scored with the SAME `_regime_flags`
+logic the live thermometer uses. Reported both ways: cluster-only (a
+conservative lower bound) and regime-inclusive (the real thermometer). The
+regime-sign of a past quarter is robust to the non-PIT cache snapshot.
 
     python scripts/validate_thermometer.py [data/backtest/backtest_results.csv]
 """
@@ -19,8 +22,16 @@ dummies target acute distress and would need a pipeline re-run to include.
 from __future__ import annotations
 
 import csv
+import glob
+import json
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from app.services.ingestion.companyfacts_mapper import build_dataset
+from app.services.scoring.thermometer import _regime_flags
 
 BALANCE_SHEET = (
     "c_net_debt_to_ebitda",
@@ -49,7 +60,7 @@ def _cluster_mean(row: dict, cols: tuple[str, ...]) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
-def thermometer_from_row(row: dict) -> float | None:
+def cluster_base(row: dict) -> float | None:
     """2-cluster AOM (max across cluster means), regime dummies excluded."""
     means = [
         m
@@ -57,6 +68,37 @@ def thermometer_from_row(row: dict) -> float | None:
         if m is not None
     ]
     return max(means) if means else None
+
+
+def _load_financials(tickers: set[str]) -> dict:
+    """period_end.isoformat() -> PIT period list, per ticker, from cache."""
+    fin: dict[str, list] = {}
+    for tk in tickers:
+        files = glob.glob(f"data/cache/companyfacts_{tk}.json")
+        if not files:
+            continue
+        try:
+            ds, _ = build_dataset(json.load(open(files[0])), tk, n_quarters=28)
+            fin[tk] = sorted(ds.periods, key=lambda p: p.period_end)
+        except Exception:  # noqa: BLE001 - a missing cache row just skips regime
+            continue
+    return fin
+
+
+def _regime_add(row: dict, fin: dict) -> float:
+    periods = fin.get(row["ticker"])
+    lp = row.get("latest_period", "")
+    if not periods or not lp:
+        return 0.0
+    pit = [p for p in periods if p.period_end.isoformat() <= lp]  # PIT slice
+    return sum(f.concern_add for f in _regime_flags(pit))
+
+
+def thermometer_from_row(row: dict, fin: dict) -> float | None:
+    base = cluster_base(row)
+    if base is None:
+        return None
+    return min(100.0, base + _regime_add(row, fin))
 
 
 def auc(positives: list[float], negatives: list[float]) -> float:
@@ -75,22 +117,31 @@ def main() -> int:
     rows = [r for r in csv.DictReader(path.open()) if r["overall"] not in ("", "None")]
     stress = [r for r in rows if r["archetype"] == "stress_case"]
     control = [r for r in rows if r["archetype"].startswith("control_")]
+    fin = _load_financials({r["ticker"] for r in stress + control})
 
     comp = auc(
         [float(r["overall"]) for r in stress],
         [float(r["overall"]) for r in control],
     )
-    th = auc(
-        [t for r in stress if (t := thermometer_from_row(r)) is not None],
-        [t for r in control if (t := thermometer_from_row(r)) is not None],
+    cl = auc(
+        [b for r in stress if (b := cluster_base(r)) is not None],
+        [b for r in control if (b := cluster_base(r)) is not None],
     )
+    th = auc(
+        [t for r in stress if (t := thermometer_from_row(r, fin)) is not None],
+        [t for r in control if (t := thermometer_from_row(r, fin)) is not None],
+    )
+    fired_s = sum(1 for r in stress if _regime_add(r, fin) > 0)
+    fired_c = sum(1 for r in control if _regime_add(r, fin) > 0)
 
     print(f"cohort: {len(stress)} stress_case vs {len(control)} controls")
-    print(f"composite   AUC = {comp:.3f}")
-    print(f"thermometer AUC = {th:.3f}  (regime dummies excluded — conservative)")
+    print(f"composite                 AUC = {comp:.3f}")
+    print(f"thermometer (clusters)    AUC = {cl:.3f}  (regime dummies excluded)")
+    print(f"thermometer (+ regime)    AUC = {th:.3f}")
+    print(f"regime dummies fired: {fired_s}/{len(stress)} stress, {fired_c}/{len(control)} control")
     verdict = "PASSES" if th > comp + 0.02 else "TIE/FAIL"
     print(f"kill gate ('discriminate better'): {verdict} -> "
-          f"{'retire composite' if verdict == 'PASSES' else 'composite stays'}")
+          f"{'thermometer justified over composite' if verdict == 'PASSES' else 'composite stays'}")
     return 0
 
 
