@@ -497,9 +497,23 @@ def _total_debt_series(
 
     total, total_tag = series(DEBT_TOTAL)
     if total:
-        out = {q: total[q] + short.get(q, 0.0) for q in total}
+        # Review finding 6: finance leases must be added on the fallback path too.
+        # us-gaap:LongTermDebt is not one of the lease-inclusive tags, so add
+        # them (with the standard caveat that the total tag can, for some filers,
+        # already embed capital leases).
+        used_parts = [total_tag, short_tag or "none"]
+        out = {
+            q: total[q] + short.get(q, 0.0) + fin_nc.get(q, 0.0) + fin_c.get(q, 0.0)
+            for q in total
+        }
         notes.append("Used LongTermDebt total (current/noncurrent split unavailable).")
-        return out, f"{total_tag}+{short_tag or 'none'}", notes
+        if fin_nc or fin_c:
+            notes.append(
+                "Finance-lease liabilities added to total debt; operating leases excluded "
+                "(the LongTermDebt total may, for some filers, already embed capital leases)."
+            )
+            used_parts += [t for t in (fin_nc_tag if fin_nc else None, fin_c_tag if fin_c else None) if t]
+        return out, "+".join(used_parts), notes
 
     return {}, None, ["No debt concepts found; company may be debt-free or use custom tags."]
 

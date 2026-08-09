@@ -29,6 +29,17 @@ class TestIssuancePressureDistress:
         assert m.status is MetricStatus.OK
         assert m.value == pytest.approx(0.25)
 
+    def test_zero_issuance_negative_cfo_is_not_distress(self):
+        # Review finding 5: negative CFO with NO issuance is not "issuance
+        # dependence" — the corroborating condition (material issuance) is absent.
+        m = cs.issuance_pressure(q(share_issuance_proceeds=0.0, cfo=-10.0))
+        assert m.distress_signal is False
+
+    def test_material_issuance_negative_cfo_is_distress(self):
+        m = cs.issuance_pressure(q(share_issuance_proceeds=100.0, cfo=-10.0))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert m.distress_signal is True
+
 
 class TestSbc:
     def test_sbc_to_revenue(self):

@@ -196,6 +196,20 @@ class TestDebtComposition:
         assert all(p.total_debt == 980.0 for p in ds.periods)  # 800+100+60+20
         assert any("inance-lease" in n for n in diag.field_by_name("total_debt").notes)
 
+    def test_finance_leases_added_on_longtermdebt_fallback(self):
+        # Review finding 6: when only the LongTermDebt total is available (no
+        # split), finance leases must still be added.
+        fj = facts_json({
+            "Assets": assets_instants(),
+            "Revenues": quarterly_flows([100.0] * 8),
+            "LongTermDebt": [fact(None, e, 900.0) for e in Q_ENDS],
+            "FinanceLeaseLiabilityNoncurrent": [fact(None, e, 60.0) for e in Q_ENDS],
+            "FinanceLeaseLiabilityCurrent": [fact(None, e, 20.0) for e in Q_ENDS],
+        })
+        ds, diag = build_dataset(fj, "SYN", n_quarters=8)
+        assert all(p.total_debt == 980.0 for p in ds.periods)  # 900 + 60 + 20
+        assert any("inance-lease" in n for n in diag.field_by_name("total_debt").notes)
+
     def test_finance_leases_not_double_counted_when_debt_tag_is_lease_inclusive(self):
         """When the chosen debt tag already embeds capital-lease obligations
         (LongTermDebtAndCapitalLeaseObligations), the separately reported
