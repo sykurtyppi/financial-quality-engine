@@ -61,10 +61,10 @@ def render(result: AnalysisResult, generated_on: str) -> str:
     overall = result.overall
     add(
         "No single composite grade is asserted — the 0–100 composite measured "
-        "non-discriminating and is retired per the target architecture. The "
-        "aggregate distress reading (the distress thermometer) and the 90-second "
-        "triage live on the decision card; this report is the evidence detail "
-        "behind it, dimension by dimension."
+        "non-discriminating on the live season and is retired from the headline. "
+        "This report is evidence detail, dimension by dimension. An EXPERIMENTAL "
+        "distress reading (not yet validated) appears on the decision card; it is "
+        "not a replacement aggregate."
     )
     add("")
     add(

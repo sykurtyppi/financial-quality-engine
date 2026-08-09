@@ -4,7 +4,7 @@
 
 ## 1. Executive Summary
 
-No single composite grade is asserted — the 0–100 composite measured non-discriminating and is retired per the target architecture. The aggregate distress reading (the distress thermometer) and the 90-second triage live on the decision card; this report is the evidence detail behind it, dimension by dimension.
+No single composite grade is asserted — the 0–100 composite measured non-discriminating on the live season and is retired from the headline. This report is evidence detail, dimension by dimension. An EXPERIMENTAL distress reading (not yet validated) appears on the decision card; it is not a replacement aggregate.
 
 The screen flagged 7 elevated-concern item(s) and 2 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
 

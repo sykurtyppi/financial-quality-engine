@@ -44,14 +44,6 @@ TIER3_SIGNALS = frozenset(
 )
 
 
-def _band(reading: float) -> str:
-    if reading >= 70:
-        return "elevated distress signals"
-    if reading >= 45:
-        return "some distress signals"
-    return "low distress signals"
-
-
 def _tier(flag: Flag) -> int:
     metrics = set(flag.evidence_metrics)
     if metrics & TIER1_SIGNALS:
@@ -62,20 +54,25 @@ def _tier(flag: Flag) -> int:
 
 
 def _thermometer_lines(t: DistressThermometer) -> list[str]:
-    lines = ["## Distress thermometer", ""]
+    """Descriptive, no 0-100 number and no band thresholds (review finding 4:
+    the thermometer is experimental and uncalibrated; unsupported 45/70 bands
+    and a raw score have no basis until reference-class framing exists). Surface
+    the concrete facts instead — the regime state and which dimension is most
+    elevated."""
+    lines = ["## Distress signals (experimental — descriptive, not a score)", ""]
     if t.reading is None:
-        lines.append("- Not computable — insufficient distress-relevant data this run.")
+        lines.append("- Insufficient distress-relevant data this run.")
         return lines
-    lines.append(f"**{t.reading:.0f}/100 — {_band(t.reading)}.**")
-    if t.hottest_cluster is not None:
-        hot = t.hottest_cluster
-        lines.append(f"- Hottest cluster: {hot.name} ({hot.concern:.0f}/100).")
     if t.regime_flags:
         lines.append(
-            "- Regime signals: " + ", ".join(f.description for f in t.regime_flags) + "."
+            "- Regime signals present: "
+            + "; ".join(f.description for f in t.regime_flags)
+            + "."
         )
     else:
-        lines.append("- Regime signals: none (no NI<0 / EBITDA<0 state).")
+        lines.append("- No net-loss / negative-EBITDA regime signal this period.")
+    if t.hottest_cluster is not None:
+        lines.append(f"- Most-elevated dimension: {t.hottest_cluster.name}.")
     lines.append("")
     lines.append(f"_{t.caveat}_")
     return lines
@@ -103,7 +100,8 @@ def render_decision_card(
         f"# Decision Card — {ticker}",
         "",
         f"_As of {generated_on}. 90-second triage; full report follows as appendix. "
-        "No composite grade — see the thermometer and tiered flags below._",
+        "The distress signals below are experimental and descriptive, not a "
+        "calibrated score._",
         "",
     ]
 

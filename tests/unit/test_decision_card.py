@@ -42,11 +42,12 @@ class TestCard:
             result, _thermo(82.0, "Balance Sheet & Leverage"), generated_on="2026-08-09"
         )
         assert "Decision Card — TESTCO" in card
-        assert "82/100 — elevated distress signals" in card
-        assert "Balance Sheet & Leverage" in card
-        # No composite grade anywhere on the card.
-        assert "composite" not in card.lower() or "No composite grade" in card
-        assert "/100 — " in card  # thermometer present
+        # Review finding 4: NO raw 0-100 number and NO band thresholds on the card.
+        assert "/100" not in card
+        assert "82" not in card
+        assert "experimental" in card.lower()
+        # The concrete, descriptive facts are still surfaced.
+        assert "Most-elevated dimension: Balance Sheet & Leverage" in card
 
     def test_flags_are_tiered(self):
         result = _result(
@@ -87,7 +88,7 @@ class TestCard:
     def test_empty_state_is_graceful(self):
         card = render_decision_card(_result(), _thermo(None), generated_on="2026-08-09")
         assert "No material period-over-period changes surfaced." in card
-        assert "Not computable" in card
+        assert "Insufficient distress-relevant data" in card
         assert "none surfaced this run" in card
 
     def test_regime_and_events_rendered(self):
