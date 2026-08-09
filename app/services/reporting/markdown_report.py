@@ -35,21 +35,6 @@ def _fmt(value: float | None, digits: int = 3) -> str:
     return f"{value:.{digits}g}"
 
 
-def _overall_assessment(result: AnalysisResult) -> str:
-    # Bands aligned with the empirical score distribution (v0.3 calibration:
-    # p50 ~ 32, p90 ~ 45, observed max ~ 67).
-    if result.overall is None or result.overall.score is None:
-        return "insufficient data for an overall assessment"
-    s = result.overall.score
-    if s < 32:
-        return "no elevated earnings-quality concerns identified by the screen"
-    if s <= 45:
-        return "mixed profile; selected items warrant analyst review"
-    if s <= 55:
-        return "elevated earnings-quality risk indicators; analyst review recommended"
-    return "multiple elevated risk indicators; thorough analyst review recommended"
-
-
 def render(result: AnalysisResult, generated_on: str) -> str:
     p = result.profile
     lines: list[str] = []
@@ -74,16 +59,13 @@ def render(result: AnalysisResult, generated_on: str) -> str:
     add("## 1. Executive Summary")
     add("")
     overall = result.overall
-    if overall and overall.score is not None:
-        add(
-            f"Overall Quality Risk Score: **{overall.score:.0f}/100** "
-            f"({_DIRECTION_LABEL[overall.direction]}, confidence {overall.confidence.value}). "
-            f"Assessment: {_overall_assessment(result)}."
-        )
-        add("")
-        add(overall.rationale)
-    else:
-        add(f"Assessment: {_overall_assessment(result)}.")
+    add(
+        "No single composite grade is asserted — the 0–100 composite measured "
+        "non-discriminating and is retired per the target architecture. The "
+        "aggregate distress reading (the distress thermometer) and the 90-second "
+        "triage live on the decision card; this report is the evidence detail "
+        "behind it, dimension by dimension."
+    )
     add("")
     add(
         f"The screen flagged {len(result.red_flags)} elevated-concern item(s) and "
