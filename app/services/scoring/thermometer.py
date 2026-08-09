@@ -36,17 +36,23 @@ healthy vs stressed cohorts):
   cluster at its own recent extreme, which max amplifies, and a stably-
   distressed firm reads low because bad is normal for it. Absolute level needs
   cross-sectional peer percentiles — the L5 reference-class store (P2-E).
-- FIX (current design): two well-populated correlated clusters instead of one
-  per metric. current_ratio is averaged with leverage, so a staple's low-but-
-  normal ratio no longer becomes the headline. Anchor-based, no anchor changes
-  (composite/golden untouched). Measured separation +15.0 vs composite +1.0;
-  healthy ceiling 47 (was 73-90); genuinely distressed names read 55-77; it
-  even fires on FPS (36) where the composite read 0.
+- DESIGN CHANGE: two well-populated correlated clusters instead of one per
+  metric, so current_ratio is averaged with leverage and a staple's low-but-
+  normal ratio no longer becomes the max-across-clusters headline. Anchor-based,
+  no anchor changes (composite/golden untouched). On hand-picked cohorts this
+  looked strong (separation +15 vs +1, healthy ceiling 47 vs 73-90).
 
-The +15 vs +1 is a preliminary read over hand-picked cohorts. FORMAL kill-gate
-validation against the distressed-control backtest cohort is the next increment
-before the composite is retired from any surface. Own-history percentiles stay
-available (the same logic applies to peer distributions once P2-E exists).
+- FORMAL kill-gate result (scripts/validate_thermometer.py, distressed-control
+  backtest: 95 stress_case vs 425 controls, threshold-free AUC): composite
+  AUC=0.713, thermometer AUC=0.700 — a TIE. The +15 was cohort-selection
+  optimism. Per the kill gate ("discriminate BETTER"), NOT PASSED.
+
+=> The composite is NOT retired. Honest status: the 2-cluster thermometer, as
+measured, does not beat the composite on the rigorous cohort. Note this reading
+excludes the regime dummies (the backtest CSV lacks raw NI/EBITDA) — those
+target acute distress and are the most likely lever; a regime-inclusive re-run
+plus cross-sectional peer percentiles (P2-E) remain the paths to a justified
+replacement. Own-history percentiles stay available for the P2-E work.
 
 Also not yet included: the equity<0 (OENEG) regime dummy needs a mapped
 stockholders-equity field the ingestion layer does not yet produce.
