@@ -62,7 +62,7 @@ class TestAOMAggregation:
         ]
         t = compute_thermometer(blocks, HEALTHY)
         assert t.reading == 90.0  # max across clusters
-        assert t.hottest_cluster.name == "Leverage & Coverage"
+        assert t.hottest_cluster.name == "Balance Sheet & Leverage"
 
     def test_average_within_cluster(self):
         blocks = [_block("Cash Conversion", {"cfo_to_net_income": 80.0, "fcf_margin": 40.0})]
@@ -110,7 +110,7 @@ class TestOwnHistoryPercentile:
         blocks = [_block("Balance Sheet Stress", {"net_debt_to_ebitda": 50.0})]
         history = {"net_debt_to_ebitda": _hist("net_debt_to_ebitda", [1.0, 1.2, 1.1, 1.3, 1.0, 8.0])}
         t = compute_thermometer(blocks, HEALTHY, history)
-        cluster = next(c for c in t.clusters if c.name == "Leverage & Coverage")
+        cluster = next(c for c in t.clusters if c.name == "Balance Sheet & Leverage")
         assert cluster.concern > 80  # near the top of its own history
 
     def test_stable_level_reads_near_median_not_false_high(self):
@@ -119,7 +119,7 @@ class TestOwnHistoryPercentile:
         blocks = [_block("Balance Sheet Stress", {"current_ratio": 85.0})]
         history = {"current_ratio": _hist("current_ratio", [0.52, 0.50, 0.51, 0.49, 0.50, 0.50])}
         t = compute_thermometer(blocks, HEALTHY, history)
-        cluster = next(c for c in t.clusters if c.name == "Liquidity")
+        cluster = next(c for c in t.clusters if c.name == "Balance Sheet & Leverage")
         assert 40 <= cluster.concern <= 60
 
     def test_short_history_falls_back_to_anchor(self):
@@ -127,7 +127,7 @@ class TestOwnHistoryPercentile:
         blocks = [_block("Balance Sheet Stress", {"current_ratio": 85.0})]
         history = {"current_ratio": _hist("current_ratio", [0.5, 0.5])}  # only 2 obs
         t = compute_thermometer(blocks, HEALTHY, history)
-        cluster = next(c for c in t.clusters if c.name == "Liquidity")
+        cluster = next(c for c in t.clusters if c.name == "Balance Sheet & Leverage")
         assert cluster.concern == 85.0
 
     def test_reading_capped_at_100(self):

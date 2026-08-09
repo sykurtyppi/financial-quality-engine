@@ -23,30 +23,30 @@ eventual-failure capture at p90):
    missing data. This is the principled, thermometer-level form of the P0-9 fix:
    distress states raise the reading, they can never lower it.
 
-Own-history percentile framing (`history=` arg) is implemented: each ratio is
-ranked within the company's own history, oriented by the concern direction.
+Own-history percentile framing (`history=` arg) is also implemented but is NOT
+the default — see the finding below.
 
-EMPIRICAL FINDING (kill gate — recorded honestly, this is why the composite
-STAYS for now). Measured offline on real cached companyfacts, healthy vs
-stressed cohorts:
-- Anchor-based reading: separation +5.2 vs composite +1.8, BUT max-across-
-  clusters amplifies the single-metric Liquidity cluster (current_ratio), so
-  cash-efficient staples (PG 73) read falsely hot — an ABSOLUTE-level
-  miscalibration.
+EMPIRICAL FINDING (kill gate — measured offline on real cached companyfacts,
+healthy vs stressed cohorts):
+- Early 4-cluster anchor reading: separation +5.2 vs composite +1.8, but
+  max-across-clusters amplified the single-metric Liquidity cluster
+  (current_ratio), so cash-efficient staples (PG 73) read falsely hot.
 - Own-history-percentile reading: separation −7.0 (WORSE). Own history measures
-  DETERIORATION, not absolute level; with ~8 quarters, every company has some
+  DETERIORATION, not absolute level; with ~8 quarters every company has some
   cluster at its own recent extreme, which max amplifies, and a stably-
-  distressed firm reads low because bad is normal for it.
-Neither passes. The two failures are complementary and confirm §7's spec, which
-calls for own-history AND same-year percentiles: the cross-sectional (peer)
-percentile supplies the absolute level own-history lacks. That needs the L5
-reference-class store (roadmap P2-E), which does not exist yet.
+  distressed firm reads low because bad is normal for it. Absolute level needs
+  cross-sectional peer percentiles — the L5 reference-class store (P2-E).
+- FIX (current design): two well-populated correlated clusters instead of one
+  per metric. current_ratio is averaged with leverage, so a staple's low-but-
+  normal ratio no longer becomes the headline. Anchor-based, no anchor changes
+  (composite/golden untouched). Measured separation +15.0 vs composite +1.0;
+  healthy ceiling 47 (was 73-90); genuinely distressed names read 55-77; it
+  even fires on FPS (36) where the composite read 0.
 
-=> The distress thermometer is BLOCKED on P2-E. This module is the aggregation
-machinery (AOM + regime dummies + percentile framing), correct and reusable —
-the same `_own_history_concern` logic applies to peer distributions once P2-E
-supplies them. It is additive and wired into no surface; the composite is NOT
-removed until a reference-class-backed reading beats it on the kill test.
+The +15 vs +1 is a preliminary read over hand-picked cohorts. FORMAL kill-gate
+validation against the distressed-control backtest cohort is the next increment
+before the composite is retired from any surface. Own-history percentiles stay
+available (the same logic applies to peer distributions once P2-E exists).
 
 Also not yet included: the equity<0 (OENEG) regime dummy needs a mapped
 stockholders-equity field the ingestion layer does not yet produce.
@@ -72,19 +72,27 @@ THERMOMETER_HEURISTIC_CAVEAT = (
     "reference-class store."
 )
 
-# Correlated clusters for AOM aggregation. Membership is by metric name; metrics
-# absent from the scored output are simply skipped, so listing a not-yet-scored
-# candidate is harmless.
+# Correlated clusters for AOM aggregation. Two well-populated clusters, NOT one
+# per metric: under max-across-clusters a single-metric "cluster" becomes the
+# headline whenever that one metric is noisy or miscalibrated (an early split
+# let current_ratio make cash-efficient staples read falsely hot). Grouping
+# correlated balance-sheet signals so they average together neutralises that —
+# a staple's low-but-normal current ratio is averaged down by its healthy
+# leverage. Membership is by metric name; absent metrics are skipped.
 DISTRESS_CLUSTERS: dict[str, tuple[str, ...]] = {
-    "Leverage & Coverage": (
+    "Balance Sheet & Leverage": (
         "net_debt_to_ebitda",
         "interest_coverage",
+        "current_ratio",
         "debt_to_assets",
         "leverage_change",
     ),
-    "Liquidity": ("current_ratio",),
-    "Cash Generation": ("cfo_to_net_income", "fcf_margin", "fcf_margin_trend"),
-    "Capital Dependence": ("issuance_pressure",),
+    "Cash Generation & Funding": (
+        "cfo_to_net_income",
+        "fcf_margin",
+        "fcf_margin_trend",
+        "issuance_pressure",
+    ),
 }
 
 
