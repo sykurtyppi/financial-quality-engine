@@ -94,7 +94,9 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
     updated = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
-    store.save_v2(updated, path)
+    # allow_update=True: `reported` stamp is a legitimate in-place update.
+    # save_v2 verifies the BEFORE hash is unchanged, so nothing else can slip in.
+    store.save_v2(updated, path, allow_update=True)
     print(f"Report stamped at {updated.reported.isoformat()}.")
     print(f"overall: {overall} -> {out}")
     print(f"\nNow fill the AFTER block in {path} (impact + conviction_after).")
@@ -348,7 +350,9 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     updated = entry
     for r in terminal:
         updated = add_resolution(updated, r)
-    store.save_v2(updated, path)
+    # allow_update=True: writing resolutions is a legitimate in-place update
+    # (add_resolution preserves BEFORE, so the hash matches — save_v2 verifies).
+    store.save_v2(updated, path, allow_update=True)
     print(f"\ncommitted {len(terminal)} terminal resolution(s) to {path.name}"
           + (f"; left {len(pending)} pending for retry" if pending else ""))
     return 0
@@ -360,6 +364,10 @@ def _print_v2_section(v2: dict) -> None:
     if v2["lock_broken"]:
         print("  ⚠ some BEFORE blocks were edited after locking; run "
               "`journal.py verify TICKER` to identify")
+    if v2.get("parse_failed"):
+        pf = v2["parse_failed"]
+        print(f"  ⚠ {len(pf)} v2 file(s) failed to parse and were excluded: "
+              f"{', '.join(pf[:5])}{' …' if len(pf) > 5 else ''}")
     r = v2["resolutions"]
     print(f"  Resolutions: {r['met']} met  ·  {r['violated']} violated  ·  "
           f"{r['unresolvable']} unresolvable"

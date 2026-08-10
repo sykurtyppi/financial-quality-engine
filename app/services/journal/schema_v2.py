@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import date, datetime, timezone
 from typing import Literal
@@ -94,6 +95,12 @@ class Assumption(BaseModel):
         # empty string used to pass through, and `can_lock` never caught it.
         if isinstance(v, str) and not v.strip():
             raise ValueError("symbolic threshold must be non-blank")
+        # Round-12 finding 3: `float('inf')` and `float('nan')` used to pass
+        # through and serialize to `Infinity`/`NaN` — invalid per RFC 8259 and
+        # incoherent as a threshold (all NaN comparisons are False, so any
+        # `x cmp NaN` silently resolved `violated`).
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError(f"threshold must be a finite number (got {v!r})")
         return v
 
 
@@ -252,6 +259,32 @@ class EntryV2(BaseModel):
     @classmethod
     def _ticker_upper(cls, v: str) -> str:
         return v.strip().upper()
+
+    @model_validator(mode="after")
+    def _timestamps_and_lock_coherent(self) -> "EntryV2":
+        # Round-12 finding 4: the CLI cannot produce these states, but nothing
+        # in the model prevented a programmatic caller from constructing a
+        # semantically impossible entry (e.g. `reported` before `locked_at`,
+        # `locked_at` present without `before_sha256`). Codify the invariants:
+        # locked_at ↔ before_sha256 (both present or both absent), and if
+        # `reported` is set the entry must be locked and `reported >= locked_at`.
+        has_hash = self.before_sha256 is not None
+        has_lock = self.locked_at is not None
+        if has_hash != has_lock:
+            raise ValueError(
+                "before_sha256 and locked_at must be set together "
+                f"(got before_sha256={'set' if has_hash else 'unset'}, "
+                f"locked_at={'set' if has_lock else 'unset'})"
+            )
+        if self.reported is not None:
+            if self.locked_at is None:
+                raise ValueError("reported set but entry is not locked")
+            if self.reported < self.locked_at:
+                raise ValueError(
+                    f"reported ({self.reported}) precedes locked_at ({self.locked_at}) — "
+                    "impossible ordering"
+                )
+        return self
 
 
 # ---------------------------------------------------------------------------

@@ -186,6 +186,14 @@ class TestAntiAnnoyanceLockRule:
         ok, reason = can_lock(before)
         assert ok is True and reason is None
 
+    def test_non_finite_threshold_rejected(self):
+        # Round-12 finding 3: `float('inf')` and `float('nan')` used to pass
+        # into the front-matter (as invalid Infinity/NaN literals) and any
+        # comparison with NaN silently returned "violated".
+        for bad in (float("inf"), float("-inf"), float("nan")):
+            with pytest.raises(ValidationError, match="finite"):
+                _min_assumption(threshold=bad)
+
 
 class TestLockAndTamperDetection:
     def test_lock_stamps_hash_and_timestamps(self):
@@ -306,6 +314,46 @@ class TestStorageRoundtrip:
         assert store.is_v2(v1_path) is False
         with pytest.raises(FileExistsError, match="v1 entry"):
             store.save_v2(lock_entry(_min_entry()), v1_path)
+
+    def test_save_v2_refuses_to_overwrite_v2_by_default(self, tmp_path, monkeypatch):
+        # Round-12 finding 1 — the P1 blocker. Openv2-openv2 for the same
+        # TICKER_DATE used to silently replace the earlier preregistration
+        # (fresh hash → passes verify_lock → tamper trail destroyed).
+        from app.services.journal import store
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        first = lock_entry(_min_entry(thesis="ORIGINAL preregistered thesis"))
+        path = store.save_v2(first)
+
+        # A completely different second entry for the same TICKER_DATE.
+        second = lock_entry(_min_entry(thesis="POST-PEEK hindsight thesis"))
+        with pytest.raises(FileExistsError, match="v2 entry already exists"):
+            store.save_v2(second)
+
+        # On-disk file still holds the ORIGINAL thesis, unchanged.
+        assert "ORIGINAL preregistered thesis" in path.read_text()
+
+    def test_save_v2_allow_update_only_for_same_before_hash(self, tmp_path, monkeypatch):
+        # Legitimate in-place updates (resolve --commit, report stamp) preserve
+        # BEFORE. `allow_update=True` is allowed only when hashes match — a
+        # defensive belt-and-braces check on top of the CLI's own logic.
+        from app.services.journal import store
+        from app.services.journal.schema_v2 import Resolution, add_resolution
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        entry = lock_entry(_min_entry())
+        path = store.save_v2(entry)
+
+        # Legit update: adding a resolution keeps BEFORE unchanged.
+        updated = add_resolution(entry, Resolution(assumption_index=0, state="met"))
+        store.save_v2(updated, path, allow_update=True)
+        assert len(store.load_v2(path).resolutions) == 1
+
+        # Illegit update: BEFORE changed (a caller bug or attack). Refused
+        # even with allow_update=True — the hash guard is the last line of defense.
+        rehashed = lock_entry(_min_entry(thesis="tampered thesis"))
+        with pytest.raises(ValueError, match="BEFORE hash changed"):
+            store.save_v2(rehashed, path, allow_update=True)
 
 
 class TestResolutionHelpers:
@@ -473,6 +521,22 @@ class TestV2Tally:
         assert t["resolutions"]["met"] == 0
         assert t["resolved_with_p_outcome"] == 0
 
+    def test_corrupt_v2_file_does_not_crash_tally(self, tmp_path, monkeypatch, capsys):
+        # Round-12 finding 2: a truncated / hand-broken v2 file used to raise
+        # ValidationError from load_v2, crashing the whole tally. Now the
+        # broken file is skipped and surfaced via `parse_failed`.
+        store = self._seed(tmp_path, monkeypatch)
+        entry = lock_entry(_min_entry())
+        store.save_v2(entry)
+        (tmp_path / "CORRUPT_2026-01-01.md").write_text("---json\n{not json\n---\n")
+        (tmp_path / "TRUNC_2026-01-02.md").write_text("---json\n")  # no body
+
+        t = store.v2_tally()
+        assert t["total"] == 1  # only the legit entry counts
+        assert set(t["parse_failed"]) == {"CORRUPT_2026-01-01.md", "TRUNC_2026-01-02.md"}
+        # Warning printed to stderr; command did not raise.
+        assert "could not be parsed" in capsys.readouterr().err
+
     def test_lock_broken_flagged(self, tmp_path, monkeypatch):
         # Tamper an on-disk entry and confirm v2_tally counts it as lock_broken.
         store = self._seed(tmp_path, monkeypatch)
@@ -488,6 +552,51 @@ class TestV2Tally:
         path.write_text(render_entry(tampered))
         t = store.v2_tally()
         assert t["lock_broken"] == 1
+
+
+class TestEntryTimestampInvariants:
+    """Round-12 finding 4: semantically-impossible timestamp/lock combinations
+    are refused at model construction so callers cannot fabricate them."""
+
+    def test_locked_at_without_hash_refused(self):
+        with pytest.raises(ValidationError, match="together"):
+            EntryV2(
+                ticker="X", day=date(2026, 1, 1),
+                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                locked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                before_sha256=None,
+                before=_min_before(),
+            )
+
+    def test_hash_without_locked_at_refused(self):
+        with pytest.raises(ValidationError, match="together"):
+            EntryV2(
+                ticker="X", day=date(2026, 1, 1),
+                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                locked_at=None,
+                before_sha256="a" * 64,
+                before=_min_before(),
+            )
+
+    def test_reported_before_locked_refused(self):
+        with pytest.raises(ValidationError, match="precedes"):
+            EntryV2(
+                ticker="X", day=date(2026, 1, 1),
+                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                locked_at=datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
+                before_sha256="a" * 64,
+                reported=datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc),
+                before=_min_before(),
+            )
+
+    def test_reported_without_lock_refused(self):
+        with pytest.raises(ValidationError, match="not locked"):
+            EntryV2(
+                ticker="X", day=date(2026, 1, 1),
+                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                reported=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                before=_min_before(),
+            )
 
 
 class TestSchemaSurface:
