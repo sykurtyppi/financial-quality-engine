@@ -191,6 +191,45 @@ def parse_entry(path: Path) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# v2 storage (P1-E). Same TICKER_DATE.md filename convention; entries are told
+# apart by the ---json front-matter fence. v1 entries continue to parse via the
+# functions above; a mixed journal is fine.
+# ---------------------------------------------------------------------------
+
+
+def is_v2(path: Path) -> bool:
+    """True iff the file starts with the v2 front-matter fence."""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return f.readline().rstrip("\n") == "---json"
+    except OSError:
+        return False
+
+
+def save_v2(entry, path: Path | None = None) -> Path:
+    """Serialize a v2 entry to disk. Defaults to journal/entries/TICKER_DAY.md.
+    Never overwrites an existing v1 entry (would silently upgrade — bad)."""
+    from app.services.journal.schema_v2 import render_entry  # avoid import cycle at load
+
+    target = path or entry_path(entry.ticker, entry.day.isoformat())
+    if target.exists() and not is_v2(target):
+        raise FileExistsError(
+            f"v1 entry exists at {target}; refusing to overwrite. Move or delete it first."
+        )
+    ENTRIES.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_entry(entry), encoding="utf-8")
+    return target
+
+
+def load_v2(path: Path):
+    """Read a v2 entry file. Raises ValueError on a v1 entry (mixed cases should
+    dispatch via is_v2 first)."""
+    from app.services.journal.schema_v2 import parse_entry
+
+    return parse_entry(path.read_text(encoding="utf-8"))
+
+
 def tally() -> dict:
     entries = [parse_entry(p) for p in list_entries()]
     total = len(entries)

@@ -183,6 +183,30 @@ class TestRoundtrip:
             parse_entry("---json\n{not json\n---\n\n# X\n")
 
 
+class TestStorageRoundtrip:
+    def test_save_load_v2_and_is_v2(self, tmp_path, monkeypatch):
+        from app.services.journal import store
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        locked = lock_entry(_min_entry(catalyst="Q2 print"))
+        path = store.save_v2(locked)
+        assert path.exists()
+        assert store.is_v2(path) is True
+        back = store.load_v2(path)
+        assert back.model_dump() == locked.model_dump()
+        assert verify_lock(back) is True
+
+    def test_save_v2_refuses_to_overwrite_v1(self, tmp_path, monkeypatch):
+        from app.services.journal import store
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        v1_path = tmp_path / "MXL_2026-07-27.md"
+        v1_path.write_text("# MXL — 2026-07-27\nopened: ...\nthesis: v1 text\n")
+        assert store.is_v2(v1_path) is False
+        with pytest.raises(FileExistsError, match="v1 entry"):
+            store.save_v2(lock_entry(_min_entry()), v1_path)
+
+
 class TestSchemaSurface:
     def test_schema_version_is_two(self):
         assert SCHEMA_VERSION == 2

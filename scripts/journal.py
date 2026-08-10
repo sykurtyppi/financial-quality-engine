@@ -34,6 +34,13 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.journal import store
 from app.services.journal.reporting import build_report
+from app.services.journal.schema_v2 import (
+    Assumption,
+    BeforeBlock,
+    EntryV2,
+    lock_entry,
+    verify_lock,
+)
 
 
 def cmd_open(args: argparse.Namespace) -> int:
@@ -97,6 +104,110 @@ def cmd_outcome(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_assumption(spec: str) -> Assumption:
+    """Parse `metric,comparator,threshold,window,source,resolve_by`. Threshold
+    is numeric if it parses, else kept as a symbolic string (e.g. 'positive')."""
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 6:
+        raise argparse.ArgumentTypeError(
+            f"assumption must have 6 comma-separated fields: "
+            f"metric,comparator,threshold,window,source,resolve_by (got {len(parts)})"
+        )
+    metric, cmp_, thr, window, source, resolve_by = parts
+    try:
+        threshold: float | str = float(thr)
+    except ValueError:
+        threshold = thr
+    from datetime import date as _date
+    return Assumption(
+        metric=metric,
+        comparator=cmp_,  # type: ignore[arg-type]  # Literal validated by pydantic
+        threshold=threshold,
+        window=window,
+        source=source,  # type: ignore[arg-type]
+        resolve_by=_date.fromisoformat(resolve_by),
+    )
+
+
+def cmd_openv2(args: argparse.Namespace) -> int:
+    """P1-E: open + lock a v2 entry in one step. The anti-annoyance rule is that
+    thesis + conviction + one assumption row is all you need."""
+    from datetime import date, datetime, timezone
+
+    try:
+        ticker = store.safe_ticker(args.ticker)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        assumptions = [_parse_assumption(spec) for spec in (args.assumption or [])]
+    except (argparse.ArgumentTypeError, ValueError) as e:
+        print(f"Bad --assumption: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        before = BeforeBlock(
+            thesis=args.thesis,
+            conviction=args.conviction,
+            conviction_fine=args.conviction_fine,
+            intended_action=args.action,
+            catalyst=args.catalyst,
+            contamination=args.contamination,
+            p_outcome=args.p_outcome,
+            reference_class=args.reference_class,
+            assumptions=assumptions,
+            falsifiers=args.falsifier or [],
+        )
+        day = date.today() if not args.date else date.fromisoformat(args.date)
+        entry = EntryV2(
+            ticker=ticker, day=day,
+            opened=datetime.now(timezone.utc),
+            before=before,
+        )
+    except Exception as e:  # pydantic ValidationError or bad --date
+        print(f"Could not build entry: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        locked = lock_entry(entry)
+    except ValueError as e:
+        print(f"Cannot lock: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        path = store.save_v2(locked)
+    except FileExistsError as e:
+        print(f"{e}", file=sys.stderr)
+        return 1
+    print(f"Locked {path}")
+    print(f"before_sha256: {locked.before_sha256}")
+    print(f"assumptions: {len(locked.before.assumptions)}"
+          + (f", falsifiers: {len(locked.before.falsifiers)}" if locked.before.falsifiers else ""))
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Recompute the BEFORE-block hash and report tamper status."""
+    try:
+        path = store.find_entry(args.ticker, args.date)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
+    if path is None:
+        print(f"No entry for {args.ticker.upper()}.", file=sys.stderr)
+        return 1
+    if not store.is_v2(path):
+        print(f"{path.name}: v1 entry (no hash lock)")
+        return 0
+    entry = store.load_v2(path)
+    if verify_lock(entry):
+        print(f"{path.name}: LOCK INTACT (sha256 {entry.before_sha256[:16]}…)")
+        return 0
+    print(f"{path.name}: LOCK BROKEN — BEFORE block has been edited since lock", file=sys.stderr)
+    return 2
+
+
 def cmd_tally(args: argparse.Namespace) -> int:
     t = store.tally()
     if not t["total"]:
@@ -154,6 +265,35 @@ def main() -> int:
 
     p_tal = sub.add_parser("tally", help="summarize decision impact across all cases")
     p_tal.set_defaults(func=cmd_tally)
+
+    # ------ P1-E v2: preregistration + hash-lock ------
+    p_o2 = sub.add_parser(
+        "openv2",
+        help="P1-E: lock a v2 (preregistered, hash-locked) entry in one step",
+    )
+    p_o2.add_argument("ticker")
+    p_o2.add_argument("--thesis", required=True)
+    p_o2.add_argument("--conviction", type=int, choices=range(1, 6), required=True)
+    p_o2.add_argument("--action",
+                      choices=["hold", "trim", "add", "avoid", "no_position"], required=True)
+    p_o2.add_argument("--assumption", action="append", default=[],
+                      help="repeatable: metric,comparator,threshold,window,source,resolve_by")
+    p_o2.add_argument("--falsifier", action="append", default=[],
+                      help='repeatable: "I am wrong if <observable>"')
+    p_o2.add_argument("--catalyst", help="expected event + date")
+    p_o2.add_argument("--contamination", help="what analysis PRECEDED this entry")
+    p_o2.add_argument("--p-outcome", dest="p_outcome", type=float,
+                      help="0.0–1.0; enables Brier scoring")
+    p_o2.add_argument("--reference-class", dest="reference_class")
+    p_o2.add_argument("--conviction-fine", dest="conviction_fine", type=int,
+                      help="optional 0–100 fine grain")
+    p_o2.add_argument("--date", help="entry day YYYY-MM-DD (defaults to today)")
+    p_o2.set_defaults(func=cmd_openv2)
+
+    p_ver = sub.add_parser("verify", help="recompute the v2 BEFORE-block hash and report tamper status")
+    p_ver.add_argument("ticker")
+    p_ver.add_argument("--date")
+    p_ver.set_defaults(func=cmd_verify)
 
     args = parser.parse_args()
     return args.func(args)
