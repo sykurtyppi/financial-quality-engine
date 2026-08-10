@@ -235,3 +235,59 @@ def test_multiline_value_does_not_corrupt_structure(tmp_path, monkeypatch):
     e = store.parse_entry(p)
     assert e["what_it_surfaced"] == "line one line two line three"  # collapsed to one line
     assert e["what_i_disagreed_with"] is None                       # next field intact
+
+
+# ---------------------------------------------------------------------------
+# openv2 CLI — round-11 fixes
+# ---------------------------------------------------------------------------
+
+
+def _openv2_ns(**overrides) -> argparse.Namespace:
+    """Minimum valid openv2 args; overrides tweak individual fields."""
+    base = dict(
+        ticker="TST", thesis="a real thesis", conviction=3, action="hold",
+        assumption=["revenue,>,100000000,FY2026Q2,,2026-08-15"],
+        falsifier=None, catalyst=None, contamination=None,
+        outcome_definition=None, p_outcome=None, reference_class=None,
+        conviction_fine=None, date="2026-07-27",
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_parse_assumption_accepts_empty_source():
+    """Round-11 finding 2: empty `source` field yields source=None."""
+    a = journal._parse_assumption("revenue,>,165000000,FY2026Q2,,2026-08-15")
+    assert a.source is None
+    a2 = journal._parse_assumption("revenue,>,165000000,FY2026Q2,10-Q,2026-08-15")
+    assert a2.source == "10-Q"
+
+
+def test_openv2_refuses_p_outcome_without_outcome_definition(tmp_path, monkeypatch, capsys):
+    """Round-11 finding 1: BEFORE is hash-locked at openv2 — the definition
+    cannot be added after the fact, so it must accompany p_outcome now."""
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    ns = _openv2_ns(p_outcome=0.7, outcome_definition=None)
+    assert journal.cmd_openv2(ns) == 1
+    err = capsys.readouterr().err
+    assert "outcome-definition" in err or "outcome_definition" in err
+    # Confirm nothing was written.
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_openv2_refuses_whitespace_only_outcome_definition(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    ns = _openv2_ns(p_outcome=0.7, outcome_definition="   ")
+    assert journal.cmd_openv2(ns) == 1
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_openv2_accepts_p_outcome_with_outcome_definition(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    ns = _openv2_ns(p_outcome=0.7, outcome_definition="Q2 revenue > 100M by 2026-08-15")
+    assert journal.cmd_openv2(ns) == 0
+    entries = list(tmp_path.glob("*.md"))
+    assert len(entries) == 1
+    e = store.load_v2(entries[0])
+    assert e.before.p_outcome == 0.7
+    assert e.before.outcome_definition == "Q2 revenue > 100M by 2026-08-15"

@@ -24,8 +24,11 @@ def _ds(*periods: PeriodFinancials) -> CompanyDataset:
 
 
 def _a(**overrides) -> Assumption:
+    # Default: source=None → numeric-only, resolver auto-terminates. Round-11
+    # finding 2 pushes any source-set assumption to pending; the
+    # TestSourceProvenance suite passes source explicitly.
     base = dict(metric="revenue", comparator=">", threshold=165_000_000.0,
-                window="FY2026Q2", source="10-Q", resolve_by=date(2026, 8, 15))
+                window="FY2026Q2", source=None, resolve_by=date(2026, 8, 15))
     base.update(overrides)
     return Assumption(**base)
 
@@ -115,6 +118,21 @@ class TestSymbolicThresholds:
         assert r.state == "unresolvable"
         assert "strong" in (r.note or "")
 
+    def test_symbolic_mismatched_comparator_refused_defensively(self):
+        # Round-11 finding 3: `cfo < positive` used to resolve met when CFO
+        # was positive (the resolver ignored the `<`). Now the resolver
+        # returns unresolvable even for unlocked/programmatic entries where
+        # can_lock never ran.
+        a = _a(metric="cfo", comparator="<", threshold="positive")
+        r = propose_resolution(a, _ds(_p(cfo=5.0)))
+        assert r.state == "unresolvable"
+
+    def test_negative_symbolic_needs_lt_not_gt(self):
+        # Same defense in the other direction.
+        a = _a(metric="cfo", comparator=">", threshold="negative")
+        r = propose_resolution(a, _ds(_p(cfo=-5.0)))
+        assert r.state == "unresolvable"
+
 
 class TestUnsupportedComparator:
     def test_within_returns_unresolvable_with_note(self):
@@ -141,40 +159,46 @@ class TestFabricationSafety:
 
 
 class TestSourceProvenance:
-    """Round-10 finding 5: the mapper's canonical dataset can attribute values
-    to 10-K/10-Q with any confidence; anything else must return `pending`
-    until per-value provenance lands (P1-A)."""
+    """Round-11 finding 2: the {10-K, 10-Q} whitelist was NOT provenance — the
+    same value resolved met under either form with no accession. Now ANY
+    source-set assumption returns pending; only source=None (numeric-only)
+    assumptions auto-terminate. Un-defer once P1-A per-value provenance lands."""
 
-    def test_10q_source_resolves(self):
+    def test_no_source_resolves_numerically(self):
+        r = propose_resolution(_a(source=None), _ds(_p(revenue=200_000_000)))
+        assert r.state == "met"
+
+    def test_10q_source_defers_to_pending(self):
         r = propose_resolution(_a(source="10-Q"), _ds(_p(revenue=200_000_000)))
-        assert r.state == "met"
+        assert r.state == "pending"
+        assert "10-Q" in (r.note or "") or "provenance" in (r.note or "")
 
-    def test_10k_source_resolves(self):
+    def test_10k_source_defers_to_pending(self):
         r = propose_resolution(_a(source="10-K"), _ds(_p(revenue=200_000_000)))
-        assert r.state == "met"
-
-    def test_8k_source_defers_to_pending(self):
-        # The reproduction the auditor filed: a numeric match should not be
-        # called `met` when the source is 8-K.
-        r = propose_resolution(_a(source="8-K"), _ds(_p(revenue=200_000_000)))
         assert r.state == "pending"
-        assert "8-K" in (r.note or "") or "provenance" in (r.note or "")
 
-    def test_proxy_source_defers_to_pending(self):
-        r = propose_resolution(_a(source="proxy"), _ds(_p(revenue=200_000_000)))
-        assert r.state == "pending"
+    def test_8k_and_proxy_defer_to_pending(self):
+        for src in ("8-K", "proxy"):
+            r = propose_resolution(_a(source=src), _ds(_p(revenue=200_000_000)))
+            assert r.state == "pending", f"{src} must be pending"
 
     def test_amendments_defer_to_pending(self):
-        # Amendments are legitimate filings but the mapper's dedupe rule keeps
-        # the latest-filed value and can't tell whether it was an /A or the
-        # original.
         for src in ("10-K/A", "10-Q/A"):
             r = propose_resolution(_a(source=src), _ds(_p(revenue=200_000_000)))
             assert r.state == "pending", f"{src} must be pending"
 
     def test_pending_source_precedes_period_check(self):
-        # Source provenance is a protocol failure regardless of whether the
-        # window matches — return pending without probing the data.
+        # Source provenance is a protocol failure regardless of numeric — the
+        # resolver returns pending without probing the data.
         r = propose_resolution(_a(source="8-K", window="FY2029Q1"), _ds(_p(revenue=1)))
         assert r.state == "pending"
-        assert "provenance" in (r.note or "") or "8-K" in (r.note or "")
+
+    def test_pending_source_defers_before_symbolic_mismatch(self):
+        # Even a would-be-unresolvable symbolic mismatch is preempted by the
+        # source gate — you can't audit numeric semantics if you can't audit
+        # the number's origin.
+        r = propose_resolution(
+            _a(source="10-Q", metric="cfo", comparator="<", threshold="positive"),
+            _ds(_p(cfo=5.0)),
+        )
+        assert r.state == "pending"

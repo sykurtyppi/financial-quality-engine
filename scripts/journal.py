@@ -150,13 +150,20 @@ def cmd_outcome(args: argparse.Namespace) -> int:
 
 
 def _parse_assumption(spec: str) -> Assumption:
-    """Parse `metric,comparator,threshold,window,source,resolve_by`. Threshold
-    is numeric if it parses, else kept as a symbolic string (e.g. 'positive')."""
+    """Parse `metric,comparator,threshold,window,source,resolve_by`.
+
+    Threshold is numeric if it parses, else a symbolic keyword.
+    Source is optional (round-11 finding 2): pass an empty field to make the
+    assumption numeric-only; setting a source form defers resolution to
+    manual attestation until per-value provenance (P1-A) lands.
+    """
     parts = [p.strip() for p in spec.split(",")]
     if len(parts) != 6:
         raise argparse.ArgumentTypeError(
             f"assumption must have 6 comma-separated fields: "
-            f"metric,comparator,threshold,window,source,resolve_by (got {len(parts)})"
+            f"metric,comparator,threshold,window,source,resolve_by (got {len(parts)}). "
+            f"Leave `source` empty for a numeric-only commitment: "
+            f"'revenue,>,165000000,FY2026Q2,,2026-08-15'."
         )
     metric, cmp_, thr, window, source, resolve_by = parts
     try:
@@ -169,7 +176,7 @@ def _parse_assumption(spec: str) -> Assumption:
         comparator=cmp_,  # type: ignore[arg-type]  # Literal validated by pydantic
         threshold=threshold,
         window=window,
-        source=source,  # type: ignore[arg-type]
+        source=source or None,  # type: ignore[arg-type]  # empty -> None (numeric-only)
         resolve_by=_date.fromisoformat(resolve_by),
     )
 
@@ -191,6 +198,20 @@ def cmd_openv2(args: argparse.Namespace) -> int:
         print(f"Bad --assumption: {e}", file=sys.stderr)
         return 1
 
+    # Round-11 finding 1: refuse `--p-outcome` without `--outcome-definition`
+    # at the CLI. The model-level validator also catches this, but a nice CLI
+    # error beats a pydantic traceback for the common misuse. Because the
+    # BEFORE block is hash-locked at openv2 time, users cannot add the
+    # definition later without breaking the lock — so it has to be here now.
+    if args.p_outcome is not None and not (args.outcome_definition and args.outcome_definition.strip()):
+        print(
+            "--p-outcome requires --outcome-definition. Brier is undefined "
+            "without a preregistered event to score against; the lock hashes "
+            "the BEFORE block, so you cannot add it after openv2.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         before = BeforeBlock(
             thesis=args.thesis,
@@ -199,6 +220,7 @@ def cmd_openv2(args: argparse.Namespace) -> int:
             intended_action=args.action,
             catalyst=args.catalyst,
             contamination=args.contamination,
+            outcome_definition=args.outcome_definition,
             p_outcome=args.p_outcome,
             reference_class=args.reference_class,
             assumptions=assumptions,
@@ -439,7 +461,11 @@ def main() -> int:
     p_o2.add_argument("--catalyst", help="expected event + date")
     p_o2.add_argument("--contamination", help="what analysis PRECEDED this entry")
     p_o2.add_argument("--p-outcome", dest="p_outcome", type=float,
-                      help="0.0–1.0; enables Brier scoring")
+                      help="0.0–1.0; enables Brier scoring "
+                           "(requires --outcome-definition)")
+    p_o2.add_argument("--outcome-definition", dest="outcome_definition",
+                      help="the BINARY event `--p-outcome` scores against "
+                           "(concrete: e.g. 'MXL Q2 revenue > 165M by 2026-08-15')")
     p_o2.add_argument("--reference-class", dest="reference_class")
     p_o2.add_argument("--conviction-fine", dest="conviction_fine", type=int,
                       help="optional 0–100 fine grain")

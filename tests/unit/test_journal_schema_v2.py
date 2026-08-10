@@ -116,6 +116,76 @@ class TestAntiAnnoyanceLockRule:
         ok, reason = can_lock(before)
         assert ok is False and "within" in reason and "resolvable" in reason
 
+    def test_p_outcome_requires_outcome_definition_at_model_level(self):
+        # Round-11 finding 1: BEFORE is hash-locked at openv2 time, so users
+        # cannot add outcome_definition later. The pairing is enforced by the
+        # model itself — no p_outcome without a preregistered event.
+        with pytest.raises(ValidationError, match="outcome_definition"):
+            BeforeBlock(
+                thesis="x", conviction=3, intended_action="hold",
+                assumptions=[_min_assumption()],
+                p_outcome=0.7,  # no outcome_definition -> ValidationError
+            )
+
+    def test_p_outcome_with_outcome_definition_ok(self):
+        # And the same-shape entry with the pair is fine.
+        b = BeforeBlock(
+            thesis="x", conviction=3, intended_action="hold",
+            assumptions=[_min_assumption()],
+            outcome_definition="Q2 revenue > 165M",
+            p_outcome=0.7,
+        )
+        assert b.p_outcome == 0.7 and b.outcome_definition == "Q2 revenue > 165M"
+
+    def test_whitespace_outcome_definition_treated_as_none(self):
+        # Round-11 finding 1: "   " is not a definition. A blank/whitespace
+        # outcome_definition normalizes to None; paired with p_outcome, that
+        # trips the pairing validator (which is the whole point).
+        with pytest.raises(ValidationError, match="outcome_definition"):
+            BeforeBlock(
+                thesis="x", conviction=3, intended_action="hold",
+                assumptions=[_min_assumption()],
+                outcome_definition="   ",
+                p_outcome=0.7,
+            )
+
+    def test_symbolic_threshold_blank_rejected_at_field(self):
+        # Round-11 finding 3: an empty symbolic threshold used to pass through.
+        with pytest.raises(ValidationError, match="non-blank"):
+            _min_assumption(threshold="")
+        with pytest.raises(ValidationError, match="non-blank"):
+            _min_assumption(threshold="   ")
+
+    def test_symbolic_threshold_unknown_keyword_refused_at_lock(self):
+        # Round-11 finding 3: unrecognized keywords are refused at lock — the
+        # resolver has no defined semantics for `strong`.
+        before = BeforeBlock(
+            thesis="x", conviction=3, intended_action="hold",
+            assumptions=[_min_assumption(metric="cfo", threshold="strong")],
+        )
+        ok, reason = can_lock(before)
+        assert ok is False and "strong" in reason and "unrecognized" in reason
+
+    def test_symbolic_threshold_mismatched_comparator_refused(self):
+        # Round-11 finding 3 core defect: `cfo < positive` is a contradiction
+        # (positive means > 0). Old code let it lock AND resolved `met` when
+        # CFO was positive. can_lock now rejects the pair itself.
+        before = BeforeBlock(
+            thesis="x", conviction=3, intended_action="hold",
+            assumptions=[_min_assumption(metric="cfo", comparator="<", threshold="positive")],
+        )
+        ok, reason = can_lock(before)
+        assert ok is False and "positive" in reason and ">" in reason
+
+    def test_symbolic_threshold_canonical_pair_ok(self):
+        # Only the canonical pair passes: `cfo > positive`.
+        before = BeforeBlock(
+            thesis="x", conviction=3, intended_action="hold",
+            assumptions=[_min_assumption(metric="cfo", comparator=">", threshold="positive")],
+        )
+        ok, reason = can_lock(before)
+        assert ok is True and reason is None
+
 
 class TestLockAndTamperDetection:
     def test_lock_stamps_hash_and_timestamps(self):
@@ -179,6 +249,7 @@ class TestRoundtrip:
         locked = lock_entry(_min_entry(
             catalyst="Q2 print 2026-07-28",
             contamination="discussed fundamentals with Claude before lock",
+            outcome_definition="MXL Q2 revenue > 165M by 2026-08-15",
             p_outcome=0.65,
             reference_class="small-cap semis with hyperscaler exposure",
             falsifiers=["Q2 revenue < 155M", "gross margin < 55%"],
@@ -252,6 +323,32 @@ class TestResolutionHelpers:
             "resolutions": [Resolution(assumption_index=1, state="met")],
         })
         assert open_assumption_indices(with_one) == [0, 2]
+
+    def test_pending_resolution_does_not_close_the_queue(self):
+        # Round-11 finding 4: even if a pending row is somehow persisted, it
+        # must NOT close the queue — pending is retryable, not terminal.
+        from app.services.journal.schema_v2 import Resolution, open_assumption_indices
+
+        entry = lock_entry(_min_entry())
+        # Persist a pending row for assumption 0 (a path the CLI avoids, but
+        # any programmatic caller could take).
+        with_pending = entry.model_copy(update={
+            "resolutions": [Resolution(assumption_index=0, state="pending",
+                                       note="filing not yet arrived")],
+        })
+        # 0 is still open — the auditor's reproduction fails now (was: []).
+        assert open_assumption_indices(with_pending) == [0]
+
+    def test_terminal_resolution_supersedes_earlier_pending(self):
+        # A pending row followed by a met row for the same index resolves the
+        # assumption terminally. add_resolution replaces same-index rows.
+        from app.services.journal.schema_v2 import Resolution, add_resolution, open_assumption_indices
+
+        entry = lock_entry(_min_entry())
+        entry = add_resolution(entry, Resolution(assumption_index=0, state="pending"))
+        assert open_assumption_indices(entry) == [0]
+        entry = add_resolution(entry, Resolution(assumption_index=0, state="met", observed=170.0))
+        assert open_assumption_indices(entry) == []
 
     def test_add_resolution_is_idempotent(self):
         from app.services.journal.schema_v2 import Resolution, add_resolution
@@ -331,26 +428,17 @@ class TestV2Tally:
         assert t["brier"] is None
         assert t["resolved_with_p_outcome"] == 1
 
-    def test_brier_ignores_verdict_helped_hurt(self, tmp_path, monkeypatch):
-        # Round-10 finding 3: `verdict=helped` (the engine helped) must NOT be
-        # treated as y=1. Without outcome_definition + y, this entry cannot
-        # contribute to Brier.
+    def test_brier_ignores_verdict_when_y_absent(self, tmp_path, monkeypatch):
+        # Round-10 finding 3 + round-11 finding 1: an entry with a valid
+        # (outcome_definition, p_outcome) pair but no observed y is not
+        # eligible for Brier — verdict=helped/hurt does not stand in for y.
         store = self._seed(tmp_path, monkeypatch)
-        entry = lock_entry(_min_entry(p_outcome=0.7))
+        entry = lock_entry(_min_entry(
+            outcome_definition="Q2 revenue > 165M",
+            p_outcome=0.7,
+        ))
         entry = entry.model_copy(update={
             "outcome": entry.outcome.model_copy(update={"verdict": "helped"}),
-        })
-        store.save_v2(entry)
-        t = store.v2_tally()
-        assert t["resolved_with_p_outcome"] == 0
-
-    def test_brier_requires_outcome_definition_not_just_y(self, tmp_path, monkeypatch):
-        # A y without a preregistered outcome_definition is meaningless (what
-        # is `y` measuring?). Must be excluded from Brier.
-        store = self._seed(tmp_path, monkeypatch)
-        entry = lock_entry(_min_entry(p_outcome=0.7))  # no outcome_definition
-        entry = entry.model_copy(update={
-            "outcome": entry.outcome.model_copy(update={"y": True}),
         })
         store.save_v2(entry)
         t = store.v2_tally()

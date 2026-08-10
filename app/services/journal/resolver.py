@@ -6,23 +6,24 @@ proposes `pending / met / violated / unresolvable` — closing the loop the
 PROPOSES and the user CONFIRMS: this module produces `Resolution` objects;
 commit is a separate step (the CLI's `resolve --commit`).
 
-Round-10 fixes:
- - **finding 4 (`pending` vs `unresolvable`)**: `pending` = the current data
-   does not YET allow evaluation (period not yet filed, value not populated).
-   This is retryable and MUST NOT be `--commit`ed. `unresolvable` is now
-   reserved for structural spec problems the resolver can NEVER evaluate
-   (unknown metric name, unsupported comparator, unrecognized symbolic
-   threshold). Only terminal states are committed.
- - **finding 5 (source provenance)**: the mapper's canonical dataset primarily
-   reflects the 10-K/10-Q line of filings. For any other source form
-   (`8-K`, `proxy`, amendments) the resolver returns `pending` with a note —
-   claiming `met` from a numeric match when the source cannot be verified is a
-   protocol violation, not a machine check.
+Round-10 & round-11 fixes:
+ - **round-10 finding 4 (`pending` vs `unresolvable`)**: `pending` = data not
+   yet available (retry later). `unresolvable` = structural spec problem
+   (unknown metric, unsupported comparator, unknown symbolic threshold).
+ - **round-11 finding 2 (source provenance)**: whitelisting {10-K, 10-Q} was
+   NOT provenance — the same quarterly value resolved met under either form
+   with `source_accession=None`. Now: ANY assumption that specifies `source`
+   returns pending until per-value provenance (P1-A) can attest form and
+   accession. Assumptions without `source` set are numeric-only commitments
+   and DO auto-terminate.
+ - **round-11 finding 3 (symbolic comparator)**: `_resolve_symbolic` used to
+   ignore the comparator, letting `cfo < positive` resolve `met` when
+   CFO=+5. Fixed at can_lock (mismatched pairs refused) and here (defensive:
+   returns unresolvable for a mismatched pair on any unlocked entry that
+   sneaks past can_lock).
 
-The lookup rule is: if the assumption's `metric` matches a computed engine
-metric in the bundle (spec_id like `cfo_to_net_income`), use that; otherwise
-fall back to the raw XBRL-mapped `PeriodFinancials` field of the same name
-(`revenue`, `net_income`, `cfo`, `total_assets`, …).
+Lookup rule: engine spec_id in `bundle.history` first (e.g. `cfo_to_net_income`),
+then fall back to raw XBRL fields on `PeriodFinancials` (`revenue`, `cfo`, …).
 """
 
 from __future__ import annotations
@@ -30,13 +31,12 @@ from __future__ import annotations
 from app.schemas.financials import CompanyDataset, PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas.registry import MetricsBundle
-from app.services.journal.schema_v2 import Assumption, Comparator, Resolution
-
-# Sources whose values the mapper's canonical dataset (built from
-# companyfacts + submissions, primarily 10-K/10-Q) can attribute with any
-# confidence. Everything else is deferred to `pending` until P1-A per-value
-# provenance lands (round-10 finding 5).
-_AUTO_VERIFIABLE_SOURCES: frozenset[str] = frozenset({"10-K", "10-Q"})
+from app.services.journal.schema_v2 import (
+    _SYMBOLIC_THRESHOLDS,
+    Assumption,
+    Comparator,
+    Resolution,
+)
 
 
 def _find_period(dataset: CompanyDataset, window: str) -> PeriodFinancials | None:
@@ -105,9 +105,20 @@ def _apply_comparator(value: float, cmp: Comparator, threshold: float) -> bool:
 
 
 def _resolve_symbolic(value: float, cmp: Comparator, threshold: str) -> str | None:
-    """Interpret common symbolic thresholds. Returns 'met' / 'violated' / None
-    (unresolvable) — never fabricates on an unknown keyword."""
+    """Evaluate a symbolic threshold. Returns 'met' / 'violated' / None
+    (unresolvable — unknown keyword or mismatched comparator).
+
+    Round-11 finding 3: the comparator IS load-bearing. The old code ignored
+    it, so `cfo < positive` with CFO=+5 resolved `met` (because "positive" was
+    True regardless of the `<`). Now: each symbolic keyword has exactly one
+    canonical comparator; any other pairing returns None (unresolvable). This
+    is a defensive re-check — `can_lock` refuses the same pairs so an entry
+    that reached the resolver only hits this branch if constructed unlocked.
+    """
     key = threshold.strip().lower()
+    expected = _SYMBOLIC_THRESHOLDS.get(key)
+    if expected is None or cmp != expected:
+        return None
     checks: dict[str, bool] = {
         "positive": value > 0,
         "negative": value < 0,
@@ -117,10 +128,6 @@ def _resolve_symbolic(value: float, cmp: Comparator, threshold: str) -> str | No
         "nonpositive": value <= 0,
         "zero": value == 0,
     }
-    if key not in checks or cmp not in ("==", ">", "<", ">=", "<="):
-        return None
-    # For symbolic thresholds only `==` semantics really apply; if the user chose
-    # `>` on "positive", treat it as "must be strictly positive" (== semantics).
     return "met" if checks[key] else "violated"
 
 
@@ -141,18 +148,23 @@ def propose_resolution(
                       this resolver (unknown metric name, unsupported
                       comparator, unknown symbolic threshold). Terminal.
     """
-    # Source provenance gate (finding 5). The mapper's canonical dataset is
-    # derived from companyfacts which primarily reflects 10-K/10-Q filings;
-    # per-value form/accession is not available yet (P1-A). For any other
-    # source the resolver refuses to attribute the observation.
-    if assumption.source not in _AUTO_VERIFIABLE_SOURCES:
+    # Round-11 finding 2. The old whitelist ({10-K, 10-Q}) was NOT provenance:
+    # the mapper's canonical dataset merges companyfacts values and cannot say
+    # which form supplied any given number, so the same quarter resolved `met`
+    # under either source with `source_accession=None`. Honest interim rule:
+    # if the user preregistered a specific source they COMMITTED to that
+    # form/accession attribution — refuse to auto-terminate until per-value
+    # provenance (P1-A) lands. Numeric-only assumptions (source=None) are
+    # legitimate: the user is not claiming a form, only a value.
+    if assumption.source is not None:
         return Resolution(
             assumption_index=assumption_index,
             state="pending",
             note=(
-                f"source '{assumption.source}' requires per-value provenance "
-                f"(not automated yet — resolve manually or wait for P1-A). "
-                f"Auto-verifiable sources: {sorted(_AUTO_VERIFIABLE_SOURCES)}."
+                f"source '{assumption.source}' preregistered but the mapper "
+                f"cannot yet attest per-value form/accession (P1-A). Resolve "
+                f"manually with a source_accession, or leave source unset for "
+                f"a numeric-only commitment."
             ),
         )
 

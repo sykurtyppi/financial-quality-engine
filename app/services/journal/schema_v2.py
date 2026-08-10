@@ -30,7 +30,7 @@ import re
 from datetime import date, datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 SCHEMA_VERSION = 2
 
@@ -46,6 +46,20 @@ SourceForm = Literal["10-K", "10-Q", "8-K", "10-K/A", "10-Q/A", "proxy", "other"
 # Comparators the resolver can currently evaluate. `within` needs a range syntax
 # that does not yet exist, so it is refused at lock time (round-10 finding 6).
 _RESOLVABLE_COMPARATORS: frozenset[str] = frozenset({">", "<", ">=", "<=", "=="})
+# Round-11 finding 3: symbolic thresholds are FULL predicates. The comparator is
+# not independently meaningful; a mismatched pair (e.g. `cfo < positive`) used
+# to resolve `met` when CFO was positive, because the comparator was ignored.
+# Each symbolic keyword now REQUIRES exactly one canonical comparator; any other
+# pairing is refused at lock time and returns unresolvable at the resolver.
+_SYMBOLIC_THRESHOLDS: dict[str, Comparator] = {
+    "positive": ">",
+    "negative": "<",
+    "non_negative": ">=",
+    "nonnegative": ">=",
+    "non_positive": "<=",
+    "nonpositive": "<=",
+    "zero": "==",
+}
 
 
 class Assumption(BaseModel):
@@ -57,8 +71,30 @@ class Assumption(BaseModel):
     comparator: Comparator
     threshold: float | str = Field(description="Numeric threshold, or a symbolic one like 'positive'")
     window: str = Field(min_length=1, description="Fiscal window, e.g. FY2026Q2 or 'trailing_4q'")
-    source: SourceForm = Field(description="Which filing type will resolve it")
+    # Round-11 finding 2: `source` is OPTIONAL. When provided (10-Q, 10-K, etc.)
+    # the resolver returns `pending` and refuses to auto-resolve, because the
+    # mapper's canonical dataset does not carry per-value form/accession
+    # provenance (deferred to P1-A). Leave unspecified for a numeric-only
+    # commitment the resolver can auto-terminate. This is honest: the older
+    # {10-K, 10-Q} whitelist attributed a value to a form without checking.
+    source: SourceForm | None = Field(
+        default=None,
+        description=(
+            "Optional filing form the user COMMITS the value will come from. "
+            "If set, resolver returns `pending` until per-value provenance "
+            "lands (P1-A). Unset -> numeric-only, resolver auto-terminates."
+        ),
+    )
     resolve_by: date = Field(description="Date by which the resolving filing is expected")
+
+    @field_validator("threshold")
+    @classmethod
+    def _threshold_nonblank_str(cls, v):
+        # Round-11 finding 3: a symbolic threshold must be a real keyword; the
+        # empty string used to pass through, and `can_lock` never caught it.
+        if isinstance(v, str) and not v.strip():
+            raise ValueError("symbolic threshold must be non-blank")
+        return v
 
 
 class BeforeBlock(BaseModel):
@@ -125,6 +161,31 @@ class BeforeBlock(BaseModel):
     def _falsifiers_nonblank(cls, v: list[str]) -> list[str]:
         cleaned = [s.strip() for s in v if s and s.strip()]
         return cleaned
+
+    @field_validator("outcome_definition")
+    @classmethod
+    def _outcome_definition_stripped(cls, v: str | None) -> str | None:
+        # A blank-string outcome_definition is not a definition. Normalize
+        # both empty and whitespace-only to None so the pairing validator
+        # below reads them the same way.
+        if v is None:
+            return None
+        s = v.strip()
+        return s or None
+
+    @model_validator(mode="after")
+    def _p_outcome_pairs_with_definition(self) -> "BeforeBlock":
+        # Round-11 finding 1: `p_outcome` is meaningless without the event it
+        # scores. Because the BEFORE block is hash-locked, users cannot add
+        # `outcome_definition` later without breaking the lock — so the pairing
+        # is enforced HERE at construction, blocking any p_outcome-without-
+        # definition entry from being locked at all.
+        if self.p_outcome is not None and not self.outcome_definition:
+            raise ValueError(
+                "p_outcome requires a non-blank outcome_definition (Brier is "
+                "undefined without a preregistered event to score against)"
+            )
+        return self
 
 
 class Resolution(BaseModel):
@@ -201,9 +262,12 @@ class EntryV2(BaseModel):
 def can_lock(before: BeforeBlock) -> tuple[bool, str | None]:
     """Anti-annoyance: only thesis + conviction + >=1 assumption row required.
     pydantic already enforces thesis non-empty (post-strip) and conviction in
-    [1, 5]. Round-10 finding 6: also refuse to lock any assumption whose grammar
-    the resolver cannot ever evaluate (currently `within`) — locking a claim
-    that can never be judged degrades the whole specificity floor."""
+    [1, 5]. Also refuses commitments the resolver can never evaluate:
+      - `within` comparator (round-10 finding 6)
+      - blank/unknown symbolic threshold (round-11 finding 3)
+      - symbolic threshold paired with a mismatched comparator, e.g.
+        `cfo < positive` (round-11 finding 3 — the comparator was silently
+        ignored, letting contradictory pairs resolve `met`)."""
     if not before.assumptions:
         return False, "at least one assumption row is required to lock (specificity floor)"
     for i, a in enumerate(before.assumptions):
@@ -212,6 +276,23 @@ def can_lock(before: BeforeBlock) -> tuple[bool, str | None]:
                 f"assumption[{i}] comparator '{a.comparator}' is not resolvable "
                 f"(supported: {sorted(_RESOLVABLE_COMPARATORS)})"
             )
+        if isinstance(a.threshold, str):
+            key = a.threshold.strip().lower()
+            # Assumption's field_validator already rejects blank, but be defensive.
+            if not key:
+                return False, f"assumption[{i}] symbolic threshold is blank"
+            if key not in _SYMBOLIC_THRESHOLDS:
+                return False, (
+                    f"assumption[{i}] symbolic threshold '{a.threshold}' is "
+                    f"unrecognized (supported: {sorted(set(_SYMBOLIC_THRESHOLDS))})"
+                )
+            expected = _SYMBOLIC_THRESHOLDS[key]
+            if a.comparator != expected:
+                return False, (
+                    f"assumption[{i}] symbolic threshold '{a.threshold}' requires "
+                    f"comparator '{expected}' (got '{a.comparator}') — symbolic "
+                    f"keywords ARE the predicate; mismatched pairs would resolve incorrectly"
+                )
     return True, None
 
 
@@ -261,9 +342,12 @@ def verify_lock(entry: EntryV2) -> bool:
 
 
 def open_assumption_indices(entry: EntryV2) -> list[int]:
-    """Assumption indices with no resolution yet — the queue the resolver
-    should propose against."""
-    resolved = {r.assumption_index for r in entry.resolutions}
+    """Assumption indices with no TERMINAL resolution yet — the queue the
+    resolver should propose against. Round-11 finding 4: `pending` is NOT
+    terminal, so an index carrying only a pending resolution stays OPEN and
+    can be retried later. The CLI already avoids persisting pending, but
+    defends against pending rows that might sneak in via other paths."""
+    resolved = {r.assumption_index for r in entry.resolutions if r.state != "pending"}
     return [i for i in range(len(entry.before.assumptions)) if i not in resolved]
 
 
