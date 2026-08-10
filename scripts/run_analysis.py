@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.pipeline import analyze
 from app.services.ingestion.json_loader import IngestionError, load_dataset
-from app.services.reporting.markdown_report import render
+from app.services.reporting.report_builder import build_report
 
 
 def main() -> int:
@@ -37,7 +37,9 @@ def main() -> int:
         print(f"Analysis error: {e}", file=sys.stderr)
         return 1
 
-    report = render(result, generated_on=date.today().isoformat())
+    # Shared builder → decision card + appendix (no client: dataset-only, so no
+    # EDGAR evidence streams). Same surface as the CLI/journal/API (finding 1).
+    report, _ = build_report(result, dataset, generated_on=date.today().isoformat())
     if args.output:
         Path(args.output).write_text(report)
         print(f"Report written to {args.output}")

@@ -6,8 +6,45 @@ from datetime import date
 import pytest
 
 from app.services.backtesting import analysis as an
-from app.services.backtesting.pit import filter_as_of
+from app.services.backtesting.pit import filter_as_of, mapped_tags, trim_to_mapped_tags
 from app.services.backtesting.prices import PriceSeries
+from app.services.ingestion.companyfacts_mapper import build_dataset
+
+
+class TestPitPreservesFinanceLeases:
+    """Review finding 2: PIT trimming must keep the finance-lease tags the live
+    mapper composes into total_debt, else PIT and live leverage diverge."""
+
+    def _facts(self):
+        ends = ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+                "2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31"]
+
+        def inst(v):
+            return {"units": {"USD": [{"end": e, "val": v, "filed": "2026-01-01"} for e in ends]}}
+
+        def flow(v):
+            return {"units": {"USD": [
+                {"start": e[:4] + "-01-01", "end": e, "val": v, "filed": "2026-01-01"} for e in ends
+            ]}}
+
+        return {"entityName": "T", "facts": {"us-gaap": {
+            "Assets": inst(1000.0), "Revenues": flow(100.0),
+            "LongTermDebt": inst(900.0),
+            "FinanceLeaseLiabilityNoncurrent": inst(60.0),
+            "FinanceLeaseLiabilityCurrent": inst(20.0),
+        }}}
+
+    def test_finance_lease_tags_whitelisted(self):
+        tags = mapped_tags()
+        assert ("us-gaap", "FinanceLeaseLiabilityNoncurrent") in tags
+        assert ("us-gaap", "FinanceLeaseLiabilityCurrent") in tags
+
+    def test_trimmed_debt_matches_live(self):
+        fj = self._facts()
+        live, _ = build_dataset(fj, "SYN", n_quarters=8)
+        trimmed, _ = build_dataset(trim_to_mapped_tags(fj), "SYN", n_quarters=8)
+        assert all(p.total_debt == 980.0 for p in live.periods)
+        assert [p.total_debt for p in trimmed.periods] == [p.total_debt for p in live.periods]
 
 
 class TestPointInTimeFilter:

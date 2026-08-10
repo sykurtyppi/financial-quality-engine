@@ -40,6 +40,17 @@ class TestIssuancePressureDistress:
         assert m.status is MetricStatus.NOT_MEANINGFUL
         assert m.distress_signal is True
 
+    def test_token_issuance_negative_cfo_is_not_distress(self):
+        # Review finding 7: a token amount against a large burn must not fire
+        # (1e-9 covers ~0% of a 1e9 burn — below the coverage floor).
+        m = cs.issuance_pressure(q(share_issuance_proceeds=1e-9, cfo=-1e9))
+        assert m.distress_signal is False
+
+    def test_immaterial_issuance_below_coverage_floor_is_not_distress(self):
+        # 1.0 issuance covers only 10% of a 10 burn — below the 25% floor.
+        m = cs.issuance_pressure(q(share_issuance_proceeds=1.0, cfo=-10.0))
+        assert m.distress_signal is False
+
 
 class TestSbc:
     def test_sbc_to_revenue(self):

@@ -5,6 +5,9 @@ documents -> markdown report under reports/.
     EDGAR_IDENTITY="Name email" .venv/bin/python scripts/generate_report.py NVDA
     ... generate_report.py NVDA --no-docs     # fundamentals only (faster)
     ... generate_report.py NVDA --fresh       # bypass caches (filing day)
+
+Report assembly lives in app/services/reporting/report_builder.build_report, the
+single builder shared by the CLI, journal, and API (review finding 1).
 """
 
 from __future__ import annotations
@@ -22,46 +25,9 @@ from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import fetch_dataset
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
-from app.services.reporting.decision_card import render_decision_card
-from app.services.reporting.markdown_report import render
-from app.services.scoring.thermometer import compute_thermometer
+from app.services.reporting.report_builder import build_report
 
 logging.basicConfig(level=logging.WARNING)
-
-
-def _data_quality_section(
-    fetched_at: str,
-    fresh: bool,
-    coverage: float,
-    warnings: list[str],
-    doc_diagnostics: list[str],
-    offerings_error: str | None,
-    restatements_error: str | None = None,
-) -> str:
-    """P0-D: acquisition quality belongs in the artifact, not stdout. A fetch
-    failure must be distinguishable from 'the filer didn't disclose'."""
-    lines = [
-        "## Appendix: Data Acquisition Quality",
-        "",
-        f"- Data fetched: {fetched_at} "
-        + ("(caches bypassed)" if fresh else "(EDGAR JSON caches up to 24h old; use --fresh on filing days)"),
-        f"- XBRL field coverage: {coverage:.0%}",
-    ]
-    for w in warnings:
-        lines.append(f"- Ingestion warning: {w}")
-    for d in doc_diagnostics:
-        lines.append(f"- Document acquisition: {d}")
-    if offerings_error is not None:
-        lines.append(
-            f"- **Capital-markets appendix UNAVAILABLE** (fetch/parse failed: {offerings_error}). "
-            "Absence of the offerings section is a data gap, not evidence of no activity."
-        )
-    if restatements_error is not None:
-        lines.append(
-            f"- **Restatement appendix UNAVAILABLE** (detection failed: {restatements_error}). "
-            "Absence of the restatement section is a data gap, not evidence of no revisions."
-        )
-    return "\n".join(lines)
 
 
 def main() -> int:
@@ -92,109 +58,35 @@ def main() -> int:
               f"({sum(1 for d in docs.documents if d.doc_type.value == 'mdna')} MD&A, "
               f"{sum(1 for d in docs.documents if d.doc_type.value == 'risk_factors')} risk factors, "
               f"{sum(1 for d in docs.documents if d.doc_type.value == 'earnings_release')} releases)")
-        if doc_diagnostics:
-            print(f"document diagnostics: {len(doc_diagnostics)} (rendered in report appendix)")
 
     result = analyze(dataset)
-    report_date = date.today()
-    generated_on = report_date.isoformat()
-    body = render(result, generated_on=generated_on)
-    event_lines: list[str] = []
-    tier1_events: list[str] = []  # validated Tier-1 evidence for the decision card
-
-    # Capital-markets activity: evidence appendix, never a score input
-    # (docs/accuracy_improvement_plan.md B1). A failure is rendered in the
-    # data-quality appendix, never silently dropped (P0-D).
-    offerings_error: str | None = None
-    try:
-        from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
-
-        # as_of anchors the offerings window to the report's date (P0-12): a
-        # report dated today must not surface a filing that post-dates it.
-        timeline = fetch_offerings(client, ticker, as_of=report_date)
-        body += "\n\n" + render_offerings_section(timeline) + "\n"
-        if timeline.takedown_count:
-            event_lines.append(
-                f"{timeline.takedown_count} securities takedown(s) in the last "
-                f"{timeline.lookback_months} months (see Capital Markets Activity)"
-            )
-            print(f"offerings: {timeline.takedown_count} takedown(s) in last "
-                  f"{timeline.lookback_months} months")
-    except Exception as e:  # noqa: BLE001 - appendix must never break the report
-        offerings_error = str(e)
-        print(f"offerings appendix failed: {e}")
-
-    # Prior-period restatements: evidence appendix, never a score input (P0-5).
-    # Scoped to recent periods so the live monitor surfaces revisions to the
-    # window it analyses, not decade-old reclassifications.
-    restatements_error: str | None = None
-    try:
-        from app.services.ingestion.restatements import (
-            detect_restatements,
-            render_restatements_section,
-        )
-
-        recent_cutoff = date(date.today().year - 3, 1, 1)
-        footprints = detect_restatements(
-            client.company_facts(ticker), period_since=recent_cutoff
-        )
-        body += "\n\n" + render_restatements_section(footprints) + "\n"
-        # Amended (/A) footprints are validated Tier-1 evidence for the card.
-        for f in footprints:
-            if f.is_amendment:
-                tier1_events.append(
-                    f"Restatement footprint: {f.field_name} {f.period_end} via {f.restated_form}"
-                )
-        amended_n = sum(1 for f in footprints if f.is_amendment)
-        if footprints:
-            print(f"restatements: {len(footprints)} revised figure(s) since "
-                  f"{recent_cutoff}, {amended_n} via amended filings")
-    except Exception as e:  # noqa: BLE001 - appendix must never break the report
-        # Review finding 8: a detection failure must be visible in the report,
-        # not just stdout — readers cannot otherwise tell "no revisions" from
-        # "detector failed".
-        restatements_error = str(e)
-        print(f"restatements appendix failed: {e}")
-
-    body += "\n\n" + _data_quality_section(
-        fetched_at, args.fresh, diag.coverage(), diag.warnings, doc_diagnostics,
-        offerings_error, restatements_error,
-    ) + "\n"
-
-    # Tier-1 validated events for the card: 8-K Item 4.02 non-reliance
-    # (restatement announcement) in the trailing two years.
-    try:
-        from app.services.backtesting.events import fetch_entity_events
-
-        events = fetch_entity_events(client, ticker)
-        cutoff = date(date.today().year - 2, date.today().month, min(date.today().day, 28))
-        for d in sorted(events.non_reliance_8k_dates):
-            if d >= cutoff:
-                tier1_events.append(
-                    f"8-K Item 4.02 non-reliance (restatement announced) filed {d}"
-                )
-        if tier1_events:
-            print(f"events: {len(tier1_events)} non-reliance 8-K(s) in trailing 2y")
-    except Exception as e:  # noqa: BLE001 - card must never break on the event stream
-        print(f"event stream failed: {e}")
-
-    # P1-D: the 90-second decision card leads (thermometer + tiered flags, no
-    # composite grade). The full report follows as an appendix. The thermometer
-    # is the kill-gate-passing config (block-score clusters + regime dummies).
-    thermometer = compute_thermometer(result.block_scores, dataset.periods)
-    card = render_decision_card(
-        result, thermometer, generated_on=generated_on,
-        coverage=diag.coverage(), event_lines=event_lines or None,
-        tier1_events=tier1_events or None,
+    generated_on = date.today().isoformat()
+    report, thermometer = build_report(
+        result, dataset,
+        generated_on=generated_on,
+        coverage=diag.coverage(),
+        client=client,
+        ticker=ticker,
+        fetched_at=fetched_at,
+        fresh=args.fresh,
+        warnings=diag.warnings,
+        doc_diagnostics=doc_diagnostics,
     )
-    report = card + "\n\n---\n\n# Full report (appendix)\n\n" + body
 
     out_dir = ROOT / "reports"
     out_dir.mkdir(exist_ok=True)
     out = out_dir / f"{ticker}_{generated_on}.md"
     out.write_text(report)
-    r = thermometer.reading
-    print(f"thermometer: {r:.0f}/100 -> {out}" if r is not None else f"thermometer: n/a -> {out}")
+
+    # Review finding 8: no 0-100 number on any surface, stdout included.
+    if thermometer.reading is None:
+        distress = "insufficient data"
+    elif thermometer.regime_flags:
+        distress = "regime signals present (" + ", ".join(f.code for f in thermometer.regime_flags) + ")"
+    else:
+        hot = thermometer.hottest_cluster
+        distress = f"most-elevated dimension {hot.name}" if hot else "no acute signals"
+    print(f"distress signals: {distress} -> {out}")
     return 0
 
 

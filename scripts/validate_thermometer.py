@@ -25,13 +25,15 @@ import csv
 import glob
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.services.backtesting.pit import filter_as_of
 from app.services.ingestion.companyfacts_mapper import build_dataset
-from app.services.scoring.thermometer import _regime_flags
+from app.services.scoring.thermometer import MIN_CLUSTER_MEMBERS, _regime_flags
 
 BALANCE_SHEET = (
     "c_net_debt_to_ebitda",
@@ -56,8 +58,10 @@ def _num(v: str) -> float | None:
 
 
 def _cluster_mean(row: dict, cols: tuple[str, ...]) -> float | None:
+    # Review finding 5: mirror the live MIN_CLUSTER_MEMBERS rule — a cluster
+    # with fewer than 2 present members is insufficient, not scored.
     vals = [_num(row[c]) for c in cols if _num(row.get(c, "")) is not None]
-    return sum(vals) / len(vals) if vals else None
+    return sum(vals) / len(vals) if len(vals) >= MIN_CLUSTER_MEMBERS else None
 
 
 def cluster_base(row: dict) -> float | None:
@@ -70,35 +74,41 @@ def cluster_base(row: dict) -> float | None:
     return max(means) if means else None
 
 
-def _load_financials(tickers: set[str]) -> dict:
-    """period_end.isoformat() -> PIT period list, per ticker, from cache."""
-    fin: dict[str, list] = {}
+def _load_raw_facts(tickers: set[str]) -> dict:
+    """ticker -> raw companyfacts JSON, for per-row PIT reconstruction."""
+    raw: dict[str, dict] = {}
     for tk in tickers:
         files = glob.glob(f"data/cache/companyfacts_{tk}.json")
-        if not files:
-            continue
-        try:
-            ds, _ = build_dataset(json.load(open(files[0])), tk, n_quarters=28)
-            fin[tk] = sorted(ds.periods, key=lambda p: p.period_end)
-        except Exception:  # noqa: BLE001 - a missing cache row just skips regime
-            continue
-    return fin
+        if files:
+            try:
+                raw[tk] = json.load(open(files[0]))
+            except Exception:  # noqa: BLE001 - a missing cache just skips regime
+                continue
+    return raw
 
 
-def _regime_add(row: dict, fin: dict) -> float:
-    periods = fin.get(row["ticker"])
-    lp = row.get("latest_period", "")
-    if not periods or not lp:
+def _regime_add(row: dict, raw: dict) -> float:
+    # Review finding 3: TRUE point-in-time. Filter raw facts by the row's `asof`
+    # FILING date before mapping, so later amendments/comparatives cannot leak
+    # into a historical observation's NI/EBITDA regime flags.
+    facts = raw.get(row["ticker"])
+    asof = row.get("asof", "")
+    if not facts or not asof:
         return 0.0
-    pit = [p for p in periods if p.period_end.isoformat() <= lp]  # PIT slice
-    return sum(f.concern_add for f in _regime_flags(pit))
+    try:
+        pit_facts = filter_as_of(facts, date.fromisoformat(asof))
+        ds, _ = build_dataset(pit_facts, row["ticker"], n_quarters=28)
+    except Exception:  # noqa: BLE001 - unmappable PIT window contributes no regime
+        return 0.0
+    periods = sorted(ds.periods, key=lambda p: p.period_end)
+    return sum(f.concern_add for f in _regime_flags(periods))
 
 
-def thermometer_from_row(row: dict, fin: dict) -> float | None:
+def thermometer_from_row(row: dict, raw: dict) -> float | None:
     base = cluster_base(row)
     if base is None:
         return None
-    return min(100.0, base + _regime_add(row, fin))
+    return min(100.0, base + _regime_add(row, raw))
 
 
 def auc(positives: list[float], negatives: list[float]) -> float:
@@ -132,12 +142,12 @@ def main() -> int:
     rows = [r for r in csv.DictReader(path.open()) if r["overall"] not in ("", "None")]
     stress = [r for r in rows if r["archetype"] == "stress_case"]
     control = [r for r in rows if r["archetype"].startswith("control_")]
-    fin = _load_financials({r["ticker"] for r in stress + control})
-    reproducible = bool(fin)  # regime dummies need the git-ignored cache
+    raw = _load_raw_facts({r["ticker"] for r in stress + control})
+    reproducible = bool(raw)  # regime dummies need the git-ignored cache
 
     n_s, n_c = len({r["ticker"] for r in stress}), len({r["ticker"] for r in control})
     comp_row = lambda r: float(r["overall"])  # noqa: E731
-    th_row = lambda r: thermometer_from_row(r, fin)  # noqa: E731
+    th_row = lambda r: thermometer_from_row(r, raw)  # noqa: E731
 
     # Company-level (primary — honest n) and company-quarter (secondary).
     comp_co = auc(_company_median(stress, comp_row), _company_median(control, comp_row))

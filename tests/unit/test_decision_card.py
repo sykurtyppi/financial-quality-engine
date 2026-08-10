@@ -104,3 +104,11 @@ class TestCard:
         assert "2 equity takedowns" in card
         assert "Strong FCF" in card
         assert "coverage 82%" in card
+
+    def test_events_unavailable_flagged_in_tier1(self):
+        # Review finding 4: a failed event fetch must not read as clean Tier-1.
+        card = render_decision_card(
+            _result(), _thermo(50.0), generated_on="2026-08-09", events_unavailable=True
+        )
+        t1 = card.split("Tier 1")[1].split("Tier 2")[0]
+        assert "event stream unavailable" in t1

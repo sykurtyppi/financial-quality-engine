@@ -10,7 +10,7 @@ from fastapi.responses import PlainTextResponse
 from app.core.pipeline import analyze
 from app.schemas.financials import CompanyDataset
 from app.schemas.report import AnalysisResult
-from app.services.reporting.markdown_report import render
+from app.services.reporting.report_builder import build_report
 
 router = APIRouter()
 
@@ -34,4 +34,8 @@ def report_dataset(dataset: CompanyDataset) -> str:
         result = analyze(dataset)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
-    return render(result, generated_on=date.today().isoformat())
+    # Review finding 1: the API returns the same decision card + appendix as the
+    # CLI/journal. No client here (a dataset is posted), so evidence streams that
+    # need EDGAR are omitted; the card + thermometer render from the dataset.
+    report, _ = build_report(result, dataset, generated_on=date.today().isoformat())
+    return report

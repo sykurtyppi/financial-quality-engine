@@ -24,7 +24,17 @@ def mapped_tags() -> set[tuple[str, str]]:
         tags.update(cands)
     tags.update(m.SGA_COMPONENTS)
     tags.update(m.DA_COMPONENTS)
-    for tag in m.DEBT_NONCURRENT + m.DEBT_CURRENT + m.DEBT_TOTAL + m.DEBT_SHORT:
+    # Debt + finance-lease tags the mapper composes into total_debt (review
+    # finding 2: omitting the finance-lease tags made PIT debt diverge from live).
+    debt_tags = (
+        m.DEBT_NONCURRENT
+        + m.DEBT_CURRENT
+        + m.DEBT_TOTAL
+        + m.DEBT_SHORT
+        + m.FINANCE_LEASE_NONCURRENT
+        + m.FINANCE_LEASE_CURRENT
+    )
+    for tag in debt_tags:
         tags.add(("us-gaap", tag))
     return tags
 

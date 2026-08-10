@@ -3,11 +3,15 @@
 Fetches fundamentals + EDGAR documents, runs the pipeline, and writes the
 markdown report under ``reports/``. Requires the ``EDGAR_IDENTITY`` env var
 (SEC fair-access rule) at call time.
+
+Uses the single shared report builder (review finding 1), so the journal/web UI
+gets the same decision card + offerings + restatements + Tier-1 events as the
+CLI — not the bare appendix.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.core.pipeline import analyze
@@ -15,7 +19,7 @@ from app.services.ingestion.edgar_adapter import fetch_dataset
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
-from app.services.reporting.markdown_report import render
+from app.services.reporting.report_builder import build_report as build_full_report
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
@@ -33,13 +37,26 @@ def build_report(
 ) -> tuple[Path, float | None]:
     """Generate and write the markdown report for ``ticker``. Returns (path, overall)."""
     ticker = ticker.upper()
-    dataset, _ = fetch_dataset(ticker, n_quarters=quarters)
+    client = SecClient()
+    dataset, diag = fetch_dataset(ticker, n_quarters=quarters, client=client)
+    doc_diagnostics: list[str] = []
     if with_docs:
-        client = SecClient()
         docs = fetch_documents(client, ticker, client.company_facts(ticker), n_filings=8)
         dataset.documents = docs.documents
+        doc_diagnostics = list(docs.diagnostics)
     result = analyze(dataset)
-    report = render(result, generated_on=date.today().isoformat())
+    generated_on = report_day or date.today().isoformat()
+    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    report, _ = build_full_report(
+        result, dataset,
+        generated_on=generated_on,
+        coverage=diag.coverage(),
+        client=client,
+        ticker=ticker,
+        fetched_at=fetched_at,
+        warnings=diag.warnings,
+        doc_diagnostics=doc_diagnostics,
+    )
     REPORTS.mkdir(exist_ok=True)
     out = report_path(ticker, report_day)
     out.write_text(report)
