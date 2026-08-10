@@ -161,26 +161,28 @@ def detect_restatements(
                     continue
                 if period_since is not None and end < period_since:
                     continue
-                filings.sort(key=lambda f: f[0])  # earliest filed first
-                orig = filings[0]
-                current = filings[-1]  # latest-filed = exactly what the mapper scores
+                # `filings` is in companyfacts order (same source the mapper
+                # reads). `current` MUST resolve same-day filed ties the way the
+                # mapper's _dedupe_latest_filed does — it keeps the FIRST fact at
+                # the latest filed date (`>` not `>=`). Python's max()/min()
+                # return the FIRST extremal element, so max(...key=filed) on the
+                # unsorted list reproduces exactly what the mapper scores
+                # (round-8 finding: sort()+filings[-1] picked the LAST same-day
+                # fact and diverged from scoring).
+                orig = min(filings, key=lambda f: f[0])  # earliest filed
+                current = max(filings, key=lambda f: f[0])  # latest filed = mapper's value
 
-                # Round-7 finding: keep the CURRENT value and the amendment EVENT
-                # separate. `material` = later filings that materially deviate
-                # from the originally reported value; if none, no restatement
-                # occurred. The amendment event is the latest material /A filing
-                # in the trail, independent of which form carries the current
-                # value. This makes:
-                #   100 -> 120(/A) -> 105(10-K): current=105 (matches scoring),
-                #     amendment=120(/A) -> still Tier-1;
-                #   100 -> 120(/A) -> 100(revert): current=100 (matches scoring),
-                #     amendment=120(/A) -> still surfaced, not called "latest".
+                # Keep the CURRENT value and the amendment EVENT separate (round-7).
+                # `material` = every filing that materially deviates from the
+                # originally reported value; the amendment event is the latest
+                # material /A filing in the trail, independent of which form
+                # carries the current value.
                 def _pct(v: float) -> float | None:
                     return None if orig[1] == 0 else abs(v - orig[1]) / abs(orig[1])
 
                 material = [
                     f
-                    for f in filings[1:]
+                    for f in filings
                     if f[1] != orig[1] and ((p := _pct(f[1])) is None or p >= materiality_pct)
                 ]
                 if not material:

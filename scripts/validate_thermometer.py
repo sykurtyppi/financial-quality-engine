@@ -75,19 +75,27 @@ def cluster_base(row: dict) -> float | None:
 
 
 def _load_raw_facts(tickers: set[str]) -> dict:
-    """ticker -> raw companyfacts JSON, for per-row PIT reconstruction."""
+    """ticker -> raw companyfacts JSON, for per-row PIT reconstruction.
+
+    A ticker is included only if its cache actually RECONSTRUCTS (build_dataset
+    succeeds), not merely if a JSON file parses (review finding P2): an empty
+    `{}` or structurally-unmappable object parses fine but yields zero regime
+    contribution. Such tickers are dropped so the completeness gate treats them
+    as missing and withholds the regime-inclusive AUC."""
     raw: dict[str, dict] = {}
     for tk in tickers:
         files = glob.glob(f"data/cache/companyfacts_{tk}.json")
-        if files:
-            try:
-                raw[tk] = json.load(open(files[0]))
-            except Exception as e:  # noqa: BLE001
-                # A CORRUPT cache (not a missing one) silently deflates the AUC
-                # for this ticker; surface it so the operator knows regime flags
-                # were dropped for it (review finding).
-                print(f"WARNING: failed to parse cache for {tk}: {e}", file=sys.stderr)
-                continue
+        if not files:
+            continue
+        try:
+            data = json.load(open(files[0]))
+            build_dataset(data, tk, n_quarters=8)  # validate it is actually mappable
+        except Exception as e:  # noqa: BLE001
+            # Corrupt / empty / unmappable cache: surface it and treat as absent
+            # so the AUC is not silently deflated for this ticker.
+            print(f"WARNING: unusable cache for {tk}: {e}", file=sys.stderr)
+            continue
+        raw[tk] = data
     return raw
 
 

@@ -181,6 +181,29 @@ class TestFilingTrail:
         ]})
         assert detect_restatements(fj) == []
 
+    def test_same_day_tie_matches_mapper(self):
+        # Round-8 finding: when the two latest facts share a filed date, the
+        # reported current_value must equal what the mapper actually keeps. The
+        # mapper's _dedupe_latest_filed keeps the FIRST fact at the max filed
+        # date (`>` not `>=`); current must resolve the tie the same way.
+        from datetime import date as _date
+
+        from app.services.ingestion.companyfacts_mapper import _collect, _dedupe_latest_filed
+
+        entries = [
+            _fact("2024-12-31", 90.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 100.0, "2025-08-01", "10-Q", accn="B"),  # same day, first
+            _fact("2024-12-31", 120.0, "2025-08-01", "10-Q", accn="C"),  # same day, second
+        ]
+        fj = _facts({"Assets": entries})
+        # Exactly what scoring keeps for this period (the mapper's selector):
+        best = _dedupe_latest_filed(_collect(fj, "us-gaap", "Assets", "USD"))
+        mapper_value = best[(None, _date(2024, 12, 31))].val
+        fps = detect_restatements(fj)
+        assert len(fps) == 1
+        assert fps[0].current_value == mapper_value  # report agrees with scoring
+        assert fps[0].current_value == 100.0  # first same-day fact, not 120
+
     def test_ongoing_regular_revision_surfaces_as_current(self):
         # A -> B via an ordinary later filing (net change, no /A): current = B,
         # no amendment -> surfaced as an "other" revision.
