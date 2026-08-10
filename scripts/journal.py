@@ -60,6 +60,47 @@ def cmd_open(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_v2(path, args: argparse.Namespace) -> int:
+    """v2 report path (round-10 finding 1). The v1 text parser cannot read a
+    JSON-front-matter entry, so a v2 entry that reached `cmd_report` used to
+    fail on `has_thesis(text)`. Now: verify the lock is intact, generate the
+    report, THEN stamp `reported`. A tampered BEFORE block refuses to report
+    (the entry no longer represents the preregistered claim)."""
+    from datetime import datetime, timezone
+
+    entry = store.load_v2(path)
+    if not verify_lock(entry):
+        print(
+            f"{path.name}: LOCK BROKEN — refusing to generate report. The BEFORE "
+            "block was edited after the entry was locked; the preregistered "
+            "commitment no longer matches what is on disk. Run `journal.py verify` "
+            "for details.",
+            file=sys.stderr,
+        )
+        return 1
+    if entry.reported is not None:
+        print(
+            "This case's report was already generated; not regenerating "
+            "(prevents peeking-then-editing).",
+            file=sys.stderr,
+        )
+        return 1
+    print("Generating report...")
+    try:
+        out, overall = build_report(
+            entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat()
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"Report generation failed: {e}", file=sys.stderr)
+        return 1
+    updated = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
+    store.save_v2(updated, path)
+    print(f"Report stamped at {updated.reported.isoformat()}.")
+    print(f"overall: {overall} -> {out}")
+    print(f"\nNow fill the AFTER block in {path} (impact + conviction_after).")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     try:
         path = store.find_entry(args.ticker, args.date)
@@ -69,6 +110,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if path is None:
         print(f"No open entry for {args.ticker.upper()}. Run `journal.py open` first.", file=sys.stderr)
         return 1
+    if store.is_v2(path):
+        return _cmd_report_v2(path, args)
     text = path.read_text()
     if not store.has_thesis(text):
         print("BEFORE block looks empty — write your thesis first. Refusing to generate the "
@@ -226,6 +269,17 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         return 1
 
     entry = store.load_v2(path)
+    # Round-10 finding 2: a tampered BEFORE block invalidates every downstream
+    # measurement. Refuse to propose or commit against it. The user must first
+    # restore the file (git) or re-open a new entry.
+    if not verify_lock(entry):
+        print(
+            f"{path.name}: LOCK BROKEN — refusing to resolve. The BEFORE block "
+            "no longer matches its hash; propose/commit against a tampered "
+            "preregistration would silently contaminate the calibration set.",
+            file=sys.stderr,
+        )
+        return 1
     open_idxs = open_assumption_indices(entry)
     if not open_idxs:
         print(f"{path.name}: no open assumptions.")
@@ -262,11 +316,19 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         print("\n(dry-run; pass --commit to write these resolutions to the entry)")
         return 0
 
+    # Round-10 finding 4: `pending` is NOT terminal. Never write it — that
+    # would close the assumption and prevent retry after the filing arrives.
+    terminal = [r for r in proposals if r.state != "pending"]
+    pending = [r for r in proposals if r.state == "pending"]
+    if not terminal:
+        print("\nnothing to commit — all proposals are `pending` (retry after the filing arrives).")
+        return 0
     updated = entry
-    for r in proposals:
+    for r in terminal:
         updated = add_resolution(updated, r)
     store.save_v2(updated, path)
-    print(f"\ncommitted {len(proposals)} resolution(s) to {path.name}")
+    print(f"\ncommitted {len(terminal)} terminal resolution(s) to {path.name}"
+          + (f"; left {len(pending)} pending for retry" if pending else ""))
     return 0
 
 
@@ -278,7 +340,8 @@ def _print_v2_section(v2: dict) -> None:
               "`journal.py verify TICKER` to identify")
     r = v2["resolutions"]
     print(f"  Resolutions: {r['met']} met  ·  {r['violated']} violated  ·  "
-          f"{r['unresolvable']} unresolvable")
+          f"{r['unresolvable']} unresolvable"
+          + (f"  ·  {r['pending']} pending" if r.get("pending") else ""))
     print(f"  Open assumptions still awaiting resolution: {v2['open_assumptions']}")
     if v2["overdue_assumptions"]:
         overdue = v2["overdue_assumptions"]

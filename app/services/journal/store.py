@@ -240,10 +240,23 @@ def v2_tally(today_iso: str | None = None) -> dict:
     """Aggregate stats for v2 entries. v1 entries are ignored here (they're
     tallied by the v1 `tally()` above).
 
+    Round-10 hardening:
+      - **finding 2**: broken/unlocked entries are counted for AUDIT
+        (`total`, `lock_broken`) but EXCLUDED from every inferential metric
+        (resolutions, open queue, overdue queue, Brier). A tampered
+        preregistration cannot be evidence.
+      - **finding 3**: Brier scores `p_outcome` against `OutcomeBlock.y` (the
+        observed binary outcome the user preregistered), NOT the AFTER
+        `verdict` (which scored engine usefulness). Also requires
+        `before.outcome_definition` — a Brier without a preregistered event
+        definition is not a probability score.
+      - **finding 4**: `pending` resolutions don't count as terminal; only
+        met/violated/unresolvable populate the resolutions histogram.
+
     Fields:
-      total, locked, lock_broken, resolutions{met,violated,unresolvable},
+      total, locked, lock_broken, resolutions{met,violated,unresolvable,pending},
       open_assumptions, overdue_assumptions (past resolve_by, unresolved),
-      resolved_with_p_outcome, brier (None below the Murphy floor).
+      resolved_with_p_outcome, brier (None below the Murphy floor or without y).
     """
     from datetime import date as _date
 
@@ -260,11 +273,13 @@ def v2_tally(today_iso: str | None = None) -> dict:
     total = len(entries)
     locked = sum(1 for e in entries if verify_lock(e))
     lock_broken = sum(1 for e in entries if e.before_sha256 and not verify_lock(e))
+    # Only legitimately-locked entries contribute to inferential metrics.
+    trusted = [e for e in entries if verify_lock(e)]
 
-    res_counts = {"met": 0, "violated": 0, "unresolvable": 0}
+    res_counts = {"met": 0, "violated": 0, "unresolvable": 0, "pending": 0}
     open_assumptions = 0
     overdue: list[tuple[str, str, str]] = []  # (ticker, day, metric)
-    for e in entries:
+    for e in trusted:
         for r in e.resolutions:
             res_counts[r.state] = res_counts.get(r.state, 0) + 1
         for i in open_assumption_indices(e):
@@ -273,14 +288,18 @@ def v2_tally(today_iso: str | None = None) -> dict:
             if a.resolve_by <= today:
                 overdue.append((e.ticker, e.day.isoformat(), a.metric))
 
-    # Raw p_outcome + verdict pairs, mapped to binary y (helped=1, hurt=0;
-    # neutral/too_early excluded — Brier needs a resolved binary).
+    # Brier: preregistered probability of a preregistered binary event, scored
+    # against the observed y. A user must have supplied BOTH
+    # `outcome_definition` (BEFORE) and `y` (OUTCOME) — otherwise the Brier
+    # score has no defined target and we withhold it.
     pairs: list[tuple[float, int]] = []
-    for e in entries:
-        p, v = e.before.p_outcome, e.outcome.verdict
-        if p is None or v not in ("helped", "hurt"):
+    for e in trusted:
+        if not e.before.outcome_definition:
             continue
-        pairs.append((p, 1 if v == "helped" else 0))
+        p, y = e.before.p_outcome, e.outcome.y
+        if p is None or y is None:
+            continue
+        pairs.append((p, 1 if y else 0))
 
     brier = (
         sum((p - y) ** 2 for p, y in pairs) / len(pairs)

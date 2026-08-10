@@ -88,6 +88,34 @@ class TestAntiAnnoyanceLockRule:
         ok, reason = can_lock(before)
         assert ok is True and reason is None
 
+    def test_whitespace_only_thesis_rejected(self):
+        # Round-10 finding 6: min_length=1 does not catch "   ". Also
+        # `\t\n` etc. — none of these are a preregistered commitment.
+        for bad in ("   ", "\t\t", "\n", " \t\n "):
+            with pytest.raises(ValidationError, match="non-whitespace"):
+                BeforeBlock(thesis=bad, conviction=3, intended_action="hold",
+                            assumptions=[_min_assumption()])
+
+    def test_thesis_stripped_on_construction(self):
+        # Leading/trailing whitespace normalized; hash still deterministic.
+        b1 = BeforeBlock(thesis="  hello world  ", conviction=3,
+                         intended_action="hold", assumptions=[_min_assumption()])
+        b2 = BeforeBlock(thesis="hello world", conviction=3,
+                         intended_action="hold", assumptions=[_min_assumption()])
+        assert b1.thesis == "hello world"
+        assert hash_before(b1) == hash_before(b2)
+
+    def test_within_comparator_refused_at_lock(self):
+        # Round-10 finding 6: the resolver has no way to evaluate `within`, so
+        # locking a claim with that comparator commits the user to something
+        # that can never resolve. can_lock refuses.
+        before = BeforeBlock(
+            thesis="X", conviction=3, intended_action="hold",
+            assumptions=[_min_assumption(comparator="within")],
+        )
+        ok, reason = can_lock(before)
+        assert ok is False and "within" in reason and "resolvable" in reason
+
 
 class TestLockAndTamperDetection:
     def test_lock_stamps_hash_and_timestamps(self):
@@ -97,7 +125,9 @@ class TestLockAndTamperDetection:
         assert is_locked(locked)
         assert locked.before_sha256 is not None and len(locked.before_sha256) == 64
         assert locked.locked_at == datetime(2026, 7, 27, 10, 0, 0, tzinfo=timezone.utc)
-        assert locked.reported is not None  # stamped on lock if unset
+        # Round-10 finding 1: lock does NOT stamp `reported`. That belongs to
+        # the report step (`cmd_report`), which happens after the engine runs.
+        assert locked.reported is None
         assert verify_lock(locked) is True
 
     def test_verify_fails_after_before_edit(self):
@@ -285,8 +315,26 @@ class TestV2Tally:
         assert t["overdue_assumptions"] and t["overdue_assumptions"][0][2] == "revenue"
 
     def test_brier_deferred_below_min_n(self, tmp_path, monkeypatch):
-        # A single p_outcome+verdict pair is below the Murphy floor -> brier None,
-        # raw resolved_with_p_outcome still reported.
+        # Round-10 finding 3: Brier requires an explicit outcome_definition +
+        # observed y (not verdict). A single valid pair is still below the
+        # Murphy floor -> brier None, but the raw pair count is reported.
+        store = self._seed(tmp_path, monkeypatch)
+        entry = lock_entry(_min_entry(
+            outcome_definition="Q2 revenue > 165M",
+            p_outcome=0.7,
+        ))
+        entry = entry.model_copy(update={
+            "outcome": entry.outcome.model_copy(update={"y": True}),
+        })
+        store.save_v2(entry)
+        t = store.v2_tally()
+        assert t["brier"] is None
+        assert t["resolved_with_p_outcome"] == 1
+
+    def test_brier_ignores_verdict_helped_hurt(self, tmp_path, monkeypatch):
+        # Round-10 finding 3: `verdict=helped` (the engine helped) must NOT be
+        # treated as y=1. Without outcome_definition + y, this entry cannot
+        # contribute to Brier.
         store = self._seed(tmp_path, monkeypatch)
         entry = lock_entry(_min_entry(p_outcome=0.7))
         entry = entry.model_copy(update={
@@ -294,8 +342,48 @@ class TestV2Tally:
         })
         store.save_v2(entry)
         t = store.v2_tally()
-        assert t["brier"] is None
-        assert t["resolved_with_p_outcome"] == 1
+        assert t["resolved_with_p_outcome"] == 0
+
+    def test_brier_requires_outcome_definition_not_just_y(self, tmp_path, monkeypatch):
+        # A y without a preregistered outcome_definition is meaningless (what
+        # is `y` measuring?). Must be excluded from Brier.
+        store = self._seed(tmp_path, monkeypatch)
+        entry = lock_entry(_min_entry(p_outcome=0.7))  # no outcome_definition
+        entry = entry.model_copy(update={
+            "outcome": entry.outcome.model_copy(update={"y": True}),
+        })
+        store.save_v2(entry)
+        t = store.v2_tally()
+        assert t["resolved_with_p_outcome"] == 0
+
+    def test_broken_lock_excluded_from_resolutions_and_brier(self, tmp_path, monkeypatch):
+        # Round-10 finding 2: tampered entries are audited but excluded from
+        # every inferential metric.
+        store = self._seed(tmp_path, monkeypatch)
+        entry = lock_entry(_min_entry(
+            outcome_definition="Q2 revenue > 165M",
+            p_outcome=0.7,
+        ))
+        path = store.save_v2(entry)
+
+        # Add a resolution + outcome.y, then tamper the thesis under the old hash.
+        from app.services.journal.schema_v2 import Resolution, add_resolution, render_entry
+        with_res = add_resolution(entry, Resolution(assumption_index=0, state="met", observed=170.0))
+        with_res = with_res.model_copy(update={
+            "outcome": with_res.outcome.model_copy(update={"y": True}),
+        })
+        tampered = with_res.model_copy(update={
+            "before": with_res.before.model_copy(update={"thesis": "hindsight rewrite"}),
+        })
+        tampered = tampered.model_copy(update={"before_sha256": entry.before_sha256})
+        path.write_text(render_entry(tampered))
+
+        t = store.v2_tally()
+        assert t["lock_broken"] == 1
+        # The tampered entry HAS a resolution and a (p_outcome, y) pair, but
+        # NONE of that should show up in the inferential metrics.
+        assert t["resolutions"]["met"] == 0
+        assert t["resolved_with_p_outcome"] == 0
 
     def test_lock_broken_flagged(self, tmp_path, monkeypatch):
         # Tamper an on-disk entry and confirm v2_tally counts it as lock_broken.

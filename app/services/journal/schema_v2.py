@@ -38,8 +38,14 @@ Comparator = Literal[">", "<", ">=", "<=", "==", "within"]
 IntendedAction = Literal["hold", "trim", "add", "avoid", "no_position"]
 Impact = Literal["changed_thesis", "changed_confidence", "new_investigation", "no_value"]
 Verdict = Literal["helped", "neutral", "hurt", "too_early"]
-ResolutionState = Literal["met", "violated", "unresolvable"]
+# Resolution states: `pending` means the resolver could not evaluate yet
+# (missing filing/period/value) and MUST be retried later — never committed.
+# The other three are terminal.
+ResolutionState = Literal["pending", "met", "violated", "unresolvable"]
 SourceForm = Literal["10-K", "10-Q", "8-K", "10-K/A", "10-Q/A", "proxy", "other"]
+# Comparators the resolver can currently evaluate. `within` needs a range syntax
+# that does not yet exist, so it is refused at lock time (round-10 finding 6).
+_RESOLVABLE_COMPARATORS: frozenset[str] = frozenset({">", "<", ">=", "<=", "=="})
 
 
 class Assumption(BaseModel):
@@ -78,9 +84,18 @@ class BeforeBlock(BaseModel):
             "read as measuring engine impact NET of that context."
         ),
     )
+    outcome_definition: str | None = Field(
+        default=None,
+        description=(
+            "The BINARY event that `p_outcome` scores against. Free text, but "
+            "must be concrete enough that an observer can flip `outcome.y` to "
+            "true/false after the resolve window. Without this + a written y "
+            "the Brier score is undefined (round-10 finding 3)."
+        ),
+    )
     p_outcome: float | None = Field(
         default=None, ge=0.0, le=1.0,
-        description="Subjective probability of the named outcome; enables Brier scoring",
+        description="Subjective probability of `outcome_definition` being true; enables Brier scoring",
     )
     reference_class: str | None = Field(
         default=None,
@@ -94,6 +109,16 @@ class BeforeBlock(BaseModel):
         default_factory=list,
         description='"I am wrong if <concrete observable>" — encouraged (Arkes 1988)',
     )
+
+    @field_validator("thesis")
+    @classmethod
+    def _thesis_nonblank(cls, v: str) -> str:
+        # min_length=1 above prevents `""` but NOT `"   "`; a whitespace-only
+        # thesis is not a preregistered commitment. Round-10 finding 6.
+        s = v.strip()
+        if not s:
+            raise ValueError("thesis must contain non-whitespace text")
+        return s
 
     @field_validator("falsifiers")
     @classmethod
@@ -129,6 +154,16 @@ class OutcomeBlock(BaseModel):
     outcome_date: date | None = None
     what_happened: str | None = None
     verdict: Verdict | None = None
+    # `verdict` scores whether the ENGINE helped. `y` scores whether the
+    # PREDICTED OUTCOME (BeforeBlock.outcome_definition) actually happened.
+    # Only `y` is the correct Brier target (round-10 finding 3).
+    y: bool | None = Field(
+        default=None,
+        description=(
+            "Observed binary outcome for `outcome_definition`. Only when this "
+            "is set does p_outcome contribute to Brier."
+        ),
+    )
     brier: float | None = Field(
         default=None, ge=0.0, le=1.0,
         description="(p_outcome - y)^2 when both p_outcome and a binary y are present",
@@ -165,9 +200,18 @@ class EntryV2(BaseModel):
 
 def can_lock(before: BeforeBlock) -> tuple[bool, str | None]:
     """Anti-annoyance: only thesis + conviction + >=1 assumption row required.
-    pydantic already enforces thesis non-empty and conviction in [1, 5]."""
+    pydantic already enforces thesis non-empty (post-strip) and conviction in
+    [1, 5]. Round-10 finding 6: also refuse to lock any assumption whose grammar
+    the resolver cannot ever evaluate (currently `within`) — locking a claim
+    that can never be judged degrades the whole specificity floor."""
     if not before.assumptions:
         return False, "at least one assumption row is required to lock (specificity floor)"
+    for i, a in enumerate(before.assumptions):
+        if a.comparator not in _RESOLVABLE_COMPARATORS:
+            return False, (
+                f"assumption[{i}] comparator '{a.comparator}' is not resolvable "
+                f"(supported: {sorted(_RESOLVABLE_COMPARATORS)})"
+            )
     return True, None
 
 
@@ -183,8 +227,17 @@ def hash_before(before: BeforeBlock) -> str:
 
 
 def lock_entry(entry: EntryV2, now: datetime | None = None) -> EntryV2:
-    """Return a locked copy: BEFORE hash computed and `locked_at` / `reported`
-    stamped. Raises ValueError if the lock rule is not met."""
+    """Return a locked copy: BEFORE hash computed and `locked_at` stamped.
+
+    Round-10 finding 1: `reported` is NOT stamped here. Lock and report are
+    separate steps — lock freezes the BEFORE block against hindsight, `report`
+    is the moment the engine actually reveals its analysis. Stamping `reported`
+    at lock-time was a lie: no report had been generated yet, and the CLI's
+    v1 `cmd_report` refuses to touch an already-reported entry, so this bug
+    silently made v2 entries impossible to run a report against.
+
+    Raises ValueError if the lock rule is not met.
+    """
     ok, reason = can_lock(entry.before)
     if not ok:
         raise ValueError(f"cannot lock: {reason}")
@@ -192,7 +245,6 @@ def lock_entry(entry: EntryV2, now: datetime | None = None) -> EntryV2:
     return entry.model_copy(update={
         "before_sha256": hash_before(entry.before),
         "locked_at": ts,
-        "reported": entry.reported or ts,
     })
 
 

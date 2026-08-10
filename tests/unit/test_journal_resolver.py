@@ -48,10 +48,21 @@ class TestXbrlFieldPath:
         r = propose_resolution(_a(), _ds(_p(revenue=150_000_000)))
         assert r.state == "violated"
 
-    def test_missing_field_is_unresolvable(self):
+    def test_missing_field_is_pending_not_unresolvable(self):
+        # Round-10 finding 4: missing data is RETRYABLE (pending), not
+        # terminal. The field exists on PeriodFinancials — the value just
+        # hasn't been populated for this period yet.
         r = propose_resolution(_a(), _ds(_p()))  # no revenue
-        assert r.state == "unresolvable"
+        assert r.state == "pending"
         assert "missing" in (r.note or "").lower()
+
+    def test_unknown_metric_is_unresolvable_not_pending(self):
+        # Round-10 finding 4 boundary: an unknown metric name IS structural.
+        # No later filing can conjure a `fake_metric_xyz` into existence.
+        a = _a(metric="fake_metric_xyz")
+        r = propose_resolution(a, _ds(_p(revenue=200_000_000)))
+        assert r.state == "unresolvable"
+        assert "unknown" in (r.note or "").lower()
 
 
 class TestEngineMetricPath:
@@ -74,10 +85,12 @@ class TestEngineMetricPath:
 
 
 class TestWindow:
-    def test_no_matching_period_is_unresolvable(self):
+    def test_no_matching_period_is_pending(self):
+        # Round-10 finding 4: the requested fiscal period may not have been
+        # filed yet — retryable.
         r = propose_resolution(_a(window="FY2027Q1"), _ds(_p(revenue=200_000_000)))
-        assert r.state == "unresolvable"
-        assert r.at is None  # never happened → no period date
+        assert r.state == "pending"
+        assert r.at is None  # no period landed → no observation date
         assert "FY2027Q1" in (r.note or "")
 
     def test_window_match_is_case_insensitive(self):
@@ -105,6 +118,9 @@ class TestSymbolicThresholds:
 
 class TestUnsupportedComparator:
     def test_within_returns_unresolvable_with_note(self):
+        # `can_lock` refuses `within` (round-10 finding 6) so it should not
+        # reach the resolver in normal use. Kept as a defensive check for
+        # programmatically-constructed (unlocked) entries.
         a = _a(comparator="within", threshold=1.0)
         r = propose_resolution(a, _ds(_p(revenue=1.0)))
         assert r.state == "unresolvable"
@@ -114,10 +130,51 @@ class TestUnsupportedComparator:
 class TestFabricationSafety:
     def test_never_marks_met_without_a_value(self):
         # No matching period + no metric — nothing to compare against. Must
-        # produce unresolvable, never met/violated.
+        # never produce met/violated. (`pending` for a missing window is the
+        # correct behavior now — the filing may still land.)
         r = propose_resolution(_a(window="FY2029Q1"), _ds(_p(revenue=999_999_999)))
-        assert r.state == "unresolvable"
+        assert r.state != "met" and r.state != "violated"
 
     def test_index_is_carried_through(self):
         r = propose_resolution(_a(), _ds(_p(revenue=200_000_000)), assumption_index=3)
         assert r.assumption_index == 3
+
+
+class TestSourceProvenance:
+    """Round-10 finding 5: the mapper's canonical dataset can attribute values
+    to 10-K/10-Q with any confidence; anything else must return `pending`
+    until per-value provenance lands (P1-A)."""
+
+    def test_10q_source_resolves(self):
+        r = propose_resolution(_a(source="10-Q"), _ds(_p(revenue=200_000_000)))
+        assert r.state == "met"
+
+    def test_10k_source_resolves(self):
+        r = propose_resolution(_a(source="10-K"), _ds(_p(revenue=200_000_000)))
+        assert r.state == "met"
+
+    def test_8k_source_defers_to_pending(self):
+        # The reproduction the auditor filed: a numeric match should not be
+        # called `met` when the source is 8-K.
+        r = propose_resolution(_a(source="8-K"), _ds(_p(revenue=200_000_000)))
+        assert r.state == "pending"
+        assert "8-K" in (r.note or "") or "provenance" in (r.note or "")
+
+    def test_proxy_source_defers_to_pending(self):
+        r = propose_resolution(_a(source="proxy"), _ds(_p(revenue=200_000_000)))
+        assert r.state == "pending"
+
+    def test_amendments_defer_to_pending(self):
+        # Amendments are legitimate filings but the mapper's dedupe rule keeps
+        # the latest-filed value and can't tell whether it was an /A or the
+        # original.
+        for src in ("10-K/A", "10-Q/A"):
+            r = propose_resolution(_a(source=src), _ds(_p(revenue=200_000_000)))
+            assert r.state == "pending", f"{src} must be pending"
+
+    def test_pending_source_precedes_period_check(self):
+        # Source provenance is a protocol failure regardless of whether the
+        # window matches — return pending without probing the data.
+        r = propose_resolution(_a(source="8-K", window="FY2029Q1"), _ds(_p(revenue=1)))
+        assert r.state == "pending"
+        assert "provenance" in (r.note or "") or "8-K" in (r.note or "")
