@@ -16,50 +16,29 @@ def q(label: str = "Q4", **kw) -> PeriodFinancials:
     )
 
 
-class TestIssuancePressureDistress:
-    def test_negative_cfo_is_distress_signal(self):
-        # P0-9: negative CFO means the firm cannot self-fund; issuance
-        # dependence is total -> maximum concern, not a drop.
-        m = cs.issuance_pressure(q(share_issuance_proceeds=100.0, cfo=-10.0))
-        assert m.status is MetricStatus.NOT_MEANINGFUL
-        assert m.distress_signal is True
+class TestIssuancePressure:
+    """Review finding 1 (round 4): the negative-CFO distress SCORE was removed
+    (unvalidated threshold on frozen scoring). Negative/zero CFO now drops the
+    metric benignly — NOT_MEANINGFUL, never a distress signal."""
 
     def test_positive_cfo_computes_normally(self):
         m = cs.issuance_pressure(q(share_issuance_proceeds=50.0, cfo=200.0))
         assert m.status is MetricStatus.OK
         assert m.value == pytest.approx(0.25)
 
-    def test_zero_issuance_negative_cfo_is_not_distress(self):
-        # Review finding 5: negative CFO with NO issuance is not "issuance
-        # dependence" — the corroborating condition (material issuance) is absent.
-        m = cs.issuance_pressure(q(share_issuance_proceeds=0.0, cfo=-10.0))
-        assert m.distress_signal is False
-
-    def test_material_issuance_negative_cfo_is_distress(self):
+    def test_negative_cfo_is_not_meaningful_not_distress(self):
         m = cs.issuance_pressure(q(share_issuance_proceeds=100.0, cfo=-10.0))
         assert m.status is MetricStatus.NOT_MEANINGFUL
-        assert m.distress_signal is True
-
-    def test_token_issuance_negative_cfo_is_not_distress(self):
-        # Review finding 7: a token amount against a large burn must not fire
-        # (1e-9 covers ~0% of a 1e9 burn — below the coverage floor).
-        m = cs.issuance_pressure(q(share_issuance_proceeds=1e-9, cfo=-1e9))
         assert m.distress_signal is False
 
-    def test_immaterial_issuance_below_coverage_floor_is_not_distress(self):
-        # 1.0 issuance covers only 10% of a 10 burn — below the 25% floor.
-        m = cs.issuance_pressure(q(share_issuance_proceeds=1.0, cfo=-10.0))
-        assert m.distress_signal is False
-
-    def test_zero_cfo_zero_issuance_is_not_distress(self):
-        # Review finding 2 (round 2): cfo == 0 makes 0.25*|0| == 0, so zero
-        # issuance used to satisfy `>= 0` and fire. Breakeven is not distress.
+    def test_zero_cfo_is_not_meaningful_not_distress(self):
+        # No distress from breakeven, and no zero/zero threshold artifact.
         m = cs.issuance_pressure(q(share_issuance_proceeds=0.0, cfo=0.0))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
         assert m.distress_signal is False
 
-    def test_zero_cfo_with_issuance_is_not_distress(self):
-        # cfo == 0 is breakeven (no burn to fund); not distress regardless.
-        m = cs.issuance_pressure(q(share_issuance_proceeds=100.0, cfo=0.0))
+    def test_no_issuance_negative_cfo_is_not_distress(self):
+        m = cs.issuance_pressure(q(share_issuance_proceeds=0.0, cfo=-10.0))
         assert m.distress_signal is False
 
 

@@ -87,6 +87,7 @@ def render_decision_card(
     event_lines: list[str] | None = None,
     tier1_events: list[str] | None = None,
     tier1_unavailable: list[str] | None = None,
+    capital_markets_checked: bool = False,
 ) -> str:
     """Render the 90-second card.
 
@@ -150,8 +151,11 @@ def render_decision_card(
     out += ["## Events & capital markets", ""]
     if event_lines:
         out += [f"- {line}" for line in event_lines]
+    elif capital_markets_checked:
+        # Review finding 2 (round 4): distinguish "checked, none" from "not checked".
+        out.append("- Checked — no securities-offering activity in the window.")
     else:
-        out.append("- No event/capital-markets stream wired into this run.")
+        out.append("- Capital-markets stream not checked this run (see data quality).")
     out.append("")
 
     # 5. Checked and clean

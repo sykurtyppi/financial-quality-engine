@@ -105,6 +105,17 @@ class TestCard:
         assert "Strong FCF" in card
         assert "coverage 82%" in card
 
+    def test_capital_markets_checked_empty_vs_not_checked(self):
+        # Review finding 2 (round 4): "checked, none" must differ from "not checked".
+        checked = render_decision_card(
+            _result(), _thermo(50.0), generated_on="2026-08-09", capital_markets_checked=True
+        )
+        assert "Checked — no securities-offering activity" in checked
+        not_checked = render_decision_card(
+            _result(), _thermo(50.0), generated_on="2026-08-09", capital_markets_checked=False
+        )
+        assert "not checked this run" in not_checked
+
     def test_unavailable_tier1_sources_flagged(self):
         # A not-checked Tier-1 source must not read as clean (findings 4 + round 2).
         card = render_decision_card(

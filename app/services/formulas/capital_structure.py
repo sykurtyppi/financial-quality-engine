@@ -6,11 +6,6 @@ from app.schemas.financials import PeriodFinancials
 from app.schemas.metrics import MetricResult
 from app.services.formulas.base import build_metric
 
-# Fraction of the operating cash burn that equity issuance must cover before
-# a negative-CFO quarter is treated as external funding dependence (review
-# finding 7). Documented HEURISTIC — economically motivated, not calibrated.
-MATERIAL_ISSUANCE_COVERAGE = 0.25
-
 
 def sbc_to_revenue(cur: PeriodFinancials) -> MetricResult:
     inputs = {"stock_based_compensation": cur.stock_based_compensation, "revenue": cur.revenue}
@@ -95,21 +90,18 @@ def issuance_pressure(cur: PeriodFinancials) -> MetricResult:
         "Issuance Proceeds / CFO",
         cur.fiscal_label,
         inputs,
-        # P0-9: an actual operating cash BURN funded by material equity issuance
-        # is external funding dependence. Review findings 5 & 7 (both rounds):
-        #  - cfo must be strictly NEGATIVE (a genuine burn); cfo == 0 is
-        #    breakeven, not distress, and previously made the relative threshold
-        #    0.25*|0| == 0 so zero issuance fired (the zero/zero bug).
-        #  - issuance must be strictly POSITIVE and cover >= MATERIAL_ISSUANCE_
-        #    COVERAGE of the burn, so a token amount does not fire.
-        # NOTE: the 25% coverage threshold is a documented HEURISTIC on frozen
-        # scoring and still needs before/after validation + human approval before
-        # it can be considered calibrated.
-        distress_guard=lambda: (
-            "Operating cash burn funded by material equity issuance: external funding dependence"
-            if cur.cfo < 0  # type: ignore[operator]
-            and cur.share_issuance_proceeds > 0  # type: ignore[operator]
-            and cur.share_issuance_proceeds >= MATERIAL_ISSUANCE_COVERAGE * abs(cur.cfo)  # type: ignore[operator]
+        # Negative CFO leaves issuance/CFO economically meaningless, so the
+        # metric is dropped (NOT_MEANINGFUL) — descriptively, NOT as a distress
+        # signal. Review finding 1 (round 4): the earlier distress_signal +
+        # 25%-coverage threshold was an unvalidated change to frozen scoring
+        # (active in 27 periods across 11 companies) that can double-count
+        # negative-CFO distress already carried by other metrics + regime flags.
+        # It is removed pending pre-specified before/after validation + human
+        # approval. The issuance and offering facts remain available descriptively
+        # (offerings section, evidence ledger).
+        guard=lambda: (
+            "Non-positive CFO: issuance-to-CFO ratio not meaningful (see offerings/evidence)"
+            if cur.cfo <= 0  # type: ignore[operator]
             else None
         ),
         value_fn=lambda: cur.share_issuance_proceeds / cur.cfo,  # type: ignore[operator]

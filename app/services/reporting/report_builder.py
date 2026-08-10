@@ -186,6 +186,11 @@ def build_report(
         if errors["events"] is not None:
             tier1_unavailable.append("8-K 4.02 events")
 
+    # Capital-markets was actually checked iff a client ran offerings without error.
+    capital_markets_checked = (
+        client is not None and ticker is not None and errors["offerings"] is None
+    )
+
     thermometer = compute_thermometer(result.block_scores, dataset.periods)
     card = render_decision_card(
         result,
@@ -195,6 +200,7 @@ def build_report(
         event_lines=event_lines or None,
         tier1_events=tier1_events or None,
         tier1_unavailable=tier1_unavailable or None,
+        capital_markets_checked=capital_markets_checked,
     )
     report = card + "\n\n---\n\n# Full report (appendix)\n\n" + body
     return report, thermometer
