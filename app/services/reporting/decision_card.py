@@ -86,7 +86,7 @@ def render_decision_card(
     coverage: float | None = None,
     event_lines: list[str] | None = None,
     tier1_events: list[str] | None = None,
-    events_unavailable: bool = False,
+    tier1_unavailable: list[str] | None = None,
 ) -> str:
     """Render the 90-second card.
 
@@ -94,8 +94,10 @@ def render_decision_card(
     non-reliance, restatement footprints) that render in Tier-1; high-severity
     disclosure emergence is pulled from the narrative findings automatically.
     `event_lines` carries capital-markets context (offerings) for the events
-    section. `events_unavailable` (review finding 4) makes Tier-1 say the event
-    stream could not be checked, so a failed fetch never reads as clean.
+    section. `tier1_unavailable` names any Tier-1 source that could NOT be
+    checked this run (a failed fetch, or streams the API omits) so a
+    not-checked source never reads as checked-and-clean (review findings 4 & the
+    round-2 Tier-1 availability finding).
     """
     ticker = result.profile.ticker
     out: list[str] = [
@@ -122,9 +124,11 @@ def render_decision_card(
     # 3. Attention flags — tiered
     out += ["## Attention flags", ""]
     tier_items: dict[int, list[str]] = {1: list(tier1_events or []), 2: [], 3: []}
-    if events_unavailable:
-        # Review finding 4: a failed event fetch must not read as "clean".
-        tier_items[1].append("⚠ event stream unavailable this run — Tier-1 not fully checked (see data quality)")
+    if tier1_unavailable:
+        # A not-checked Tier-1 source must not read as checked-and-clean.
+        tier_items[1].append(
+            "⚠ not checked this run: " + ", ".join(tier1_unavailable) + " (see data quality)"
+        )
     # High-severity disclosure emergence is a validated Tier-1 signal (§7).
     for finding in result.narrative_findings:
         if getattr(finding, "kind", "") == "high_severity_disclosure":

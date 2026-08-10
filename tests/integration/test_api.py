@@ -38,6 +38,9 @@ def test_report_endpoint_leads_with_decision_card():
     assert "Distress signals (experimental" in card
     assert "/100" not in card
     assert "Full report (appendix)" in resp.text
+    # Round-2 finding: the API omits EDGAR streams, so Tier-1 must say so rather
+    # than read checked-and-clean.
+    assert "not checked this run" in card
 
 
 def test_analyze_rejects_single_period():

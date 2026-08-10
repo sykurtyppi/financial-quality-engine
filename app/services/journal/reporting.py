@@ -45,7 +45,13 @@ def build_report(
         dataset.documents = docs.documents
         doc_diagnostics = list(docs.diagnostics)
     result = analyze(dataset)
-    generated_on = report_day or date.today().isoformat()
+    # Review finding 1 (round 2): the report is built from CURRENTLY fetched
+    # fundamentals/evidence, so it must be labeled with the ACTUAL generation
+    # date, never a historical `report_day`. `report_day` only names the output
+    # file (to match the journal entry). A true historical replay would require
+    # PIT fundamentals + `filed <= as_of` across every stream (the pit.py path),
+    # which this regeneration does not do.
+    generated_on = date.today().isoformat()
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     report, _ = build_full_report(
         result, dataset,

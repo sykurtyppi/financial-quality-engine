@@ -51,6 +51,17 @@ class TestIssuancePressureDistress:
         m = cs.issuance_pressure(q(share_issuance_proceeds=1.0, cfo=-10.0))
         assert m.distress_signal is False
 
+    def test_zero_cfo_zero_issuance_is_not_distress(self):
+        # Review finding 2 (round 2): cfo == 0 makes 0.25*|0| == 0, so zero
+        # issuance used to satisfy `>= 0` and fire. Breakeven is not distress.
+        m = cs.issuance_pressure(q(share_issuance_proceeds=0.0, cfo=0.0))
+        assert m.distress_signal is False
+
+    def test_zero_cfo_with_issuance_is_not_distress(self):
+        # cfo == 0 is breakeven (no burn to fund); not distress regardless.
+        m = cs.issuance_pressure(q(share_issuance_proceeds=100.0, cfo=0.0))
+        assert m.distress_signal is False
+
 
 class TestSbc:
     def test_sbc_to_revenue(self):

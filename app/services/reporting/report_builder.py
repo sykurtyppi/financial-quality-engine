@@ -173,6 +173,19 @@ def build_report(
             events_error=errors["events"],
         ) + "\n"
 
+    # Tier-1 sources that could NOT be checked this run — restatement footprints
+    # and 8-K 4.02 events (offerings is Tier-2 context, not Tier-1). Round-2
+    # finding: a not-checked source must not render as checked-and-clean. With no
+    # client (API path) none of the evidence streams are checked at all.
+    tier1_unavailable: list[str] = []
+    if client is None or ticker is None:
+        tier1_unavailable = ["restatement footprints", "8-K 4.02 events"]
+    else:
+        if errors["restatements"] is not None:
+            tier1_unavailable.append("restatement footprints")
+        if errors["events"] is not None:
+            tier1_unavailable.append("8-K 4.02 events")
+
     thermometer = compute_thermometer(result.block_scores, dataset.periods)
     card = render_decision_card(
         result,
@@ -181,7 +194,7 @@ def build_report(
         coverage=coverage,
         event_lines=event_lines or None,
         tier1_events=tier1_events or None,
-        events_unavailable="events" in unavailable,
+        tier1_unavailable=tier1_unavailable or None,
     )
     report = card + "\n\n---\n\n# Full report (appendix)\n\n" + body
     return report, thermometer

@@ -95,14 +95,20 @@ def issuance_pressure(cur: PeriodFinancials) -> MetricResult:
         "Issuance Proceeds / CFO",
         cur.fiscal_label,
         inputs,
-        # P0-9: negative operating cash flow WHILE materially raising equity is
-        # external funding dependence. Review findings 5 & 7: the corroborating
-        # condition must be MATERIAL issuance, not merely positive — a token
-        # amount against a large burn (1e-9 vs -1e9) must not fire. Require
-        # issuance to cover at least MATERIAL_ISSUANCE_COVERAGE of the burn.
+        # P0-9: an actual operating cash BURN funded by material equity issuance
+        # is external funding dependence. Review findings 5 & 7 (both rounds):
+        #  - cfo must be strictly NEGATIVE (a genuine burn); cfo == 0 is
+        #    breakeven, not distress, and previously made the relative threshold
+        #    0.25*|0| == 0 so zero issuance fired (the zero/zero bug).
+        #  - issuance must be strictly POSITIVE and cover >= MATERIAL_ISSUANCE_
+        #    COVERAGE of the burn, so a token amount does not fire.
+        # NOTE: the 25% coverage threshold is a documented HEURISTIC on frozen
+        # scoring and still needs before/after validation + human approval before
+        # it can be considered calibrated.
         distress_guard=lambda: (
-            "Non-positive CFO with material equity issuance: external funding dependence"
-            if cur.cfo <= 0  # type: ignore[operator]
+            "Operating cash burn funded by material equity issuance: external funding dependence"
+            if cur.cfo < 0  # type: ignore[operator]
+            and cur.share_issuance_proceeds > 0  # type: ignore[operator]
             and cur.share_issuance_proceeds >= MATERIAL_ISSUANCE_COVERAGE * abs(cur.cfo)  # type: ignore[operator]
             else None
         ),
