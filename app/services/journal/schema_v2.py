@@ -208,6 +208,23 @@ def verify_lock(entry: EntryV2) -> bool:
     return hash_before(entry.before) == entry.before_sha256
 
 
+def open_assumption_indices(entry: EntryV2) -> list[int]:
+    """Assumption indices with no resolution yet — the queue the resolver
+    should propose against."""
+    resolved = {r.assumption_index for r in entry.resolutions}
+    return [i for i in range(len(entry.before.assumptions)) if i not in resolved]
+
+
+def add_resolution(entry: EntryV2, resolution: Resolution) -> EntryV2:
+    """Return a copy of `entry` with `resolution` folded in. Idempotent — a
+    later resolution for the same assumption_index REPLACES the earlier one
+    (final answer wins). AFTER/OUTCOME/BEFORE untouched, so lock stays valid."""
+    others = [r for r in entry.resolutions if r.assumption_index != resolution.assumption_index]
+    return entry.model_copy(update={
+        "resolutions": sorted([*others, resolution], key=lambda r: r.assumption_index)
+    })
+
+
 # ---------------------------------------------------------------------------
 # Serialization: JSON front-matter + markdown body
 # ---------------------------------------------------------------------------

@@ -38,7 +38,9 @@ from app.services.journal.schema_v2 import (
     Assumption,
     BeforeBlock,
     EntryV2,
+    add_resolution,
     lock_entry,
+    open_assumption_indices,
     verify_lock,
 )
 
@@ -208,6 +210,66 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """Engine proposes met/violated/unresolvable for every open assumption on a
+    v2 entry. Dry-run by default; `--commit` writes the resolutions back."""
+    try:
+        path = store.find_entry(args.ticker, args.date)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
+    if path is None:
+        print(f"No entry for {args.ticker.upper()}.", file=sys.stderr)
+        return 1
+    if not store.is_v2(path):
+        print(f"{path.name}: v1 entry — resolutions only apply to v2 (openv2).", file=sys.stderr)
+        return 1
+
+    entry = store.load_v2(path)
+    open_idxs = open_assumption_indices(entry)
+    if not open_idxs:
+        print(f"{path.name}: no open assumptions.")
+        return 0
+
+    # Import lazily so the resolver + pipeline aren't loaded for openv2/verify.
+    from app.services.ingestion.edgar_adapter import fetch_dataset
+    from app.services.formulas.registry import compute_metrics
+    from app.services.journal.resolver import propose_resolution
+
+    try:
+        dataset, _ = fetch_dataset(entry.ticker)
+    except Exception as e:  # noqa: BLE001 - a fetch failure must not corrupt the entry
+        print(f"Fetch failed: {e}", file=sys.stderr)
+        return 1
+    bundle = compute_metrics(dataset)
+
+    proposals = [
+        propose_resolution(entry.before.assumptions[i], dataset, bundle, assumption_index=i)
+        for i in open_idxs
+    ]
+
+    print(f"{path.name}: {len(proposals)} open assumption(s)")
+    for r in proposals:
+        a = entry.before.assumptions[r.assumption_index]
+        print(f"  [{r.assumption_index}] {a.metric} {a.comparator} {a.threshold} @ {a.window}")
+        obs = "n/a" if r.observed is None else f"{r.observed:g}"
+        at = r.at.isoformat() if r.at else "—"
+        print(f"      -> {r.state.upper():12s} observed={obs}  at={at}")
+        if r.note:
+            print(f"         note: {r.note}")
+
+    if not args.commit:
+        print("\n(dry-run; pass --commit to write these resolutions to the entry)")
+        return 0
+
+    updated = entry
+    for r in proposals:
+        updated = add_resolution(updated, r)
+    store.save_v2(updated, path)
+    print(f"\ncommitted {len(proposals)} resolution(s) to {path.name}")
+    return 0
+
+
 def cmd_tally(args: argparse.Namespace) -> int:
     t = store.tally()
     if not t["total"]:
@@ -294,6 +356,16 @@ def main() -> int:
     p_ver.add_argument("ticker")
     p_ver.add_argument("--date")
     p_ver.set_defaults(func=cmd_verify)
+
+    p_res = sub.add_parser(
+        "resolve",
+        help="engine proposes met/violated/unresolvable for open assumptions (dry-run by default)",
+    )
+    p_res.add_argument("ticker")
+    p_res.add_argument("--date")
+    p_res.add_argument("--commit", action="store_true",
+                       help="write the proposed resolutions back to the entry file")
+    p_res.set_defaults(func=cmd_resolve)
 
     args = parser.parse_args()
     return args.func(args)

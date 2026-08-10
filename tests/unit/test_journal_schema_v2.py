@@ -207,6 +207,41 @@ class TestStorageRoundtrip:
             store.save_v2(lock_entry(_min_entry()), v1_path)
 
 
+class TestResolutionHelpers:
+    def test_open_indices_are_the_unresolved_ones(self):
+        from app.services.journal.schema_v2 import Resolution, open_assumption_indices
+
+        entry = lock_entry(_min_entry())
+        entry = entry.model_copy(update={
+            "before": entry.before.model_copy(update={
+                "assumptions": [_min_assumption(), _min_assumption(metric="cfo"), _min_assumption(metric="ni")],
+            })
+        })
+        assert open_assumption_indices(entry) == [0, 1, 2]
+        with_one = entry.model_copy(update={
+            "resolutions": [Resolution(assumption_index=1, state="met")],
+        })
+        assert open_assumption_indices(with_one) == [0, 2]
+
+    def test_add_resolution_is_idempotent(self):
+        from app.services.journal.schema_v2 import Resolution, add_resolution
+
+        entry = lock_entry(_min_entry())
+        entry = add_resolution(entry, Resolution(assumption_index=0, state="met", observed=170.0))
+        assert len(entry.resolutions) == 1 and entry.resolutions[0].observed == 170.0
+        # A second call for the same index REPLACES, not appends.
+        entry = add_resolution(entry, Resolution(assumption_index=0, state="violated", observed=140.0))
+        assert len(entry.resolutions) == 1 and entry.resolutions[0].state == "violated"
+
+    def test_add_resolution_preserves_lock(self):
+        from app.services.journal.schema_v2 import Resolution, add_resolution
+
+        entry = lock_entry(_min_entry())
+        assert verify_lock(entry) is True
+        after = add_resolution(entry, Resolution(assumption_index=0, state="met"))
+        assert verify_lock(after) is True  # BEFORE untouched
+
+
 class TestSchemaSurface:
     def test_schema_version_is_two(self):
         assert SCHEMA_VERSION == 2
