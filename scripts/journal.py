@@ -270,10 +270,39 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_v2_section(v2: dict) -> None:
+    print(f"\n== v2 entries — {v2['total']} preregistered ({v2['locked']} locked, "
+          f"{v2['lock_broken']} LOCK BROKEN) ==")
+    if v2["lock_broken"]:
+        print("  ⚠ some BEFORE blocks were edited after locking; run "
+              "`journal.py verify TICKER` to identify")
+    r = v2["resolutions"]
+    print(f"  Resolutions: {r['met']} met  ·  {r['violated']} violated  ·  "
+          f"{r['unresolvable']} unresolvable")
+    print(f"  Open assumptions still awaiting resolution: {v2['open_assumptions']}")
+    if v2["overdue_assumptions"]:
+        overdue = v2["overdue_assumptions"]
+        print(f"  Past resolve_by ({len(overdue)}):")
+        for ticker, day, metric in overdue[:8]:
+            print(f"    {ticker} ({day}): {metric}")
+        if len(overdue) > 8:
+            print(f"    … +{len(overdue) - 8} more")
+    n = v2["resolved_with_p_outcome"]
+    if v2["brier"] is not None:
+        print(f"  Brier: {v2['brier']:.3f}  (n={n})")
+    elif n:
+        print(f"  {n} case(s) resolved with p_outcome — Brier deferred until "
+              f"n >= {v2['brier_min_n']} (Murphy floor).")
+
+
 def cmd_tally(args: argparse.Namespace) -> int:
     t = store.tally()
+    v2 = store.v2_tally()
+    if not t["total"] and not v2["total"]:
+        print("No journal entries yet. Start with `journal.py open TICKER` or `openv2`.")
+        return 0
     if not t["total"]:
-        print("No journal entries yet. Start with `journal.py open TICKER`.")
+        _print_v2_section(v2)
         return 0
     print(f"Journal tally — {t['total']} cases logged ({t['scored']} scored, "
           f"{t['with_outcome']} with outcomes)\n")
@@ -300,6 +329,8 @@ def cmd_tally(args: argparse.Namespace) -> int:
     if t["gate_ready"]:
         print("\n>=20 cases with outcomes: enough to judge. Decision gate — would you keep "
               "using it voluntarily? See docs/evaluation_protocol.md.")
+    if v2["total"]:
+        _print_v2_section(v2)
     return 0
 
 

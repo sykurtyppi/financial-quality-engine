@@ -230,8 +230,82 @@ def load_v2(path: Path):
     return parse_entry(path.read_text(encoding="utf-8"))
 
 
+# Brier / calibration threshold from VALIDATION_STRATEGY §4 (Murphy decomposition
+# floor): below this many resolved p_outcome samples, report raw tallies only —
+# no calibration claim.
+BRIER_MIN_N = 50
+
+
+def v2_tally(today_iso: str | None = None) -> dict:
+    """Aggregate stats for v2 entries. v1 entries are ignored here (they're
+    tallied by the v1 `tally()` above).
+
+    Fields:
+      total, locked, lock_broken, resolutions{met,violated,unresolvable},
+      open_assumptions, overdue_assumptions (past resolve_by, unresolved),
+      resolved_with_p_outcome, brier (None below the Murphy floor).
+    """
+    from datetime import date as _date
+
+    from app.services.journal.schema_v2 import (
+        add_resolution,  # noqa: F401 - kept exported through this module
+        open_assumption_indices,
+        verify_lock,
+    )
+
+    today = _date.fromisoformat(today_iso) if today_iso else _date.today()
+    v2_paths = [p for p in list_entries() if is_v2(p)]
+    entries = [load_v2(p) for p in v2_paths]
+
+    total = len(entries)
+    locked = sum(1 for e in entries if verify_lock(e))
+    lock_broken = sum(1 for e in entries if e.before_sha256 and not verify_lock(e))
+
+    res_counts = {"met": 0, "violated": 0, "unresolvable": 0}
+    open_assumptions = 0
+    overdue: list[tuple[str, str, str]] = []  # (ticker, day, metric)
+    for e in entries:
+        for r in e.resolutions:
+            res_counts[r.state] = res_counts.get(r.state, 0) + 1
+        for i in open_assumption_indices(e):
+            open_assumptions += 1
+            a = e.before.assumptions[i]
+            if a.resolve_by <= today:
+                overdue.append((e.ticker, e.day.isoformat(), a.metric))
+
+    # Raw p_outcome + verdict pairs, mapped to binary y (helped=1, hurt=0;
+    # neutral/too_early excluded — Brier needs a resolved binary).
+    pairs: list[tuple[float, int]] = []
+    for e in entries:
+        p, v = e.before.p_outcome, e.outcome.verdict
+        if p is None or v not in ("helped", "hurt"):
+            continue
+        pairs.append((p, 1 if v == "helped" else 0))
+
+    brier = (
+        sum((p - y) ** 2 for p, y in pairs) / len(pairs)
+        if len(pairs) >= BRIER_MIN_N
+        else None
+    )
+
+    return {
+        "total": total,
+        "locked": locked,
+        "lock_broken": lock_broken,
+        "resolutions": res_counts,
+        "open_assumptions": open_assumptions,
+        "overdue_assumptions": overdue,
+        "resolved_with_p_outcome": len(pairs),
+        "brier": brier,
+        "brier_min_n": BRIER_MIN_N,
+    }
+
+
 def tally() -> dict:
-    entries = [parse_entry(p) for p in list_entries()]
+    # v2 entries are counted separately by `v2_tally()`; the v1 markdown parser
+    # can't read a JSON front-matter file (would yield an entry with all fields
+    # None and quietly inflate v1 stats).
+    entries = [parse_entry(p) for p in list_entries() if not is_v2(p)]
     total = len(entries)
     scored = [e for e in entries if e["impact"]]
     impact_counts = {code: sum(1 for e in scored if code in (e["impact"] or "")) for code in IMPACT_CODES}

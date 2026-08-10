@@ -242,6 +242,78 @@ class TestResolutionHelpers:
         assert verify_lock(after) is True  # BEFORE untouched
 
 
+class TestV2Tally:
+    def _seed(self, tmp_path, monkeypatch):
+        from app.services.journal import store
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        return store
+
+    def test_empty_tally(self, tmp_path, monkeypatch):
+        store = self._seed(tmp_path, monkeypatch)
+        t = store.v2_tally()
+        assert t["total"] == 0 and t["locked"] == 0 and t["lock_broken"] == 0
+        assert t["open_assumptions"] == 0 and t["brier"] is None
+
+    def test_v1_files_ignored_by_v2_tally(self, tmp_path, monkeypatch):
+        store = self._seed(tmp_path, monkeypatch)
+        (tmp_path / "OLD_2025-01-01.md").write_text("# OLD\nthesis: x\n")
+        assert store.v2_tally()["total"] == 0
+
+    def test_locked_and_resolutions_counted(self, tmp_path, monkeypatch):
+        from app.services.journal.schema_v2 import Resolution, add_resolution
+
+        store = self._seed(tmp_path, monkeypatch)
+        entry = lock_entry(_min_entry())
+        entry = add_resolution(entry, Resolution(assumption_index=0, state="met", observed=170.0))
+        store.save_v2(entry)
+        t = store.v2_tally()
+        assert t["total"] == 1 and t["locked"] == 1 and t["lock_broken"] == 0
+        assert t["resolutions"]["met"] == 1
+        assert t["open_assumptions"] == 0
+
+    def test_overdue_open_assumption_surfaced(self, tmp_path, monkeypatch):
+        store = self._seed(tmp_path, monkeypatch)
+        # resolve_by is in the past AND unresolved -> shows as overdue.
+        entry = lock_entry(_min_entry())
+        # override resolve_by via a fresh assumption
+        past = _min_before(assumptions=[_min_assumption(resolve_by=date(2020, 1, 1))])
+        entry = entry.model_copy(update={"before": past, "before_sha256": None, "locked_at": None})
+        entry = lock_entry(entry)
+        store.save_v2(entry)
+        t = store.v2_tally(today_iso="2026-08-10")
+        assert t["overdue_assumptions"] and t["overdue_assumptions"][0][2] == "revenue"
+
+    def test_brier_deferred_below_min_n(self, tmp_path, monkeypatch):
+        # A single p_outcome+verdict pair is below the Murphy floor -> brier None,
+        # raw resolved_with_p_outcome still reported.
+        store = self._seed(tmp_path, monkeypatch)
+        entry = lock_entry(_min_entry(p_outcome=0.7))
+        entry = entry.model_copy(update={
+            "outcome": entry.outcome.model_copy(update={"verdict": "helped"}),
+        })
+        store.save_v2(entry)
+        t = store.v2_tally()
+        assert t["brier"] is None
+        assert t["resolved_with_p_outcome"] == 1
+
+    def test_lock_broken_flagged(self, tmp_path, monkeypatch):
+        # Tamper an on-disk entry and confirm v2_tally counts it as lock_broken.
+        store = self._seed(tmp_path, monkeypatch)
+        entry = lock_entry(_min_entry())
+        path = store.save_v2(entry)
+        # Rewrite the file with an edited thesis but the OLD hash.
+        tampered = entry.model_copy(update={
+            "before": entry.before.model_copy(update={"thesis": "hindsight edit"}),
+        })
+        # Preserve the original hash (simulate a hand-edit).
+        tampered = tampered.model_copy(update={"before_sha256": entry.before_sha256})
+        from app.services.journal.schema_v2 import render_entry
+        path.write_text(render_entry(tampered))
+        t = store.v2_tally()
+        assert t["lock_broken"] == 1
+
+
 class TestSchemaSurface:
     def test_schema_version_is_two(self):
         assert SCHEMA_VERSION == 2
