@@ -1,9 +1,58 @@
-"""Shared report builder tests (review findings 1, 4, 6)."""
+"""Shared report builder tests (review findings 1, 4, 6, and round-5 outage)."""
 
 from datetime import date
 
+from app.core.pipeline import analyze
 from app.services.ingestion.restatements import RestatementFootprint
-from app.services.reporting.report_builder import _restatement_tier1_lines, data_quality_section
+from app.services.ingestion.sec_client import SecClientError
+from app.services.reporting.report_builder import (
+    _restatement_tier1_lines,
+    build_report,
+    data_quality_section,
+)
+from tests.fixtures.companies import stretch_dataset
+
+
+class _OutageClient:
+    """Simulates an EDGAR submissions/companyfacts outage on every network call."""
+
+    cache_dir = None
+
+    def resolve_cik(self, ticker):
+        return 320193
+
+    def submissions_by_cik(self, cik):
+        raise SecClientError("submissions 503")
+
+    def company_facts(self, ticker):
+        raise SecClientError("companyfacts 503")
+
+    def _cached_json(self, *a, **k):
+        raise SecClientError("submissions 503")
+
+    def _get(self, *a, **k):
+        raise SecClientError("archive 503")
+
+
+class TestOfferingsOutage:
+    def test_outage_is_not_checked_end_to_end(self):
+        # Review finding 1 (round 5): a submissions OUTAGE must not read as
+        # checked-clean on the card, and the appendix must surface the gap.
+        ds = stretch_dataset()
+        result = analyze(ds)
+        report, _ = build_report(
+            result, ds,
+            generated_on="2026-08-10",
+            coverage=1.0,
+            client=_OutageClient(),
+            ticker="AAPL",
+            fetched_at="2026-08-10 00:00 UTC",
+        )
+        card = report.split("Full report (appendix)")[0]
+        assert "Checked — no securities-offering activity" not in card
+        assert "Capital-markets stream not checked" in card
+        assert "UNAVAILABLE" in report  # appendix surfaces the outage
+        assert "No offering-related filings found" not in report
 
 
 def _fp(field: str, accn: str, period: date, form: str) -> RestatementFootprint:

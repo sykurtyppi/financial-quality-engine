@@ -92,7 +92,13 @@ def _collect_streams(client, ticker: str, report_date: date):
 
         timeline = fetch_offerings(client, ticker, as_of=report_date)
         body_sections.append(render_offerings_section(timeline))
-        if timeline.takedown_count:
+        # Review finding 1 (round 5): fetch_offerings swallows a submissions
+        # outage into a structured acquisition_error instead of raising, so check
+        # it explicitly — otherwise an outage reads as checked-and-clean.
+        if timeline.acquisition_error is not None:
+            errors["offerings"] = timeline.acquisition_error
+            unavailable.append("capital-markets")
+        elif timeline.takedown_count:
             event_lines.append(
                 f"{timeline.takedown_count} securities takedown(s) in the last "
                 f"{timeline.lookback_months} months (see Capital Markets Activity)"

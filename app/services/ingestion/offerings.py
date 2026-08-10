@@ -94,6 +94,9 @@ class OfferingsTimeline:
     # As-of anchor for the window (P0-12). None only for hand-built timelines
     # that never went through fetch_offerings; recency then falls back to today.
     as_of: date | None = None
+    # Set when the filing index could NOT be acquired (submissions outage), so a
+    # failure is never mistaken for "no offering activity" (review finding 1).
+    acquisition_error: str | None = None
 
     @property
     def takedowns(self) -> list[OfferingFiling]:
@@ -209,7 +212,11 @@ def fetch_offerings(
     try:
         subs = client.submissions_by_cik(cik)
     except SecClientError as e:
+        # Review finding 1 (round 5): a submissions OUTAGE is not "no activity".
+        # Record it as a structured acquisition error so the builder marks the
+        # stream not-checked and the renderer surfaces the gap.
         timeline.diagnostics.append(f"submissions fetch failed: {e}")
+        timeline.acquisition_error = str(e)
         return timeline
 
     recent = subs.get("filings", {}).get("recent", {})
@@ -273,8 +280,17 @@ def render_offerings_section(timeline: OfferingsTimeline, current_price: float |
     )
     lines.append("")
 
+    if timeline.acquisition_error is not None:
+        lines.append(
+            f"- **UNAVAILABLE** — filing index could not be fetched ({timeline.acquisition_error}). "
+            "Absence of activity here is a data gap, not evidence of no offerings."
+        )
+        return "\n".join(lines)
+
     if not timeline.filings:
         lines.append("- No offering-related filings found in the window.")
+        if timeline.diagnostics:
+            lines.append("- Parse diagnostics: " + "; ".join(timeline.diagnostics))
         return "\n".join(lines)
 
     _MAX_ROWS = 20  # MTN-program filers produce hundreds of 424B2/B5 rows
