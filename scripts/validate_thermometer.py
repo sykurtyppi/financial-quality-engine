@@ -99,7 +99,7 @@ def _load_raw_facts(tickers: set[str]) -> dict:
     return raw
 
 
-def _regime_add(row: dict, raw: dict) -> float:
+def _regime_add(row: dict, raw: dict, failures: set | None = None) -> float:
     # Review finding 3: TRUE point-in-time. Filter raw facts by the row's `asof`
     # FILING date before mapping, so later amendments/comparatives cannot leak
     # into a historical observation's NI/EBITDA regime flags.
@@ -111,16 +111,21 @@ def _regime_add(row: dict, raw: dict) -> float:
         pit_facts = filter_as_of(facts, date.fromisoformat(asof))
         ds, _ = build_dataset(pit_facts, row["ticker"], n_quarters=28)
     except Exception:  # noqa: BLE001 - unmappable PIT window contributes no regime
+        # Round-9 finding 4: a PIT window that passed the 8-quarter load probe can
+        # still fail to reconstruct here; record it so the completeness gate does
+        # not silently show an AUC with rows that contributed zero regime.
+        if failures is not None:
+            failures.add(row["ticker"])
         return 0.0
     periods = sorted(ds.periods, key=lambda p: p.period_end)
     return sum(f.concern_add for f in _regime_flags(periods))
 
 
-def thermometer_from_row(row: dict, raw: dict) -> float | None:
+def thermometer_from_row(row: dict, raw: dict, failures: set | None = None) -> float | None:
     base = cluster_base(row)
     if base is None:
         return None
-    return min(100.0, base + _regime_add(row, raw))
+    return min(100.0, base + _regime_add(row, raw, failures))
 
 
 def auc(positives: list[float], negatives: list[float]) -> float:
@@ -145,7 +150,10 @@ def _company_median(rows: list[dict], score_fn) -> list[float]:
     out = []
     for vals in by_ticker.values():
         s = sorted(vals)
-        out.append(s[len(s) // 2])
+        n = len(s)
+        # True median (average the two middles for even n) — review finding: the
+        # upper-middle element biases the company-level statistic (round-9).
+        out.append(s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2)
     return out
 
 
@@ -160,11 +168,13 @@ def main() -> int:
     # ticker must be present, else missing tickers silently receive zero regime
     # contribution and the regime-inclusive AUC is understated/withheld.
     missing = sorted(requested - set(raw))
-    complete = not missing
+    # Round-9 finding 4: also catch per-row PIT reconstruction failures (a ticker
+    # can pass the load probe yet fail to rebuild for a specific asof window).
+    pit_failures: set[str] = set()
 
     n_s, n_c = len({r["ticker"] for r in stress}), len({r["ticker"] for r in control})
     comp_row = lambda r: float(r["overall"])  # noqa: E731
-    th_row = lambda r: thermometer_from_row(r, raw)  # noqa: E731
+    th_row = lambda r: thermometer_from_row(r, raw, pit_failures)  # noqa: E731
 
     # Company-level (primary — honest n) and company-quarter (secondary).
     comp_co = auc(_company_median(stress, comp_row), _company_median(control, comp_row))
@@ -175,23 +185,28 @@ def main() -> int:
         [t for r in control if (t := th_row(r)) is not None],
     )
 
+    # Coverage is complete only if every ticker loaded AND every PIT row rebuilt.
+    unusable = sorted(set(missing) | pit_failures)
+    complete = not unusable
+
     print("=== EXPERIMENTAL — indicative only, NOT a formal validation ===")
     print(f"cohort: {n_s} stress companies ({len(stress)} quarters) vs "
           f"{n_c} control companies ({len(control)} quarters)")
     print("company-quarters are pseudo-replicated (same firm, many quarters);")
     print("AUC on them understates uncertainty. Company-level AUC is primary.\n")
     print(f"composite   AUC: company-level {comp_co:.3f} | company-quarter {comp_q:.3f}")
-    print(f"regime-cache coverage: {len(raw)}/{len(requested)} tickers")
+    print(f"regime-cache coverage: {len(raw)}/{len(requested)} tickers loaded; "
+          f"{len(pit_failures)} with PIT-reconstruction failures")
     if complete:
         print(f"thermometer AUC: company-level {th_co:.3f} | company-quarter {th_q:.3f}")
     else:
-        # Incomplete cache: the missing tickers get zero regime contribution, so
+        # Missing or unreconstructable tickers get zero regime contribution, so
         # the thermometer AUC would be silently understated. Withhold it.
-        print("thermometer AUC: WITHHELD — regime cache incomplete "
-              f"({len(missing)} ticker(s) missing: {', '.join(missing[:8])}"
-              f"{' …' if len(missing) > 8 else ''}).")
-        print("Regime dummies need every requested ticker's data/cache/*.json "
-              "(git-ignored); this is NOT reproducible from a clean checkout.")
+        print("thermometer AUC: WITHHELD — regime coverage incomplete "
+              f"({len(unusable)} ticker(s): {', '.join(unusable[:8])}"
+              f"{' …' if len(unusable) > 8 else ''}).")
+        print("Regime dummies need every requested ticker's data/cache/*.json to "
+              "load AND reconstruct point-in-time; NOT reproducible from a clean checkout.")
     print("\nCaveats: n=6 stress companies; in-sample; cohort is qualitative evidence")
     print("(universe.py: 'not proof'); clustering/config chosen ex-post. This does NOT")
     print("justify retiring the composite — treat the thermometer as experimental until")

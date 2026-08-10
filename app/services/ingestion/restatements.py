@@ -116,6 +116,25 @@ def _rows(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[dict]:
     return rows or []
 
 
+def _active_tag(
+    facts_json: dict, candidates: tuple[tuple[str, str], ...], unit: str
+) -> tuple[str, str] | None:
+    """The candidate tag the mapper would SCORE for this field: the one covering
+    the most distinct periods, ties broken by candidate order. This mirrors the
+    companyfacts mapper's `_best_series` coverage criterion so a reported
+    revision is always on the tag the engine actually uses. Returns (taxonomy,
+    tag) or None if no candidate has data."""
+    best: tuple[str, str] | None = None
+    best_cov = 0
+    for taxonomy, tag in candidates:  # candidates are in mapper priority order
+        rows = _rows(facts_json, taxonomy, tag, unit)
+        cov = len({(r.get("start"), r["end"]) for r in rows if "end" in r})
+        if cov > best_cov:  # strict > => ties keep the earlier (higher-priority) tag
+            best_cov = cov
+            best = (taxonomy, tag)
+    return best
+
+
 def detect_restatements(
     facts_json: dict,
     materiality_pct: float = DEFAULT_MATERIALITY_PCT,
@@ -141,7 +160,15 @@ def detect_restatements(
         if field_name in SPLIT_ADJUSTED_FIELDS:
             continue
         unit = _unit_for(field_name)
-        for taxonomy, tag in candidates:
+        # Only inspect the tag the mapper actually SCORES for this field — the
+        # best-coverage candidate (round-9 finding). Reporting a revision on a
+        # non-scored candidate tag would show a current_value that disagrees with
+        # the engine, and iterating every candidate would double-report a field
+        # when two tags both carry a same-period revision.
+        active = _active_tag(facts_json, candidates, unit)
+        if active is None:
+            continue
+        for taxonomy, tag in (active,):
             qualified_tag = f"{taxonomy}:{tag}"
             by_key: dict[tuple[date | None, date], list[tuple[date, float, str, str]]] = {}
             for e in _rows(facts_json, taxonomy, tag, unit):

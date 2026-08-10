@@ -181,6 +181,30 @@ class TestFilingTrail:
         ]})
         assert detect_restatements(fj) == []
 
+    def test_only_reports_mapper_scored_tag(self):
+        # Round-9 finding: net_income candidates are NetIncomeLoss (rank 0) then
+        # ProfitLoss (rank 1). If ProfitLoss covers more periods, the mapper
+        # scores it — a revision on the low-coverage NetIncomeLoss must NOT be
+        # reported (its current_value would disagree with scoring), and the field
+        # must not be double-reported across both tags.
+        from app.services.ingestion.companyfacts_mapper import _collect, _dedupe_latest_filed
+
+        ends = ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+                "2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31"]
+        profit = [_fact(e, 450.0, "2026-01-01", "10-K") for e in ends]  # covers 8 (mapper's pick)
+        # NetIncomeLoss covers only 1 period, but with a same-period revision:
+        nil = [
+            _fact("2024-12-31", 500.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 430.0, "2025-05-01", "10-K/A", accn="B"),
+        ]
+        fj = _facts({"ProfitLoss": profit, "NetIncomeLoss": nil})
+        fps = [f for f in detect_restatements(fj) if f.field_name == "net_income"]
+        # The mapper scores ProfitLoss (no revision there) -> nothing reported on
+        # net_income, and definitely no duplicate footprint.
+        tags = {f.tag for f in fps}
+        assert "us-gaap:NetIncomeLoss" not in tags
+        assert len(fps) <= 1
+
     def test_same_day_tie_matches_mapper(self):
         # Round-8 finding: when the two latest facts share a filed date, the
         # reported current_value must equal what the mapper actually keeps. The
