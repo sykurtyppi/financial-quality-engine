@@ -24,6 +24,16 @@ class MetricResult(BaseModel):
     inputs: dict[str, float | None] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
     note: str | None = None
+    distress_signal: bool = Field(
+        default=False,
+        description=(
+            "P0-9: the ratio is NOT_MEANINGFUL because its denominator crossed "
+            "into distress territory (e.g. negative EBITDA with net debt, a loss "
+            "with cash burn). The scoring engine treats this as maximum concern "
+            "instead of dropping the metric — a distress state must never lift "
+            "the block score by handing weight to less-alarming survivors."
+        ),
+    )
 
     @property
     def is_ok(self) -> bool:

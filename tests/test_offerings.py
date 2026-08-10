@@ -8,6 +8,7 @@ from app.services.ingestion.offerings import (
     OfferingsTimeline,
     _classify,
     _parse_prospectus,
+    fetch_offerings,
     render_offerings_section,
 )
 
@@ -164,3 +165,76 @@ class TestTimeline:
     def test_render_empty_window(self):
         t = OfferingsTimeline(ticker="AMPX", cik=1899287, lookback_months=18)
         assert "No offering-related filings" in render_offerings_section(t)
+
+
+class _FakeClient:
+    """Network-free SecClient stand-in for PIT tests (P0-12)."""
+
+    def __init__(self, cik: int, submissions: dict):
+        self._cik = cik
+        self._subs = submissions
+
+    def resolve_cik(self, ticker: str) -> int:
+        return self._cik
+
+    def submissions_by_cik(self, cik: int) -> dict:
+        return self._subs
+
+
+def _subs(rows: list[tuple[str, str, str, str]]) -> dict:
+    """Build a companyfacts-style submissions blob from (form, filingDate,
+    accession, primaryDoc) rows."""
+    return {
+        "filings": {
+            "recent": {
+                "form": [r[0] for r in rows],
+                "filingDate": [r[1] for r in rows],
+                "accessionNumber": [r[2] for r in rows],
+                "primaryDocument": [r[3] for r in rows],
+            }
+        }
+    }
+
+
+class TestPointInTime:
+    """P0-12: the offerings window must be anchored to an explicit as-of date,
+    not the wall clock, so a report (or backtest) generated for a past date
+    cannot see filings that did not yet exist."""
+
+    def test_as_of_excludes_future_filings(self):
+        subs = _subs(
+            [
+                ("424B5", "2026-01-10", "acc-jan", "jan.htm"),  # in-window
+                ("424B5", "2026-07-01", "acc-jul", "jul.htm"),  # after as_of
+            ]
+        )
+        client = _FakeClient(1069258, subs)
+        timeline = fetch_offerings(
+            client, "KTOS", as_of=date(2026, 3, 1), parse_takedowns=False
+        )
+        filed = {f.filing_date for f in timeline.filings}
+        assert date(2026, 1, 10) in filed
+        assert date(2026, 7, 1) not in filed  # future filing must not leak
+        assert timeline.as_of == date(2026, 3, 1)
+
+    def test_recency_uses_timeline_as_of_not_wall_clock(self):
+        t = OfferingsTimeline(
+            ticker="KTOS",
+            cik=1069258,
+            lookback_months=18,
+            filings=[_filing()],  # filed 2026-02-26
+            as_of=date(2026, 3, 28),
+        )
+        # No explicit `today=` — must fall back to the timeline's as_of.
+        assert t.days_since_last_takedown() == 30
+
+    def test_render_recency_reflects_as_of(self):
+        t = OfferingsTimeline(
+            ticker="KTOS",
+            cik=1069258,
+            lookback_months=18,
+            filings=[_filing()],
+            as_of=date(2026, 3, 28),
+        )
+        md = render_offerings_section(t)
+        assert "30 days ago" in md

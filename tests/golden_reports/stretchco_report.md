@@ -4,9 +4,7 @@
 
 ## 1. Executive Summary
 
-Overall Quality Risk Score: **61/100** (Negative, confidence high). Assessment: multiple elevated risk indicators; thorough analyst review recommended.
-
-Weighted average of 8 block scores. Highest concern: Revenue Quality (90). Lowest concern: Balance Sheet Stress (28).
+No single composite grade is asserted — the 0–100 composite measured non-discriminating on the live season and is retired from the headline. This report is evidence detail, dimension by dimension. An EXPERIMENTAL distress reading (not yet validated) appears on the decision card; it is not a replacement aggregate.
 
 The screen flagged 7 elevated-concern item(s) and 2 supportive item(s) for STRETCHCO in FY2025Q4. Key changes versus prior periods are listed in §5.
 

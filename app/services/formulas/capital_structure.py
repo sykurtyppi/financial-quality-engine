@@ -90,8 +90,17 @@ def issuance_pressure(cur: PeriodFinancials) -> MetricResult:
         "Issuance Proceeds / CFO",
         cur.fiscal_label,
         inputs,
+        # Negative CFO leaves issuance/CFO economically meaningless, so the
+        # metric is dropped (NOT_MEANINGFUL) — descriptively, NOT as a distress
+        # signal. Review finding 1 (round 4): the earlier distress_signal +
+        # 25%-coverage threshold was an unvalidated change to frozen scoring
+        # (active in 27 periods across 11 companies) that can double-count
+        # negative-CFO distress already carried by other metrics + regime flags.
+        # It is removed pending pre-specified before/after validation + human
+        # approval. The issuance and offering facts remain available descriptively
+        # (offerings section, evidence ledger).
         guard=lambda: (
-            "Non-positive CFO: issuance dependence is total, ratio not meaningful"
+            "Non-positive CFO: issuance-to-CFO ratio not meaningful (see offerings/evidence)"
             if cur.cfo <= 0  # type: ignore[operator]
             else None
         ),

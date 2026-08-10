@@ -84,6 +84,59 @@ class TestBlockScoring:
         assert score_block(self._spec(), metrics).direction is Direction.NEGATIVE
 
 
+def distress_metric(name: str) -> MetricResult:
+    return MetricResult(
+        name=name,
+        formula="test",
+        fiscal_label="Q4",
+        status=MetricStatus.NOT_MEANINGFUL,
+        distress_signal=True,
+        note="denominator in distress",
+    )
+
+
+class TestDistressSignalScoring:
+    """P0-9: a metric that is NOT_MEANINGFUL *because of distress* must be scored
+    at its maximum concern and keep its weight — never drop out and lift the
+    block by renormalizing over less-alarming survivors."""
+
+    def _spec(self):
+        return cfg.BlockSpec(
+            name="Test Block",
+            metrics=[
+                cfg.MetricSpec("a", 0.5, ANCHORS),
+                cfg.MetricSpec("b", 0.5, ANCHORS),
+            ],
+        )
+
+    def test_distress_metric_scored_at_max_concern(self):
+        # 'a' low concern (10), 'b' distress -> max anchor 90. (10+90)/2 = 50.
+        bs = score_block(self._spec(), {"a": ok_metric("a", 0.0), "b": distress_metric("b")})
+        assert bs.score == pytest.approx(50.0)
+        assert bs.data_coverage == pytest.approx(1.0)  # 'b' counts as covered
+        comp_b = next(c for c in bs.components if c.metric_name == "b")
+        assert comp_b.concern_score == pytest.approx(90.0)
+        assert "distress" in (comp_b.note or "").lower()
+
+    def test_distress_raises_score_versus_dropping(self):
+        # The inversion the fix targets: if 'b' merely dropped, the block would
+        # reflect only 'a' (concern 10). Distress must pull it UP instead.
+        dropped = score_block(self._spec(), {"a": ok_metric("a", 0.0), "b": missing_metric("b")})
+        distress = score_block(self._spec(), {"a": ok_metric("a", 0.0), "b": distress_metric("b")})
+        assert dropped.score == pytest.approx(10.0)
+        assert distress.score > dropped.score
+        assert distress.score == pytest.approx(50.0)
+
+    def test_benign_not_meaningful_still_drops(self):
+        # NOT_MEANINGFUL without the distress flag keeps the old drop behavior.
+        benign = MetricResult(
+            name="b", formula="t", fiscal_label="Q4", status=MetricStatus.NOT_MEANINGFUL
+        )
+        bs = score_block(self._spec(), {"a": ok_metric("a", 2.0), "b": benign})
+        assert bs.score == pytest.approx(90.0)  # only 'a'
+        assert bs.data_coverage == pytest.approx(0.5)
+
+
 class TestScoreAll:
     def test_high_growth_caveat_applied_to_growth_sensitive_blocks(self):
         metrics = [ok_metric("receivables_growth_spread", 0.3)]

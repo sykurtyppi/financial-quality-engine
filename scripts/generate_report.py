@@ -5,6 +5,9 @@ documents -> markdown report under reports/.
     EDGAR_IDENTITY="Name email" .venv/bin/python scripts/generate_report.py NVDA
     ... generate_report.py NVDA --no-docs     # fundamentals only (faster)
     ... generate_report.py NVDA --fresh       # bypass caches (filing day)
+
+Report assembly lives in app/services/reporting/report_builder.build_report, the
+single builder shared by the CLI, journal, and API (review finding 1).
 """
 
 from __future__ import annotations
@@ -22,38 +25,9 @@ from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import fetch_dataset
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
-from app.services.reporting.markdown_report import render
+from app.services.reporting.report_builder import build_report
 
 logging.basicConfig(level=logging.WARNING)
-
-
-def _data_quality_section(
-    fetched_at: str,
-    fresh: bool,
-    coverage: float,
-    warnings: list[str],
-    doc_diagnostics: list[str],
-    offerings_error: str | None,
-) -> str:
-    """P0-D: acquisition quality belongs in the artifact, not stdout. A fetch
-    failure must be distinguishable from 'the filer didn't disclose'."""
-    lines = [
-        "## Appendix: Data Acquisition Quality",
-        "",
-        f"- Data fetched: {fetched_at} "
-        + ("(caches bypassed)" if fresh else "(EDGAR JSON caches up to 24h old; use --fresh on filing days)"),
-        f"- XBRL field coverage: {coverage:.0%}",
-    ]
-    for w in warnings:
-        lines.append(f"- Ingestion warning: {w}")
-    for d in doc_diagnostics:
-        lines.append(f"- Document acquisition: {d}")
-    if offerings_error is not None:
-        lines.append(
-            f"- **Capital-markets appendix UNAVAILABLE** (fetch/parse failed: {offerings_error}). "
-            "Absence of the offerings section is a data gap, not evidence of no activity."
-        )
-    return "\n".join(lines)
 
 
 def main() -> int:
@@ -84,38 +58,35 @@ def main() -> int:
               f"({sum(1 for d in docs.documents if d.doc_type.value == 'mdna')} MD&A, "
               f"{sum(1 for d in docs.documents if d.doc_type.value == 'risk_factors')} risk factors, "
               f"{sum(1 for d in docs.documents if d.doc_type.value == 'earnings_release')} releases)")
-        if doc_diagnostics:
-            print(f"document diagnostics: {len(doc_diagnostics)} (rendered in report appendix)")
 
     result = analyze(dataset)
-    report = render(result, generated_on=date.today().isoformat())
-
-    # Capital-markets activity: evidence appendix, never a score input
-    # (docs/accuracy_improvement_plan.md B1). A failure is rendered in the
-    # data-quality appendix, never silently dropped (P0-D).
-    offerings_error: str | None = None
-    try:
-        from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
-
-        timeline = fetch_offerings(client, ticker)
-        report += "\n\n" + render_offerings_section(timeline) + "\n"
-        if timeline.takedown_count:
-            print(f"offerings: {timeline.takedown_count} takedown(s) in last "
-                  f"{timeline.lookback_months} months")
-    except Exception as e:  # noqa: BLE001 - appendix must never break the report
-        offerings_error = str(e)
-        print(f"offerings appendix failed: {e}")
-
-    report += "\n\n" + _data_quality_section(
-        fetched_at, args.fresh, diag.coverage(), diag.warnings, doc_diagnostics, offerings_error
-    ) + "\n"
+    generated_on = date.today().isoformat()
+    report, thermometer = build_report(
+        result, dataset,
+        generated_on=generated_on,
+        coverage=diag.coverage(),
+        client=client,
+        ticker=ticker,
+        fetched_at=fetched_at,
+        fresh=args.fresh,
+        warnings=diag.warnings,
+        doc_diagnostics=doc_diagnostics,
+    )
 
     out_dir = ROOT / "reports"
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / f"{ticker}_{date.today().isoformat()}.md"
+    out = out_dir / f"{ticker}_{generated_on}.md"
     out.write_text(report)
-    overall = result.overall.score if result.overall else None
-    print(f"overall: {overall} -> {out}")
+
+    # Review finding 8: no 0-100 number on any surface, stdout included.
+    if thermometer.reading is None:
+        distress = "insufficient data"
+    elif thermometer.regime_flags:
+        distress = "regime signals present (" + ", ".join(f.code for f in thermometer.regime_flags) + ")"
+    else:
+        hot = thermometer.hottest_cluster
+        distress = f"most-elevated dimension {hot.name}" if hot else "no acute signals"
+    print(f"distress signals: {distress} -> {out}")
     return 0
 
 

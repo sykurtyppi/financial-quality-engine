@@ -91,6 +91,12 @@ class OfferingsTimeline:
     lookback_months: int
     filings: list[OfferingFiling] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
+    # As-of anchor for the window (P0-12). None only for hand-built timelines
+    # that never went through fetch_offerings; recency then falls back to today.
+    as_of: date | None = None
+    # Set when the filing index could NOT be acquired (submissions outage), so a
+    # failure is never mistaken for "no offering activity" (review finding 1).
+    acquisition_error: str | None = None
 
     @property
     def takedowns(self) -> list[OfferingFiling]:
@@ -104,7 +110,10 @@ class OfferingsTimeline:
         if not self.takedowns:
             return None
         latest = max(f.filing_date for f in self.takedowns)
-        return ((today or date.today()) - latest).days
+        # Anchor recency to the as-of date, not the wall clock, so the number
+        # matches the report's point-in-time (P0-12). Explicit `today=` wins.
+        reference = today or self.as_of or date.today()
+        return (reference - latest).days
 
 
 def _classify(form: str) -> str | None:
@@ -182,19 +191,36 @@ def fetch_offerings(
     lookback_months: int = 18,
     parse_takedowns: bool = True,
     max_parsed: int = 8,
+    as_of: date | None = None,
 ) -> OfferingsTimeline:
-    """Build the offering timeline for a ticker from the EDGAR filing index."""
+    """Build the offering timeline for a ticker from the EDGAR filing index.
+
+    `as_of` anchors the point-in-time window (P0-12): filings are kept only if
+    they were filed in `(as_of - lookback, as_of]`. A future filing relative to
+    `as_of` must never leak into a report dated `as_of`. Defaults to today for
+    live runs; pass an explicit date for backtests / PIT replay.
+    """
+    reference = as_of or date.today()
     cik = client.resolve_cik(ticker)
-    timeline = OfferingsTimeline(ticker=ticker.upper(), cik=cik, lookback_months=lookback_months)
+    timeline = OfferingsTimeline(
+        ticker=ticker.upper(),
+        cik=cik,
+        lookback_months=lookback_months,
+        as_of=reference,
+    )
 
     try:
         subs = client.submissions_by_cik(cik)
     except SecClientError as e:
+        # Review finding 1 (round 5): a submissions OUTAGE is not "no activity".
+        # Record it as a structured acquisition error so the builder marks the
+        # stream not-checked and the renderer surfaces the gap.
         timeline.diagnostics.append(f"submissions fetch failed: {e}")
+        timeline.acquisition_error = str(e)
         return timeline
 
     recent = subs.get("filings", {}).get("recent", {})
-    cutoff = date.today() - timedelta(days=lookback_months * 30)
+    cutoff = reference - timedelta(days=lookback_months * 30)
 
     rows = zip(
         recent.get("form", []),
@@ -207,8 +233,8 @@ def fetch_offerings(
         if kind is None:
             continue
         filed = datetime.strptime(fdate, "%Y-%m-%d").date()
-        if filed < cutoff:
-            continue
+        if filed < cutoff or filed > reference:
+            continue  # PIT window: [cutoff, as_of]
         timeline.filings.append(
             OfferingFiling(
                 form=form,
@@ -254,8 +280,17 @@ def render_offerings_section(timeline: OfferingsTimeline, current_price: float |
     )
     lines.append("")
 
+    if timeline.acquisition_error is not None:
+        lines.append(
+            f"- **UNAVAILABLE** — filing index could not be fetched ({timeline.acquisition_error}). "
+            "Absence of activity here is a data gap, not evidence of no offerings."
+        )
+        return "\n".join(lines)
+
     if not timeline.filings:
         lines.append("- No offering-related filings found in the window.")
+        if timeline.diagnostics:
+            lines.append("- Parse diagnostics: " + "; ".join(timeline.diagnostics))
         return "\n".join(lines)
 
     _MAX_ROWS = 20  # MTN-program filers produce hundreds of 424B2/B5 rows

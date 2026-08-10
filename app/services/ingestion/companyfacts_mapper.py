@@ -164,6 +164,17 @@ DEBT_CURRENT = ("LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCu
 DEBT_TOTAL = ("LongTermDebt",)
 DEBT_SHORT = ("ShortTermBorrowings", "CommercialPaper", "DebtCurrent")
 
+# Finance (capital) lease liabilities are a financing obligation and belong in
+# total debt (P0-10). Operating-lease liabilities are deliberately EXCLUDED —
+# a different economic commitment that credit leverage conventions keep apart.
+FINANCE_LEASE_NONCURRENT = ("FinanceLeaseLiabilityNoncurrent",)
+FINANCE_LEASE_CURRENT = ("FinanceLeaseLiabilityCurrent",)
+# Debt tags that already embed capital/finance-lease obligations: adding the
+# separately reported finance-lease liability on top would double-count.
+LEASE_INCLUSIVE_DEBT_TAGS = frozenset(
+    {"LongTermDebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligationsCurrent"}
+)
+
 # Weighted-average share counts are not additive across quarters: no Q4
 # derivation, direct facts only.
 NON_ADDITIVE_FLOWS = {"shares_diluted"}
@@ -457,23 +468,52 @@ def _total_debt_series(
     noncur, noncur_tag = series(DEBT_NONCURRENT)
     cur, cur_tag = series(DEBT_CURRENT)
     short, short_tag = series(DEBT_SHORT)
+    fin_nc, fin_nc_tag = series(FINANCE_LEASE_NONCURRENT)
+    fin_c, fin_c_tag = series(FINANCE_LEASE_CURRENT)
 
     if noncur:
-        used = f"{noncur_tag}+{cur_tag or 'none'}+{short_tag or 'none'}"
+        # Only add finance-lease liabilities the chosen debt tag does not
+        # already embed (P0-10 double-count guard).
+        add_fin_nc = fin_nc if noncur_tag not in LEASE_INCLUSIVE_DEBT_TAGS else {}
+        add_fin_c = fin_c if cur_tag not in LEASE_INCLUSIVE_DEBT_TAGS else {}
+        used_parts = [noncur_tag, cur_tag or "none", short_tag or "none"]
         out = {
-            q: noncur[q] + cur.get(q, 0.0) + short.get(q, 0.0) for q in quarter_ends if q in noncur
+            q: noncur[q]
+            + cur.get(q, 0.0)
+            + short.get(q, 0.0)
+            + add_fin_nc.get(q, 0.0)
+            + add_fin_c.get(q, 0.0)
+            for q in quarter_ends
+            if q in noncur
         }
         if not cur:
             notes.append("Current portion of long-term debt unavailable; total debt may understate.")
         if not short:
             notes.append("Short-term borrowings unavailable or zero; not included.")
-        return out, used, notes
+        if add_fin_nc or add_fin_c:
+            notes.append("Finance-lease liabilities added to total debt; operating leases excluded.")
+            used_parts += [t for t in (fin_nc_tag if add_fin_nc else None, fin_c_tag if add_fin_c else None) if t]
+        return out, "+".join(used_parts), notes
 
     total, total_tag = series(DEBT_TOTAL)
     if total:
-        out = {q: total[q] + short.get(q, 0.0) for q in total}
+        # Review finding 6: finance leases must be added on the fallback path too.
+        # us-gaap:LongTermDebt is not one of the lease-inclusive tags, so add
+        # them (with the standard caveat that the total tag can, for some filers,
+        # already embed capital leases).
+        used_parts = [total_tag, short_tag or "none"]
+        out = {
+            q: total[q] + short.get(q, 0.0) + fin_nc.get(q, 0.0) + fin_c.get(q, 0.0)
+            for q in total
+        }
         notes.append("Used LongTermDebt total (current/noncurrent split unavailable).")
-        return out, f"{total_tag}+{short_tag or 'none'}", notes
+        if fin_nc or fin_c:
+            notes.append(
+                "Finance-lease liabilities added to total debt; operating leases excluded "
+                "(the LongTermDebt total may, for some filers, already embed capital leases)."
+            )
+            used_parts += [t for t in (fin_nc_tag if fin_nc else None, fin_c_tag if fin_c else None) if t]
+        return out, "+".join(used_parts), notes
 
     return {}, None, ["No debt concepts found; company may be debt-free or use custom tags."]
 
