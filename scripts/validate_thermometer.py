@@ -146,8 +146,13 @@ def main() -> int:
     rows = [r for r in csv.DictReader(path.open()) if r["overall"] not in ("", "None")]
     stress = [r for r in rows if r["archetype"] == "stress_case"]
     control = [r for r in rows if r["archetype"].startswith("control_")]
-    raw = _load_raw_facts({r["ticker"] for r in stress + control})
-    reproducible = bool(raw)  # regime dummies need the git-ignored cache
+    requested = {r["ticker"] for r in stress + control}
+    raw = _load_raw_facts(requested)
+    # Review finding P2: a PARTIAL cache is not reproducible. Every requested
+    # ticker must be present, else missing tickers silently receive zero regime
+    # contribution and the regime-inclusive AUC is understated/withheld.
+    missing = sorted(requested - set(raw))
+    complete = not missing
 
     n_s, n_c = len({r["ticker"] for r in stress}), len({r["ticker"] for r in control})
     comp_row = lambda r: float(r["overall"])  # noqa: E731
@@ -168,10 +173,17 @@ def main() -> int:
     print("company-quarters are pseudo-replicated (same firm, many quarters);")
     print("AUC on them understates uncertainty. Company-level AUC is primary.\n")
     print(f"composite   AUC: company-level {comp_co:.3f} | company-quarter {comp_q:.3f}")
-    print(f"thermometer AUC: company-level {th_co:.3f} | company-quarter {th_q:.3f}")
-    if not reproducible:
-        print("\nNOTE: regime dummies need data/cache/*.json (git-ignored, absent here),")
-        print("so the thermometer figures above are NOT reproducible from a clean checkout.")
+    print(f"regime-cache coverage: {len(raw)}/{len(requested)} tickers")
+    if complete:
+        print(f"thermometer AUC: company-level {th_co:.3f} | company-quarter {th_q:.3f}")
+    else:
+        # Incomplete cache: the missing tickers get zero regime contribution, so
+        # the thermometer AUC would be silently understated. Withhold it.
+        print("thermometer AUC: WITHHELD — regime cache incomplete "
+              f"({len(missing)} ticker(s) missing: {', '.join(missing[:8])}"
+              f"{' …' if len(missing) > 8 else ''}).")
+        print("Regime dummies need every requested ticker's data/cache/*.json "
+              "(git-ignored); this is NOT reproducible from a clean checkout.")
     print("\nCaveats: n=6 stress companies; in-sample; cohort is qualitative evidence")
     print("(universe.py: 'not proof'); clustering/config chosen ex-post. This does NOT")
     print("justify retiring the composite — treat the thermometer as experimental until")

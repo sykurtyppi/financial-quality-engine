@@ -34,9 +34,11 @@ class TestDetection:
         fp = fps[0]
         assert fp.field_name == "total_assets"
         assert fp.original_value == 39_572_000_000
-        assert fp.restated_value == 36_171_000_000
-        assert fp.restated_form == "10-K/A"
-        assert fp.restated_accession == "B"
+        assert fp.current_value == 36_171_000_000
+        assert fp.current_form == "10-K/A"
+        assert fp.current_accession == "B"
+        assert fp.amendment_value == 36_171_000_000  # the /A event
+        assert fp.amendment_form == "10-K/A"
         assert fp.direction == "down"
         assert fp.is_amendment is True
         assert fp.pct_change == pytest.approx(-0.0859, abs=1e-3)
@@ -120,9 +122,28 @@ class TestDetection:
 
 
 class TestFilingTrail:
-    def test_amendment_in_middle_labeled_amendment(self):
-        # Review finding 7: 10-K -> 10-K/A (restates) -> 10-K (reverts). The
-        # amendment must be surfaced and labeled, not collapsed to earliest-vs-latest.
+    def test_amendment_superseded_by_regular_filing_stays_tier1(self):
+        # Round-7 finding: 10-K(100) -> 10-K/A(120) -> 10-K(105). The CURRENT
+        # value is 105 (what the mapper scores, via an ordinary 10-K), but the
+        # /A amendment event (120) must still be captured -> Tier-1 eligible.
+        fj = _facts({"Assets": [
+            _fact("2024-12-31", 100.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 120.0, "2025-05-01", "10-K/A", accn="B"),
+            _fact("2024-12-31", 105.0, "2025-08-01", "10-K", accn="C"),
+        ]})
+        fps = detect_restatements(fj)
+        assert len(fps) == 1
+        fp = fps[0]
+        assert fp.current_value == 105.0  # matches scoring (latest-filed)
+        assert fp.current_form == "10-K"
+        assert fp.amendment_value == 120.0  # the /A event, not lost
+        assert fp.amendment_form == "10-K/A"
+        assert fp.amendment_accession == "B"
+        assert fp.is_amendment is True  # -> promotes to Tier-1
+
+    def test_amendment_revert_current_matches_scoring(self):
+        # 10-K(100) -> 10-K/A(120) -> 10-K(100 revert). Current = 100 (what the
+        # mapper scores), NOT the historical 120; the /A event still surfaces.
         fj = _facts({"Assets": [
             _fact("2024-12-31", 1000.0, "2025-02-01", "10-K", accn="A"),
             _fact("2024-12-31", 1200.0, "2025-05-01", "10-K/A", accn="B"),
@@ -130,15 +151,15 @@ class TestFilingTrail:
         ]})
         fps = detect_restatements(fj)
         assert len(fps) == 1
-        assert fps[0].is_amendment is True
-        assert fps[0].restated_form == "10-K/A"
-        assert fps[0].restated_value == 1200.0
-        assert fps[0].restated_accession == "B"
+        fp = fps[0]
+        assert fp.current_value == 1000.0  # NOT 1200 — matches scoring
+        assert fp.pct_change == 0.0  # no net change vs original
+        assert fp.amendment_value == 1200.0
+        assert fp.is_amendment is True
 
-    def test_multi_amendment_reports_latest_not_largest(self):
-        # Round-6 finding: 10-K(100) -> 10-K/A(120) -> 10-K/A(105). The restated
-        # value must be the LATEST-filed (105 = what the mapper scores), not the
-        # largest transient deviation (120).
+    def test_multi_amendment_current_is_latest(self):
+        # 10-K(100) -> 10-K/A(120) -> 10-K/A(105): current = 105 (latest-filed),
+        # amendment event = the latest /A (105 here).
         fj = _facts({"Assets": [
             _fact("2024-12-31", 100.0, "2025-02-01", "10-K", accn="A"),
             _fact("2024-12-31", 120.0, "2025-05-01", "10-K/A", accn="B"),
@@ -146,22 +167,31 @@ class TestFilingTrail:
         ]})
         fps = detect_restatements(fj)
         assert len(fps) == 1
-        assert fps[0].restated_value == 105.0
-        assert fps[0].restated_accession == "C"
+        assert fps[0].current_value == 105.0
+        assert fps[0].current_accession == "C"
         assert fps[0].is_amendment is True
 
-    def test_reverted_revision_still_surfaces(self):
-        # A -> B -> A via regular filings: the revision happened; it must not
-        # vanish just because the latest value equals the original.
+    def test_reverted_regular_transient_is_noise_skipped(self):
+        # A -> B -> A via ORDINARY filings (no /A): current back at original and
+        # no amendment -> low-signal transient, not surfaced (round-7 model).
         fj = _facts({"Assets": [
             _fact("2024-12-31", 1000.0, "2025-02-01", "10-K", accn="A"),
             _fact("2024-12-31", 1300.0, "2025-05-01", "10-Q", accn="B"),
             _fact("2024-12-31", 1000.0, "2025-08-01", "10-Q", accn="C"),
         ]})
+        assert detect_restatements(fj) == []
+
+    def test_ongoing_regular_revision_surfaces_as_current(self):
+        # A -> B via an ordinary later filing (net change, no /A): current = B,
+        # no amendment -> surfaced as an "other" revision.
+        fj = _facts({"Assets": [
+            _fact("2024-12-31", 1000.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 1300.0, "2025-05-01", "10-Q", accn="B"),
+        ]})
         fps = detect_restatements(fj)
         assert len(fps) == 1
-        assert fps[0].restated_value == 1300.0
-        assert fps[0].restated_accession == "B"
+        assert fps[0].current_value == 1300.0
+        assert fps[0].is_amendment is False
 
 
 class TestRender:

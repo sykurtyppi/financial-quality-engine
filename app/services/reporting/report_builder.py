@@ -69,10 +69,13 @@ def _restatement_tier1_lines(footprints) -> list[str]:
     revisions are lower-confidence (often discontinued-ops / spinoff
     re-presentations) and are shown in the appendix's "Other prior-period
     revisions" subsection, not promoted to the 90-second card."""
+    # Key on the AMENDMENT event (round-7), not the form carrying the current
+    # value — so a genuine /A that was later superseded by an ordinary filing
+    # still promotes to Tier-1.
     by_event: dict[tuple[str, object, str], list[str]] = defaultdict(list)
     for f in footprints:
         if f.is_amendment:
-            by_event[(f.restated_accession, f.period_end, f.restated_form)].append(f.field_name)
+            by_event[(f.amendment_accession, f.period_end, f.amendment_form)].append(f.field_name)
     lines = []
     for (_accn, period_end, form), fields in sorted(
         by_event.items(), key=lambda kv: str(kv[0][1]), reverse=True
@@ -154,19 +157,25 @@ def build_report(
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
-    provided (CLI/journal); the API passes a dataset alone."""
+    provided (CLI/journal); the API passes a dataset alone.
+
+    `generated_on` must be an ISO date (YYYY-MM-DD): it anchors both the card's
+    displayed date and the evidence-stream as-of window, so a malformed value is
+    rejected up front rather than silently diverging (review finding P3).
+    """
+    try:
+        report_date = date.fromisoformat(generated_on)
+    except ValueError as e:
+        raise ValueError(
+            f"generated_on must be an ISO date (YYYY-MM-DD); got {generated_on!r}"
+        ) from e
+
     body = render(result, generated_on=generated_on)
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors = {"offerings": None, "restatements": None, "events": None}
 
     if client is not None and ticker is not None:
-        # Guard a caller-controlled string (review finding: a non-ISO
-        # generated_on would otherwise raise inside stream setup, unguarded).
-        try:
-            report_date = date.fromisoformat(generated_on)
-        except ValueError:
-            report_date = date.today()
         sections, event_lines, tier1_events, errors = _collect_streams(
             client, ticker, report_date
         )

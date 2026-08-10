@@ -53,38 +53,56 @@ SPLIT_ADJUSTED_FIELDS = frozenset({"shares_diluted", "shares_outstanding"})
 
 @dataclass(frozen=True)
 class RestatementFootprint:
-    """One previously reported figure that a later filing revised."""
+    """One previously reported figure that a later filing revised.
+
+    Round-7 finding: the CURRENT value (latest-filed, what the mapper scores) and
+    the amendment EVENT are distinct and must not be conflated. `current_*` is the
+    value as it now stands; `amendment_*` is the material /A event in the filing
+    trail, if any (None when the revision came only via ordinary comparatives).
+    `pct_change`/`direction` describe original -> current, matching scoring.
+    Tier-1 promotion keys on `is_amendment` (an amendment event exists), never on
+    the form carrying the current value.
+    """
 
     field_name: str  # canonical field, e.g. "total_assets"
     tag: str  # XBRL tag, e.g. "us-gaap:Assets"
     period_end: date
     period_start: date | None  # None for instant (balance-sheet) facts
+    # As originally reported (earliest filing):
     original_value: float
     original_filed: date
     original_form: str
     original_accession: str
-    restated_value: float
-    restated_filed: date
-    restated_form: str
-    restated_accession: str
+    # As it now stands — latest-filed, i.e. exactly what the mapper scores:
+    current_value: float
+    current_filed: date
+    current_form: str
+    current_accession: str
+    # The material amendment (/A) event in the trail, if any (Tier-1 provenance):
+    amendment_value: float | None = None
+    amendment_filed: date | None = None
+    amendment_form: str | None = None
+    amendment_accession: str | None = None
 
     @property
     def abs_change(self) -> float:
-        return self.restated_value - self.original_value
+        return self.current_value - self.original_value
 
     @property
     def pct_change(self) -> float | None:
         if self.original_value == 0:
             return None
-        return (self.restated_value - self.original_value) / abs(self.original_value)
+        return (self.current_value - self.original_value) / abs(self.original_value)
 
     @property
     def direction(self) -> str:
-        return "up" if self.restated_value > self.original_value else "down"
+        return "up" if self.current_value > self.original_value else "down"
 
     @property
     def is_amendment(self) -> bool:
-        return self.restated_form.endswith("/A")
+        """True iff a material /A amendment touched this period (regardless of
+        the form carrying the current value)."""
+        return self.amendment_accession is not None
 
 
 def _rows(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[dict]:
@@ -145,16 +163,18 @@ def detect_restatements(
                     continue
                 filings.sort(key=lambda f: f[0])  # earliest filed first
                 orig = filings[0]
+                current = filings[-1]  # latest-filed = exactly what the mapper scores
 
-                # Walk every later filing and keep those that materially deviate
-                # from the originally reported value (review finding 7). The
-                # restated value is the LATEST-FILED such revision — NOT the
-                # largest deviation — so it matches what the mapper's
-                # latest-filed-wins dedupe actually scores (round-6 finding: a
-                # 100->120->105 chain must report 105, the current value, not the
-                # bigger transient 120). A reverted revision (A->B->A) still
-                # surfaces because the final filing equal to the original is
-                # excluded from `material`, leaving the intermediate B as latest.
+                # Round-7 finding: keep the CURRENT value and the amendment EVENT
+                # separate. `material` = later filings that materially deviate
+                # from the originally reported value; if none, no restatement
+                # occurred. The amendment event is the latest material /A filing
+                # in the trail, independent of which form carries the current
+                # value. This makes:
+                #   100 -> 120(/A) -> 105(10-K): current=105 (matches scoring),
+                #     amendment=120(/A) -> still Tier-1;
+                #   100 -> 120(/A) -> 100(revert): current=100 (matches scoring),
+                #     amendment=120(/A) -> still surfaced, not called "latest".
                 def _pct(v: float) -> float | None:
                     return None if orig[1] == 0 else abs(v - orig[1]) / abs(orig[1])
 
@@ -165,7 +185,14 @@ def detect_restatements(
                 ]
                 if not material:
                     continue
-                rest = max(material, key=lambda f: f[0])  # latest filed = current value
+                material_amendments = [f for f in material if f[2].endswith("/A")]
+                amendment = max(material_amendments, key=lambda f: f[0]) if material_amendments else None
+                # Emit iff there is a NET change (current materially differs from
+                # original) OR a formal /A amendment. A transient non-amendment
+                # revision that fully reverted (current back at ~original, no /A)
+                # is low-signal noise and is skipped.
+                if current not in material and amendment is None:
+                    continue
                 seen.add((qualified_tag, start, end))
                 footprints.append(
                     RestatementFootprint(
@@ -177,10 +204,14 @@ def detect_restatements(
                         original_filed=orig[0],
                         original_form=orig[2],
                         original_accession=orig[3],
-                        restated_value=rest[1],
-                        restated_filed=rest[0],
-                        restated_form=rest[2],
-                        restated_accession=rest[3],
+                        current_value=current[1],
+                        current_filed=current[0],
+                        current_form=current[2],
+                        current_accession=current[3],
+                        amendment_value=amendment[1] if amendment else None,
+                        amendment_filed=amendment[0] if amendment else None,
+                        amendment_form=amendment[2] if amendment else None,
+                        amendment_accession=amendment[3] if amendment else None,
                     )
                 )
 
@@ -192,13 +223,19 @@ _MAX_ROWS = 20  # spinoff/discontinued-ops re-presentation can produce many rows
 
 
 def _table(footprints: list[RestatementFootprint]) -> list[str]:
-    rows = ["| Period | Field | Original | Restated | Change | Trail |", "|---|---|---|---|---|---|"]
+    # Original -> Current (latest-filed = what the scorer uses), with the /A
+    # amendment event shown separately so the two are never conflated (round-7).
+    rows = ["| Period | Field | Original | Current | Change | Amendment event |", "|---|---|---|---|---|---|"]
     for f in footprints[:_MAX_ROWS]:
         pct = f"{f.pct_change * 100:+.1f}%" if f.pct_change is not None else "n/a"
+        amend = (
+            f"{f.amendment_value:,.0f} via {f.amendment_form} {f.amendment_filed}"
+            if f.amendment_value is not None
+            else "—"
+        )
         rows.append(
             f"| {f.period_end} | {f.field_name} | {f.original_value:,.0f} "
-            f"| {f.restated_value:,.0f} | {pct} "
-            f"| {f.original_form} {f.original_filed} → {f.restated_form} {f.restated_filed} |"
+            f"| {f.current_value:,.0f} | {pct} | {amend} |"
         )
     if len(footprints) > _MAX_ROWS:
         rows.append(f"| … | +{len(footprints) - _MAX_ROWS} more | | | | |")

@@ -56,6 +56,7 @@ class TestOfferingsOutage:
 
 
 def _fp(field: str, accn: str, period: date, form: str) -> RestatementFootprint:
+    is_amend = form.endswith("/A")
     return RestatementFootprint(
         field_name=field,
         tag=f"us-gaap:{field}",
@@ -65,10 +66,14 @@ def _fp(field: str, accn: str, period: date, form: str) -> RestatementFootprint:
         original_filed=date(2025, 1, 1),
         original_form="10-K",
         original_accession="orig",
-        restated_value=120.0,
-        restated_filed=date(2025, 6, 1),
-        restated_form=form,
-        restated_accession=accn,
+        current_value=120.0,
+        current_filed=date(2025, 6, 1),
+        current_form=form,
+        current_accession=accn,
+        amendment_value=120.0 if is_amend else None,
+        amendment_filed=date(2025, 6, 1) if is_amend else None,
+        amendment_form=form if is_amend else None,
+        amendment_accession=accn if is_amend else None,
     )
 
 
