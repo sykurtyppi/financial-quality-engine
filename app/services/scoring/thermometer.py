@@ -20,8 +20,14 @@ eventual-failure capture at p90):
 2. Ohlson-style regime dummies (O-score, 45 years) that ADD concern instead of
    renormalizing away. NI<0, NI<0 in both recent quarters (INTWO), EBITDA<0 are
    first-class distress predictors — a broken ratio regime is signal, not
-   missing data. This is the principled, thermometer-level form of the P0-9 fix:
-   distress states raise the reading, they can never lower it.
+   missing data. This is the principled, thermometer-level form of the P0-9 fix.
+   Invariant: a distress metric NEVER drops out and lets weight renormalize to
+   less-alarming survivors — it is scored at its max anchor and kept at full
+   weight (engine.py), and regime dummies add on top. (Within a single cluster's
+   average, a max-anchor-capped distress metric can shift the mean by a fraction
+   of a point vs the non-distress subset when that subset already averages above
+   the cap; the no-renormalization guarantee is at the weight/regime level, not
+   an exact per-cluster-mean monotonicity claim.)
 
 Own-history percentile framing (`history=` arg) is also implemented but is NOT
 the default — see the finding below.
@@ -181,22 +187,24 @@ def _cluster_inputs(
     concern: dict[str, float],
     history: dict[str, list[MetricResult]] | None,
     directions: dict[str, float],
-) -> tuple[list[float], bool]:
-    """Concern input per present member: own-history percentile when enough
-    history exists, else the absolute anchor concern. Returns (values,
-    used_percentile_for_any)."""
+) -> tuple[list[float], list[str]]:
+    """Concern input per member that actually contributes: own-history
+    percentile when enough history exists, else the absolute anchor concern.
+    Returns (values, contributing_member_names) — kept in sync so the readout
+    cannot list a member that added no value."""
     inputs: list[float] = []
-    used_percentile = False
+    contributed: list[str] = []
     for m in members:
         if history is not None and m in history:
             vals = [r.value for r in history[m] if r.status is MetricStatus.OK and r.value is not None]
             if len(vals) >= MIN_HISTORY_FOR_PERCENTILE:
                 inputs.append(_own_history_concern(vals, directions.get(m, 1.0)))
-                used_percentile = True
+                contributed.append(m)
                 continue
         if m in concern:
             inputs.append(concern[m])
-    return inputs, used_percentile
+            contributed.append(m)
+    return inputs, contributed
 
 
 def _regime_flags(periods: list[PeriodFinancials]) -> list[RegimeFlag]:
@@ -244,12 +252,13 @@ def compute_thermometer(
 
     clusters: list[ClusterReadout] = []
     for name, members in DISTRESS_CLUSTERS.items():
-        present = tuple(m for m in members if m in concern or (history is not None and m in history))
-        inputs, _ = _cluster_inputs(members, concern, history, directions)
+        # `contributed` are the members that actually produced a value, so the
+        # readout never lists a phantom member that added nothing to the mean.
+        inputs, contributed = _cluster_inputs(members, concern, history, directions)
         if len(inputs) < MIN_CLUSTER_MEMBERS:
             continue  # a single available metric is not a reliable cluster
         mean = sum(inputs) / len(inputs)
-        clusters.append(ClusterReadout(name=name, concern=round(mean, 1), members=present))
+        clusters.append(ClusterReadout(name=name, concern=round(mean, 1), members=tuple(contributed)))
 
     regime_flags = _regime_flags(periods)
 

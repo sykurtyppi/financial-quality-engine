@@ -62,7 +62,13 @@ def data_quality_section(
 
 def _restatement_tier1_lines(footprints) -> list[str]:
     """Review finding 6: one Tier-1 line per restatement EVENT (accession +
-    period), not per field — field detail stays in the appendix section."""
+    period), not per field — field detail stays in the appendix section.
+
+    AMENDMENTS ONLY, by design (the PR #4 review): a /A filing is the
+    high-confidence, low-false-positive Tier-1 signal. Non-amendment same-period
+    revisions are lower-confidence (often discontinued-ops / spinoff
+    re-presentations) and are shown in the appendix's "Other prior-period
+    revisions" subsection, not promoted to the 90-second card."""
     by_event: dict[tuple[str, object, str], list[str]] = defaultdict(list)
     for f in footprints:
         if f.is_amendment:
@@ -80,12 +86,12 @@ def _restatement_tier1_lines(footprints) -> list[str]:
 
 def _collect_streams(client, ticker: str, report_date: date):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
-    (body_sections, event_lines, tier1_events, errors, unavailable)."""
+    (body_sections, event_lines, tier1_events, errors). Stream availability is
+    derived from `errors` by the caller — there is no separate list."""
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors = {"offerings": None, "restatements": None, "events": None}
-    unavailable: list[str] = []
 
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
@@ -97,7 +103,6 @@ def _collect_streams(client, ticker: str, report_date: date):
         # it explicitly — otherwise an outage reads as checked-and-clean.
         if timeline.acquisition_error is not None:
             errors["offerings"] = timeline.acquisition_error
-            unavailable.append("capital-markets")
         elif timeline.takedown_count:
             event_lines.append(
                 f"{timeline.takedown_count} securities takedown(s) in the last "
@@ -105,7 +110,6 @@ def _collect_streams(client, ticker: str, report_date: date):
             )
     except Exception as e:  # noqa: BLE001 - a stream must never break the report
         errors["offerings"] = str(e)
-        unavailable.append("capital-markets")
 
     try:
         from app.services.ingestion.restatements import (
@@ -119,7 +123,6 @@ def _collect_streams(client, ticker: str, report_date: date):
         tier1_events += _restatement_tier1_lines(footprints)
     except Exception as e:  # noqa: BLE001
         errors["restatements"] = str(e)
-        unavailable.append("restatements")
 
     try:
         from app.services.backtesting.events import fetch_entity_events
@@ -132,9 +135,8 @@ def _collect_streams(client, ticker: str, report_date: date):
         ]
     except Exception as e:  # noqa: BLE001
         errors["events"] = str(e)
-        unavailable.append("events")
 
-    return body_sections, event_lines, tier1_events, errors, unavailable
+    return body_sections, event_lines, tier1_events, errors
 
 
 def build_report(
@@ -156,12 +158,16 @@ def build_report(
     body = render(result, generated_on=generated_on)
     event_lines: list[str] = []
     tier1_events: list[str] = []
-    unavailable: list[str] = []
     errors = {"offerings": None, "restatements": None, "events": None}
 
     if client is not None and ticker is not None:
-        report_date = date.fromisoformat(generated_on)
-        sections, event_lines, tier1_events, errors, unavailable = _collect_streams(
+        # Guard a caller-controlled string (review finding: a non-ISO
+        # generated_on would otherwise raise inside stream setup, unguarded).
+        try:
+            report_date = date.fromisoformat(generated_on)
+        except ValueError:
+            report_date = date.today()
+        sections, event_lines, tier1_events, errors = _collect_streams(
             client, ticker, report_date
         )
         for section in sections:

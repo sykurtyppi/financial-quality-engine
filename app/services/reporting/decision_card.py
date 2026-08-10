@@ -168,6 +168,13 @@ def render_decision_card(
 
     # 6. Data quality
     out += ["## Data quality", ""]
-    cov = f"{coverage:.0%}" if coverage is not None else "n/a"
-    out.append(f"- XBRL field coverage {cov}; as of {generated_on}.")
+    if coverage is not None:
+        out.append(f"- XBRL field coverage {coverage:.0%}; as of {generated_on}.")
+    else:
+        # Dataset-only mode (e.g. the API): no EDGAR acquisition, so coverage and
+        # the evidence streams were not measured this run.
+        out.append(
+            f"- Dataset-only run (as of {generated_on}): coverage and EDGAR "
+            "evidence streams not measured — run via generate_report.py for full detail."
+        )
     return "\n".join(out)

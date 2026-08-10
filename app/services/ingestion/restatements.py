@@ -146,12 +146,15 @@ def detect_restatements(
                 filings.sort(key=lambda f: f[0])  # earliest filed first
                 orig = filings[0]
 
-                # Review finding 7: do NOT collapse the chain to earliest-vs-
-                # latest. Walk every later filing, keep those that materially
-                # deviate from the originally reported value, and pick the one
-                # that INTRODUCED the largest revision — preferring an amendment
-                # (/A) when present. This surfaces a reverted revision (A->B->A)
-                # and correctly labels a mid-chain amendment.
+                # Walk every later filing and keep those that materially deviate
+                # from the originally reported value (review finding 7). The
+                # restated value is the LATEST-FILED such revision — NOT the
+                # largest deviation — so it matches what the mapper's
+                # latest-filed-wins dedupe actually scores (round-6 finding: a
+                # 100->120->105 chain must report 105, the current value, not the
+                # bigger transient 120). A reverted revision (A->B->A) still
+                # surfaces because the final filing equal to the original is
+                # excluded from `material`, leaving the intermediate B as latest.
                 def _pct(v: float) -> float | None:
                     return None if orig[1] == 0 else abs(v - orig[1]) / abs(orig[1])
 
@@ -162,8 +165,7 @@ def detect_restatements(
                 ]
                 if not material:
                     continue
-                amendments = [f for f in material if f[2].endswith("/A")]
-                rest = max(amendments or material, key=lambda f: abs(f[1] - orig[1]))
+                rest = max(material, key=lambda f: f[0])  # latest filed = current value
                 seen.add((qualified_tag, start, end))
                 footprints.append(
                     RestatementFootprint(

@@ -135,6 +135,21 @@ class TestFilingTrail:
         assert fps[0].restated_value == 1200.0
         assert fps[0].restated_accession == "B"
 
+    def test_multi_amendment_reports_latest_not_largest(self):
+        # Round-6 finding: 10-K(100) -> 10-K/A(120) -> 10-K/A(105). The restated
+        # value must be the LATEST-filed (105 = what the mapper scores), not the
+        # largest transient deviation (120).
+        fj = _facts({"Assets": [
+            _fact("2024-12-31", 100.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 120.0, "2025-05-01", "10-K/A", accn="B"),
+            _fact("2024-12-31", 105.0, "2025-08-01", "10-K/A", accn="C"),
+        ]})
+        fps = detect_restatements(fj)
+        assert len(fps) == 1
+        assert fps[0].restated_value == 105.0
+        assert fps[0].restated_accession == "C"
+        assert fps[0].is_amendment is True
+
     def test_reverted_revision_still_surfaces(self):
         # A -> B -> A via regular filings: the revision happened; it must not
         # vanish just because the latest value equals the original.

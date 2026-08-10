@@ -82,7 +82,11 @@ def _load_raw_facts(tickers: set[str]) -> dict:
         if files:
             try:
                 raw[tk] = json.load(open(files[0]))
-            except Exception:  # noqa: BLE001 - a missing cache just skips regime
+            except Exception as e:  # noqa: BLE001
+                # A CORRUPT cache (not a missing one) silently deflates the AUC
+                # for this ticker; surface it so the operator knows regime flags
+                # were dropped for it (review finding).
+                print(f"WARNING: failed to parse cache for {tk}: {e}", file=sys.stderr)
                 continue
     return raw
 

@@ -92,6 +92,8 @@ def score_block(
             # distress. Score it at this metric's own maximum concern and keep
             # its full weight — never let a distress state drop out and lift the
             # block by renormalizing over less-alarming survivors.
+            if not anchors:  # defensive: mirror interpolate_concern's guard
+                raise ValueError(f"Empty anchors for distress metric {ms.metric_name}")
             concern = max(y for _, y in anchors)
             weighted_sum += concern * ms.weight
             weight_ok += ms.weight
