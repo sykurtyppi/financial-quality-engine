@@ -1,0 +1,444 @@
+"""Decision-journal schema v2 (P1-E).
+
+Preregistration schema per VALIDATION_STRATEGY §5 and calibration_journal_survey
+2026Q3. Key design constraints, from evidence:
+- SPECIFICITY is the active ingredient (Brodeur 2024: bare preregistration does
+  nothing; detailed plans do). Machine-checkable assumption rows enforce it.
+- ONE concrete falsifier per rival hypothesis cuts bias (Arkes 1988: 58% -> 41%).
+  Encouraged, not required (anti-annoyance).
+- Don't force-snap conviction to coarse buckets (Mellers): keep 1-5 required and
+  offer an optional 0-100 fine grain.
+- Contamination is first-class: the 2026Q2 season showed lock-time contamination
+  needs a home so the AFTER block measures ENGINE impact, not blended discussion.
+- No literature shows journals improve outcomes -> the journal is the experiment
+  itself; the schema stays honest about that.
+
+Anti-annoyance rule (VALIDATION_STRATEGY §5): only `thesis + conviction + ONE
+assumption row` are required to lock. Everything else is optional-but-nagged. A
+journal too heavy to use produces n=0, which is worse than imperfect entries.
+
+Storage format: JSON front-matter (stdlib) + markdown body (free-text thesis and
+optional AFTER/OUTCOME prose). One file per entry, plus a lock hash INSIDE the
+front-matter that `verify_lock` recomputes on read to detect BEFORE-block tamper.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+from datetime import date, datetime, timezone
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+SCHEMA_VERSION = 2
+
+Comparator = Literal[">", "<", ">=", "<=", "==", "within"]
+IntendedAction = Literal["hold", "trim", "add", "avoid", "no_position"]
+Impact = Literal["changed_thesis", "changed_confidence", "new_investigation", "no_value"]
+Verdict = Literal["helped", "neutral", "hurt", "too_early"]
+# Resolution states: `pending` means the resolver could not evaluate yet
+# (missing filing/period/value) and MUST be retried later — never committed.
+# The other three are terminal.
+ResolutionState = Literal["pending", "met", "violated", "unresolvable"]
+SourceForm = Literal["10-K", "10-Q", "8-K", "10-K/A", "10-Q/A", "proxy", "other"]
+# Comparators the resolver can currently evaluate. `within` needs a range syntax
+# that does not yet exist, so it is refused at lock time (round-10 finding 6).
+_RESOLVABLE_COMPARATORS: frozenset[str] = frozenset({">", "<", ">=", "<=", "=="})
+# Round-11 finding 3: symbolic thresholds are FULL predicates. The comparator is
+# not independently meaningful; a mismatched pair (e.g. `cfo < positive`) used
+# to resolve `met` when CFO was positive, because the comparator was ignored.
+# Each symbolic keyword now REQUIRES exactly one canonical comparator; any other
+# pairing is refused at lock time and returns unresolvable at the resolver.
+_SYMBOLIC_THRESHOLDS: dict[str, Comparator] = {
+    "positive": ">",
+    "negative": "<",
+    "non_negative": ">=",
+    "nonnegative": ">=",
+    "non_positive": "<=",
+    "nonpositive": "<=",
+    "zero": "==",
+}
+
+
+class Assumption(BaseModel):
+    """A machine-checkable claim the user is willing to be wrong about. The
+    assumption resolves to met / violated / unresolvable when the named source
+    filing arrives (auto-checkable when `metric` is an engine spec_id)."""
+
+    metric: str = Field(min_length=1, description="XBRL concept or engine spec_id (e.g., 'revenue', 'cfo_to_net_income')")
+    comparator: Comparator
+    threshold: float | str = Field(description="Numeric threshold, or a symbolic one like 'positive'")
+    window: str = Field(min_length=1, description="Fiscal window, e.g. FY2026Q2 or 'trailing_4q'")
+    # Round-11 finding 2: `source` is OPTIONAL. When provided (10-Q, 10-K, etc.)
+    # the resolver returns `pending` and refuses to auto-resolve, because the
+    # mapper's canonical dataset does not carry per-value form/accession
+    # provenance (deferred to P1-A). Leave unspecified for a numeric-only
+    # commitment the resolver can auto-terminate. This is honest: the older
+    # {10-K, 10-Q} whitelist attributed a value to a form without checking.
+    source: SourceForm | None = Field(
+        default=None,
+        description=(
+            "Optional filing form the user COMMITS the value will come from. "
+            "If set, resolver returns `pending` until per-value provenance "
+            "lands (P1-A). Unset -> numeric-only, resolver auto-terminates."
+        ),
+    )
+    resolve_by: date = Field(description="Date by which the resolving filing is expected")
+
+    @field_validator("threshold")
+    @classmethod
+    def _threshold_nonblank_str(cls, v):
+        # Round-11 finding 3: a symbolic threshold must be a real keyword; the
+        # empty string used to pass through, and `can_lock` never caught it.
+        if isinstance(v, str) and not v.strip():
+            raise ValueError("symbolic threshold must be non-blank")
+        # Round-12 finding 3: `float('inf')` and `float('nan')` used to pass
+        # through and serialize to `Infinity`/`NaN` — invalid per RFC 8259 and
+        # incoherent as a threshold (all NaN comparisons are False, so any
+        # `x cmp NaN` silently resolved `violated`).
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError(f"threshold must be a finite number (got {v!r})")
+        return v
+
+
+class BeforeBlock(BaseModel):
+    """Everything the user commits to BEFORE reading the engine report. Locked
+    by hash so it cannot be edited after `reported:` is stamped."""
+
+    thesis: str = Field(min_length=1, description="Free-text thesis (unchanged from v1)")
+    conviction: int = Field(ge=1, le=5, description="1 (low) - 5 (high)")
+    conviction_fine: int | None = Field(
+        default=None, ge=0, le=100,
+        description="Optional 0-100 fine grain (Mellers: don't force-snap to buckets)",
+    )
+    intended_action: IntendedAction
+    catalyst: str | None = Field(
+        default=None,
+        description="Expected event + date, e.g. 'Q2 print 2026-07-28'",
+    )
+    contamination: str | None = Field(
+        default=None,
+        description=(
+            "Analysis/discussion that PRECEDED this entry. First-class field "
+            "(2026Q2 season lesson): if not blank, the AFTER block should be "
+            "read as measuring engine impact NET of that context."
+        ),
+    )
+    outcome_definition: str | None = Field(
+        default=None,
+        description=(
+            "The BINARY event that `p_outcome` scores against. Free text, but "
+            "must be concrete enough that an observer can flip `outcome.y` to "
+            "true/false after the resolve window. Without this + a written y "
+            "the Brier score is undefined (round-10 finding 3)."
+        ),
+    )
+    p_outcome: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Subjective probability of `outcome_definition` being true; enables Brier scoring",
+    )
+    reference_class: str | None = Field(
+        default=None,
+        description="Which base rate applies (free text + optional engine ref)",
+    )
+    assumptions: list[Assumption] = Field(
+        default_factory=list,
+        description="Preregistered claims — >= 1 required to lock (specificity floor)",
+    )
+    falsifiers: list[str] = Field(
+        default_factory=list,
+        description='"I am wrong if <concrete observable>" — encouraged (Arkes 1988)',
+    )
+
+    @field_validator("thesis")
+    @classmethod
+    def _thesis_nonblank(cls, v: str) -> str:
+        # min_length=1 above prevents `""` but NOT `"   "`; a whitespace-only
+        # thesis is not a preregistered commitment. Round-10 finding 6.
+        s = v.strip()
+        if not s:
+            raise ValueError("thesis must contain non-whitespace text")
+        return s
+
+    @field_validator("falsifiers")
+    @classmethod
+    def _falsifiers_nonblank(cls, v: list[str]) -> list[str]:
+        cleaned = [s.strip() for s in v if s and s.strip()]
+        return cleaned
+
+    @field_validator("outcome_definition")
+    @classmethod
+    def _outcome_definition_stripped(cls, v: str | None) -> str | None:
+        # A blank-string outcome_definition is not a definition. Normalize
+        # both empty and whitespace-only to None so the pairing validator
+        # below reads them the same way.
+        if v is None:
+            return None
+        s = v.strip()
+        return s or None
+
+    @model_validator(mode="after")
+    def _p_outcome_pairs_with_definition(self) -> "BeforeBlock":
+        # Round-11 finding 1: `p_outcome` is meaningless without the event it
+        # scores. Because the BEFORE block is hash-locked, users cannot add
+        # `outcome_definition` later without breaking the lock — so the pairing
+        # is enforced HERE at construction, blocking any p_outcome-without-
+        # definition entry from being locked at all.
+        if self.p_outcome is not None and not self.outcome_definition:
+            raise ValueError(
+                "p_outcome requires a non-blank outcome_definition (Brier is "
+                "undefined without a preregistered event to score against)"
+            )
+        return self
+
+
+class Resolution(BaseModel):
+    """Per-assumption outcome, auto-checkable when the metric is an engine
+    spec_id (engine proposes met/violated, user confirms)."""
+
+    assumption_index: int = Field(ge=0)
+    state: ResolutionState
+    observed: float | str | None = None
+    at: date | None = None
+    source_accession: str | None = None
+    note: str | None = None
+
+
+class AfterBlock(BaseModel):
+    """Filled after reading the engine report — measures ENGINE impact only."""
+
+    impact: Impact | None = None
+    conviction_after: int | None = Field(default=None, ge=1, le=5)
+    what_it_surfaced: str | None = None
+    what_i_disagreed_with: str | None = None
+
+
+class OutcomeBlock(BaseModel):
+    """Filled weeks later when the catalyst / resolve_by dates land."""
+
+    outcome_date: date | None = None
+    what_happened: str | None = None
+    verdict: Verdict | None = None
+    # `verdict` scores whether the ENGINE helped. `y` scores whether the
+    # PREDICTED OUTCOME (BeforeBlock.outcome_definition) actually happened.
+    # Only `y` is the correct Brier target (round-10 finding 3).
+    y: bool | None = Field(
+        default=None,
+        description=(
+            "Observed binary outcome for `outcome_definition`. Only when this "
+            "is set does p_outcome contribute to Brier."
+        ),
+    )
+    brier: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="(p_outcome - y)^2 when both p_outcome and a binary y are present",
+    )
+
+
+class EntryV2(BaseModel):
+    """One journal entry — the atomic unit of decision-impact evidence."""
+
+    schema_version: int = SCHEMA_VERSION
+    ticker: str
+    day: date
+    opened: datetime
+    reported: datetime | None = None
+    locked_at: datetime | None = None
+    before_sha256: str | None = Field(
+        default=None, description="Canonical sha256 of the BEFORE block at lock time"
+    )
+    before: BeforeBlock
+    after: AfterBlock = Field(default_factory=AfterBlock)
+    outcome: OutcomeBlock = Field(default_factory=OutcomeBlock)
+    resolutions: list[Resolution] = Field(default_factory=list)
+
+    @field_validator("ticker")
+    @classmethod
+    def _ticker_upper(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @model_validator(mode="after")
+    def _timestamps_and_lock_coherent(self) -> "EntryV2":
+        # Round-12 finding 4: the CLI cannot produce these states, but nothing
+        # in the model prevented a programmatic caller from constructing a
+        # semantically impossible entry (e.g. `reported` before `locked_at`,
+        # `locked_at` present without `before_sha256`). Codify the invariants:
+        # locked_at ↔ before_sha256 (both present or both absent), and if
+        # `reported` is set the entry must be locked and `reported >= locked_at`.
+        has_hash = self.before_sha256 is not None
+        has_lock = self.locked_at is not None
+        if has_hash != has_lock:
+            raise ValueError(
+                "before_sha256 and locked_at must be set together "
+                f"(got before_sha256={'set' if has_hash else 'unset'}, "
+                f"locked_at={'set' if has_lock else 'unset'})"
+            )
+        if self.reported is not None:
+            if self.locked_at is None:
+                raise ValueError("reported set but entry is not locked")
+            if self.reported < self.locked_at:
+                raise ValueError(
+                    f"reported ({self.reported}) precedes locked_at ({self.locked_at}) — "
+                    "impossible ordering"
+                )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Lock / verify — the tamper-detection layer
+# ---------------------------------------------------------------------------
+
+
+def can_lock(before: BeforeBlock) -> tuple[bool, str | None]:
+    """Anti-annoyance: only thesis + conviction + >=1 assumption row required.
+    pydantic already enforces thesis non-empty (post-strip) and conviction in
+    [1, 5]. Also refuses commitments the resolver can never evaluate:
+      - `within` comparator (round-10 finding 6)
+      - blank/unknown symbolic threshold (round-11 finding 3)
+      - symbolic threshold paired with a mismatched comparator, e.g.
+        `cfo < positive` (round-11 finding 3 — the comparator was silently
+        ignored, letting contradictory pairs resolve `met`)."""
+    if not before.assumptions:
+        return False, "at least one assumption row is required to lock (specificity floor)"
+    for i, a in enumerate(before.assumptions):
+        if a.comparator not in _RESOLVABLE_COMPARATORS:
+            return False, (
+                f"assumption[{i}] comparator '{a.comparator}' is not resolvable "
+                f"(supported: {sorted(_RESOLVABLE_COMPARATORS)})"
+            )
+        if isinstance(a.threshold, str):
+            key = a.threshold.strip().lower()
+            # Assumption's field_validator already rejects blank, but be defensive.
+            if not key:
+                return False, f"assumption[{i}] symbolic threshold is blank"
+            if key not in _SYMBOLIC_THRESHOLDS:
+                return False, (
+                    f"assumption[{i}] symbolic threshold '{a.threshold}' is "
+                    f"unrecognized (supported: {sorted(set(_SYMBOLIC_THRESHOLDS))})"
+                )
+            expected = _SYMBOLIC_THRESHOLDS[key]
+            if a.comparator != expected:
+                return False, (
+                    f"assumption[{i}] symbolic threshold '{a.threshold}' requires "
+                    f"comparator '{expected}' (got '{a.comparator}') — symbolic "
+                    f"keywords ARE the predicate; mismatched pairs would resolve incorrectly"
+                )
+    return True, None
+
+
+def _canonical_before(before: BeforeBlock) -> str:
+    """Sorted-keys JSON with default str conversion for dates — deterministic
+    across saves so the same BEFORE always hashes the same."""
+    data = json.loads(before.model_dump_json())
+    return json.dumps(data, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def hash_before(before: BeforeBlock) -> str:
+    return hashlib.sha256(_canonical_before(before).encode("utf-8")).hexdigest()
+
+
+def lock_entry(entry: EntryV2, now: datetime | None = None) -> EntryV2:
+    """Return a locked copy: BEFORE hash computed and `locked_at` stamped.
+
+    Round-10 finding 1: `reported` is NOT stamped here. Lock and report are
+    separate steps — lock freezes the BEFORE block against hindsight, `report`
+    is the moment the engine actually reveals its analysis. Stamping `reported`
+    at lock-time was a lie: no report had been generated yet, and the CLI's
+    v1 `cmd_report` refuses to touch an already-reported entry, so this bug
+    silently made v2 entries impossible to run a report against.
+
+    Raises ValueError if the lock rule is not met.
+    """
+    ok, reason = can_lock(entry.before)
+    if not ok:
+        raise ValueError(f"cannot lock: {reason}")
+    ts = now or datetime.now(timezone.utc)
+    return entry.model_copy(update={
+        "before_sha256": hash_before(entry.before),
+        "locked_at": ts,
+    })
+
+
+def is_locked(entry: EntryV2) -> bool:
+    return entry.before_sha256 is not None and entry.locked_at is not None
+
+
+def verify_lock(entry: EntryV2) -> bool:
+    """False iff the BEFORE block was edited after locking (tamper detection).
+    An unlocked entry returns False (nothing to verify against)."""
+    if not is_locked(entry):
+        return False
+    return hash_before(entry.before) == entry.before_sha256
+
+
+def open_assumption_indices(entry: EntryV2) -> list[int]:
+    """Assumption indices with no TERMINAL resolution yet — the queue the
+    resolver should propose against. Round-11 finding 4: `pending` is NOT
+    terminal, so an index carrying only a pending resolution stays OPEN and
+    can be retried later. The CLI already avoids persisting pending, but
+    defends against pending rows that might sneak in via other paths."""
+    resolved = {r.assumption_index for r in entry.resolutions if r.state != "pending"}
+    return [i for i in range(len(entry.before.assumptions)) if i not in resolved]
+
+
+def add_resolution(entry: EntryV2, resolution: Resolution) -> EntryV2:
+    """Return a copy of `entry` with `resolution` folded in. Idempotent — a
+    later resolution for the same assumption_index REPLACES the earlier one
+    (final answer wins). AFTER/OUTCOME/BEFORE untouched, so lock stays valid."""
+    others = [r for r in entry.resolutions if r.assumption_index != resolution.assumption_index]
+    return entry.model_copy(update={
+        "resolutions": sorted([*others, resolution], key=lambda r: r.assumption_index)
+    })
+
+
+# ---------------------------------------------------------------------------
+# Serialization: JSON front-matter + markdown body
+# ---------------------------------------------------------------------------
+
+_FRONT_MATTER_RE = re.compile(r"\A---json\n(.*?)\n---\n?", re.DOTALL)
+
+
+def render_entry(entry: EntryV2) -> str:
+    """Serialize as a markdown file: ---json front-matter + human-readable body.
+
+    The front-matter carries every structured field (source of truth for the
+    machine); the body carries the thesis prose and optional AFTER/OUTCOME
+    narrative for humans reading in an editor or web UI.
+    """
+    fm = entry.model_dump(mode="json", exclude_none=False)
+    header = json.dumps(fm, indent=2, sort_keys=True, default=str)
+
+    body_lines = [
+        f"# {entry.ticker} — {entry.day.isoformat()}",
+        "",
+        "## Thesis (BEFORE)",
+        "",
+        entry.before.thesis.rstrip(),
+        "",
+    ]
+    if entry.after.what_it_surfaced or entry.after.what_i_disagreed_with:
+        body_lines += ["## AFTER (free text)", ""]
+        if entry.after.what_it_surfaced:
+            body_lines += [f"**Surfaced:** {entry.after.what_it_surfaced}", ""]
+        if entry.after.what_i_disagreed_with:
+            body_lines += [f"**Disagreed:** {entry.after.what_i_disagreed_with}", ""]
+    if entry.outcome.what_happened:
+        body_lines += ["## OUTCOME (free text)", "", entry.outcome.what_happened.rstrip(), ""]
+
+    return f"---json\n{header}\n---\n\n" + "\n".join(body_lines)
+
+
+def parse_entry(text: str) -> EntryV2:
+    """Parse a v2 entry file. Raises ValueError if the front-matter is missing
+    or malformed (v1 markdown-only entries are handled by the v1 parser)."""
+    m = _FRONT_MATTER_RE.match(text)
+    if not m:
+        raise ValueError("v2 entry missing ---json front-matter (is this a v1 entry?)")
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"v2 front-matter is not valid JSON: {e}") from e
+    return EntryV2.model_validate(data)
