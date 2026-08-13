@@ -30,6 +30,15 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+# Round-15 finding 4: the setuptools default only ships `.py` files. Without
+# this, wheels build cleanly but omit the Jinja templates the web UI needs,
+# and `pip install`-from-wheel produces a broken app that only shows up when
+# a route is actually hit. Editable installs (`pip install -e .`) mask the
+# issue because they read from the source tree. Explicit is safer than magic
+# `include-package-data = true` because it names what actually needs to ship.
+[tool.setuptools.package-data]
+"app.templates" = ["*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

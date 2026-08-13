@@ -30,8 +30,13 @@ def capex_growth_spread(cur: PeriodFinancials, prev: PeriodFinancials) -> Metric
     def guard() -> str | None:
         if prev.revenue <= 0:  # type: ignore[operator]
             return "Non-positive prior revenue"
-        if prev.capex == 0:
-            return "Zero prior capex: growth undefined"
+        # Round-15 finding 6 (same class as R14 F1/F2 that missed capex): a
+        # negative prior capex slipped through and made `growth()` compute
+        # `(cur - prev) / abs(prev)`, producing arithmetically valid but
+        # economically meaningless "growth" readings on sign-flipped inputs.
+        # Aligned with the `<= 0` convention used everywhere else.
+        if prev.capex <= 0:  # type: ignore[operator]
+            return "Non-positive prior capex: growth undefined"
         return None
 
     return build_metric(
@@ -51,8 +56,11 @@ def capex_to_da(cur: PeriodFinancials) -> MetricResult:
         "Capex / D&A",
         cur.fiscal_label,
         inputs,
+        # Round-15 finding 6: negative D&A slipped past `== 0` and produced
+        # sign-flipped ratios (e.g. capex=20, D&A=-10 → -2.0 as an OK value).
+        # D&A is a positive-purchase-convention field per the schema contract.
         guard=lambda: (
-            "Zero D&A" if cur.depreciation_amortization == 0 else None
+            "Non-positive D&A" if cur.depreciation_amortization <= 0 else None  # type: ignore[operator]
         ),
         value_fn=lambda: cur.capex / cur.depreciation_amortization,  # type: ignore[operator]
     )
