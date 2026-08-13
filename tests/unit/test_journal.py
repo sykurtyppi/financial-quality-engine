@@ -291,3 +291,280 @@ def test_openv2_accepts_p_outcome_with_outcome_definition(tmp_path, monkeypatch)
     e = store.load_v2(entries[0])
     assert e.before.p_outcome == 0.7
     assert e.before.outcome_definition == "Q2 revenue > 100M by 2026-08-15"
+
+
+# ---------------------------------------------------------------------------
+# after / outcome-v2 CLI — the dogfood ergonomics layer
+# ---------------------------------------------------------------------------
+
+
+def _after_ns(**overrides) -> argparse.Namespace:
+    base = dict(ticker="TST", date="2026-07-27", impact=None, conviction_after=None,
+                surfaced=None, disagreed=None)
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def _outcome_ns(**overrides) -> argparse.Namespace:
+    base = dict(ticker="TST", date="2026-07-27", outcome_date=None,
+                what_happened=None, verdict=None, y=None)
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def _seed_v2(tmp_path, monkeypatch, *, reported: bool = True, **before_kwargs) -> object:
+    """Seed a locked v2 entry and return the on-disk EntryV2.
+
+    By default ALSO stamps `reported` (simulating a completed `journal.py report`
+    step) so tests exercise the state after-report, which is the only state
+    where `after`/`outcome` may legitimately run (round-13 findings 1 & 2).
+    Pass `reported=False` when a test wants the pre-report state.
+    """
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    ns = _openv2_ns(**before_kwargs)
+    assert journal.cmd_openv2(ns) == 0
+    p = list(tmp_path.glob("*.md"))[0]
+    entry = store.load_v2(p)
+    if reported:
+        stamped = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
+        store.save_v2(stamped, p, allow_update=True)
+        entry = store.load_v2(p)
+    return entry
+
+
+class TestCmdAfter:
+    def test_updates_after_and_preserves_lock(self, tmp_path, monkeypatch):
+        from app.services.journal.schema_v2 import verify_lock
+
+        before = _seed_v2(tmp_path, monkeypatch)
+        rc = journal.cmd_after(_after_ns(impact="changed_confidence",
+                                        conviction_after=4,
+                                        surfaced="cash conversion trend"))
+        assert rc == 0
+        after = store.load_v2(list(tmp_path.glob("*.md"))[0])
+        assert after.after.impact == "changed_confidence"
+        assert after.after.conviction_after == 4
+        assert after.after.what_it_surfaced == "cash conversion trend"
+        # BEFORE untouched -> hash still matches.
+        assert verify_lock(after) is True
+        assert after.before_sha256 == before.before_sha256
+
+    def test_refuses_before_report(self, tmp_path, monkeypatch, capsys):
+        """Round-13 finding 1 (P1): AFTER cannot be filled before `report` has
+        stamped `reported`. Without this guard, users could pre-fill AFTER
+        before ever running the engine — degrading the post-report semantic."""
+        _seed_v2(tmp_path, monkeypatch, reported=False)  # locked but not reported
+        rc = journal.cmd_after(_after_ns(impact="changed_confidence"))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "report not yet generated" in err
+
+    def test_refuses_v1_entry(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        # v1 entry at the same TICKER_DATE slot the after command targets.
+        store.open_entry("TST", "v1 thesis")
+        ns = _after_ns(date=None, impact="changed_confidence")  # find latest
+        assert journal.cmd_after(ns) == 1
+        assert "v1 entry" in capsys.readouterr().err
+
+    def test_refuses_missing_fields(self, tmp_path, monkeypatch, capsys):
+        _seed_v2(tmp_path, monkeypatch)
+        rc = journal.cmd_after(_after_ns())  # all None
+        assert rc == 1
+        assert "Nothing to update" in capsys.readouterr().err
+
+    def test_refuses_tampered_lock(self, tmp_path, monkeypatch, capsys):
+        from app.services.journal.schema_v2 import render_entry
+
+        seeded = _seed_v2(tmp_path, monkeypatch)
+        path = list(tmp_path.glob("*.md"))[0]
+        # Tamper thesis while preserving the old hash on disk.
+        tampered = seeded.model_copy(update={
+            "before": seeded.before.model_copy(update={"thesis": "hindsight edit"}),
+        })
+        tampered = tampered.model_copy(update={"before_sha256": seeded.before_sha256})
+        path.write_text(render_entry(tampered))
+        rc = journal.cmd_after(_after_ns(impact="changed_confidence"))
+        assert rc == 1
+        assert "LOCK BROKEN" in capsys.readouterr().err
+
+    def test_no_entry_returns_error(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        rc = journal.cmd_after(_after_ns(ticker="NOPE", date=None, impact="no_value"))
+        assert rc == 1
+        assert "No entry" in capsys.readouterr().err
+
+
+class TestCmdOutcomeV2:
+    def test_updates_outcome_fields(self, tmp_path, monkeypatch):
+        from app.services.journal.schema_v2 import verify_lock
+
+        _seed_v2(tmp_path, monkeypatch,
+                 outcome_definition="TST Q2 revenue > 100M by 2026-08-15",
+                 p_outcome=0.65)
+        rc = journal.cmd_outcome(_outcome_ns(outcome_date="2026-08-14",
+                                             what_happened="revenue landed at 108M",
+                                             verdict="helped", y=True))
+        assert rc == 0
+        e = store.load_v2(list(tmp_path.glob("*.md"))[0])
+        assert e.outcome.outcome_date.isoformat() == "2026-08-14"
+        assert e.outcome.what_happened == "revenue landed at 108M"
+        assert e.outcome.verdict == "helped"
+        assert e.outcome.y is True
+        assert verify_lock(e) is True  # BEFORE preserved
+
+    def test_y_requires_outcome_definition(self, tmp_path, monkeypatch, capsys):
+        # No outcome_definition set at openv2 → --y meaningless (orphaned).
+        _seed_v2(tmp_path, monkeypatch)  # default: no p_outcome, no outcome_definition
+        rc = journal.cmd_outcome(_outcome_ns(y=True))
+        assert rc == 1
+        assert "outcome_definition" in capsys.readouterr().err
+
+    def test_verdict_only_ok_without_outcome_definition(self, tmp_path, monkeypatch):
+        # `--verdict` scores whether the engine helped — no outcome_definition
+        # required. Independent of Brier.
+        _seed_v2(tmp_path, monkeypatch)
+        rc = journal.cmd_outcome(_outcome_ns(verdict="helped"))
+        assert rc == 0
+        e = store.load_v2(list(tmp_path.glob("*.md"))[0])
+        assert e.outcome.verdict == "helped"
+        assert e.outcome.y is None
+
+    def test_bad_outcome_date_refused(self, tmp_path, monkeypatch, capsys):
+        _seed_v2(tmp_path, monkeypatch)
+        rc = journal.cmd_outcome(_outcome_ns(outcome_date="not-a-date"))
+        assert rc == 1
+        assert "outcome-date" in capsys.readouterr().err
+
+    def test_v1_entry_keeps_edit_message(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        store.open_entry("TST", "v1 thesis")
+        rc = journal.cmd_outcome(_outcome_ns(date=None, verdict="helped"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Edit the OUTCOME block" in out
+
+    def test_refuses_tampered_lock(self, tmp_path, monkeypatch, capsys):
+        from app.services.journal.schema_v2 import render_entry
+
+        seeded = _seed_v2(tmp_path, monkeypatch)
+        path = list(tmp_path.glob("*.md"))[0]
+        tampered = seeded.model_copy(update={
+            "before": seeded.before.model_copy(update={"thesis": "hindsight edit"}),
+        })
+        tampered = tampered.model_copy(update={"before_sha256": seeded.before_sha256})
+        path.write_text(render_entry(tampered))
+        rc = journal.cmd_outcome(_outcome_ns(verdict="helped"))
+        assert rc == 1
+        assert "LOCK BROKEN" in capsys.readouterr().err
+
+    def test_refuses_before_report(self, tmp_path, monkeypatch, capsys):
+        """Round-13 finding 2 (P1): OUTCOME cannot be filled before report."""
+        _seed_v2(tmp_path, monkeypatch, reported=False)
+        rc = journal.cmd_outcome(_outcome_ns(verdict="helped"))
+        assert rc == 1
+        assert "report not yet generated" in capsys.readouterr().err
+
+    def test_outcome_date_before_entry_day_refused(self, tmp_path, monkeypatch, capsys):
+        """Round-13 finding 3: an outcome that predates the preregistration
+        is temporally impossible — the thesis wasn't written yet."""
+        _seed_v2(tmp_path, monkeypatch)  # openv2 date default 2026-07-27
+        rc = journal.cmd_outcome(_outcome_ns(outcome_date="2025-01-01"))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "precedes" in err
+        # File unchanged: outcome_date still None.
+        assert store.load_v2(list(tmp_path.glob("*.md"))[0]).outcome.outcome_date is None
+
+    def test_outcome_date_equal_to_entry_day_ok(self, tmp_path, monkeypatch):
+        _seed_v2(tmp_path, monkeypatch)
+        rc = journal.cmd_outcome(_outcome_ns(outcome_date="2026-07-27"))
+        assert rc == 0
+
+    def test_y_cannot_be_flipped_once_set(self, tmp_path, monkeypatch, capsys):
+        """Round-13 finding 4 (the retroactive-Brier defect): once `y` is
+        recorded it cannot be flipped through the CLI. Same for `verdict` and
+        `outcome_date`. `what_happened` remains editable (typos, added prose)."""
+        _seed_v2(tmp_path, monkeypatch,
+                 outcome_definition="Q2 revenue > 100M", p_outcome=0.65)
+        assert journal.cmd_outcome(_outcome_ns(y=True)) == 0
+        # Same value again: idempotent, allowed.
+        assert journal.cmd_outcome(_outcome_ns(y=True)) == 0
+        # Different value: refused.
+        rc = journal.cmd_outcome(_outcome_ns(y=False))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "immutable" in err and "OUTCOME.y" in err
+        # File still says True (no partial write).
+        assert store.load_v2(list(tmp_path.glob("*.md"))[0]).outcome.y is True
+
+    def test_verdict_cannot_be_flipped_once_set(self, tmp_path, monkeypatch, capsys):
+        _seed_v2(tmp_path, monkeypatch)
+        assert journal.cmd_outcome(_outcome_ns(verdict="helped")) == 0
+        rc = journal.cmd_outcome(_outcome_ns(verdict="hurt"))
+        assert rc == 1
+        assert "OUTCOME.verdict" in capsys.readouterr().err
+
+    def test_outcome_date_cannot_be_flipped_once_set(self, tmp_path, monkeypatch, capsys):
+        _seed_v2(tmp_path, monkeypatch)
+        assert journal.cmd_outcome(_outcome_ns(outcome_date="2026-08-14")) == 0
+        rc = journal.cmd_outcome(_outcome_ns(outcome_date="2026-08-15"))
+        assert rc == 1
+        assert "OUTCOME.outcome_date" in capsys.readouterr().err
+
+    def test_what_happened_stays_editable(self, tmp_path, monkeypatch):
+        """Only factual fields (y, verdict, outcome_date) are locked. Free-text
+        stays editable — typos and expanded prose are legitimate iteration."""
+        _seed_v2(tmp_path, monkeypatch)
+        assert journal.cmd_outcome(_outcome_ns(what_happened="revenue was flat")) == 0
+        assert journal.cmd_outcome(_outcome_ns(what_happened="revenue was flat; margins compressed")) == 0
+        e = store.load_v2(list(tmp_path.glob("*.md"))[0])
+        assert "margins compressed" in e.outcome.what_happened
+
+    def test_empty_free_text_normalizes_to_none(self, tmp_path, monkeypatch):
+        """Round-13 finding 5: --what-happened '' becomes None (unset), not ''.
+        Empty string was harmless but muddied the schema — 'is this set?'
+        should have one answer, not two."""
+        _seed_v2(tmp_path, monkeypatch)
+        assert journal.cmd_outcome(_outcome_ns(what_happened="   ")) == 1  # nothing to update
+        # Same for after --surfaced ""
+        assert journal.cmd_after(_after_ns(surfaced="   ")) == 1
+
+
+class TestParseBool:
+    def test_truthy_variants(self):
+        for s in ("true", "True", "TRUE", "t", "yes", "y", "1"):
+            assert journal._parse_bool(s) is True
+
+    def test_falsy_variants(self):
+        # Round-13 finding 6: `"f"` was in the implementation's falsy set but
+        # not tested — coverage gap now closed.
+        for s in ("false", "False", "FALSE", "f", "F", "no", "n", "0"):
+            assert journal._parse_bool(s) is False
+
+    def test_garbage_rejected(self):
+        import argparse as _argparse
+        for s in ("", "maybe", "2", "on"):
+            with pytest.raises(_argparse.ArgumentTypeError):
+                journal._parse_bool(s)
+
+
+class TestAfterOutcomeE2E:
+    """End-to-end: openv2 → after → outcome → verify tally counts the pair."""
+
+    def test_full_dogfood_flow(self, tmp_path, monkeypatch):
+        _seed_v2(tmp_path, monkeypatch,
+                 outcome_definition="TST Q2 revenue > 100M by 2026-08-15",
+                 p_outcome=0.65)
+        assert journal.cmd_after(_after_ns(impact="changed_confidence",
+                                           conviction_after=4)) == 0
+        assert journal.cmd_outcome(_outcome_ns(outcome_date="2026-08-14",
+                                               verdict="helped", y=True)) == 0
+        t = store.v2_tally()
+        assert t["total"] == 1
+        assert t["locked"] == 1
+        assert t["lock_broken"] == 0
+        # p_outcome + outcome_definition + y all set -> enters raw Brier count
+        assert t["resolved_with_p_outcome"] == 1

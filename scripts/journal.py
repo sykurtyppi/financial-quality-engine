@@ -99,7 +99,8 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     store.save_v2(updated, path, allow_update=True)
     print(f"Report stamped at {updated.reported.isoformat()}.")
     print(f"overall: {overall} -> {out}")
-    print(f"\nNow fill the AFTER block in {path} (impact + conviction_after).")
+    print(f"\nNow fill the AFTER block: `journal.py after {entry.ticker} --impact CODE "
+          f"--conviction-after N` (or edit {path} directly).")
     return 0
 
 
@@ -138,17 +139,211 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_outcome(args: argparse.Namespace) -> int:
+def _resolve_v2_or_exit(args: argparse.Namespace) -> tuple[object, object] | int:
+    """Common preamble for v2 AFTER/OUTCOME commands: locate the entry, refuse
+    v1, load, verify the lock, and refuse if the report has not been generated
+    yet. Returns (path, entry) on success or a non-zero exit code (as int).
+
+    Round-13 finding 1/2 (P1): AFTER captures the user's REACTION to the
+    engine report and OUTCOME records what actually happened afterwards.
+    Filling either BEFORE `report` has ever run degrades the "no
+    peek-then-edit" guarantee from "BEFORE cannot be edited after reading"
+    to "BEFORE is locked, but AFTER can be pre-filled before reading" —
+    which defeats the whole measurement. `reported is None` is refused here.
+    """
     try:
         path = store.find_entry(args.ticker, args.date)
     except ValueError as e:
         print(f"Invalid ticker: {e}", file=sys.stderr)
         return 1
     if path is None:
-        print(f"No entry found for {args.ticker.upper()}.", file=sys.stderr)
+        print(f"No entry for {args.ticker.upper()}.", file=sys.stderr)
         return 1
-    print(f"Edit the OUTCOME block in {path} (outcome_date, what_happened, verdict).")
+    if not store.is_v2(path):
+        print(f"{path.name}: v1 entry — this command targets v2 (openv2) entries. "
+              f"Edit the file directly for v1.", file=sys.stderr)
+        return 1
+    entry = store.load_v2(path)
+    if not verify_lock(entry):
+        print(f"{path.name}: LOCK BROKEN — refusing to edit AFTER/OUTCOME on a "
+              f"tampered entry. Run `journal.py verify {args.ticker.upper()}` "
+              f"for details.", file=sys.stderr)
+        return 1
+    if entry.reported is None:
+        print(f"{path.name}: report not yet generated — run "
+              f"`journal.py report {args.ticker.upper()}` first. AFTER/OUTCOME "
+              f"only make sense POST-report; filling them beforehand would "
+              f"corrupt the causal chain the whole journal measures.",
+              file=sys.stderr)
+        return 1
+    return path, entry
+
+
+def _normalize_free_text(v):
+    """`""` -> None (round-13 finding 5). Users pass empty strings sometimes;
+    persisting them muddies the "is this field set?" question everywhere and
+    the model treats None as "unset"."""
+    if v is None:
+        return None
+    s = v.strip()
+    return s or None
+
+
+def cmd_after(args: argparse.Namespace) -> int:
+    """Fill (or overwrite) the AFTER block on a v2 entry. AFTER captures the
+    engine's IMPACT on the user's thesis — measured AFTER reading the report.
+    The BEFORE hash is unchanged, so the lock survives.
+    """
+    got = _resolve_v2_or_exit(args)
+    if isinstance(got, int):
+        return got
+    path, entry = got
+
+    fields: dict = {}
+    if args.impact is not None:
+        fields["impact"] = args.impact
+    if args.conviction_after is not None:
+        fields["conviction_after"] = args.conviction_after
+    # Round-13 finding 5: empty free-text becomes None, not "".
+    surfaced = _normalize_free_text(args.surfaced)
+    if surfaced is not None:
+        fields["what_it_surfaced"] = surfaced
+    disagreed = _normalize_free_text(args.disagreed)
+    if disagreed is not None:
+        fields["what_i_disagreed_with"] = disagreed
+    if not fields:
+        print("Nothing to update. Provide at least one of: --impact, "
+              "--conviction-after, --surfaced, --disagreed.", file=sys.stderr)
+        return 1
+
+    try:
+        updated = entry.model_copy(update={
+            "after": entry.after.model_copy(update=fields),
+        })
+    except Exception as e:  # pydantic ValidationError on impact/conviction bounds
+        print(f"AFTER update rejected: {e}", file=sys.stderr)
+        return 1
+    store.save_v2(updated, path, allow_update=True)
+    changed = ", ".join(sorted(fields))
+    print(f"{path.name}: AFTER updated ({changed}).")
     return 0
+
+
+def _parse_bool(s: str) -> bool:
+    """Parse a CLI truthiness string. `argparse` treats any nonempty --y as True
+    by default — that's a footgun for `--y false`. Reject anything ambiguous."""
+    s = (s or "").strip().lower()
+    if s in ("true", "t", "yes", "y", "1"):
+        return True
+    if s in ("false", "f", "no", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true/false, got {s!r}")
+
+
+# Round-13 finding 4: factual OUTCOME fields are immutable once set. `y` enters
+# Brier calibration and re-flipping it silently rewrites the scored outcome —
+# exactly the class of retroactive edit BEFORE was hash-locked against. Same
+# logic applies to `verdict` (subjective but final) and `outcome_date` (a
+# factual timestamp). Free-text `what_happened` stays editable — typos and
+# expanded prose are normal iterative use.
+_OUTCOME_IMMUTABLE_ONCE_SET: frozenset[str] = frozenset({"y", "verdict", "outcome_date"})
+
+
+def _cmd_outcome_v2(path, entry, args: argparse.Namespace) -> int:
+    """v2 OUTCOME path: fill outcome_date, what_happened, verdict, y."""
+    from datetime import date as _date
+
+    fields: dict = {}
+    if args.outcome_date is not None:
+        try:
+            od = _date.fromisoformat(args.outcome_date)
+        except ValueError as e:
+            print(f"Bad --outcome-date: {e}", file=sys.stderr)
+            return 1
+        # Round-13 finding 3: outcome cannot precede the preregistration.
+        if od < entry.day:
+            print(
+                f"--outcome-date {od.isoformat()} precedes the preregistration "
+                f"date {entry.day.isoformat()} — an outcome cannot have happened "
+                f"before the thesis was written.",
+                file=sys.stderr,
+            )
+            return 1
+        fields["outcome_date"] = od
+    if args.what_happened is not None:
+        wh = _normalize_free_text(args.what_happened)
+        if wh is not None:
+            fields["what_happened"] = wh
+    if args.verdict is not None:
+        fields["verdict"] = args.verdict
+    if args.y is not None:
+        # `y` is the observed binary outcome of `before.outcome_definition`. If
+        # the user did not preregister a definition (and a paired p_outcome),
+        # setting `y` is meaningless — it doesn't score anything. Refuse.
+        if not (entry.before.outcome_definition and entry.before.p_outcome is not None):
+            print(
+                "--y requires an entry with `outcome_definition` + `p_outcome` "
+                "preregistered at openv2 time. Setting y otherwise produces an "
+                "orphaned observation (not scored by Brier).",
+                file=sys.stderr,
+            )
+            return 1
+        fields["y"] = args.y
+    if not fields:
+        print("Nothing to update. Provide at least one of: --outcome-date, "
+              "--what-happened, --verdict, --y.", file=sys.stderr)
+        return 1
+
+    # Round-13 finding 4: refuse to overwrite already-set factual fields.
+    # Idempotent same-value re-set is allowed (harmless). Distinct re-set
+    # refused — user must edit the file directly (git captures the change).
+    for name in _OUTCOME_IMMUTABLE_ONCE_SET:
+        if name in fields:
+            existing = getattr(entry.outcome, name)
+            if existing is not None and existing != fields[name]:
+                print(
+                    f"OUTCOME.{name} is already set to {existing!r} and cannot be "
+                    f"changed to {fields[name]!r} through the CLI. Factual outcome "
+                    f"fields are immutable once recorded — this is the same "
+                    f"anti-hindsight guarantee BEFORE gets via the hash lock. "
+                    f"If this is a genuine correction, edit the file directly "
+                    f"so git records the change.",
+                    file=sys.stderr,
+                )
+                return 1
+
+    try:
+        updated = entry.model_copy(update={
+            "outcome": entry.outcome.model_copy(update=fields),
+        })
+    except Exception as e:  # pydantic ValidationError on verdict/y bounds
+        print(f"OUTCOME update rejected: {e}", file=sys.stderr)
+        return 1
+    store.save_v2(updated, path, allow_update=True)
+    changed = ", ".join(sorted(fields))
+    print(f"{path.name}: OUTCOME updated ({changed}).")
+    return 0
+
+
+def cmd_outcome(args: argparse.Namespace) -> int:
+    # v1 dispatch first, so v1 entries don't hit the v2-specific guards
+    # (`reported` requirement, structured field refusals).
+    try:
+        path = store.find_entry(args.ticker, args.date)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
+    if path is not None and not store.is_v2(path):
+        print(f"Edit the OUTCOME block in {path} (outcome_date, what_happened, verdict).")
+        return 0
+    # v2 (or path-is-None): route through the shared preamble, which handles
+    # missing entry, v1 rejection, lock verification, AND the round-13 F2
+    # "reported must exist" check. Then dispatch to the field updater.
+    got = _resolve_v2_or_exit(args)
+    if isinstance(got, int):
+        return got
+    p, entry = got
+    return _cmd_outcome_v2(p, entry, args)
 
 
 def _parse_assumption(spec: str) -> Assumption:
@@ -447,6 +642,16 @@ def main() -> int:
     p_out = sub.add_parser("outcome", help="record what actually happened, weeks later")
     p_out.add_argument("ticker")
     p_out.add_argument("--date")
+    # v2 field-setting args (ignored on v1 entries; v1 keeps the "edit the file" message).
+    p_out.add_argument("--outcome-date", dest="outcome_date",
+                       help="v2: date the outcome landed (YYYY-MM-DD)")
+    p_out.add_argument("--what-happened", dest="what_happened",
+                       help="v2: free-text description of what actually happened")
+    p_out.add_argument("--verdict", choices=["helped", "neutral", "hurt", "too_early"],
+                       help="v2: did the engine's report help the decision?")
+    p_out.add_argument("--y", dest="y", type=_parse_bool,
+                       help="v2: observed binary outcome for `outcome_definition` "
+                            "(true/false) — enters Brier calibration")
     p_out.set_defaults(func=cmd_outcome)
 
     p_tal = sub.add_parser("tally", help="summarize decision impact across all cases")
@@ -494,6 +699,21 @@ def main() -> int:
     p_res.add_argument("--commit", action="store_true",
                        help="write the proposed resolutions back to the entry file")
     p_res.set_defaults(func=cmd_resolve)
+
+    p_aft = sub.add_parser(
+        "after",
+        help="v2: fill the AFTER block (impact of the engine report on your view)",
+    )
+    p_aft.add_argument("ticker")
+    p_aft.add_argument("--date")
+    p_aft.add_argument("--impact",
+                       choices=["changed_thesis", "changed_confidence",
+                                "new_investigation", "no_value"])
+    p_aft.add_argument("--conviction-after", dest="conviction_after",
+                       type=int, choices=range(1, 6))
+    p_aft.add_argument("--surfaced", help="what the report surfaced you didn't have")
+    p_aft.add_argument("--disagreed", help="what the report claimed that you rejected")
+    p_aft.set_defaults(func=cmd_after)
 
     args = parser.parse_args()
     return args.func(args)
