@@ -73,3 +73,15 @@ class TestAssetQuality:
 
     def test_current_ratio(self):
         assert bs.current_ratio(q(current_assets=300.0, current_liabilities=200.0)).value == pytest.approx(1.5)
+
+    def test_current_ratio_zero_liabilities_guarded(self):
+        m = bs.current_ratio(q(current_assets=300.0, current_liabilities=0.0))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+
+    def test_current_ratio_negative_liabilities_guarded(self):
+        # Round-14 finding 1: `== 0` guard used to let negative liabilities
+        # through, producing -1.5 and clamping to max concern for what is
+        # usually a benign reclassification.
+        m = bs.current_ratio(q(current_assets=300.0, current_liabilities=-200.0))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert "Non-positive" in (m.note or "")

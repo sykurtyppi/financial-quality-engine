@@ -31,6 +31,10 @@ _COMMENT_FIELDS = frozenset({"conviction", "impact", "conviction_after", "verdic
 # Ticker must not escape the entries dir or break the filename scheme: leading
 # alphanumeric (rejects "..", ".", "-"), then A-Z/0-9/./- only, max 12 chars.
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
+# Round-14 finding 3: the `day` half of TICKER_DATE.md was unvalidated. Direct
+# traversal was blocked in practice (no matching file), but any user-supplied
+# `date=` value reached path construction. Strict ISO-day format only.
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def safe_ticker(ticker: str) -> str:
@@ -42,6 +46,15 @@ def safe_ticker(ticker: str) -> str:
     return t
 
 
+def safe_day(day: str) -> str:
+    """Enforce YYYY-MM-DD on the day component of TICKER_DAY.md paths.
+    Rejects `../`, whitespace, arbitrary strings — mirrors `safe_ticker` for
+    the other filename component. Round-14 finding 3."""
+    if not day or not _DAY_RE.match(day):
+        raise ValueError(f"invalid day (expected YYYY-MM-DD): {day!r}")
+    return day
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -51,12 +64,13 @@ def today() -> str:
 
 
 def entry_path(ticker: str, day: str | None = None) -> Path:
-    return ENTRIES / f"{safe_ticker(ticker)}_{day or today()}.md"
+    d = safe_day(day) if day else today()
+    return ENTRIES / f"{safe_ticker(ticker)}_{d}.md"
 
 
 def find_entry(ticker: str, day: str | None = None) -> Path | None:
     if day:
-        p = entry_path(ticker, day)
+        p = entry_path(ticker, day)  # safe_day validates before path construction
         return p if p.exists() else None
     matches = sorted(ENTRIES.glob(f"{safe_ticker(ticker)}_*.md"))
     return matches[-1] if matches else None

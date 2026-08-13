@@ -363,6 +363,15 @@ class _FlowSeries:
                         continue
                     implied_days = f2.days - (f1.days or 0)  # type: ignore[operator]
                     if QTD_DAYS[0] <= implied_days <= QTD_DAYS[1]:
+                        # Round-14 finding 4 (known limitation): `f2` and `f1`
+                        # are each the LATEST-filed value for their period, but
+                        # they can come from different filings/accessions. If
+                        # a company amends only the longer YTD (Q1-Q2 restated
+                        # but Q1 alone unchanged), the diff mixes vintages.
+                        # The scored-field impact is already caught by
+                        # detect_restatements; a full fix requires per-value
+                        # form/accession provenance (P1-A). Until then, no
+                        # cross-vintage flag is emitted.
                         values[qend] = f2.val - f1.val
                         methods[qend] = "ytd_diff"
                         break
