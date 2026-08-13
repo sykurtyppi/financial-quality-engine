@@ -34,8 +34,15 @@ def _growth_spread(
     def guard() -> str | None:
         if prev.revenue <= 0:  # type: ignore[operator]
             return "Non-positive prior revenue"
-        if asset_prev == 0:
-            return f"Zero prior {asset_field}: growth undefined"
+        # Round-14 finding 2: `== 0` used to let a negative prior base through
+        # (unusual — sign flips from reclassification, consignment inventory,
+        # deferred-revenue offsets). `growth()` divides by `abs(prior)`, so a
+        # sign flip from -10 to +5 produces "growth = 1.5" — arithmetically
+        # valid but economically meaningless, and it scored near max concern.
+        # Aligning with the `<= 0` convention used by every other prior-base
+        # guard in this codebase.
+        if asset_prev <= 0:  # type: ignore[operator]
+            return f"Non-positive prior {asset_field}: growth undefined"
         return None
 
     return build_metric(

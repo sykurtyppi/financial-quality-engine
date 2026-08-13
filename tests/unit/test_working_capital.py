@@ -36,6 +36,28 @@ class TestGrowthSpreads:
         assert m.status is MetricStatus.MISSING_DATA
         assert "inventory_prior" in m.missing_fields
 
+    def test_zero_prior_inventory_guarded(self):
+        prev = q("Q3", inventory=0.0, revenue=1000.0)
+        cur = q("Q4", inventory=50.0, revenue=1100.0)
+        assert wc.inventory_growth_spread(cur, prev).status is MetricStatus.NOT_MEANINGFUL
+
+    def test_negative_prior_inventory_guarded(self):
+        # Round-14 finding 2: `== 0` guard used to let a negative prior base
+        # through. growth() divides by abs(prior), so -10 -> +5 evaluated to
+        # 1.5 growth (arithmetically valid, economically meaningless), which
+        # scored near max concern on a benign reclassification.
+        prev = q("Q3", inventory=-10.0, revenue=1000.0)
+        cur = q("Q4", inventory=5.0, revenue=1100.0)
+        m = wc.inventory_growth_spread(cur, prev)
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert "Non-positive" in (m.note or "")
+
+    def test_negative_prior_receivables_guarded(self):
+        # Same guard applies to the receivables spread — one code path, two metrics.
+        prev = q("Q3", receivables=-100.0, revenue=1000.0)
+        cur = q("Q4", receivables=50.0, revenue=1100.0)
+        assert wc.receivables_growth_spread(cur, prev).status is MetricStatus.NOT_MEANINGFUL
+
 
 class TestDayCounts:
     def test_dso_quarterly_uses_91_days(self):

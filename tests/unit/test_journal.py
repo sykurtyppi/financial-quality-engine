@@ -205,6 +205,25 @@ def test_ticker_path_traversal_rejected(tmp_path, monkeypatch):
     assert store.safe_ticker("brk.b") == "BRK.B"  # legit dotted/hyphen tickers pass
 
 
+def test_day_path_traversal_rejected(tmp_path, monkeypatch):
+    """Round-14 finding 3: the `day` half of TICKER_DAY.md used to accept any
+    string. Direct traversal was blocked in practice (no matching file) but
+    the invariant was violated. Now enforced by `safe_day`."""
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    # Empty string is treated as "use default" (mirrors None) — that's the
+    # explicit CLI/web behavior, not a validation failure.
+    for bad in ("../../etc/passwd", "2026-08", "2026/08/13", "not-a-date",
+                "2026-08-13T00:00:00", "2026-08-13 ", " 2026-08-13"):
+        with pytest.raises(ValueError, match="invalid day"):
+            store.entry_path("AAPL", bad)
+        with pytest.raises(ValueError, match="invalid day"):
+            store.find_entry("AAPL", bad)
+    # Valid ISO day accepted.
+    assert store.entry_path("AAPL", "2026-08-13").name == "AAPL_2026-08-13.md"
+    # `safe_day` returns the same string on valid input.
+    assert store.safe_day("2026-01-01") == "2026-01-01"
+
+
 def test_blank_field_does_not_bleed_into_next_line(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "ENTRIES", tmp_path)
     p = store.open_entry("KO", "steady staple", conviction=3)

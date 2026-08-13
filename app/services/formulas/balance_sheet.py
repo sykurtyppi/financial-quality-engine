@@ -83,7 +83,13 @@ def current_ratio(cur: PeriodFinancials) -> MetricResult:
         "Current Assets / Current Liabilities",
         cur.fiscal_label,
         inputs,
-        guard=lambda: "Zero current liabilities" if cur.current_liabilities == 0 else None,
+        # Round-14 finding 1: `== 0` used to let negative current_liabilities
+        # through (rare — negative accruals, over-refunded advances). The
+        # resulting ratio (e.g. 200 / -10 = -20) then clamped to max concern
+        # (85/100) for what is usually a benign reclassification. Aligning with
+        # the `<= 0` convention used by every other denominator guard here.
+        # (base.build_metric already handles the None case via MISSING_DATA.)
+        guard=lambda: "Non-positive current liabilities" if cur.current_liabilities <= 0 else None,  # type: ignore[operator]
         value_fn=lambda: cur.current_assets / cur.current_liabilities,  # type: ignore[operator]
     )
 
