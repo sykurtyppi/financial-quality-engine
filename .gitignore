@@ -9,3 +9,8 @@ data/cache/
 reports/
 data/kpi_pairs.json
 data/kpi_judgments.json
+
+# Build artifacts (round-15: wheel smoke tests generate these)
+build/
+dist/
+*.egg-info/
