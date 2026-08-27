@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.core.pipeline import analyze
-from app.services.ingestion.edgar_adapter import fetch_dataset
+from app.services.ingestion.edgar_adapter import fetch_dataset_snapshot
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.reporting.report_builder import build_report
@@ -45,13 +45,14 @@ def main() -> int:
     client = SecClient(fresh=args.fresh)
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    dataset, diag = fetch_dataset(ticker, n_quarters=args.quarters, client=client)
+    snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
+    dataset, diag = snapshot.dataset, snapshot.diagnostics
     print(f"{ticker}: field coverage {diag.coverage():.0%}"
           + (f"; warnings: {'; '.join(diag.warnings)}" if diag.warnings else ""))
 
     doc_diagnostics: list[str] = []
     if not args.no_docs:
-        docs = fetch_documents(client, ticker, client.company_facts(ticker), n_filings=8)
+        docs = fetch_documents(client, ticker, snapshot.company_facts, n_filings=8)
         dataset.documents = docs.documents
         doc_diagnostics = list(docs.diagnostics)
         print(f"documents: {len(docs.documents)} "
@@ -71,6 +72,7 @@ def main() -> int:
         fresh=args.fresh,
         warnings=diag.warnings,
         doc_diagnostics=doc_diagnostics,
+        company_facts=snapshot.company_facts,
     )
 
     out_dir = ROOT / "reports"

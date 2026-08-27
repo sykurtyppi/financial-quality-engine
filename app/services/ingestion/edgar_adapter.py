@@ -11,9 +11,42 @@ Requires EDGAR_IDENTITY (SEC fair-access User-Agent), e.g.:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from app.schemas.financials import CompanyDataset
 from app.services.ingestion.companyfacts_mapper import IngestionDiagnostics, build_dataset
 from app.services.ingestion.sec_client import SecClient
+
+
+@dataclass(frozen=True)
+class DatasetSnapshot:
+    """Mapped fundamentals and the exact Company Facts payload behind them."""
+
+    dataset: CompanyDataset
+    diagnostics: IngestionDiagnostics
+    company_facts: dict
+
+
+def fetch_dataset_snapshot(
+    ticker: str,
+    n_quarters: int = 8,
+    sector: str | None = None,
+    cache_dir: str = "data/cache",
+    identity: str | None = None,
+    client: SecClient | None = None,
+) -> DatasetSnapshot:
+    """Fetch Company Facts once and retain that payload for adjacent analyses.
+
+    Report generation also uses Company Facts for document and restatement
+    evidence. Keeping the raw payload avoids multiple live reads that can fail
+    independently or observe different SEC snapshots when caches are bypassed.
+    """
+    client = client or SecClient(cache_dir=cache_dir, identity=identity)
+    facts = client.company_facts(ticker)
+    dataset, diagnostics = build_dataset(
+        facts, ticker=ticker, n_quarters=n_quarters, sector=sector
+    )
+    return DatasetSnapshot(dataset, diagnostics, facts)
 
 
 def fetch_dataset(
@@ -30,6 +63,12 @@ def fetch_dataset(
     Documents (transcripts, releases) are not fetched; supply them via the
     canonical JSON format if narrative analysis is wanted.
     """
-    client = client or SecClient(cache_dir=cache_dir, identity=identity)
-    facts = client.company_facts(ticker)
-    return build_dataset(facts, ticker=ticker, n_quarters=n_quarters, sector=sector)
+    snapshot = fetch_dataset_snapshot(
+        ticker,
+        n_quarters=n_quarters,
+        sector=sector,
+        cache_dir=cache_dir,
+        identity=identity,
+        client=client,
+    )
+    return snapshot.dataset, snapshot.diagnostics

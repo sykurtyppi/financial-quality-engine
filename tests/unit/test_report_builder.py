@@ -116,3 +116,33 @@ class TestDataQualityEventError:
         )
         assert "Event (8-K 4.02) appendix UNAVAILABLE" in section
         assert "not evidence of no events" in section
+
+
+class TestReportScopeAndSnapshot:
+    def test_complete_report_names_material_unmodeled_disclosures(self):
+        ds = stretch_dataset()
+        result = analyze(ds)
+        report, _ = build_report(result, ds, generated_on="2026-08-27")
+        assert "examples of material risks not analyzed" in report.lower()
+        assert "purchase commitments and guarantees" in report.lower()
+        assert "customer concentration" in report.lower()
+        assert "export controls" in report.lower()
+        assert "not exhaustive" in report.lower()
+
+    def test_prefetched_company_facts_prevent_restatement_refetch(self):
+        ds = stretch_dataset()
+        result = analyze(ds)
+        report, _ = build_report(
+            result,
+            ds,
+            generated_on="2026-08-27",
+            coverage=1.0,
+            client=_OutageClient(),
+            ticker="AAPL",
+            fetched_at="2026-08-27 00:00 UTC",
+            company_facts={"facts": {}},
+        )
+
+        # Other streams are unavailable, but restatements were checked against
+        # the exact snapshot used for fundamentals instead of making a new call.
+        assert "Restatement appendix UNAVAILABLE" not in report

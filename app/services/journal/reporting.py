@@ -15,7 +15,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.core.pipeline import analyze
-from app.services.ingestion.edgar_adapter import fetch_dataset
+from app.services.ingestion.edgar_adapter import fetch_dataset_snapshot
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
@@ -38,10 +38,11 @@ def build_report(
     """Generate and write the markdown report for ``ticker``. Returns (path, overall)."""
     ticker = ticker.upper()
     client = SecClient()
-    dataset, diag = fetch_dataset(ticker, n_quarters=quarters, client=client)
+    snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
+    dataset, diag = snapshot.dataset, snapshot.diagnostics
     doc_diagnostics: list[str] = []
     if with_docs:
-        docs = fetch_documents(client, ticker, client.company_facts(ticker), n_filings=8)
+        docs = fetch_documents(client, ticker, snapshot.company_facts, n_filings=8)
         dataset.documents = docs.documents
         doc_diagnostics = list(docs.diagnostics)
     result = analyze(dataset)
@@ -62,6 +63,7 @@ def build_report(
         fetched_at=fetched_at,
         warnings=diag.warnings,
         doc_diagnostics=doc_diagnostics,
+        company_facts=snapshot.company_facts,
     )
     REPORTS.mkdir(exist_ok=True)
     out = report_path(ticker, report_day)
