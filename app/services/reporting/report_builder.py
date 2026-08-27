@@ -27,9 +27,10 @@ from app.services.scoring.thermometer import DistressThermometer, compute_thermo
 
 ANALYSIS_SCOPE_NOTICE = (
     "## Scope limitation\n\n"
-    "**Not analyzed:** purchase commitments and guarantees, customer "
-    "concentration, and export controls/geopolitical exposure. Review the "
-    "filing notes directly before making an investment decision."
+    "**Examples of material risks not analyzed by this engine include:** purchase "
+    "commitments and guarantees, customer concentration, and export controls/"
+    "geopolitical exposure. This list is not exhaustive; review the filing and its "
+    "notes directly before making an investment decision."
 )
 
 

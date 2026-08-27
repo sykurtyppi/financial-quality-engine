@@ -123,10 +123,11 @@ class TestReportScopeAndSnapshot:
         ds = stretch_dataset()
         result = analyze(ds)
         report, _ = build_report(result, ds, generated_on="2026-08-27")
-        assert "not analyzed" in report.lower()
+        assert "examples of material risks not analyzed" in report.lower()
         assert "purchase commitments and guarantees" in report.lower()
         assert "customer concentration" in report.lower()
         assert "export controls" in report.lower()
+        assert "not exhaustive" in report.lower()
 
     def test_prefetched_company_facts_prevent_restatement_refetch(self):
         ds = stretch_dataset()
