@@ -25,6 +25,14 @@ from app.services.reporting.markdown_report import render
 from app.services.scoring.thermometer import DistressThermometer, compute_thermometer
 
 
+ANALYSIS_SCOPE_NOTICE = (
+    "## Scope limitation\n\n"
+    "**Not analyzed:** purchase commitments and guarantees, customer "
+    "concentration, and export controls/geopolitical exposure. Review the "
+    "filing notes directly before making an investment decision."
+)
+
+
 def data_quality_section(
     *,
     fetched_at: str,
@@ -87,7 +95,12 @@ def _restatement_tier1_lines(footprints) -> list[str]:
     return lines
 
 
-def _collect_streams(client, ticker: str, report_date: date):
+def _collect_streams(
+    client,
+    ticker: str,
+    report_date: date,
+    company_facts: dict | None = None,
+):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
     (body_sections, event_lines, tier1_events, errors). Stream availability is
     derived from `errors` by the caller — there is no separate list."""
@@ -121,7 +134,8 @@ def _collect_streams(client, ticker: str, report_date: date):
         )
 
         cutoff = date(report_date.year - 3, 1, 1)
-        footprints = detect_restatements(client.company_facts(ticker), period_since=cutoff)
+        facts = company_facts if company_facts is not None else client.company_facts(ticker)
+        footprints = detect_restatements(facts, period_since=cutoff)
         body_sections.append(render_restatements_section(footprints))
         tier1_events += _restatement_tier1_lines(footprints)
     except Exception as e:  # noqa: BLE001
@@ -154,6 +168,7 @@ def build_report(
     fresh: bool = False,
     warnings: list[str] | None = None,
     doc_diagnostics: list[str] | None = None,
+    company_facts: dict | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -177,7 +192,7 @@ def build_report(
 
     if client is not None and ticker is not None:
         sections, event_lines, tier1_events, errors = _collect_streams(
-            client, ticker, report_date
+            client, ticker, report_date, company_facts
         )
         for section in sections:
             body += "\n\n" + section + "\n"
@@ -223,5 +238,11 @@ def build_report(
         tier1_unavailable=tier1_unavailable or None,
         capital_markets_checked=capital_markets_checked,
     )
-    report = card + "\n\n---\n\n# Full report (appendix)\n\n" + body
+    report = (
+        card
+        + "\n\n"
+        + ANALYSIS_SCOPE_NOTICE
+        + "\n\n---\n\n# Full report (appendix)\n\n"
+        + body
+    )
     return report, thermometer
