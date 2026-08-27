@@ -83,3 +83,27 @@ callers · both `build_report`s and their web/API/script/test callers ·
 `render()` only — untouched; card-split assertions unaffected; web markdown
 render OK). `calibration_snapshot.json` untouched; no scoring/anchor/PIT files
 in the diff.
+
+## Addendum — merged state (797adc2, verified post-merge)
+
+PR #12 merged as squash commit `797adc2` with one additional pre-merge
+revision beyond the audited `38beca8`. Independently verified:
+
+- **Delta is exactly a response to this audit**: F1 (description narrowed to
+  Company Facts; submissions named as residual risk), F2 (notice reworded
+  "Examples of material risks not analyzed … not exhaustive"), test gaps 1/2
+  (new `test_report_entrypoint_snapshot.py` pins snapshot reuse at both entry
+  points) and gap 4 (two-tuple contract test). Zero production-logic changes
+  beyond the notice string — confirmed by a 0-line diff on the three other
+  production files.
+- **Suite**: 497 passed on merged main (fresh venv, py3.13); compileall clean;
+  calibration snapshot and golden reports untouched.
+- **Mutation probe reproduced**: reinstating a `client.company_facts()`
+  refetch in either entry point, dropping the `company_facts=` kwarg, or
+  breaking the `fetch_dataset` two-tuple each fail exactly the intended test.
+  The new tests are not hollow: real `main()`/`build_report()` bodies run,
+  identity assertions on a sentinel dict, refetch raises.
+- **Still open (accepted)**: gap 3 — notice placement/uniqueness unpinned
+  (moving or duplicating it fails no test); F3 — notice renders on
+  dataset-only API paths. Both cosmetic. Submissions-snapshot coherence
+  remains the substantive follow-up, now candidly documented in the PR.
