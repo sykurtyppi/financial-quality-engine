@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "Earnings calendar for scripts/watch.py. Timing only — never theses.",
+    "print_at is the expected announcement in UTC and MUST carry an offset.",
+    "AMC prints are ~20:20Z while the US is on EDT (16:20 ET).",
+    "Verify each date against company IR before relying on it; aggregator",
+    "dates were wrong often enough last season to warrant the habit."
+  ],
+  "watchlist": [
+    {
+      "ticker": "NVDA",
+      "label": "FQ2-27",
+      "print_at": "2026-08-26T20:20:00Z",
+      "forms": ["10-Q"],
+      "note": "10-Q lands SAME DAY as the print (FQ2-26: both 2025-08-27; FQ2-25: both 2024-08-28), so the engine has the quarter the same evening."
+    }
+  ]
+}
