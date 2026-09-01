@@ -76,7 +76,7 @@ def test_journal_reuses_snapshot_company_facts_for_documents_and_report(monkeypa
 
     def fake_build_report(*args, **kwargs):
         observed["report_facts"] = kwargs["company_facts"]
-        return "report", object()
+        return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
 
     monkeypatch.setattr(journal_reporting, "fetch_documents", fake_fetch_documents)
     monkeypatch.setattr(journal_reporting, "build_full_report", fake_build_report)
