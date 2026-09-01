@@ -11,8 +11,16 @@
       "ticker": "NVDA",
       "label": "FQ2-27",
       "print_at": "2026-08-26T20:20:00Z",
-      "forms": ["10-Q"],
+      "forms": [
+        "10-Q"
+      ],
       "note": "10-Q lands SAME DAY as the print (FQ2-26: both 2025-08-27; FQ2-25: both 2024-08-28), so the engine has the quarter the same evening."
+    },
+    {
+      "ticker": "AAPL",
+      "print_at": "2026-10-29T20:30:00+00:00",
+      "label": "FQ4-26",
+      "note": "print_at inferred from 46 8-K 2.02 acceptances: min in-band gap 91d of last 6 (91, 91, 91, 91, 91, 91), early-biased; last print 2026-07-30 20:30Z. Verify against company IR."
     }
   ]
 }
