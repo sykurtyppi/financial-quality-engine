@@ -159,7 +159,12 @@ def run_backtest(
                          relative_forward_returns(series, spy, asof).items()}
                     )
                 row.update(
-                    {k: (v if v is not None else "") for k, v in forward_outcomes(full_ds, asof).items()}
+                    {
+                        k: (v if v is not None else "")
+                        # anchor=latest: outcomes must start from the quarter the
+                        # signal was scored on (last FILED), not the last ended
+                        for k, v in forward_outcomes(full_ds, asof, anchor=latest).items()
+                    }
                 )
                 row["non_reliance_24m"] = int(events.non_reliance_within(asof, RESTATEMENT_WINDOW_DAYS))
                 writer.writerow(row)
