@@ -145,10 +145,14 @@ class TestFreshPropagation:
             def __init__(self, *a, **k):
                 client_kwargs.update(k)
 
-        dataset = SimpleNamespace(documents=[])
-        diag = SimpleNamespace(coverage=lambda: 0.9, warnings=[])
+        snapshot = SimpleNamespace(
+            dataset=SimpleNamespace(documents=[]),
+            diagnostics=SimpleNamespace(coverage=lambda: 0.9, warnings=[]),
+            company_facts={},
+        )
         monkeypatch.setattr(reporting, "SecClient", _Client)
-        monkeypatch.setattr(reporting, "fetch_dataset", lambda t, n_quarters, client: (dataset, diag))
+        monkeypatch.setattr(reporting, "fetch_dataset_snapshot",
+                            lambda t, n_quarters, client: snapshot)
         monkeypatch.setattr(
             reporting, "analyze", lambda ds: SimpleNamespace(overall=None)
         )
@@ -176,10 +180,14 @@ class TestFreshPropagation:
             def __init__(self, *a, **k):
                 client_kwargs.update(k)
 
-        dataset = SimpleNamespace(documents=[])
-        diag = SimpleNamespace(coverage=lambda: 0.9, warnings=[])
+        snapshot = SimpleNamespace(
+            dataset=SimpleNamespace(documents=[]),
+            diagnostics=SimpleNamespace(coverage=lambda: 0.9, warnings=[]),
+            company_facts={},
+        )
         monkeypatch.setattr(reporting, "SecClient", _Client)
-        monkeypatch.setattr(reporting, "fetch_dataset", lambda t, n_quarters, client: (dataset, diag))
+        monkeypatch.setattr(reporting, "fetch_dataset_snapshot",
+                            lambda t, n_quarters, client: snapshot)
         monkeypatch.setattr(reporting, "analyze", lambda ds: SimpleNamespace(overall=None))
         monkeypatch.setattr(reporting, "build_full_report", lambda *a, **k: ("BODY", None))
         monkeypatch.setattr(reporting, "REPORTS", tmp_path)
