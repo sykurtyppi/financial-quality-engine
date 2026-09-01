@@ -205,7 +205,7 @@ class TestFreshPropagation:
             reporting, "build_full_report", lambda *a, **k: ("ENGINE REPORT BODY", None)
         )
 
-        out, overall = reporting.build_report(
+        out, distress = reporting.build_report(
             "nvda", with_docs=False, fresh=True,
             out_dir=tmp_path / "auto", banner="> BANNER LINE",
         )
@@ -213,7 +213,8 @@ class TestFreshPropagation:
         assert out.parent == tmp_path / "auto"
         assert out.name.startswith("NVDA_")
         assert out.read_text().startswith("> BANNER LINE\n\nENGINE REPORT BODY")
-        assert overall is None
+        # 4c: the composite is gone from the return — a distress summary string
+        assert isinstance(distress, str)
 
     def test_build_report_defaults_unchanged(self, monkeypatch, tmp_path):
         """No banner, default dir logic, unfresh client — the journal path."""

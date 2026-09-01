@@ -146,3 +146,89 @@ class TestReportScopeAndSnapshot:
         # Other streams are unavailable, but restatements were checked against
         # the exact snapshot used for fundamentals instead of making a new call.
         assert "Restatement appendix UNAVAILABLE" not in report
+
+def _block(name: str, score: float | None) -> "BlockScore":
+    from app.schemas.scoring import BlockScore, Confidence, Direction
+
+    return BlockScore(
+        name=name, score=score, direction=Direction.MIXED,
+        confidence=Confidence.HIGH, rationale="fixture", components=[],
+        data_coverage=1.0,
+    )
+
+
+class TestCapitalIntegrityOfferingsCaveat:
+    """FPS-class consistency check (2026Q2's worst miss): a low-concern
+    Capital Integrity score must not sit silently next to a takedown
+    timeline it cannot see."""
+
+    def _result(self, ci_score):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(block_scores=[
+            _block("Earnings Quality", 50.0),
+            _block("Capital Integrity", ci_score),
+        ])
+
+    def test_low_concern_score_with_takedowns_fires(self):
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        caveat = _capital_integrity_offerings_caveat(self._result(10.0), takedown_count=4)
+        assert caveat is not None
+        assert "blind" in caveat
+        assert "4 securities takedown(s)" in caveat
+
+    def test_no_takedowns_is_silent(self):
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        assert _capital_integrity_offerings_caveat(self._result(10.0), 0) is None
+
+    def test_elevated_score_is_silent(self):
+        # The block already reads concerning; the contradiction is gone.
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        assert _capital_integrity_offerings_caveat(self._result(55.0), 4) is None
+
+    def test_unscored_block_is_silent(self):
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        assert _capital_integrity_offerings_caveat(self._result(None), 4) is None
+
+
+class TestFundingContextNote:
+    """AMKR-class misread: a cash-conversion red flag must carry the
+    funding-context checklist line; unrelated flags must not."""
+
+    def test_cash_conversion_flag_carries_the_note(self):
+        from app.core.pipeline import analyze
+        from app.services.reporting.markdown_report import render
+
+        ds = stretch_dataset()  # stressed fixture fires cash-conversion flags
+        result = analyze(ds)
+        assert any(
+            set(f.evidence_metrics) & {"cfo_to_net_income", "fcf_margin", "fcf_margin_trend"}
+            for f in result.red_flags
+        ), "fixture no longer fires a cash flag; pick another fixture"
+        report = render(result, generated_on="2026-09-01")
+        assert "Funding context" in report
+        assert "does not ingest them" in report
+
+    def test_note_absent_without_cash_flags(self):
+        from types import SimpleNamespace
+
+        from app.services.reporting.markdown_report import (
+            FUNDING_CONTEXT_METRICS,
+        )
+
+        # Pure containment check on the trigger set — a flag on any other
+        # metric must not intersect.
+        other = SimpleNamespace(evidence_metrics=["dso_trend"])
+        assert not (set(other.evidence_metrics) & FUNDING_CONTEXT_METRICS)

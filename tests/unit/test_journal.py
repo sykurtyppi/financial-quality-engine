@@ -33,7 +33,7 @@ def _report(ticker: str, defer_mark: bool = False) -> int:
 def _stub_build(monkeypatch, calls):
     monkeypatch.setattr(journal, "build_report",
                         lambda ticker, with_docs=True, report_day=None, fresh=False:
-                        calls.append((ticker, report_day)) or (Path("x.md"), 31.2))
+                        calls.append((ticker, report_day)) or (Path("x.md"), "no acute signals"))
 
 
 def test_report_generates_on_fresh_entry(tmp_path, monkeypatch):

@@ -103,12 +103,14 @@ def _collect_streams(
     company_facts: dict | None = None,
 ):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
-    (body_sections, event_lines, tier1_events, errors). Stream availability is
-    derived from `errors` by the caller — there is no separate list."""
+    (body_sections, event_lines, tier1_events, errors, takedown_count). Stream
+    availability is derived from `errors` by the caller — there is no separate
+    list."""
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors = {"offerings": None, "restatements": None, "events": None}
+    takedown_count = 0
 
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
@@ -121,6 +123,7 @@ def _collect_streams(
         if timeline.acquisition_error is not None:
             errors["offerings"] = timeline.acquisition_error
         elif timeline.takedown_count:
+            takedown_count = timeline.takedown_count
             event_lines.append(
                 f"{timeline.takedown_count} securities takedown(s) in the last "
                 f"{timeline.lookback_months} months (see Capital Markets Activity)"
@@ -154,7 +157,31 @@ def _collect_streams(
     except Exception as e:  # noqa: BLE001
         errors["events"] = str(e)
 
-    return body_sections, event_lines, tier1_events, errors
+    return body_sections, event_lines, tier1_events, errors, takedown_count
+
+
+def _capital_integrity_offerings_caveat(
+    result: AnalysisResult, takedown_count: int
+) -> str | None:
+    """FPS-class consistency check (2026Q2's worst miss): Capital Integrity
+    scored the sponsor's serial sell-downs 10/100 — lowest concern — because
+    the block only sees issuer-side dilution, not selling-stockholder
+    takedowns. When the offerings timeline shows takedowns while the block
+    reads low-concern, say so next to the events instead of letting the score
+    quietly contradict the filings. Cross-reference only; no score change."""
+    if not takedown_count:
+        return None
+    from app.config import scoring_config as cfg
+
+    ci = next((b for b in result.block_scores if b.name == "Capital Integrity"), None)
+    if ci is None or ci.score is None or ci.score >= cfg.DIRECTION_POSITIVE_BELOW:
+        return None
+    return (
+        f"CAVEAT — Capital Integrity reads low-concern ({ci.score:.0f}/100) but is "
+        f"blind to the {takedown_count} securities takedown(s) above: the block "
+        "scores issuer-side dilution only, not sponsor/selling-stockholder sales "
+        "(measured miss, 2026Q2). Read Capital Markets Activity before trusting it."
+    )
 
 
 def build_report(
@@ -192,11 +219,14 @@ def build_report(
     errors = {"offerings": None, "restatements": None, "events": None}
 
     if client is not None and ticker is not None:
-        sections, event_lines, tier1_events, errors = _collect_streams(
+        sections, event_lines, tier1_events, errors, takedown_count = _collect_streams(
             client, ticker, report_date, company_facts
         )
         for section in sections:
             body += "\n\n" + section + "\n"
+        caveat = _capital_integrity_offerings_caveat(result, takedown_count)
+        if caveat is not None:
+            event_lines.append(caveat)
 
     if fetched_at is not None:
         body += "\n\n" + data_quality_section(

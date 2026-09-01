@@ -81,14 +81,9 @@ def main() -> int:
     out.write_text(report)
 
     # Review finding 8: no 0-100 number on any surface, stdout included.
-    if thermometer.reading is None:
-        distress = "insufficient data"
-    elif thermometer.regime_flags:
-        distress = "regime signals present (" + ", ".join(f.code for f in thermometer.regime_flags) + ")"
-    else:
-        hot = thermometer.hottest_cluster
-        distress = f"most-elevated dimension {hot.name}" if hot else "no acute signals"
-    print(f"distress signals: {distress} -> {out}")
+    from app.services.scoring.thermometer import describe
+
+    print(f"distress signals: {describe(thermometer)} -> {out}")
     return 0
 
 
