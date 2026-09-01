@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Earnings-season watch: nudge before the print, poll for the filing after it.
 
+    # ticker-only: add a name, print date inferred from its 8-K 2.02 cadence
+    EDGAR_IDENTITY="Name email" scripts/watch.py add NVDA
+
     # what needs a thesis written before it reports?
     scripts/watch.py due --within-hours 36
 
@@ -36,6 +39,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.watch import watchlist as wl
+from app.services.watch.infer import infer_print_at
 from app.services.watch.poller import Gate, decide, thesis_state
 
 POLITE_INTERVAL_S = 300
@@ -220,6 +224,43 @@ def cmd_poll(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def cmd_add(args: argparse.Namespace) -> int:
+    """Ticker-only entry point: `watch.py add NVDA` and the calendar row is
+    derived from the issuer's own 8-K 2.02 filing cadence."""
+    ticker = args.ticker.upper()
+    note = args.note
+    if args.print_at:
+        print_at = args.print_at
+    else:
+        try:
+            client = SecClient()
+            submissions = client.submissions_by_cik(client.resolve_cik(ticker))
+        except SecClientError as e:
+            print(f"EDGAR unavailable: {e}", file=sys.stderr)
+            return 1
+        est = infer_print_at(submissions)
+        if est is None:
+            print(
+                f"{ticker}: cannot infer the print date — needs >=3 regular 8-K "
+                f"Item 2.02 filings in recent history. Pass --print-at explicitly.",
+                file=sys.stderr,
+            )
+            return 1
+        print_at = est.print_at.isoformat()
+        note = f"{args.note} · {est.basis}" if args.note else est.basis
+
+    raw: dict = {"ticker": ticker, "print_at": print_at}
+    if args.label:
+        raw["label"] = args.label
+    if note:
+        raw["note"] = note
+    watch = wl.add_entry(raw)
+    print(f"added {watch.ticker}: prints {watch.print_at:%Y-%m-%d %H:%M}Z")
+    if watch.note:
+        print(f"  note: {watch.note}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     now = _now(args.now)
     watches = wl.load()
@@ -260,6 +301,13 @@ def main() -> int:
     p_poll.add_argument("--no-audit", action="store_true",
                         help="skip the headless earnings-audit run after generation")
     p_poll.set_defaults(fn=cmd_poll)
+
+    p_add = sub.add_parser("add", help="add a name; print date inferred from 8-K 2.02 cadence")
+    p_add.add_argument("ticker")
+    p_add.add_argument("--print-at", help="override: explicit ISO print time with offset")
+    p_add.add_argument("--label", help='e.g. "FQ2-27"')
+    p_add.add_argument("--note", help="free text; the inference basis is appended")
+    p_add.set_defaults(fn=cmd_add)
 
     p_st = sub.add_parser("status", help="watchlist + thesis state at a glance")
     p_st.add_argument("--now", help="override 'now' (ISO) for rehearsal")

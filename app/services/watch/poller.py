@@ -57,6 +57,7 @@ class Filing:
     report_date: date | None = None
     accepted: str | None = None
     primary_document: str | None = None
+    items: str | None = None  # 8-K item codes, e.g. "2.02,9.01"
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,7 @@ def recent_filings(submissions: dict) -> list[Filing]:
     report_dates = recent.get("reportDate") or [None] * len(forms)
     accepted = recent.get("acceptanceDateTime") or [None] * len(forms)
     primary = recent.get("primaryDocument") or [None] * len(forms)
+    items = recent.get("items") or [None] * len(forms)
 
     out: list[Filing] = []
     for i, form in enumerate(forms):
@@ -140,6 +142,7 @@ def recent_filings(submissions: dict) -> list[Filing]:
                 report_date=_as_date(report_dates[i] if i < len(report_dates) else None),
                 accepted=accepted[i] if i < len(accepted) else None,
                 primary_document=primary[i] if i < len(primary) else None,
+                items=items[i] if i < len(items) else None,
             )
         )
     return out

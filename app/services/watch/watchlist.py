@@ -113,6 +113,36 @@ def load(path: Path | None = None) -> list[Watch]:
     return sorted(watches, key=lambda w: w.print_at)
 
 
+def add_entry(raw: dict, path: Path | None = None) -> Watch:
+    """Validate one entry and append it to the watchlist file.
+
+    Validation runs BEFORE the write (parse_watch raises on anything the
+    loader would later choke on), so a bad `add` can never corrupt the file a
+    cron job reads. Existing content — including the `_comment` block — is
+    preserved as-is.
+    """
+    watch = parse_watch(raw)
+    p = path or WATCHLIST
+    if p.exists():
+        try:
+            data = json.loads(p.read_text())
+        except json.JSONDecodeError as e:
+            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+        if isinstance(data, list):
+            data = {"watchlist": data}
+    else:
+        data = {"watchlist": []}
+    items = data.setdefault("watchlist", [])
+    if any(
+        isinstance(it, dict) and str(it.get("ticker", "")).upper() == watch.ticker
+        for it in items
+    ):
+        raise WatchlistError(f"{watch.ticker} is already on the watchlist")
+    items.append(raw)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return watch
+
+
 def due(watches: list[Watch], within_hours: float, now: datetime | None = None) -> list[Watch]:
     """Names whose print is inside the window and still ahead of us.
 
