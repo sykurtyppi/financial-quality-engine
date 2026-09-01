@@ -5,20 +5,32 @@ Operating procedure for `scripts/watch.py`. Written for NVDA FQ2-27 on
 
 ## What is and isn't automated
 
-Automated: the reminder before the print, watching EDGAR for the filing, and
-running the engine the moment it lands.
+Automated: the reminder before the print, watching EDGAR for the filing,
+running the engine the moment it lands, and the headless earnings-audit pass
+over the generated report (`scripts/run_audit.py`, skippable with
+`--no-audit`).
 
 Not automated, by design: the thesis, the AFTER block, the OUTCOME. Track 1 of
 [evaluation_protocol.md](evaluation_protocol.md) is explicitly the track that
 *requires the analyst*, and the entry is only evidence if the BEFORE block was
 written blind ([JOURNAL.md](../journal/JOURNAL.md) rule 1).
 
-The poller enforces that rather than trusting it: **a landed filing does not
-authorize a report — a locked thesis does.** With no thesis on file the poller
-detects the filing, refuses to generate, and exits 2. That refusal is the
-feature. A report sitting in `reports/` before you have written a prior means no
-blind case for that name is possible, and the season's lesson was that the
-scarce resource is entries, not reports (16 reports, 1 entry, 0 outcomes).
+**Two tracks, chosen by whether a thesis was locked before the print:**
+
+- **Journal track** — a locked thesis exists: the poller shells to
+  `journal.py report --fresh`, the report lands in `reports/`, and the entry
+  becomes a blind case. Unchanged from the original design.
+- **Ticker-only track** — no thesis on file: the poller does NOT write into
+  `reports/`. It generates a clearly-bannered artifact in `reports/auto/`
+  ("NOT journal evidence") and exits 0. `--no-auto` restores the strict
+  behavior (refuse, exit 2) for anyone alerting on the gate.
+
+The gate itself is untouched: a landed filing still never authorizes a
+*journal* report — only a locked thesis does. A report in `reports/` before
+you wrote a prior means no blind case is possible, and the season's lesson was
+that the scarce resource is entries, not reports (16 reports, 1 entry,
+0 outcomes). The auto track exists so that names you never intended to journal
+still produce the full evidence artifact with zero input.
 
 ## NVDA timing (measured, not assumed)
 

@@ -88,7 +88,8 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     print("Generating report...")
     try:
         out, overall = build_report(
-            entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat()
+            entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat(),
+            fresh=getattr(args, "fresh", False),
         )
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
@@ -127,7 +128,10 @@ def cmd_report(args: argparse.Namespace) -> int:
     print("Generating report...")
     try:
         entry = store.parse_entry(path)
-        out, overall = build_report(args.ticker, with_docs=not args.no_docs, report_day=entry["day"])
+        out, overall = build_report(
+            args.ticker, with_docs=not args.no_docs, report_day=entry["day"],
+            fresh=getattr(args, "fresh", False),
+        )
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
@@ -637,6 +641,8 @@ def main() -> int:
     p_rep.add_argument("ticker")
     p_rep.add_argument("--date")
     p_rep.add_argument("--no-docs", action="store_true")
+    p_rep.add_argument("--fresh", action="store_true",
+                       help="bypass the EDGAR cache (use on filing night)")
     p_rep.set_defaults(func=cmd_report)
 
     p_out = sub.add_parser("outcome", help="record what actually happened, weeks later")

@@ -31,7 +31,7 @@ def _report(ticker: str) -> int:
 
 def _stub_build(monkeypatch, calls):
     monkeypatch.setattr(journal, "build_report",
-                        lambda ticker, with_docs=True, report_day=None:
+                        lambda ticker, with_docs=True, report_day=None, fresh=False:
                         calls.append((ticker, report_day)) or (Path("x.md"), 31.2))
 
 

@@ -14,7 +14,10 @@ inconvenience. Calendar lives in journal/watchlist.json.
 Exit codes (for cron/alerting):
     0  work completed (report generated, or nothing left to do)
     1  setup problem, EDGAR failure, or the poll gave up waiting
-    2  a filing landed but generation was refused by the thesis gate — you act
+    2  --no-auto only: filing landed but the thesis gate refused — you act.
+       Without --no-auto, a thesis-less print instead produces a bannered
+       non-journal artifact in reports/auto/ (the ticker-only track) and
+       exits 0; a locked thesis always takes the journal track.
     3  still waiting: no qualifying filing yet (normal for a `--once` poll)
     `due` returns 1 when a watched name still needs a thesis: that is the alert.
 """
@@ -36,6 +39,13 @@ from app.services.watch import watchlist as wl
 from app.services.watch.poller import Gate, decide, thesis_state
 
 POLITE_INTERVAL_S = 300
+
+AUTO_DIR = ROOT / "reports" / "auto"
+AUTO_BANNER = (
+    "> **AUTO-GENERATED AUDIT ARTIFACT** — no blind thesis was locked before "
+    "this print; this report is NOT journal evidence (journal/JOURNAL.md "
+    "rule 1) and lives outside `reports/` for that reason."
+)
 
 
 def _now(arg: str | None) -> datetime:
@@ -97,10 +107,41 @@ def cmd_due(args: argparse.Namespace) -> int:
 
 def _generate(ticker: str, no_docs: bool) -> int:
     """Shell out to the journal CLI so the thesis-lock, timestamp and hash
-    bookkeeping stay in exactly one implementation."""
-    cmd = [sys.executable, str(ROOT / "scripts" / "journal.py"), "report", ticker]
+    bookkeeping stay in exactly one implementation. Always --fresh: a <24h
+    cached EDGAR answer can predate the filing this poll just detected."""
+    cmd = [sys.executable, str(ROOT / "scripts" / "journal.py"), "report", ticker, "--fresh"]
     if no_docs:
         cmd.append("--no-docs")
+    print(f"  -> {' '.join(cmd[1:])}")
+    return subprocess.run(cmd, cwd=ROOT).returncode
+
+
+def _generate_auto(ticker: str, no_docs: bool) -> Path | None:
+    """The non-journal track: generate the report into reports/auto/ with the
+    NOT-journal-evidence banner. No thesis, no lock, no journal bookkeeping —
+    and therefore never a blind case."""
+    from app.services.journal import reporting
+
+    try:
+        out, _ = reporting.build_report(
+            ticker, with_docs=not no_docs, fresh=True,
+            out_dir=AUTO_DIR, banner=AUTO_BANNER,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"  auto-report generation failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+    print(f"  auto-report -> {out}")
+    return out
+
+
+def _latest_report(ticker: str, directory: Path) -> Path | None:
+    matches = sorted(directory.glob(f"{ticker}_*.md"), key=lambda p: p.stat().st_mtime)
+    return matches[-1] if matches else None
+
+
+def _run_audit(report: Path) -> int:
+    """Headless audit loop over a generated report (scripts/run_audit.py)."""
+    cmd = [sys.executable, str(ROOT / "scripts" / "run_audit.py"), str(report)]
     print(f"  -> {' '.join(cmd[1:])}")
     return subprocess.run(cmd, cwd=ROOT).returncode
 
@@ -146,11 +187,29 @@ def cmd_poll(args: argparse.Namespace) -> int:
                 if args.dry_run:
                     print("  (dry run — not generating)")
                     return 0
-                return _generate(ticker, args.no_docs)
+                rc = _generate(ticker, args.no_docs)
+                if rc == 0 and not args.no_audit:
+                    report = _latest_report(ticker, ROOT / "reports")
+                    if report is not None:
+                        _run_audit(report)  # best-effort: report already exists
+                return rc
             if decision.action == "skip":
                 return 0
             if decision.action == "refuse":
-                return 2
+                if args.no_auto:
+                    return 2
+                # Ticker-only track: no thesis was locked, so no blind case is
+                # possible — generate the clearly-bannered auto artifact instead
+                # of stopping. The journal gate itself is untouched.
+                if args.dry_run:
+                    print("  (dry run — would generate auto-report)")
+                    return 0
+                report = _generate_auto(ticker, args.no_docs)
+                if report is None:
+                    return 1
+                if not args.no_audit:
+                    _run_audit(report)
+                return 0
 
         if args.once:
             return 3  # "not yet" is not a failure; cron should not alert on it
@@ -195,6 +254,11 @@ def main() -> int:
     p_poll.add_argument("--once", action="store_true", help="check once and exit")
     p_poll.add_argument("--dry-run", action="store_true", help="detect but do not generate")
     p_poll.add_argument("--no-docs", action="store_true", help="pass through to report generation")
+    p_poll.add_argument("--no-auto", action="store_true",
+                        help="strict journal mode: refuse (exit 2) instead of generating "
+                             "the bannered reports/auto/ artifact when no thesis is locked")
+    p_poll.add_argument("--no-audit", action="store_true",
+                        help="skip the headless earnings-audit run after generation")
     p_poll.set_defaults(fn=cmd_poll)
 
     p_st = sub.add_parser("status", help="watchlist + thesis state at a glance")

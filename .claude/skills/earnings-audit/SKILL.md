@@ -17,6 +17,12 @@ exercises with stated assumptions. If asked directly for a recommendation, say p
 you can't make it, then deliver the maximum analytical substance you can — the failure mode is
 not "gave advice", it's "hid behind the boundary and delivered nothing."
 
+**Headless runs** (scripts/run_audit.py, no analyst in the loop): for any input that
+requires the analyst — consensus figures you cannot verify on a primary source,
+portfolio context, the holder's thesis — write `UNAVAILABLE (headless run)` for that
+line and continue; never guess it. Phase 7 (cross-portfolio) is UNAVAILABLE by
+definition headlessly. Everything EDGAR-derivable runs exactly as specified.
+
 ---
 
 ## Phase 0 — Identity and data availability (never skip)
