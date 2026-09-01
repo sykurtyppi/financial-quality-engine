@@ -22,6 +22,20 @@ DISCLAIMER = (
     "heuristic thresholds that are not backtested or sector-normalized."
 )
 
+# AMKR-class misread (2026Q2): CFO − capex ignores government grants, ITCs, and
+# customer prepayments — AMKR flagged FCF/NI −0.954 while holding a $407M CHIPS
+# award, a 35% ITC, and a $1.5B customer prepayment. The engine does not ingest
+# funding sources; when a cash-conversion flag fires, the reader is told to
+# check them rather than treat the flag as deterioration on its own.
+FUNDING_CONTEXT_METRICS = {"cfo_to_net_income", "fcf_margin", "fcf_margin_trend"}
+FUNDING_CONTEXT_NOTE = (
+    "> Funding context (check before treating weak cash conversion as "
+    "deterioration): government grants/ITCs, customer prepayments, and "
+    "milestone payments fund operations outside CFO − capex, and this engine "
+    "does not ingest them. Verify in the filing's liquidity/commitments notes "
+    "(measured misread: AMKR 2026Q2)."
+)
+
 _DIRECTION_LABEL = {
     Direction.POSITIVE: "Positive",
     Direction.MIXED: "Mixed",
@@ -105,6 +119,9 @@ def render(result: AnalysisResult, generated_on: str) -> str:
     if result.red_flags:
         for f in result.red_flags:
             add(f"- **{f.title}** ({f.fiscal_label}): {f.detail}")
+        if any(set(f.evidence_metrics) & FUNDING_CONTEXT_METRICS for f in result.red_flags):
+            add("")
+            add(FUNDING_CONTEXT_NOTE)
     else:
         add("- No metrics crossed the elevated-concern threshold this period.")
     add("")
