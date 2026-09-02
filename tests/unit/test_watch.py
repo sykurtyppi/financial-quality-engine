@@ -463,3 +463,99 @@ class TestDecide:
         old = ("10-Q", "0001045810-26-000060", "2026-05-27", None, "2026-04-26")
         d = decide(_watch(), _submissions(old))
         assert d.action == "wait"
+
+    def test_since_on_armed_watch_refuses_event_mismatch(self, monkeypatch, tmp_path):
+        # Post-merge hardening: a stale --since on an ARMED watch could trigger
+        # on an old filing, generate a report for the wrong quarter, and
+        # permanently consume the pinned entry (ALREADY_REPORTED is terminal).
+        # The since-match must be the same filing the event identity selects.
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        old = ("10-Q", "0001045810-26-000060", "2026-05-27", None, "2026-04-26")
+        with pytest.raises(PollerError, match="Drop --since"):
+            decide(_watch(), _submissions(old), since=date(2026, 5, 1))
+
+    def test_since_force_overrides_the_cross_check(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        old = ("10-Q", "0001045810-26-000060", "2026-05-27", None, "2026-04-26")
+        d = decide(_watch(), _submissions(old), since=date(2026, 5, 1), force=True)
+        assert d.action == "refuse"  # filing accepted; the (empty) gate decides
+        assert d.filing.accession == "0001045810-26-000060"
+
+    def test_since_matching_the_event_filing_passes(self, monkeypatch, tmp_path):
+        # A --since that finds the SAME filing the event identity selects is
+        # consistent, not an override — no error, no --force needed.
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        d = decide(_watch(), _submissions(self.FILED), since=date(2026, 8, 1))
+        assert d.action == "refuse"
+        assert d.filing.accession == self.FILED[1]
+
+    def test_since_on_unarmed_watch_skips_cross_check(self, monkeypatch, tmp_path):
+        # The pure ad-hoc path (synthetic watch, no event identity) is the
+        # operator's own bound; nothing exists to cross-check against.
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        legacy = _watch(baseline_accession=None, expected_report_date=None)
+        old = ("10-Q", "0001045810-26-000060", "2026-05-27", None, "2026-04-26")
+        d = decide(legacy, _submissions(old), since=date(2026, 5, 1))
+        assert d.action == "refuse"
+
+
+class TestWatchlistWriteLock:
+    """_atomic_write prevents torn files; the flock prevents lost updates —
+    two concurrent add/link invocations must serialize their read-modify-write
+    cycles instead of the second silently clobbering the first."""
+
+    def _seed(self, tmp_path):
+        import json
+
+        p = tmp_path / "watchlist.json"
+        p.write_text(json.dumps({"watchlist": [{
+            "ticker": "NVDA", "print_at": "2026-08-26T20:20:00+00:00",
+            "baseline_accession": "acc-1", "expected_report_date": "2026-07-26",
+        }]}) + "\n")
+        return p
+
+    def _probe(self, monkeypatch, observed):
+        """Swap _atomic_write for a probe that checks — from a second file
+        descriptor, exactly as a concurrent process would — whether the
+        exclusive lock is held at write time."""
+        import fcntl
+
+        orig = wl._atomic_write
+
+        def probing_write(path, data):
+            with open(path.with_name(path.name + ".lock"), "w") as fh:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    observed["held"] = False
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                except BlockingIOError:
+                    observed["held"] = True
+            orig(path, data)
+
+        monkeypatch.setattr(wl, "_atomic_write", probing_write)
+
+    def test_update_entry_holds_the_lock_across_the_write(self, tmp_path, monkeypatch):
+        p = self._seed(tmp_path)
+        observed: dict = {}
+        self._probe(monkeypatch, observed)
+        wl.update_entry("NVDA", {"label": "FQ2-27"}, path=p)
+        assert observed["held"] is True
+
+    def test_add_entry_holds_the_lock_across_the_write(self, tmp_path, monkeypatch):
+        p = self._seed(tmp_path)
+        observed: dict = {}
+        self._probe(monkeypatch, observed)
+        wl.add_entry({
+            "ticker": "AAPL", "print_at": "2026-10-29T20:30:00+00:00",
+            "baseline_accession": "acc-2", "expected_report_date": "2026-09-26",
+        }, path=p)
+        assert observed["held"] is True
+
+    def test_lock_is_released_after_the_write(self, tmp_path, monkeypatch):
+        import fcntl
+
+        p = self._seed(tmp_path)
+        wl.update_entry("NVDA", {"label": "FQ2-27"}, path=p)
+        with open(p.with_name(p.name + ".lock"), "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
+            fcntl.flock(fh, fcntl.LOCK_UN)

@@ -122,11 +122,16 @@ before the night it matters:
 
 ```
 scripts/watch.py due --within-hours 36 --now 2026-08-25T20:20:00Z
-scripts/watch.py poll NVDA --once --dry-run --since 2026-05-20
+scripts/watch.py poll NVDA --once --dry-run --since 2026-05-20 --force
 ```
 
 The second detects NVDA's real May 10-Q against live EDGAR and stops at the
-gate — the full path with nothing written.
+gate — the full path with nothing written. `--force` is needed because the
+May filing does not match the armed watch's expected report period: on an
+armed watch, a `--since` match that disagrees with the event identity is
+refused (exit 1) rather than allowed to consume the pinned entry for the
+wrong event. That refusal itself is worth rehearsing once — run the same
+command WITHOUT `--force` and confirm the mismatch error.
 
 ## Unattended operation
 

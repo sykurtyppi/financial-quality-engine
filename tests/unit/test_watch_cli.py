@@ -83,7 +83,8 @@ def poll_env(monkeypatch):
 def _force_decision(monkeypatch, action: str):
     monkeypatch.setattr(
         watch_cli, "decide",
-        lambda watch, submissions, since=None: Decision(action, f"forced {action}"),
+        lambda watch, submissions, since=None, force=False:
+        Decision(action, f"forced {action}"),
     )
 
 
@@ -149,7 +150,7 @@ class TestPollAutoTrack:
     def test_legacy_watch_without_identity_fails_closed(self, poll_env, monkeypatch):
         # decide() raising PollerError (no event identity) must exit 1, not
         # loop or pretend to wait.
-        def boom(watch, submissions, since=None):
+        def boom(watch, submissions, since=None, force=False):
             raise watch_cli.PollerError("NVDA: watch has no event identity")
         monkeypatch.setattr(watch_cli, "decide", boom)
         assert watch_cli.cmd_poll(_poll_args()) == 1
@@ -165,6 +166,77 @@ class TestPollAutoTrack:
         rc = watch_cli.cmd_poll(_poll_args(dry_run=True))
         assert rc == 0
         assert poll_env.generate_auto == []
+
+
+class TestLinkAmbiguity:
+    """`link` without --entry-day may resolve an entry only when there is
+    exactly one candidate — with several unreported v2 entries it must refuse
+    rather than silently pin the lexicographically latest one (the "latest
+    entry wins" guess the pin mechanism exists to eliminate)."""
+
+    def _entry(self, day):
+        from datetime import date as d, datetime, timezone
+
+        from app.services.journal.schema_v2 import (
+            Assumption, BeforeBlock, EntryV2, lock_entry,
+        )
+
+        before = BeforeBlock(
+            thesis="thesis for the event", conviction=3, intended_action="hold",
+            assumptions=[Assumption(metric="revenue", comparator=">", threshold=1.0,
+                                    window="Q", source="10-Q",
+                                    resolve_by=d(2026, 12, 31))],
+        )
+        return lock_entry(EntryV2(
+            ticker="NVDA", day=d.fromisoformat(day),
+            opened=datetime(2026, 8, 1, tzinfo=timezone.utc), before=before,
+        ))
+
+    @pytest.fixture
+    def link_env(self, monkeypatch, tmp_path):
+        from app.services.journal import store as st
+
+        monkeypatch.setattr(st, "ENTRIES", tmp_path)
+        monkeypatch.setattr(
+            watch_cli, "_find_watch",
+            lambda t: watch_cli.wl.Watch(
+                ticker=t, print_at=watch_cli._now("2026-11-18T21:20:00+00:00"),
+                baseline_accession="acc-1",
+                expected_report_date=watch_cli.date(2026, 10, 25),
+            ),
+        )
+        pinned: list = []
+        monkeypatch.setattr(
+            watch_cli.wl, "update_entry",
+            lambda t, updates, path=None: pinned.append((t, updates)) or None,
+        )
+        return SimpleNamespace(store=st, pinned=pinned)
+
+    def test_two_unreported_entries_without_entry_day_refuse(self, link_env):
+        link_env.store.save_v2(self._entry("2026-08-26"))
+        link_env.store.save_v2(self._entry("2026-11-18"))
+        rc = watch_cli.cmd_link(Namespace(ticker="NVDA", entry_day=None))
+        assert rc == 1
+        assert link_env.pinned == []  # nothing guessed, nothing pinned
+
+    def test_single_unreported_entry_links_without_entry_day(self, link_env):
+        entry = self._entry("2026-11-18")
+        link_env.store.save_v2(entry)
+        rc = watch_cli.cmd_link(Namespace(ticker="NVDA", entry_day=None))
+        assert rc == 0
+        assert link_env.pinned == [("NVDA", {
+            "thesis_entry": "2026-11-18", "thesis_sha256": entry.before_sha256,
+        })]
+
+    def test_explicit_entry_day_resolves_the_ambiguity(self, link_env):
+        link_env.store.save_v2(self._entry("2026-08-26"))
+        wanted = self._entry("2026-11-18")
+        link_env.store.save_v2(wanted)
+        rc = watch_cli.cmd_link(Namespace(ticker="NVDA", entry_day="2026-11-18"))
+        assert rc == 0
+        assert link_env.pinned == [("NVDA", {
+            "thesis_entry": "2026-11-18", "thesis_sha256": wanted.before_sha256,
+        })]
 
 
 class TestFreshPropagation:
