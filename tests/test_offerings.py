@@ -196,6 +196,25 @@ class TestSecurityType:
         # the caveat's gate — is withheld.
         assert f.has_selling_stockholders is True
 
+    def test_warrant_unit_resale_stays_unknown(self):
+        # Round-3 residual: warrants issued in units with a notes tranche,
+        # later registered for resale by exercise — same debt-linked-equity
+        # class as convertibles but uses "warrant"/"exercise", not
+        # "convertible". Must not be positively classified equity.
+        cover = (
+            "1,250,000 Shares of Common Stock Issuable Upon Exercise of "
+            "Warrants Originally Issued in Units with $500,000,000 8.00% "
+            "Senior Notes due 2031. This prospectus relates to the resale "
+            "by the selling stockholders of shares of our common stock "
+            "issuable upon exercise of the warrants. We will not receive "
+            "any proceeds from the sale of the shares by the selling "
+            "stockholders."
+        )
+        diags: list = []
+        f = _filing(form="424B3")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+
     def test_convertible_notes_first_still_unknown(self):
         # Debt-named-first covers (the real convertible shape) must NOT be
         # rescued to equity by the position tie-break.

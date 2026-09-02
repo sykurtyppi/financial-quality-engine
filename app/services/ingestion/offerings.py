@@ -69,7 +69,11 @@ _EQUITY_RE = re.compile(r"shares\s+of\s+(?:our\s+|class\s+[a-c]\s+)?common\s+sto
 # stock — and its resale covers routinely name the shares FIRST ("N Shares of
 # Common Stock Issuable Upon Conversion of $X Notes due Y"), so neither regex
 # priority nor match position can classify it. The word itself is the signal.
-_CONVERTIBLE_RE = re.compile(r"convertib|exchangeab", re.I)
+# "warrant" covers the sibling structure: shares issuable on exercise of
+# warrants issued in units with a notes tranche — same debt-linked-equity
+# class, different keyword. Only consulted on both-match covers, so plain
+# equity secondaries are unaffected.
+_CONVERTIBLE_RE = re.compile(r"convertib|exchangeab|warrant", re.I)
 
 
 @dataclass
