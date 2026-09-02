@@ -87,7 +87,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
         return 1
     print("Generating report...")
     try:
-        out, overall = build_report(
+        out, distress = build_report(
             entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat(),
             fresh=getattr(args, "fresh", False),
         )
@@ -97,7 +97,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     if getattr(args, "defer_mark", False):
         # The watch flow marks only AFTER a successful audit: a failed audit
         # must leave the case retryable. Report exists; `reported` does not.
-        print(f"overall: {overall} -> {out}")
+        print(f"distress: {distress} -> {out}")
         print("reported NOT stamped (--defer-mark) — run "
               f"`journal.py mark-reported {entry.ticker} --date {entry.day.isoformat()}` "
               "once the audit succeeds.")
@@ -107,7 +107,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     # save_v2 verifies the BEFORE hash is unchanged, so nothing else can slip in.
     store.save_v2(updated, path, allow_update=True)
     print(f"Report stamped at {updated.reported.isoformat()}.")
-    print(f"overall: {overall} -> {out}")
+    print(f"distress: {distress} -> {out}")
     print(f"\nNow fill the AFTER block: `journal.py after {entry.ticker} --impact CODE "
           f"--conviction-after N` (or edit {path} directly).")
     return 0
@@ -136,7 +136,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     print("Generating report...")
     try:
         entry = store.parse_entry(path)
-        out, overall = build_report(
+        out, distress = build_report(
             args.ticker, with_docs=not args.no_docs, report_day=entry["day"],
             fresh=getattr(args, "fresh", False),
         )
@@ -144,7 +144,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
     if getattr(args, "defer_mark", False):
-        print(f"overall: {overall} -> {out}")
+        print(f"distress: {distress} -> {out}")
         day = path.stem.split("_", 1)[1]
         print("reported NOT stamped (--defer-mark) — run "
               f"`journal.py mark-reported {args.ticker.upper()} --date {day}` "
@@ -152,7 +152,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 0
     store.mark_reported(path)
     print(f"Thesis locked at {store.now_iso()}.")
-    print(f"overall: {overall} -> {out}")
+    print(f"distress: {distress} -> {out}")
     print(f"\nNow read the report and fill the AFTER block in {path}")
     print(f"  impact: one of {', '.join(store.IMPACT_CODES)}")
     return 0

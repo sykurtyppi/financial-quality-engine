@@ -20,6 +20,7 @@ from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
+from app.services.scoring.thermometer import describe
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
@@ -37,8 +38,12 @@ def build_report(
     fresh: bool = False,
     out_dir: Path | None = None,
     banner: str | None = None,
-) -> tuple[Path, float | None]:
-    """Generate and write the markdown report for ``ticker``. Returns (path, overall).
+) -> tuple[Path, str]:
+    """Generate and write the markdown report for ``ticker``.
+
+    Returns (path, distress_summary). The 0-100 composite is retired from every
+    surface (it measured non-discriminating in both directions on the live
+    season); the second element is now the thermometer's one-line summary.
 
     ``fresh`` bypasses the EDGAR cache — required on a filing night, where a
     <24h cached answer can silently predate the filing being waited on.
@@ -64,7 +69,7 @@ def build_report(
     # which this regeneration does not do.
     generated_on = date.today().isoformat()
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    report, _ = build_full_report(
+    report, thermometer = build_full_report(
         result, dataset,
         generated_on=generated_on,
         coverage=diag.coverage(),
@@ -81,5 +86,4 @@ def build_report(
     target_dir.mkdir(parents=True, exist_ok=True)
     out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}.md"
     out.write_text(report)
-    overall = result.overall.score if result.overall else None
-    return out, overall
+    return out, describe(thermometer)

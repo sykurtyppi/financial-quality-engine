@@ -22,6 +22,33 @@ DISCLAIMER = (
     "heuristic thresholds that are not backtested or sector-normalized."
 )
 
+# AMKR-class misread (2026Q2): the engine's cash-conversion flags do not model
+# grants, tax credits, customer advances, or milestone receipts. Those items
+# may affect reported operating cash flow, investing cash flow, or net capital
+# spending depending on their terms and presentation — the engine cannot tell,
+# so the note stays NEUTRAL about where they land and is split by metric: a
+# CFO-based flag gets no capex-centered explanation attached to it.
+FUNDING_CONTEXT_METRICS_CFO = {"cfo_to_net_income"}
+FUNDING_CONTEXT_METRICS_FCF = {"fcf_margin", "fcf_margin_trend"}
+FUNDING_CONTEXT_METRICS = FUNDING_CONTEXT_METRICS_CFO | FUNDING_CONTEXT_METRICS_FCF
+FUNDING_CONTEXT_NOTE_CFO = (
+    "> Funding context (check before treating weak cash conversion as "
+    "deterioration): government grants, tax credits, customer advances, and "
+    "milestone receipts may affect reported operating cash flow depending on "
+    "their terms and presentation. Their classification is not separately "
+    "modeled here — verify in the filing's liquidity/commitments notes "
+    "(measured misread: AMKR 2026Q2)."
+)
+FUNDING_CONTEXT_NOTE_FCF = (
+    "> Funding context (check before treating a weak free-cash-flow reading as "
+    "deterioration): government grants, tax credits, customer advances, and "
+    "milestone receipts may affect reported operating cash flow, investing "
+    "cash flow, or net capital spending depending on their terms and "
+    "presentation. Their classification is not separately modeled here — "
+    "verify in the filing's liquidity/commitments notes (measured misread: "
+    "AMKR 2026Q2)."
+)
+
 _DIRECTION_LABEL = {
     Direction.POSITIVE: "Positive",
     Direction.MIXED: "Mixed",
@@ -105,6 +132,13 @@ def render(result: AnalysisResult, generated_on: str) -> str:
     if result.red_flags:
         for f in result.red_flags:
             add(f"- **{f.title}** ({f.fiscal_label}): {f.detail}")
+        flagged = set().union(*(set(f.evidence_metrics) for f in result.red_flags))
+        if flagged & FUNDING_CONTEXT_METRICS_FCF:
+            add("")
+            add(FUNDING_CONTEXT_NOTE_FCF)
+        elif flagged & FUNDING_CONTEXT_METRICS_CFO:
+            add("")
+            add(FUNDING_CONTEXT_NOTE_CFO)
     else:
         add("- No metrics crossed the elevated-concern threshold this period.")
     add("")

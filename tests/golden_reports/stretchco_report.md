@@ -37,6 +37,8 @@ All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 - **Elevated concern: fcf_margin_trend** (TTM FY2025Q4): fcf_margin_trend = -0.0625 (formula: latest - mean(prior); period TTM FY2025Q4; concern 76/100). Requires analyst review.
 - **Weak free-cash-flow generation** (TTM FY2025Q4): fcf_margin = -0.0681 (formula: (CFO - Capex) / Revenue; period TTM FY2025Q4; concern 74/100). Requires analyst review.
 
+> Funding context (check before treating a weak free-cash-flow reading as deterioration): government grants, tax credits, customer advances, and milestone receipts may affect reported operating cash flow, investing cash flow, or net capital spending depending on their terms and presentation. Their classification is not separately modeled here — verify in the filing's liquidity/commitments notes (measured misread: AMKR 2026Q2).
+
 ## 4. Top Green Flags
 
 - **Supportive: disclosure_volume_change** (FY2025Q4): disclosure_volume_change = 1.26 (formula: latest period word count / mean(prior period word counts); period FY2025Q4; concern 15/100). Supportive indicator.

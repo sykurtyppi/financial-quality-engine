@@ -123,6 +123,111 @@ class TestSecurityType:
         _parse_prospectus(FPS_424B4, f, [])
         assert f.security_type == "equity"
 
+    def test_convertible_cover_left_unknown_not_equity(self):
+        # Review finding: a convertible-notes cover matches BOTH the debt
+        # regex ("notes due") and the equity regex (conversion "shares of
+        # common stock"). Defaulting that to "equity" let debt paper read as
+        # a sponsor equity sale downstream; both-match must classify unknown
+        # with a diagnostic.
+        cover = (
+            "We are offering $500,000,000 aggregate principal amount of "
+            "1.25% convertible senior notes due 2031. The notes will be "
+            "convertible into shares of common stock at an initial "
+            "conversion rate described herein. Selling stockholders may "
+            "also offer shares issuable upon conversion."
+        )
+        diags: list = []
+        f = _filing(form="424B5")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+        assert any("convertible?" in d for d in diags)
+
+    def test_equity_secondary_with_later_debt_mention_stays_equity(self):
+        # Audit finding (final pre-merge review): a genuine selling-stockholder
+        # secondary whose Use-of-Proceeds boilerplate mentions unrelated
+        # existing debt matched both regexes and was blanket-classified
+        # "unknown" — with an early return that skipped the selling-stockholder
+        # parse. That silently blinded the Capital Integrity caveat to the
+        # exact FPS-class sponsor sell-down it exists to catch. The cover names
+        # the offered security first, so equity-before-debt must stay equity
+        # and keep parsing.
+        cover = (
+            "14,555,925 shares of Class A common stock offered by the "
+            "selling stockholders named herein at a public offering price "
+            "of $18.00 per share. We will not receive any of the proceeds "
+            "from the sale of shares by the selling stockholders. "
+            "Prospectus Summary: we intend to use available cash to redeem "
+            "our outstanding 5.00% Senior Notes due 2027."
+        )
+        diags: list = []
+        f = _filing(form="424B7")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "equity"
+        assert f.has_selling_stockholders is True
+        assert f.company_receives_no_secondary_proceeds is True
+        assert f.secondary_shares == 14_555_925
+        assert any("classified equity by cover order" in d for d in diags)
+
+    def test_convertible_resale_with_shares_named_first_stays_unknown(self):
+        # Re-review counterexample: convertible-note RESALE prospectuses
+        # (424B3) are routinely titled "N Shares of Common Stock Issuable
+        # Upon Conversion of $X Y% Convertible Senior Notes due YYYY" — the
+        # equity phrase precedes the notes phrase, so a position tie-break
+        # classified this "equity" and the selling-stockholder caveat would
+        # falsely attribute a notes resale as a sponsor equity sell-down.
+        # Convertible language must veto positive equity classification
+        # regardless of cover order — while parsing still runs so the
+        # evidence stays visible under the honest "unknown" label.
+        cover = (
+            "6,432,749 Shares of Common Stock Issuable Upon Conversion of "
+            "$300,000,000 4.00% Convertible Senior Notes due 2030. This "
+            "prospectus relates to the resale, from time to time, by the "
+            "selling stockholders identified herein of up to 6,432,749 "
+            "shares of our common stock issuable upon conversion of the "
+            "notes. We will not receive any proceeds from the sale of the "
+            "shares by the selling stockholders."
+        )
+        diags: list = []
+        f = _filing(form="424B3")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+        assert any("convertible" in d for d in diags)
+        # Evidence is parsed and visible, but the positive classification —
+        # the caveat's gate — is withheld.
+        assert f.has_selling_stockholders is True
+
+    def test_warrant_unit_resale_stays_unknown(self):
+        # Round-3 residual: warrants issued in units with a notes tranche,
+        # later registered for resale by exercise — same debt-linked-equity
+        # class as convertibles but uses "warrant"/"exercise", not
+        # "convertible". Must not be positively classified equity.
+        cover = (
+            "1,250,000 Shares of Common Stock Issuable Upon Exercise of "
+            "Warrants Originally Issued in Units with $500,000,000 8.00% "
+            "Senior Notes due 2031. This prospectus relates to the resale "
+            "by the selling stockholders of shares of our common stock "
+            "issuable upon exercise of the warrants. We will not receive "
+            "any proceeds from the sale of the shares by the selling "
+            "stockholders."
+        )
+        diags: list = []
+        f = _filing(form="424B3")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+
+    def test_convertible_notes_first_still_unknown(self):
+        # Debt-named-first covers (the real convertible shape) must NOT be
+        # rescued to equity by the position tie-break.
+        cover = (
+            "$500,000,000 1.25% convertible senior notes due 2031, "
+            "convertible into shares of common stock as described herein."
+        )
+        diags: list = []
+        f = _filing(form="424B5")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+        assert any("convertible?" in d for d in diags)
+
     def test_debt_takedowns_excluded_from_supply_summary(self):
         f = _filing(form="424B5")
         _parse_prospectus(AMZN_DEBT_424B5, f, [])
