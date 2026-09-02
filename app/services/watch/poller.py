@@ -32,6 +32,7 @@ class Gate(str, Enum):
     """Why the poller may or may not generate a report for this name."""
 
     NO_ENTRY = "no_entry"
+    NO_PINNED = "no_pinned_thesis"
     PLACEHOLDER_THESIS = "placeholder_thesis"
     LOCK_BROKEN = "lock_broken"
     ALREADY_REPORTED = "already_reported"
@@ -148,22 +149,130 @@ def recent_filings(submissions: dict) -> list[Filing]:
     return out
 
 
-def find_filing(submissions: dict, forms: tuple[str, ...], since: date) -> Filing | None:
-    """Newest filing of a watched form filed on/after `since`.
+# A fiscal quarter end can drift a couple of weeks around the expected date
+# (52/53-week calendars, 4-4-5 retailers); an ADJACENT quarter is ~91 days
+# away, so a 21-day tolerance separates "this event, slightly shifted" from
+# "a different quarter entirely".
+REPORT_DATE_TOL_DAYS = 21
 
-    `since` is the print date, which is what makes this safe without tracking
-    state between polls: the periodic report for the quarter just announced can
-    only be filed on or after the announcement. Exact form matching keeps
-    amendments (`10-Q/A`) from re-triggering a case that already ran.
+
+def _qualifies(f: Filing, wanted: set[str]) -> bool:
+    """Form match, with 8-K narrowed to Item 2.02 (earnings). An 8-K without
+    2.02 — a debt agreement, an officer departure — is not the print."""
+    if f.form.upper() not in wanted:
+        return False
+    if f.form.upper().startswith("8-K") and "2.02" not in (f.items or ""):
+        return False
+    return True
+
+
+def _newest(hits: list[Filing]) -> Filing:
+    # Deterministic: acceptance timestamp, then filing date, then accession —
+    # never dict/iteration order.
+    return max(hits, key=lambda f: (f.filing_date, f.accepted or "", f.accession))
+
+
+def find_filing(
+    submissions: dict,
+    forms: tuple[str, ...],
+    *,
+    baseline_accession: str,
+    expected_report_date: date,
+    tolerance_days: int = REPORT_DATE_TOL_DAYS,
+) -> Filing | None:
+    """The event-identified trigger: a filing counts iff it is a NEW accession
+    (not the baseline recorded when the watch was armed) whose report period
+    matches the expected fiscal period.
+
+    `print_at` is deliberately absent here. A forecast date must never act as
+    a filing cutoff — a company reporting earlier than estimated would have
+    its real filing excluded on every subsequent poll, forever. The baseline
+    accession + expected period identify the filing regardless of WHEN it
+    arrives; the estimate only schedules when polling starts.
     """
+    wanted = {f.upper() for f in forms}
+    hits = []
+    for f in recent_filings(submissions):
+        if not _qualifies(f, wanted):
+            continue
+        if f.accession == baseline_accession:
+            continue
+        if f.form.upper().startswith("8-K"):
+            # An earnings 8-K's reportDate is the event date, not the quarter
+            # end — for the intended quarter it can only come after that
+            # quarter ends, and before the NEXT quarter's release cycle
+            # (one ~91d period + tolerance); a later quarter's 2.02 must not
+            # win the newest-selection on a long-forgotten watch.
+            age = (f.filing_date - expected_report_date).days
+            if age < 0 or age > 91 + tolerance_days:
+                continue
+        else:
+            if f.report_date is None:
+                continue
+            if abs((f.report_date - expected_report_date).days) > tolerance_days:
+                continue  # an intervening earlier (or later) quarter is NOT this event
+        hits.append(f)
+    return _newest(hits) if hits else None
+
+
+def find_filing_since(submissions: dict, forms: tuple[str, ...], since: date) -> Filing | None:
+    """Ad-hoc variant for an OPERATOR-SUPPLIED lower bound (`poll --since`).
+    Never called with a forecast date — that was the defect: an estimate used
+    as a cutoff silently excludes a filing that arrives early."""
     wanted = {f.upper() for f in forms}
     hits = [
         f for f in recent_filings(submissions)
-        if f.form.upper() in wanted and f.filing_date >= since
+        if _qualifies(f, wanted) and f.filing_date >= since
     ]
-    if not hits:
-        return None
-    return max(hits, key=lambda f: (f.filing_date, f.accepted or ""))
+    return _newest(hits) if hits else None
+
+
+def pinned_thesis_state(watch: Watch) -> GateResult:
+    """The event-pinned gate: only the journal entry the watch was linked to —
+    verified against the lock hash recorded at link time — can authorize this
+    event's report.
+
+    Never falls back to "latest entry for the ticker": that fallback is how a
+    May thesis got stamped as evidence for an August quarter. No pin, no
+    journal-track generation.
+    """
+    if not watch.thesis_entry or not watch.thesis_sha256:
+        return GateResult(
+            Gate.NO_PINNED,
+            f"no thesis pinned to this event — open a v2 entry "
+            f"(`journal.py openv2 {watch.ticker} ...`) then `watch.py link {watch.ticker}`",
+        )
+    path = store.find_entry(watch.ticker, watch.thesis_entry)
+    if path is None:
+        return GateResult(
+            Gate.NO_ENTRY,
+            f"pinned entry {watch.ticker}_{watch.thesis_entry}.md is missing",
+        )
+    if not store.is_v2(path):
+        return GateResult(
+            Gate.LOCK_BROKEN,
+            f"{path.name}: pinned entry is not a hash-locked v2 entry — the pin "
+            f"cannot be verified. Re-open with `journal.py openv2` and re-link.",
+            path,
+        )
+    entry = store.load_v2(path)
+    if not verify_lock(entry):
+        return GateResult(
+            Gate.LOCK_BROKEN,
+            f"{path.name}: BEFORE-block hash does not match — refusing to act on a "
+            f"tampered entry (run `journal.py verify {watch.ticker}`)",
+            path,
+        )
+    if entry.before_sha256 != watch.thesis_sha256:
+        return GateResult(
+            Gate.LOCK_BROKEN,
+            f"{path.name}: entry lock hash differs from the hash pinned on the watch "
+            f"— the entry on disk is not the one linked to this event",
+            path,
+        )
+    if entry.reported is not None:
+        return GateResult(Gate.ALREADY_REPORTED, f"{path.name}: already reported", path)
+    return GateResult(Gate.LOCKED, f"{path.name}: thesis locked (pinned)", path)
 
 
 def decide(
@@ -178,16 +287,40 @@ def decide(
     Order matters. The filing is checked first so that a name with no thesis is
     only ever flagged once its filing is actually up — before that there is
     nothing to refuse and the correct state is simply "waiting".
+
+    `since` is ONLY for an operator-supplied ad-hoc lower bound. Without it the
+    watch must carry event identity (baseline accession + expected period);
+    a legacy row without those fields fails closed rather than guessing from
+    the forecast print date.
     """
-    since = since or watch.print_at.date()
-    filing = find_filing(submissions, watch.forms, since)
+    if since is not None:
+        filing = find_filing_since(submissions, watch.forms, since)
+    else:
+        if not watch.event_armed:
+            raise PollerError(
+                f"{watch.ticker}: watch has no event identity "
+                f"(baseline_accession + expected_report_date). Re-arm it with "
+                f"`watch.py add {watch.ticker}` (or set the fields) — polling on "
+                f"a forecast date can miss an early filing forever."
+            )
+        filing = find_filing(
+            submissions,
+            watch.forms,
+            baseline_accession=watch.baseline_accession,
+            expected_report_date=watch.expected_report_date,
+        )
     if filing is None:
+        what = (
+            f"on/after {since.isoformat()}" if since is not None
+            else f"for period ~{watch.expected_report_date.isoformat()} "
+                 f"beyond baseline {watch.baseline_accession or '(none)'}"
+        )
         return Decision(
             "wait",
-            f"{watch.ticker}: no {'/'.join(watch.forms)} filed on/after {since.isoformat()} yet",
+            f"{watch.ticker}: no qualifying {'/'.join(watch.forms)} {what} yet",
         )
 
-    gate = thesis_state(watch.ticker)
+    gate = pinned_thesis_state(watch)
     landed = f"{filing.form} {filing.accession} filed {filing.filing_date.isoformat()}"
 
     if gate.state is Gate.ALREADY_REPORTED:

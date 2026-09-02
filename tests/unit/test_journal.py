@@ -25,8 +25,9 @@ def _open(ticker: str, thesis: str | None, conviction: int | None = 3):
     assert journal.cmd_open(ns) == 0
 
 
-def _report(ticker: str) -> int:
-    return journal.cmd_report(argparse.Namespace(ticker=ticker, date=None, no_docs=True))
+def _report(ticker: str, defer_mark: bool = False) -> int:
+    return journal.cmd_report(argparse.Namespace(
+        ticker=ticker, date=None, no_docs=True, defer_mark=defer_mark))
 
 
 def _stub_build(monkeypatch, calls):
@@ -587,3 +588,90 @@ class TestAfterOutcomeE2E:
         assert t["lock_broken"] == 0
         # p_outcome + outcome_definition + y all set -> enters raw Brier count
         assert t["resolved_with_p_outcome"] == 1
+
+
+# --- deferred `reported` marking (audit-before-mark ordering) ------------------
+# The watch flow generates with --defer-mark and stamps `reported` only after a
+# successful audit; a failed audit must leave the entry retryable.
+
+
+def test_defer_mark_leaves_entry_unreported(tmp_path, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, calls)
+    _open("AAPL", "clean compounder; watching services margin")
+    assert _report("AAPL", defer_mark=True) == 0
+    assert calls  # the report WAS generated
+    text = (tmp_path / f"AAPL_{store.today()}.md").read_text()
+    assert not store.is_reported(text)  # ...but the entry stays retryable
+
+
+def test_mark_reported_stamps_deferred_v1_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, [])
+    _open("AAPL", "clean compounder; watching services margin")
+    assert _report("AAPL", defer_mark=True) == 0
+    rc = journal.cmd_mark_reported(argparse.Namespace(ticker="AAPL", date=None))
+    assert rc == 0
+    assert store.is_reported((tmp_path / f"AAPL_{store.today()}.md").read_text())
+    # Second stamp refused — the mark is single-shot.
+    assert journal.cmd_mark_reported(argparse.Namespace(ticker="AAPL", date=None)) == 1
+
+
+def test_defer_mark_v2_entry_stays_retryable_then_marks(tmp_path, monkeypatch):
+    from datetime import date as _date, datetime as _dt, timezone as _tz
+
+    from app.services.journal.schema_v2 import (
+        Assumption, BeforeBlock, EntryV2, lock_entry,
+    )
+
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, [])
+    before = BeforeBlock(
+        thesis="priced for perfection", conviction=3, intended_action="hold",
+        assumptions=[Assumption(metric="revenue", comparator=">", threshold=1.0,
+                                window="FY2027Q2", source="10-Q",
+                                resolve_by=_date(2026, 12, 31))],
+    )
+    entry = lock_entry(EntryV2(ticker="NVDA", day=_date.today(),
+                               opened=_dt.now(_tz.utc), before=before))
+    path = store.save_v2(entry)
+
+    ns = argparse.Namespace(ticker="NVDA", date=None, no_docs=True, defer_mark=True)
+    assert journal.cmd_report(ns) == 0
+    assert store.load_v2(path).reported is None  # retryable after deferred report
+
+    assert journal.cmd_mark_reported(argparse.Namespace(ticker="NVDA", date=None)) == 0
+    assert store.load_v2(path).reported is not None
+    # And single-shot, same as v1.
+    assert journal.cmd_mark_reported(argparse.Namespace(ticker="NVDA", date=None)) == 1
+
+
+def test_mark_reported_dispatches_through_real_argparse(tmp_path):
+    """Regression for the review-caught CRITICAL: the subparser was wired with
+    `fn=` while main() dispatches `args.func` — every real invocation (exactly
+    how watch.py calls it, via subprocess) crashed with AttributeError while
+    the direct-call unit tests stayed green. Exercise the actual CLI boundary."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "journal.py"),
+         "mark-reported", "ZZZZ", "--date", "2026-01-01"],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    # Graceful refusal (no entry), NOT an AttributeError crash.
+    assert proc.returncode == 1
+    assert "AttributeError" not in proc.stderr
+    assert "No entry" in proc.stderr
+
+
+def test_defer_mark_hint_names_the_exact_entry_day(tmp_path, monkeypatch, capsys):
+    """The printed recovery command must pin --date — a bare `mark-reported
+    TICKER` falls back to latest-entry-wins, the Defect-2 pattern."""
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    _stub_build(monkeypatch, [])
+    _open("AAPL", "clean compounder; watching services margin")
+    assert _report("AAPL", defer_mark=True) == 0
+    out = capsys.readouterr().out
+    assert f"--date {store.today()}" in out

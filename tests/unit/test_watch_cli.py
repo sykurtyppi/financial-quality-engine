@@ -26,8 +26,8 @@ _spec.loader.exec_module(watch_cli)
 
 def _poll_args(**over) -> Namespace:
     base = dict(
-        ticker="NVDA", since=None, interval=0.01, max_wait=1.0, once=True,
-        dry_run=False, no_docs=False, no_auto=False, no_audit=False,
+        ticker="NVDA", since=None, entry_day=None, interval=0.01, max_wait=1.0,
+        once=True, dry_run=False, no_docs=False, no_auto=False, no_audit=False,
     )
     base.update(over)
     return Namespace(**base)
@@ -47,17 +47,20 @@ class _FakeClient:
 @pytest.fixture
 def poll_env(monkeypatch):
     """Neutralize network + subprocess; record what the poll routed to."""
-    calls = SimpleNamespace(generate=[], generate_auto=[], audit=[])
+    calls = SimpleNamespace(generate=[], generate_auto=[], audit=[], marked=[])
     monkeypatch.setattr(watch_cli, "SecClient", _FakeClient)
     monkeypatch.setattr(
         watch_cli, "_find_watch",
         lambda t: watch_cli.wl.Watch(
-            ticker=t, print_at=watch_cli._now("2026-08-26T20:20:00+00:00")
+            ticker=t, print_at=watch_cli._now("2026-08-26T20:20:00+00:00"),
+            baseline_accession="0001045810-26-000052",
+            expected_report_date=watch_cli.date(2026, 7, 26),
+            thesis_entry="2026-08-26", thesis_sha256="ab" * 32,
         ),
     )
     monkeypatch.setattr(
         watch_cli, "_generate",
-        lambda t, nd: calls.generate.append(t) or 0,
+        lambda t, day, nd: calls.generate.append((t, day)) or 0,
     )
     monkeypatch.setattr(
         watch_cli, "_generate_auto",
@@ -66,6 +69,10 @@ def poll_env(monkeypatch):
     monkeypatch.setattr(
         watch_cli, "_run_audit",
         lambda p: calls.audit.append(p) or 0,
+    )
+    monkeypatch.setattr(
+        watch_cli, "_mark_reported",
+        lambda t, day: calls.marked.append((t, day, len(calls.audit))) or 0,
     )
     monkeypatch.setattr(
         watch_cli, "_latest_report", lambda t, d: Path("/tmp/fake_journal.md")
@@ -107,9 +114,45 @@ class TestPollAutoTrack:
         _force_decision(monkeypatch, "generate")
         rc = watch_cli.cmd_poll(_poll_args())
         assert rc == 0
-        assert poll_env.generate == ["NVDA"]
+        assert poll_env.generate == [("NVDA", "2026-08-26")]  # pinned day, not "latest"
         assert poll_env.generate_auto == []
         assert poll_env.audit == [Path("/tmp/fake_journal.md")]
+
+    def test_reported_is_stamped_only_after_a_successful_audit(self, poll_env, monkeypatch):
+        # Ordering regression: mark must come AFTER the audit completes. The
+        # recorded audit-count-at-mark-time proves the sequence.
+        _force_decision(monkeypatch, "generate")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.marked == [("NVDA", "2026-08-26", 1)]  # 1 audit already done
+
+    def test_audit_failure_propagates_and_leaves_journal_retryable(self, poll_env, monkeypatch):
+        # THE defect: the poll returned 0 while the audit had failed, so cron
+        # saw a healthy run with no analysis. Now: exit 4, nothing marked.
+        _force_decision(monkeypatch, "generate")
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        rc = watch_cli.cmd_poll(_poll_args())
+        assert rc == 4
+        assert poll_env.marked == []  # entry stays retryable
+
+    def test_no_audit_marks_immediately(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        rc = watch_cli.cmd_poll(_poll_args(no_audit=True))
+        assert rc == 0
+        assert poll_env.audit == []
+        assert poll_env.marked == [("NVDA", "2026-08-26", 0)]
+
+    def test_auto_track_audit_failure_propagates(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "refuse")
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        assert watch_cli.cmd_poll(_poll_args()) == 4
+
+    def test_legacy_watch_without_identity_fails_closed(self, poll_env, monkeypatch):
+        # decide() raising PollerError (no event identity) must exit 1, not
+        # loop or pretend to wait.
+        def boom(watch, submissions, since=None):
+            raise watch_cli.PollerError("NVDA: watch has no event identity")
+        monkeypatch.setattr(watch_cli, "decide", boom)
+        assert watch_cli.cmd_poll(_poll_args()) == 1
 
     def test_auto_generation_failure_exits_1(self, poll_env, monkeypatch):
         _force_decision(monkeypatch, "refuse")
@@ -133,8 +176,10 @@ class TestFreshPropagation:
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(watch_cli.subprocess, "run", fake_run)
-        assert watch_cli._generate("NVDA", no_docs=False) == 0
+        assert watch_cli._generate("NVDA", "2026-08-26", no_docs=False) == 0
         assert "--fresh" in recorded["cmd"]
+        assert "--defer-mark" in recorded["cmd"]  # mark happens only post-audit
+        assert recorded["cmd"][recorded["cmd"].index("--date") + 1] == "2026-08-26"
 
     def test_build_report_constructs_fresh_client_and_banners(self, monkeypatch, tmp_path):
         from app.services.journal import reporting

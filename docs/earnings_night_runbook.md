@@ -60,16 +60,22 @@ scripts/watch.py due --within-hours 36
 
 Exit 1 means a watched name still needs a thesis. Exit 0 means you are ready.
 
-**2. Before the print — lock the thesis (you, blind)**
+**2. Before the print — lock the thesis (you, blind), then PIN it**
 
 ```
 scripts/journal.py openv2 NVDA \
   --thesis "..." --conviction 3 \
   --assumption "..." --catalyst "FQ2-27 print 2026-08-26"
+scripts/watch.py link NVDA
 ```
 
 Do this *before* 20:20Z. Afterwards the tape exists and the prior is no longer
 blind — record it in `--contamination` if that happens.
+
+`link` writes the entry's day and BEFORE-block hash onto the watch. Only that
+exact, unmodified entry can authorize this event's report — a thesis from a
+prior quarter (or an edited one) fails the gate instead of silently standing
+in. No link, no journal-track report.
 
 **3. At the print — start the poller**
 
@@ -77,12 +83,23 @@ blind — record it in `--contamination` if that happens.
 EDGAR_IDENTITY="Your Name you@example.com" scripts/watch.py poll NVDA
 ```
 
-Defaults: check every 5 minutes, give up after 6 hours, only count 10-Qs filed
-on/after the print date. It fetches with `fresh=True` — a <24h cache can serve
-pre-filing data on exactly the night that matters (P0-D).
+Defaults: check every 5 minutes, give up after 6 hours. A filing counts when
+it is a NEW accession beyond the baseline recorded at `add` time AND its report
+period matches the event's expected fiscal period — the estimated print time
+only schedules the polling, so a company that files *earlier* than estimated
+still triggers (a forecast date is never a filing cutoff), and an intervening
+earlier quarter's filing never hijacks the watch. Fetches use `fresh=True` — a
+<24h cache can serve pre-filing data on exactly the night that matters (P0-D).
 
-Exit codes: `0` report generated · `2` filing landed but no thesis (act now) ·
-`3` nothing yet (`--once` only) · `1` gave up or EDGAR failed.
+After generation the headless audit runs, and **`reported` is stamped only
+when the audit succeeds** — a failed audit keeps the report on disk for
+diagnosis, leaves the journal entry retryable, and exits nonzero so cron sees
+the failure.
+
+Exit codes: `0` report generated, audited, and marked · `2` filing landed but
+no thesis (`--no-auto` only; act now) · `3` nothing yet (`--once` only) ·
+`4` report generated but the audit FAILED (journal not marked; retry) ·
+`1` gave up, EDGAR failed, or the watch has no event identity (re-`add` it).
 
 **4. After it generates — read, then fill AFTER**
 

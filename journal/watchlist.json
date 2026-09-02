@@ -1,26 +1,32 @@
 {
   "_comment": [
     "Earnings calendar for scripts/watch.py. Timing only — never theses.",
-    "print_at is the expected announcement in UTC and MUST carry an offset.",
-    "AMC prints are ~20:20Z while the US is on EDT (16:20 ET).",
-    "Verify each date against company IR before relying on it; aggregator",
-    "dates were wrong often enough last season to warrant the habit."
+    "print_at is a SCHEDULING HINT (when polling starts), deliberately",
+    "early-biased; it never decides which filing counts. Filing identity =",
+    "baseline_accession (newest qualifying accession at arm time) +",
+    "expected_report_date (the fiscal period this event is for).",
+    "thesis_entry/thesis_sha256 are written by `watch.py link` and pin the",
+    "one journal entry allowed to authorize this event's report."
   ],
   "watchlist": [
     {
       "ticker": "NVDA",
-      "label": "FQ2-27",
-      "print_at": "2026-08-26T20:20:00Z",
+      "label": "FQ3-27",
+      "print_at": "2026-11-18T20:21:00+00:00",
       "forms": [
         "10-Q"
       ],
-      "note": "10-Q lands SAME DAY as the print (FQ2-26: both 2025-08-27; FQ2-25: both 2024-08-28), so the engine has the quarter the same evening."
+      "baseline_accession": "0001045810-26-000075",
+      "expected_report_date": "2026-10-25",
+      "note": "10-Q lands SAME DAY as the print (~15 min after the 8-K; verified FQ1-27, FQ2-27). print_at inferred from 8-K 2.02 cadence, early-biased — harmless: identity comes from the baseline accession, not the date. Verify against company IR."
     },
     {
       "ticker": "AAPL",
-      "print_at": "2026-10-29T20:30:00+00:00",
       "label": "FQ4-26",
-      "note": "print_at inferred from 46 8-K 2.02 acceptances: min in-band gap 91d of last 6 (91, 91, 91, 91, 91, 91), early-biased; last print 2026-07-30 20:30Z. Verify against company IR."
+      "print_at": "2026-10-29T20:30:00+00:00",
+      "baseline_accession": "0000320193-26-000020",
+      "expected_report_date": "2026-09-26",
+      "note": "print_at inferred from 46 8-K 2.02 acceptances (steady 91d cadence, last print 2026-07-30 20:30Z). FQ4 filing is the 10-K. Verify against company IR."
     }
   ]
 }
