@@ -34,10 +34,20 @@ def build_report(
     with_docs: bool = True,
     quarters: int = 8,
     report_day: str | None = None,
+    fresh: bool = False,
+    out_dir: Path | None = None,
+    banner: str | None = None,
 ) -> tuple[Path, float | None]:
-    """Generate and write the markdown report for ``ticker``. Returns (path, overall)."""
+    """Generate and write the markdown report for ``ticker``. Returns (path, overall).
+
+    ``fresh`` bypasses the EDGAR cache — required on a filing night, where a
+    <24h cached answer can silently predate the filing being waited on.
+    ``out_dir``/``banner`` exist for the automatic (non-journal) track: the
+    banner is prepended verbatim so an auto-generated artifact can never be
+    mistaken for a blind journal case.
+    """
     ticker = ticker.upper()
-    client = SecClient()
+    client = SecClient(fresh=fresh)
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
     doc_diagnostics: list[str] = []
@@ -65,8 +75,11 @@ def build_report(
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
     )
-    REPORTS.mkdir(exist_ok=True)
-    out = report_path(ticker, report_day)
+    if banner:
+        report = f"{banner}\n\n{report}"
+    target_dir = out_dir if out_dir is not None else REPORTS
+    target_dir.mkdir(parents=True, exist_ok=True)
+    out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}.md"
     out.write_text(report)
     overall = result.overall.score if result.overall else None
     return out, overall

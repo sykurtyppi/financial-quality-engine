@@ -3,6 +3,14 @@
 Date: 2026-07-03 · Config version: 0.3.0 · Artifact: `data/backtest/backtest_results.csv`
 Harness: `scripts/run_backtest.py` → `scripts/analyze_backtest.py`
 
+> **Known artifact defect (2026-08-21):** `backtest_results.csv` was generated
+> pre-F1-fix — the forward-outcome columns (`op_margin_chg_4q`,
+> `fcf_margin_chg_4q`, `ni_growth_fwd_4q`) anchored on the last *ended* quarter
+> while scores anchored on the last *filed* quarter, and the 4-quarter lookahead
+> was positional with no contiguity guard. The code is fixed
+> (`app/services/backtesting/outcomes.py`); regeneration and a refresh of every
+> number in this report are scheduled after the 2026-08-26 NVDA print.
+
 ## Read this first
 
 This is a **signal validity audit on free data**, not a statistically

@@ -88,11 +88,20 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     print("Generating report...")
     try:
         out, overall = build_report(
-            entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat()
+            entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat(),
+            fresh=getattr(args, "fresh", False),
         )
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
+    if getattr(args, "defer_mark", False):
+        # The watch flow marks only AFTER a successful audit: a failed audit
+        # must leave the case retryable. Report exists; `reported` does not.
+        print(f"overall: {overall} -> {out}")
+        print("reported NOT stamped (--defer-mark) — run "
+              f"`journal.py mark-reported {entry.ticker} --date {entry.day.isoformat()}` "
+              "once the audit succeeds.")
+        return 0
     updated = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
     # allow_update=True: `reported` stamp is a legitimate in-place update.
     # save_v2 verifies the BEFORE hash is unchanged, so nothing else can slip in.
@@ -127,10 +136,20 @@ def cmd_report(args: argparse.Namespace) -> int:
     print("Generating report...")
     try:
         entry = store.parse_entry(path)
-        out, overall = build_report(args.ticker, with_docs=not args.no_docs, report_day=entry["day"])
+        out, overall = build_report(
+            args.ticker, with_docs=not args.no_docs, report_day=entry["day"],
+            fresh=getattr(args, "fresh", False),
+        )
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
+    if getattr(args, "defer_mark", False):
+        print(f"overall: {overall} -> {out}")
+        day = path.stem.split("_", 1)[1]
+        print("reported NOT stamped (--defer-mark) — run "
+              f"`journal.py mark-reported {args.ticker.upper()} --date {day}` "
+              "once the audit succeeds.")
+        return 0
     store.mark_reported(path)
     print(f"Thesis locked at {store.now_iso()}.")
     print(f"overall: {overall} -> {out}")
@@ -622,6 +641,43 @@ def cmd_tally(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mark_reported(args: argparse.Namespace) -> int:
+    """Stamp `reported` on an entry whose report was generated with
+    --defer-mark. Kept separate so the watch flow can order it strictly AFTER
+    a successful audit — report-then-mark, never mark-then-hope."""
+    from datetime import datetime, timezone
+
+    try:
+        path = store.find_entry(args.ticker, args.date)
+    except ValueError as e:
+        print(f"Invalid ticker: {e}", file=sys.stderr)
+        return 1
+    if path is None:
+        print(f"No entry for {args.ticker.upper()}"
+              f"{' on ' + args.date if args.date else ''}.", file=sys.stderr)
+        return 1
+    if store.is_v2(path):
+        entry = store.load_v2(path)
+        if not verify_lock(entry):
+            print(f"{path.name}: LOCK BROKEN — refusing to stamp a tampered entry.",
+                  file=sys.stderr)
+            return 1
+        if entry.reported is not None:
+            print(f"{path.name}: already reported.", file=sys.stderr)
+            return 1
+        updated = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
+        store.save_v2(updated, path, allow_update=True)
+        print(f"Report stamped at {updated.reported.isoformat()}.")
+        return 0
+    text = path.read_text()
+    if store.is_reported(text):
+        print(f"{path.name}: already reported.", file=sys.stderr)
+        return 1
+    store.mark_reported(path)
+    print(f"Reported stamped at {store.now_iso()}.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Decision-impact journal for the earnings-quality engine")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -637,7 +693,18 @@ def main() -> int:
     p_rep.add_argument("ticker")
     p_rep.add_argument("--date")
     p_rep.add_argument("--no-docs", action="store_true")
+    p_rep.add_argument("--defer-mark", action="store_true",
+                       help="generate but do NOT stamp `reported` — the watch flow "
+                            "stamps only after a successful audit (mark-reported)")
+    p_rep.add_argument("--fresh", action="store_true",
+                       help="bypass the EDGAR cache (use on filing night)")
     p_rep.set_defaults(func=cmd_report)
+
+    p_mark = sub.add_parser("mark-reported",
+                            help="stamp `reported` after a deferred (--defer-mark) report")
+    p_mark.add_argument("ticker")
+    p_mark.add_argument("--date")
+    p_mark.set_defaults(func=cmd_mark_reported)
 
     p_out = sub.add_parser("outcome", help="record what actually happened, weeks later")
     p_out.add_argument("ticker")

@@ -25,6 +25,15 @@ journal, run blind over a real earnings season, can answer it.
   impact), writing the identical `journal/entries/*.md` files. It's a dogfooding
   convenience, not a product; the thesis-before-report lock is enforced there too.
 
+## Earnings-night automation (scripts/watch.py)
+
+The calendar side is automated; your side is not. `watch.py due` reminds you to
+write the prior *before* a watched name prints, and `watch.py poll` waits for
+the filing and runs step 2 the moment it lands. It will **refuse** to generate a
+report for a name with no locked thesis — see
+[docs/earnings_night_runbook.md](../docs/earnings_night_runbook.md). Calendar
+lives in `watchlist.json` (timing only, never theses).
+
 ## The daily loop
 
 ```

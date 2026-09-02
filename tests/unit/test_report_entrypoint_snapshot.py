@@ -65,7 +65,7 @@ def test_journal_reuses_snapshot_company_facts_for_documents_and_report(monkeypa
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(journal_reporting, "REPORTS", tmp_path)
-    monkeypatch.setattr(journal_reporting, "SecClient", lambda: client)
+    monkeypatch.setattr(journal_reporting, "SecClient", lambda *a, **k: client)
     monkeypatch.setattr(journal_reporting, "fetch_dataset_snapshot", lambda *a, **k: snapshot)
     monkeypatch.setattr(journal_reporting, "analyze", real_analyze)
 
