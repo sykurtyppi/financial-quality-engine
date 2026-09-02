@@ -65,6 +65,11 @@ _DEBT_RE = re.compile(
     r"debt\s+securities|medium-?term\s+notes|subordinated\s+notes", re.I
 )
 _EQUITY_RE = re.compile(r"shares\s+of\s+(?:our\s+|class\s+[a-c]\s+)?common\s+stock", re.I)
+# Convertible/exchangeable paper mentions BOTH notes and the underlying common
+# stock — and its resale covers routinely name the shares FIRST ("N Shares of
+# Common Stock Issuable Upon Conversion of $X Notes due Y"), so neither regex
+# priority nor match position can classify it. The word itself is the signal.
+_CONVERTIBLE_RE = re.compile(r"convertib|exchangeab", re.I)
 
 
 @dataclass
@@ -143,29 +148,40 @@ def _parse_prospectus(text: str, filing: OfferingFiling, diagnostics: list[str])
         return
     if debt_m and equity_m:
         # Both match. Two very different documents land here:
-        #  - a convertible-notes cover ("2.5% Convertible Senior Notes due
-        #    2031") that mentions the common stock underlying conversion, and
-        #  - a genuine equity secondary whose LATER boilerplate mentions
+        #  - convertible/exchangeable paper (offerings AND resales of the
+        #    shares underlying conversion — whose covers routinely name the
+        #    common stock BEFORE the notes), and
+        #  - a genuine equity secondary whose later boilerplate mentions
         #    unrelated existing debt ("proceeds to redeem our Senior Notes
         #    due 2027" in Use of Proceeds).
-        # The cover names the OFFERED security first, so break the tie on
-        # match position: equity-first reads as an equity offering with a
-        # downstream debt mention; debt-first is the convertible/notes case
-        # and stays honestly unclassified. Blanket "unknown" here blinded the
-        # selling-stockholder caveat to exactly the sponsor sell-downs it
-        # exists to catch.
-        if debt_m.start() < equity_m.start():
+        # Convertible language anywhere in the head settles it as the first
+        # kind: never positively "equity" (a conversion-share resale reading
+        # as a sponsor sell-down is the false attribution this classifier
+        # exists to prevent). Without it, the cover names the offered
+        # security first, so equity-before-debt is an equity offering with a
+        # downstream debt mention; debt-first stays honestly unclassified.
+        # In every unknown case parsing CONTINUES so the selling-stockholder
+        # evidence is still visible in the table — only the positive
+        # classification (and with it the Capital Integrity caveat) is
+        # withheld.
+        if _CONVERTIBLE_RE.search(head):
+            filing.security_type = "unknown"
+            diagnostics.append(
+                f"{filing.accession}: convertible/exchangeable language on a "
+                f"debt+equity cover (convertible?) — security_type left unknown"
+            )
+        elif debt_m.start() < equity_m.start():
             filing.security_type = "unknown"
             diagnostics.append(
                 f"{filing.accession}: cover names notes before common stock "
                 f"(convertible?) — security_type left unknown"
             )
-            return
-        filing.security_type = "equity"
-        diagnostics.append(
-            f"{filing.accession}: equity cover with a later debt mention — "
-            f"classified equity by cover order"
-        )
+        else:
+            filing.security_type = "equity"
+            diagnostics.append(
+                f"{filing.accession}: equity cover with a later debt mention — "
+                f"classified equity by cover order"
+            )
     else:
         filing.security_type = "equity" if equity_m else "unknown"
 

@@ -168,6 +168,34 @@ class TestSecurityType:
         assert f.secondary_shares == 14_555_925
         assert any("classified equity by cover order" in d for d in diags)
 
+    def test_convertible_resale_with_shares_named_first_stays_unknown(self):
+        # Re-review counterexample: convertible-note RESALE prospectuses
+        # (424B3) are routinely titled "N Shares of Common Stock Issuable
+        # Upon Conversion of $X Y% Convertible Senior Notes due YYYY" — the
+        # equity phrase precedes the notes phrase, so a position tie-break
+        # classified this "equity" and the selling-stockholder caveat would
+        # falsely attribute a notes resale as a sponsor equity sell-down.
+        # Convertible language must veto positive equity classification
+        # regardless of cover order — while parsing still runs so the
+        # evidence stays visible under the honest "unknown" label.
+        cover = (
+            "6,432,749 Shares of Common Stock Issuable Upon Conversion of "
+            "$300,000,000 4.00% Convertible Senior Notes due 2030. This "
+            "prospectus relates to the resale, from time to time, by the "
+            "selling stockholders identified herein of up to 6,432,749 "
+            "shares of our common stock issuable upon conversion of the "
+            "notes. We will not receive any proceeds from the sale of the "
+            "shares by the selling stockholders."
+        )
+        diags: list = []
+        f = _filing(form="424B3")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+        assert any("convertible" in d for d in diags)
+        # Evidence is parsed and visible, but the positive classification —
+        # the caveat's gate — is withheld.
+        assert f.has_selling_stockholders is True
+
     def test_convertible_notes_first_still_unknown(self):
         # Debt-named-first covers (the real convertible shape) must NOT be
         # rescued to equity by the position tie-break.
