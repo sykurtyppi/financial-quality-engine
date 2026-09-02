@@ -228,6 +228,30 @@ class TestLinkAmbiguity:
             "thesis_entry": "2026-11-18", "thesis_sha256": entry.before_sha256,
         })]
 
+    def test_single_candidate_wins_over_later_spent_entry(self, link_env):
+        # Review repro (HIGH): one unreported v2 entry plus a lexicographically
+        # LATER already-reported one. The guard validated the single candidate
+        # but resolution still went through find_entry(ticker, None), which
+        # picked the later spent entry and failed with "already reported" —
+        # breaking the routine close-one-case-open-the-next workflow. The
+        # validated candidate must BE the resolution.
+        from datetime import datetime, timezone
+
+        from app.services.journal import store as st
+
+        wanted = self._entry("2026-08-26")
+        st.save_v2(wanted)
+        spent = self._entry("2026-11-18")
+        path = st.save_v2(spent)
+        st.save_v2(spent.model_copy(update={"reported": datetime.now(timezone.utc)}),
+                   path, allow_update=True)
+
+        rc = watch_cli.cmd_link(Namespace(ticker="NVDA", entry_day=None))
+        assert rc == 0
+        assert link_env.pinned == [("NVDA", {
+            "thesis_entry": "2026-08-26", "thesis_sha256": wanted.before_sha256,
+        })]
+
     def test_explicit_entry_day_resolves_the_ambiguity(self, link_env):
         link_env.store.save_v2(self._entry("2026-08-26"))
         wanted = self._entry("2026-11-18")

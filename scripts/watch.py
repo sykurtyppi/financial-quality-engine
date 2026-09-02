@@ -429,9 +429,11 @@ def cmd_link(args: argparse.Namespace) -> int:
     if not args.entry_day:
         # Without --entry-day, find_entry() picks the lexicographically latest
         # entry — the "latest entry wins" guess the pin mechanism exists to
-        # eliminate. Guessing is only safe when there is nothing to guess
-        # between: with several candidate entries the operator must name the
-        # one that belongs to THIS event.
+        # eliminate. Resolution without the flag is safe only when exactly one
+        # entry could possibly be pinned, and then it must be THAT entry —
+        # falling through to find_entry here would re-pick the latest filename
+        # (a spent or v1 entry included) and spuriously fail the routine
+        # one-open-case workflow.
         candidates = _linkable_entries(ticker)
         if len(candidates) > 1:
             days = ", ".join(p.stem.split("_", 1)[1] for p in candidates)
@@ -439,7 +441,11 @@ def cmd_link(args: argparse.Namespace) -> int:
                   f"ambiguous which belongs to this event. Re-run with "
                   f"`--entry-day YYYY-MM-DD`.", file=sys.stderr)
             return 1
-    path = store.find_entry(ticker, args.entry_day)
+        # One candidate: pin it. Zero: fall through so the existing
+        # no-entry/v1/reported error paths explain what is missing.
+        path = candidates[0] if candidates else store.find_entry(ticker, None)
+    else:
+        path = store.find_entry(ticker, args.entry_day)
     if path is None:
         print(f"{ticker}: no journal entry"
               f"{' for ' + args.entry_day if args.entry_day else ''} — open one with "

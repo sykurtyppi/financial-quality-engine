@@ -186,6 +186,9 @@ def _write_lock(p: Path):
     the thesis pin on a multi-name earnings night. The lock lives on a stable
     sidecar file because ``os.replace`` swaps the watchlist's inode out from
     under any lock held on the file itself.
+
+    Assumes a local POSIX filesystem: ``fcntl.flock`` is not reliable across
+    NFS mounts, so do not host ``journal/`` on one and expect this guarantee.
     """
     lock_path = p.with_name(p.name + ".lock")
     with open(lock_path, "w") as fh:
