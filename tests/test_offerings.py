@@ -140,7 +140,46 @@ class TestSecurityType:
         f = _filing(form="424B5")
         _parse_prospectus(cover, f, diags)
         assert f.security_type == "unknown"
-        assert any("both debt and equity" in d for d in diags)
+        assert any("convertible?" in d for d in diags)
+
+    def test_equity_secondary_with_later_debt_mention_stays_equity(self):
+        # Audit finding (final pre-merge review): a genuine selling-stockholder
+        # secondary whose Use-of-Proceeds boilerplate mentions unrelated
+        # existing debt matched both regexes and was blanket-classified
+        # "unknown" — with an early return that skipped the selling-stockholder
+        # parse. That silently blinded the Capital Integrity caveat to the
+        # exact FPS-class sponsor sell-down it exists to catch. The cover names
+        # the offered security first, so equity-before-debt must stay equity
+        # and keep parsing.
+        cover = (
+            "14,555,925 shares of Class A common stock offered by the "
+            "selling stockholders named herein at a public offering price "
+            "of $18.00 per share. We will not receive any of the proceeds "
+            "from the sale of shares by the selling stockholders. "
+            "Prospectus Summary: we intend to use available cash to redeem "
+            "our outstanding 5.00% Senior Notes due 2027."
+        )
+        diags: list = []
+        f = _filing(form="424B7")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "equity"
+        assert f.has_selling_stockholders is True
+        assert f.company_receives_no_secondary_proceeds is True
+        assert f.secondary_shares == 14_555_925
+        assert any("classified equity by cover order" in d for d in diags)
+
+    def test_convertible_notes_first_still_unknown(self):
+        # Debt-named-first covers (the real convertible shape) must NOT be
+        # rescued to equity by the position tie-break.
+        cover = (
+            "$500,000,000 1.25% convertible senior notes due 2031, "
+            "convertible into shares of common stock as described herein."
+        )
+        diags: list = []
+        f = _filing(form="424B5")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+        assert any("convertible?" in d for d in diags)
 
     def test_debt_takedowns_excluded_from_supply_summary(self):
         f = _filing(form="424B5")

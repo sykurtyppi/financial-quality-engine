@@ -136,23 +136,38 @@ def _parse_prospectus(text: str, filing: OfferingFiling, diagnostics: list[str])
     head = text[:20000]  # cover-page facts live up front
 
     # Classify the security first: bond/note prospectuses get no equity parsing.
-    is_debt = bool(_DEBT_RE.search(head))
-    is_equity = bool(_EQUITY_RE.search(head))
-    if is_debt and not is_equity:
+    debt_m = _DEBT_RE.search(head)
+    equity_m = _EQUITY_RE.search(head)
+    if debt_m and not equity_m:
         filing.security_type = "debt"
         return
-    if is_debt and is_equity:
-        # A convertible-notes cover routinely mentions both "notes due" and
-        # the "shares of common stock" underlying conversion. Defaulting that
-        # to "equity" let debt paper read as a sponsor equity sale downstream;
-        # the honest classification is "we cannot tell".
-        filing.security_type = "unknown"
+    if debt_m and equity_m:
+        # Both match. Two very different documents land here:
+        #  - a convertible-notes cover ("2.5% Convertible Senior Notes due
+        #    2031") that mentions the common stock underlying conversion, and
+        #  - a genuine equity secondary whose LATER boilerplate mentions
+        #    unrelated existing debt ("proceeds to redeem our Senior Notes
+        #    due 2027" in Use of Proceeds).
+        # The cover names the OFFERED security first, so break the tie on
+        # match position: equity-first reads as an equity offering with a
+        # downstream debt mention; debt-first is the convertible/notes case
+        # and stays honestly unclassified. Blanket "unknown" here blinded the
+        # selling-stockholder caveat to exactly the sponsor sell-downs it
+        # exists to catch.
+        if debt_m.start() < equity_m.start():
+            filing.security_type = "unknown"
+            diagnostics.append(
+                f"{filing.accession}: cover names notes before common stock "
+                f"(convertible?) — security_type left unknown"
+            )
+            return
+        filing.security_type = "equity"
         diagnostics.append(
-            f"{filing.accession}: cover matches both debt and equity language "
-            f"(convertible?) — security_type left unknown"
+            f"{filing.accession}: equity cover with a later debt mention — "
+            f"classified equity by cover order"
         )
-        return
-    filing.security_type = "equity" if is_equity else "unknown"
+    else:
+        filing.security_type = "equity" if equity_m else "unknown"
 
     for pat in _PRICE_PATTERNS:
         m = pat.search(head)

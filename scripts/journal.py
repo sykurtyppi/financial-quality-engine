@@ -97,7 +97,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     if getattr(args, "defer_mark", False):
         # The watch flow marks only AFTER a successful audit: a failed audit
         # must leave the case retryable. Report exists; `reported` does not.
-        print(f"distress: {_distress_summary(distress)} -> {out}")
+        print(f"distress: {distress} -> {out}")
         print("reported NOT stamped (--defer-mark) — run "
               f"`journal.py mark-reported {entry.ticker} --date {entry.day.isoformat()}` "
               "once the audit succeeds.")
@@ -107,7 +107,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     # save_v2 verifies the BEFORE hash is unchanged, so nothing else can slip in.
     store.save_v2(updated, path, allow_update=True)
     print(f"Report stamped at {updated.reported.isoformat()}.")
-    print(f"distress: {_distress_summary(distress)} -> {out}")
+    print(f"distress: {distress} -> {out}")
     print(f"\nNow fill the AFTER block: `journal.py after {entry.ticker} --impact CODE "
           f"--conviction-after N` (or edit {path} directly).")
     return 0
@@ -144,7 +144,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
     if getattr(args, "defer_mark", False):
-        print(f"distress: {_distress_summary(distress)} -> {out}")
+        print(f"distress: {distress} -> {out}")
         day = path.stem.split("_", 1)[1]
         print("reported NOT stamped (--defer-mark) — run "
               f"`journal.py mark-reported {args.ticker.upper()} --date {day}` "
@@ -152,7 +152,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 0
     store.mark_reported(path)
     print(f"Thesis locked at {store.now_iso()}.")
-    print(f"distress: {_distress_summary(distress)} -> {out}")
+    print(f"distress: {distress} -> {out}")
     print(f"\nNow read the report and fill the AFTER block in {path}")
     print(f"  impact: one of {', '.join(store.IMPACT_CODES)}")
     return 0
@@ -639,16 +639,6 @@ def cmd_tally(args: argparse.Namespace) -> int:
     if v2["total"]:
         _print_v2_section(v2)
     return 0
-
-
-def _distress_summary(distress) -> str:
-    """One readable line, not a dataclass repr dump."""
-    if distress is None:
-        return "n/a"
-    reading = getattr(distress, "reading", None)
-    clusters = getattr(distress, "clusters", None) or []
-    head = "no reading" if reading is None else f"{reading:.0f} (experimental)"
-    return f"{head}, {len(clusters)} cluster(s)"
 
 
 def cmd_mark_reported(args: argparse.Namespace) -> int:

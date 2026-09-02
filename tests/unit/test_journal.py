@@ -50,6 +50,25 @@ def test_report_generates_on_fresh_entry(tmp_path, monkeypatch):
     assert "reported: 2" in text   # thesis timestamp was stamped
 
 
+def test_report_prints_distress_string_verbatim(tmp_path, monkeypatch, capsys):
+    # Audit finding (final pre-merge review): build_report returns describe()'s
+    # already-formatted STRING, but a leftover formatter treated it as the raw
+    # thermometer object — getattr fell through and every run printed a fixed
+    # "no reading, 0 cluster(s)" regardless of the actual signal. The CLI must
+    # surface the returned summary verbatim.
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    monkeypatch.setattr(journal, "build_report",
+                        lambda ticker, with_docs=True, report_day=None, fresh=False:
+                        (Path("x.md"), "regime signals present (going_concern)"))
+
+    _open("AAPL", "clean compounder; watching services margin")
+    assert _report("AAPL") == 0
+
+    out = capsys.readouterr().out
+    assert "distress: regime signals present (going_concern) -> x.md" in out
+    assert "no reading" not in out
+
+
 def test_report_refuses_second_time(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "ENTRIES", tmp_path)
     _stub_build(monkeypatch, [])
