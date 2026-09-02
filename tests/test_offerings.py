@@ -123,6 +123,25 @@ class TestSecurityType:
         _parse_prospectus(FPS_424B4, f, [])
         assert f.security_type == "equity"
 
+    def test_convertible_cover_left_unknown_not_equity(self):
+        # Review finding: a convertible-notes cover matches BOTH the debt
+        # regex ("notes due") and the equity regex (conversion "shares of
+        # common stock"). Defaulting that to "equity" let debt paper read as
+        # a sponsor equity sale downstream; both-match must classify unknown
+        # with a diagnostic.
+        cover = (
+            "We are offering $500,000,000 aggregate principal amount of "
+            "1.25% convertible senior notes due 2031. The notes will be "
+            "convertible into shares of common stock at an initial "
+            "conversion rate described herein. Selling stockholders may "
+            "also offer shares issuable upon conversion."
+        )
+        diags: list = []
+        f = _filing(form="424B5")
+        _parse_prospectus(cover, f, diags)
+        assert f.security_type == "unknown"
+        assert any("both debt and equity" in d for d in diags)
+
     def test_debt_takedowns_excluded_from_supply_summary(self):
         f = _filing(form="424B5")
         _parse_prospectus(AMZN_DEBT_424B5, f, [])

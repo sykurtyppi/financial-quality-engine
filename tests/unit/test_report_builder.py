@@ -159,8 +159,10 @@ def _block(name: str, score: float | None) -> "BlockScore":
 
 class TestCapitalIntegrityOfferingsCaveat:
     """FPS-class consistency check (2026Q2's worst miss): a low-concern
-    Capital Integrity score must not sit silently next to a takedown
-    timeline it cannot see."""
+    Capital Integrity score must not sit silently next to SELLING-STOCKHOLDER
+    takedowns it cannot see. The caveat must fire only on classified
+    secondary/mixed evidence — calling a debt 424B5 or an issuer-primary deal
+    a "sponsor sale" states an attribution the data does not establish."""
 
     def _result(self, ci_score):
         from types import SimpleNamespace
@@ -170,22 +172,88 @@ class TestCapitalIntegrityOfferingsCaveat:
             _block("Capital Integrity", ci_score),
         ])
 
-    def test_low_concern_score_with_takedowns_fires(self):
+    @staticmethod
+    def _takedown(**over):
+        from datetime import date as _date
+
+        from app.services.ingestion.offerings import OfferingFiling
+
+        base = dict(form="424B4", filing_date=_date(2026, 7, 6), accession="a",
+                    primary_doc="d.htm", kind="takedown")
+        base.update(over)
+        return OfferingFiling(**base)
+
+    def test_secondary_only_fires(self):
         from app.services.reporting.report_builder import (
             _capital_integrity_offerings_caveat,
         )
 
-        caveat = _capital_integrity_offerings_caveat(self._result(10.0), takedown_count=4)
+        tds = [self._takedown(security_type="equity", has_selling_stockholders=True,
+                              secondary_shares=29_094_075)]
+        caveat = _capital_integrity_offerings_caveat(self._result(10.0), tds)
         assert caveat is not None
         assert "blind" in caveat
-        assert "4 securities takedown(s)" in caveat
+        assert "1 selling-stockholder takedown(s)" in caveat
+
+    def test_mixed_offering_fires(self):
+        # FPS's actual July deal: sponsor shares AND issuer shares in one 424B4.
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        tds = [self._takedown(security_type="equity", has_selling_stockholders=True,
+                              primary_shares=14_555_925, secondary_shares=29_094_075)]
+        assert _capital_integrity_offerings_caveat(self._result(10.0), tds) is not None
+
+    def test_debt_takedown_is_silent(self):
+        # A debt 424B5 is not a sponsor sale; labeling it one was the defect.
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        tds = [self._takedown(form="424B5", security_type="debt",
+                              has_selling_stockholders=False)]
+        assert _capital_integrity_offerings_caveat(self._result(10.0), tds) is None
+
+    def test_primary_only_is_silent(self):
+        # Issuer-side dilution is exactly what the block DOES score — there is
+        # no blind spot to caveat.
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        tds = [self._takedown(security_type="equity", primary_shares=16_586_427,
+                              secondary_shares=0, has_selling_stockholders=False)]
+        assert _capital_integrity_offerings_caveat(self._result(10.0), tds) is None
+
+    def test_unknown_unparsed_is_silent(self):
+        # No parsed evidence of selling stockholders -> no sponsor attribution.
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        tds = [self._takedown(security_type="unknown")]
+        assert _capital_integrity_offerings_caveat(self._result(10.0), tds) is None
+
+    def test_unknown_with_selling_stockholder_boilerplate_is_silent(self):
+        # Review finding: an unrecognized instrument (preferred, warrants,
+        # convertible left "unknown") whose boilerplate says "selling
+        # stockholders" is still not a POSITIVELY classified equity secondary
+        # — the caveat requires security_type == "equity", not "not debt".
+        from app.services.reporting.report_builder import (
+            _capital_integrity_offerings_caveat,
+        )
+
+        tds = [self._takedown(security_type="unknown", has_selling_stockholders=True,
+                              secondary_shares=1_000_000)]
+        assert _capital_integrity_offerings_caveat(self._result(10.0), tds) is None
 
     def test_no_takedowns_is_silent(self):
         from app.services.reporting.report_builder import (
             _capital_integrity_offerings_caveat,
         )
 
-        assert _capital_integrity_offerings_caveat(self._result(10.0), 0) is None
+        assert _capital_integrity_offerings_caveat(self._result(10.0), []) is None
 
     def test_elevated_score_is_silent(self):
         # The block already reads concerning; the contradiction is gone.
@@ -193,14 +261,16 @@ class TestCapitalIntegrityOfferingsCaveat:
             _capital_integrity_offerings_caveat,
         )
 
-        assert _capital_integrity_offerings_caveat(self._result(55.0), 4) is None
+        tds = [self._takedown(security_type="equity", has_selling_stockholders=True)]
+        assert _capital_integrity_offerings_caveat(self._result(55.0), tds) is None
 
     def test_unscored_block_is_silent(self):
         from app.services.reporting.report_builder import (
             _capital_integrity_offerings_caveat,
         )
 
-        assert _capital_integrity_offerings_caveat(self._result(None), 4) is None
+        tds = [self._takedown(security_type="equity", has_selling_stockholders=True)]
+        assert _capital_integrity_offerings_caveat(self._result(None), tds) is None
 
 
 class TestFundingContextNote:
@@ -219,7 +289,21 @@ class TestFundingContextNote:
         ), "fixture no longer fires a cash flag; pick another fixture"
         report = render(result, generated_on="2026-09-01")
         assert "Funding context" in report
-        assert "does not ingest them" in report
+        # Neutral wording only: the old note claimed these items sit "outside
+        # CFO - capex", which is not generally true (a customer advance can BE
+        # operating cash flow). The note must hedge on classification.
+        assert "may affect reported operating cash flow" in report
+        assert "outside CFO" not in report
+
+    def test_cfo_only_flag_gets_no_capex_language(self):
+        # Split-by-metric: a cfo_to_net_income flag involves no capex, so the
+        # attached note must not steer the reader to a capex explanation.
+        from app.services.reporting.markdown_report import (
+            FUNDING_CONTEXT_NOTE_CFO,
+        )
+
+        assert "capital spending" not in FUNDING_CONTEXT_NOTE_CFO
+        assert "investing cash flow" not in FUNDING_CONTEXT_NOTE_CFO
 
     def test_note_absent_without_cash_flags(self):
         from types import SimpleNamespace

@@ -15,8 +15,16 @@ def test_analyze_endpoint():
     resp = client.post("/analyze", json=payload)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["overall"]["score"] is not None
     assert body["red_flags"]
+
+
+def test_analyze_does_not_expose_the_retired_composite():
+    # The composite was measured non-discriminating (2026Q2) and retired from
+    # the human report — the machine-readable API must not keep a second
+    # product truth alive. `overall` stays internal (sort key only).
+    payload = stretch_dataset().model_dump(mode="json")
+    body = client.post("/analyze", json=payload).json()
+    assert "overall" not in body
 
 
 def test_report_endpoint_returns_markdown():

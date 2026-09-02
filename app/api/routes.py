@@ -20,8 +20,16 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.post("/analyze", response_model=AnalysisResult)
+# NOTE: response_model_exclude strips `overall` from the JSON body only — the
+# published OpenAPI schema still lists the field on AnalysisResult. Accepted
+# limitation; a wire consumer never receives a value for it.
+@router.post("/analyze", response_model=AnalysisResult, response_model_exclude={"overall"})
 def analyze_dataset(dataset: CompanyDataset) -> AnalysisResult:
+    """The composite 0-100 was measured non-discriminating over the 2026Q2
+    season (11 live runs, zero decision value) and retired from every surface
+    — the human report AND this machine-readable one. It survives internally
+    only as a sort key; exposing it here would quietly re-create the product
+    truth the retirement removed."""
     try:
         return analyze(dataset)
     except ValueError as e:

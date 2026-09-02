@@ -103,14 +103,17 @@ def _collect_streams(
     company_facts: dict | None = None,
 ):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
-    (body_sections, event_lines, tier1_events, errors, takedown_count). Stream
+    (body_sections, event_lines, tier1_events, errors, takedowns). `takedowns`
+    is the CLASSIFIED OfferingFiling list (not a count): the Capital Integrity
+    caveat must attribute only what the parsed records establish — a debt
+    424B5 or an issuer-primary deal is not a sponsor sale. Stream
     availability is derived from `errors` by the caller — there is no separate
     list."""
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors = {"offerings": None, "restatements": None, "events": None}
-    takedown_count = 0
+    takedowns: list = []
 
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
@@ -123,7 +126,7 @@ def _collect_streams(
         if timeline.acquisition_error is not None:
             errors["offerings"] = timeline.acquisition_error
         elif timeline.takedown_count:
-            takedown_count = timeline.takedown_count
+            takedowns = list(timeline.takedowns)
             event_lines.append(
                 f"{timeline.takedown_count} securities takedown(s) in the last "
                 f"{timeline.lookback_months} months (see Capital Markets Activity)"
@@ -157,19 +160,44 @@ def _collect_streams(
     except Exception as e:  # noqa: BLE001
         errors["events"] = str(e)
 
-    return body_sections, event_lines, tier1_events, errors, takedown_count
+    return body_sections, event_lines, tier1_events, errors, takedowns
+
+
+def _selling_stockholder_takedowns(takedowns: list) -> list:
+    """Takedowns whose PARSED evidence establishes secondary or mixed
+    selling-stockholder participation. A debt 424B5 or an issuer-primary
+    equity deal must never be counted here — labeling those "sponsor sales"
+    states an attribution the underlying data does not establish. The bar is
+    positive classification as EQUITY, not merely "not debt": an "unknown"
+    instrument whose boilerplate happens to say "selling stockholders" is
+    still an attribution the parse has not established."""
+    out = []
+    for f in takedowns:
+        if getattr(f, "security_type", "unknown") != "equity":
+            continue
+        if (
+            getattr(f, "has_selling_stockholders", False)
+            or (getattr(f, "secondary_shares", None) or 0) > 0
+            or getattr(f, "company_receives_no_secondary_proceeds", False)
+        ):
+            out.append(f)
+    return out
 
 
 def _capital_integrity_offerings_caveat(
-    result: AnalysisResult, takedown_count: int
+    result: AnalysisResult, takedowns: list
 ) -> str | None:
     """FPS-class consistency check (2026Q2's worst miss): Capital Integrity
     scored the sponsor's serial sell-downs 10/100 — lowest concern — because
     the block only sees issuer-side dilution, not selling-stockholder
-    takedowns. When the offerings timeline shows takedowns while the block
-    reads low-concern, say so next to the events instead of letting the score
-    quietly contradict the filings. Cross-reference only; no score change."""
-    if not takedown_count:
+    takedowns. When the offerings timeline shows SELLING-STOCKHOLDER
+    takedowns while the block reads low-concern, say so next to the events
+    instead of letting the score quietly contradict the filings. Fires only
+    on classified secondary/mixed evidence — never on debt or issuer-primary
+    deals, whose sale the block is not blind to. Cross-reference only; no
+    score change."""
+    secondary = _selling_stockholder_takedowns(takedowns)
+    if not secondary:
         return None
     from app.config import scoring_config as cfg
 
@@ -178,9 +206,10 @@ def _capital_integrity_offerings_caveat(
         return None
     return (
         f"CAVEAT — Capital Integrity reads low-concern ({ci.score:.0f}/100) but is "
-        f"blind to the {takedown_count} securities takedown(s) above: the block "
-        "scores issuer-side dilution only, not sponsor/selling-stockholder sales "
-        "(measured miss, 2026Q2). Read Capital Markets Activity before trusting it."
+        f"blind to the {len(secondary)} selling-stockholder takedown(s) above "
+        "(secondary/mixed offerings per the parsed prospectuses): the block scores "
+        "issuer-side dilution only (measured miss, 2026Q2). Read Capital Markets "
+        "Activity before trusting it."
     )
 
 
@@ -219,12 +248,12 @@ def build_report(
     errors = {"offerings": None, "restatements": None, "events": None}
 
     if client is not None and ticker is not None:
-        sections, event_lines, tier1_events, errors, takedown_count = _collect_streams(
+        sections, event_lines, tier1_events, errors, takedowns = _collect_streams(
             client, ticker, report_date, company_facts
         )
         for section in sections:
             body += "\n\n" + section + "\n"
-        caveat = _capital_integrity_offerings_caveat(result, takedown_count)
+        caveat = _capital_integrity_offerings_caveat(result, takedowns)
         if caveat is not None:
             event_lines.append(caveat)
 

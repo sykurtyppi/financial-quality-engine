@@ -79,7 +79,11 @@ class AnalysisResult(BaseModel):
     exclusion_reason: str | None = None
     metrics: list[MetricResult] = Field(default_factory=list)
     block_scores: list[BlockScore] = Field(default_factory=list)
-    overall: OverallScore | None = None
+    overall: OverallScore | None = Field(
+        default=None,
+        description="INTERNAL sort key only — measured non-discriminating (2026Q2) "
+        "and retired from all surfaces; the /analyze API excludes this field.",
+    )
     red_flags: list[Flag] = Field(default_factory=list)
     green_flags: list[Flag] = Field(default_factory=list)
     changes: list[str] = Field(default_factory=list, description="What changed this period")

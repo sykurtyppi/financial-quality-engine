@@ -141,6 +141,17 @@ def _parse_prospectus(text: str, filing: OfferingFiling, diagnostics: list[str])
     if is_debt and not is_equity:
         filing.security_type = "debt"
         return
+    if is_debt and is_equity:
+        # A convertible-notes cover routinely mentions both "notes due" and
+        # the "shares of common stock" underlying conversion. Defaulting that
+        # to "equity" let debt paper read as a sponsor equity sale downstream;
+        # the honest classification is "we cannot tell".
+        filing.security_type = "unknown"
+        diagnostics.append(
+            f"{filing.accession}: cover matches both debt and equity language "
+            f"(convertible?) — security_type left unknown"
+        )
+        return
     filing.security_type = "equity" if is_equity else "unknown"
 
     for pat in _PRICE_PATTERNS:
