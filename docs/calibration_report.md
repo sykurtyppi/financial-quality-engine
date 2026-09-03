@@ -88,8 +88,10 @@ Quintiles vs forward 12M SPY-relative return:
 
 Interpretation: **the July finding that separation existed in the top
 quintile no longer holds cleanly.** Q4 and Q5 have the worst medians, but Q5's
-mean is positive (a few large rallies), and Q1–Q3 are not monotone. The
-composite is at best a weak tail screen; this is consistent with the live
+mean is positive (a few large rallies), and the relationship is *inverted*
+through the lower quintiles — mean and median both rise monotonically from Q1
+to Q3, i.e. more concern went with better returns until the break at Q3→Q4.
+The composite is at best a weak tail screen; this is consistent with the live
 2026Q2 season, where it discriminated in neither direction, and it is why
 the composite was retired from every surface.
 
@@ -99,14 +101,17 @@ At the empirical p80 threshold (score ≥ 37.1):
 - **False-positive rate among flagged: 50.0%** — half of flags see benign
   forward returns. At the July threshold of 40.3 the hit rate is 55.0% on 151
   flags, i.e. the lift is concentrated further into the tail than before.
-- Margin-deterioration hit rate at p80: 26.5% vs base 26.8% — the *overall*
-  score adds nothing for margins (the Earnings Quality *block* does; see below).
+- Margin-deterioration hit rate at p80 (forward 4-quarter operating-margin
+  change < −2 pp): 26.5% vs base 26.8% — the *overall* score adds nothing for
+  margins (the Earnings Quality *block* does; see below).
 
 The legacy >60 "negative" band now fires on 10 rows (July: 1) with an 80% hit
-rate — all stress cases. Direction bands remain positive < 32 / negative > 45
-in config; against the regenerated distribution those sit at ~p62 and ~p92
-rather than the p50/p90 they were anchored to. Re-anchoring is a config +
-snapshot change and is deliberately left for a reviewed follow-up.
+rate: nine stress-case rows and one control — ROP (serial acquirer, 65.4,
+following-12M relative return −3.6%), a false positive even at the extreme
+tail. Direction bands remain positive < 32 / negative > 45 in config; against
+the regenerated distribution those sit at ~p66 and ~p92 rather than the
+p50/p90 they were anchored to. Re-anchoring is a config + snapshot change and
+is deliberately left for a reviewed follow-up.
 
 ### Block-level signal (Spearman IC of concern vs outcome; negative = works)
 
@@ -209,6 +214,12 @@ loaded and PIT-reconstructed:
 | Composite (`overall`) | 1.000 (July: 0.947) | 0.860 (July: 0.713) |
 | Thermometer (2-cluster + regime) | 1.000 (July: 0.987) | 0.911 (July: 0.859) |
 
+"July" figures are `validate_thermometer.py` rerun on 2026-09-03 against the
+preserved July artifact (`backtest_results_2026-07-03.csv`); the original
+kill-gate run recorded the thermometer figure as 0.856 — the 0.003 gap is
+the validator's own later review fixes (true median, MIN_CLUSTER_MEMBERS),
+not the data.
+
 Company-level AUC saturates at n=6 stress companies and carries no
 information at this size; the company-quarter figure is the one to read, and
 there the thermometer's margin over the composite narrowed (from +0.15 to
@@ -268,7 +279,7 @@ the watch/season PRs (#13, #14) — see git history for provenance:
 
 - Anchor values — the backtest ranks concern scores; it does not identify
   better breakpoints without overfitting this small sample.
-- Direction bands — now mis-anchored (~p62/~p92) but changing them requires
+- Direction bands — now mis-anchored (~p66/~p92) but changing them requires
   a reviewed snapshot diff; scheduled as its own change.
 - Beneish M-score handling — n=342 rows had all components (coverage-
   limited); mixed signs; left as-is with its existing caveats.
@@ -288,6 +299,9 @@ the watch/season PRs (#13, #14) — see git history for provenance:
   `data/backtest/backtest_results.csv`; re-running `scripts/run_backtest.py`
   regenerates it (cache-dependent fetches; results stable for fixed as-ofs,
   given the XOM entity pin).
+- The superseded July artifact is preserved as
+  `data/backtest/backtest_results_2026-07-03.csv` so every "July" comparison
+  figure in this report can be recomputed from the repo.
 
 ## Bottom line
 
