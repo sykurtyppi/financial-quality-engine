@@ -74,7 +74,7 @@ the thermometer.
 Empirical distribution (n=1,121 with returns): min 16.6, p50 28.7, p80 37.1,
 p90 42.7, max 72.9 — the score uses roughly a third of its nominal 0–100
 range, and the whole distribution sits ~3 points lower than in July (mean
-delta −2.4 across the 1,112 rows scored in both artifacts).
+delta −2.4 across the 1,116 rows scored in both artifacts).
 
 Quintiles vs forward 12M SPY-relative return:
 
@@ -168,9 +168,10 @@ finding.)
 
 Key reads:
 
-- **Stress cases score far above every control group (45.0 vs 28–32 — the gap
-  widened from +7–8 points in July to +13–17) and are flagged three-quarters
-  of the time, with the lowest FP rate among flagged (32.9%).** The screen
+- **Stress cases score far above every other archetype (45.0 vs 27.6–31.9,
+  a gap of +13–17 points; on the July artifact, measured the same way against
+  all non-stress archetypes, it was +4–10) and are flagged three-quarters of
+  the time, with the lowest FP rate among flagged (32.9%).** The screen
   concentrates on the right names more sharply than before.
 - The price of that concentration: **FP rates among flagged controls rose**
   (57–80%, from 43–70%). The FP-heavy archetypes are unchanged — serial
