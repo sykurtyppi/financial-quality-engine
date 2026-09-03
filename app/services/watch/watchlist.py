@@ -9,10 +9,12 @@ private in the gitignored `journal/entries/`.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -174,6 +176,29 @@ def load(path: Path | None = None) -> list[Watch]:
     return sorted(watches, key=lambda w: w.print_at)
 
 
+@contextmanager
+def _write_lock(p: Path):
+    """Serialize read-modify-write cycles across processes.
+
+    ``_atomic_write`` prevents a half-written file, but not a lost update: two
+    concurrent ``add``/``link`` invocations both read, both modify their own
+    copy, and the second rename silently discards the first's change — e.g.
+    the thesis pin on a multi-name earnings night. The lock lives on a stable
+    sidecar file because ``os.replace`` swaps the watchlist's inode out from
+    under any lock held on the file itself.
+
+    Assumes a local POSIX filesystem: ``fcntl.flock`` is not reliable across
+    NFS mounts, so do not host ``journal/`` on one and expect this guarantee.
+    """
+    lock_path = p.with_name(p.name + ".lock")
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def add_entry(raw: dict, path: Path | None = None) -> Watch:
     """Validate one entry and append it to the watchlist file.
 
@@ -184,23 +209,24 @@ def add_entry(raw: dict, path: Path | None = None) -> Watch:
     """
     watch = parse_watch(raw)
     p = path or WATCHLIST
-    if p.exists():
-        try:
-            data = json.loads(p.read_text())
-        except json.JSONDecodeError as e:
-            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
-        if isinstance(data, list):
-            data = {"watchlist": data}
-    else:
-        data = {"watchlist": []}
-    items = data.setdefault("watchlist", [])
-    if any(
-        isinstance(it, dict) and str(it.get("ticker", "")).upper() == watch.ticker
-        for it in items
-    ):
-        raise WatchlistError(f"{watch.ticker} is already on the watchlist")
-    items.append(raw)
-    _atomic_write(p, data)
+    with _write_lock(p):
+        if p.exists():
+            try:
+                data = json.loads(p.read_text())
+            except json.JSONDecodeError as e:
+                raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+            if isinstance(data, list):
+                data = {"watchlist": data}
+        else:
+            data = {"watchlist": []}
+        items = data.setdefault("watchlist", [])
+        if any(
+            isinstance(it, dict) and str(it.get("ticker", "")).upper() == watch.ticker
+            for it in items
+        ):
+            raise WatchlistError(f"{watch.ticker} is already on the watchlist")
+        items.append(raw)
+        _atomic_write(p, data)
     return watch
 
 
@@ -227,26 +253,27 @@ def update_entry(ticker: str, updates: dict, path: Path | None = None) -> Watch:
     p = path or WATCHLIST
     if not p.exists():
         raise WatchlistError(f"{p}: no watchlist to update")
-    try:
-        data = json.loads(p.read_text())
-    except json.JSONDecodeError as e:
-        raise WatchlistError(f"{p}: invalid JSON ({e})") from e
-    if isinstance(data, list):
-        data = {"watchlist": data}
-    items = data.setdefault("watchlist", [])
-    t = store.safe_ticker(ticker)
-    row = next(
-        (it for it in items
-         if isinstance(it, dict) and str(it.get("ticker", "")).upper() == t),
-        None,
-    )
-    if row is None:
-        raise WatchlistError(f"{t} is not on the watchlist ({p})")
-    merged = {**row, **updates}
-    watch = parse_watch(merged)  # validate before touching the file
-    row.clear()
-    row.update(merged)
-    _atomic_write(p, data)
+    with _write_lock(p):
+        try:
+            data = json.loads(p.read_text())
+        except json.JSONDecodeError as e:
+            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+        if isinstance(data, list):
+            data = {"watchlist": data}
+        items = data.setdefault("watchlist", [])
+        t = store.safe_ticker(ticker)
+        row = next(
+            (it for it in items
+             if isinstance(it, dict) and str(it.get("ticker", "")).upper() == t),
+            None,
+        )
+        if row is None:
+            raise WatchlistError(f"{t} is not on the watchlist ({p})")
+        merged = {**row, **updates}
+        watch = parse_watch(merged)  # validate before touching the file
+        row.clear()
+        row.update(merged)
+        _atomic_write(p, data)
     return watch
 
 

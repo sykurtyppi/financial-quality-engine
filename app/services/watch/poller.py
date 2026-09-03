@@ -281,6 +281,7 @@ def decide(
     *,
     since: date | None = None,
     now: datetime | None = None,
+    force: bool = False,
 ) -> Decision:
     """Pure decision step: what should the poller do right now?
 
@@ -291,10 +292,32 @@ def decide(
     `since` is ONLY for an operator-supplied ad-hoc lower bound. Without it the
     watch must carry event identity (baseline accession + expected period);
     a legacy row without those fields fails closed rather than guessing from
-    the forecast print date.
+    the forecast print date. When the watch DOES carry event identity, a
+    `since`-matched filing must be the same one the event identity selects —
+    a stale `--since` on an armed watch would otherwise trigger on an old
+    filing and permanently consume the pinned entry (ALREADY_REPORTED is
+    terminal). `force=True` overrides the cross-check.
     """
     if since is not None:
         filing = find_filing_since(submissions, watch.forms, since)
+        if filing is not None and watch.event_armed and not force:
+            event_match = find_filing(
+                submissions,
+                watch.forms,
+                baseline_accession=watch.baseline_accession,
+                expected_report_date=watch.expected_report_date,
+            )
+            if event_match is None or event_match.accession != filing.accession:
+                raise PollerError(
+                    f"{watch.ticker}: --since matched {filing.form} {filing.accession} "
+                    f"(filed {filing.filing_date.isoformat()}), but the armed watch "
+                    f"expects period ~{watch.expected_report_date.isoformat()} beyond "
+                    f"baseline {watch.baseline_accession or '(none)'}"
+                    + (f" — which selects {event_match.form} {event_match.accession} "
+                       f"instead" if event_match else " — which matches nothing yet")
+                    + ". A mismatched trigger would consume the pinned entry for the "
+                    "wrong event. Drop --since, or pass --force to override."
+                )
     else:
         if not watch.event_armed:
             raise PollerError(

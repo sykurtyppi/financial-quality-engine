@@ -234,7 +234,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
         try:
             submissions = client.submissions_by_cik(cik)
-            decision = decide(watch, submissions, since=since)
+            decision = decide(watch, submissions, since=since,
+                              force=getattr(args, "force", False))
         except PollerError as e:
             # Fail closed: a watch without event identity cannot poll safely.
             print(f"[{stamp}] {e}", file=sys.stderr)
@@ -401,6 +402,22 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _linkable_entries(ticker: str) -> list[Path]:
+    """Every v2 entry for `ticker` that could still back an event (unreported,
+    loadable). Used to detect when `link` without --entry-day would be a guess
+    between several candidates rather than the only possible resolution."""
+    out: list[Path] = []
+    for p in sorted(store.ENTRIES.glob(f"{store.safe_ticker(ticker)}_*.md")):
+        if not store.is_v2(p):
+            continue
+        try:
+            if store.load_v2(p).reported is None:
+                out.append(p)
+        except Exception:  # noqa: BLE001 — malformed entry: not linkable, not fatal
+            continue
+    return out
+
+
 def cmd_link(args: argparse.Namespace) -> int:
     """Pin the event's journal entry (and its lock hash) onto the watch, so
     only THAT entry can ever authorize this event's report."""
@@ -409,7 +426,26 @@ def cmd_link(args: argparse.Namespace) -> int:
     if watch is None:
         print(f"{ticker} is not on the watchlist ({wl.WATCHLIST}).", file=sys.stderr)
         return 1
-    path = store.find_entry(ticker, args.entry_day)
+    if not args.entry_day:
+        # Without --entry-day, find_entry() picks the lexicographically latest
+        # entry — the "latest entry wins" guess the pin mechanism exists to
+        # eliminate. Resolution without the flag is safe only when exactly one
+        # entry could possibly be pinned, and then it must be THAT entry —
+        # falling through to find_entry here would re-pick the latest filename
+        # (a spent or v1 entry included) and spuriously fail the routine
+        # one-open-case workflow.
+        candidates = _linkable_entries(ticker)
+        if len(candidates) > 1:
+            days = ", ".join(p.stem.split("_", 1)[1] for p in candidates)
+            print(f"{ticker}: {len(candidates)} unreported v2 entries ({days}) — "
+                  f"ambiguous which belongs to this event. Re-run with "
+                  f"`--entry-day YYYY-MM-DD`.", file=sys.stderr)
+            return 1
+        # One candidate: pin it. Zero: fall through so the existing
+        # no-entry/v1/reported error paths explain what is missing.
+        path = candidates[0] if candidates else store.find_entry(ticker, None)
+    else:
+        path = store.find_entry(ticker, args.entry_day)
     if path is None:
         print(f"{ticker}: no journal entry"
               f"{' for ' + args.entry_day if args.entry_day else ''} — open one with "
@@ -476,6 +512,9 @@ def main() -> int:
                              "the bannered reports/auto/ artifact when no thesis is locked")
     p_poll.add_argument("--no-audit", action="store_true",
                         help="skip the headless earnings-audit run after generation")
+    p_poll.add_argument("--force", action="store_true",
+                        help="with --since on an armed watch: accept a filing that "
+                             "does not match the watch's expected report period")
     p_poll.set_defaults(fn=cmd_poll)
 
     p_add = sub.add_parser("add", help="add a name; print date inferred from 8-K 2.02 cadence")
@@ -490,7 +529,8 @@ def main() -> int:
 
     p_link = sub.add_parser("link", help="pin a locked v2 journal entry to the watch")
     p_link.add_argument("ticker")
-    p_link.add_argument("--entry-day", help="entry day YYYY-MM-DD (default: latest entry)")
+    p_link.add_argument("--entry-day", help="entry day YYYY-MM-DD (may be omitted only "
+                        "when a single unreported v2 entry exists; refused when ambiguous)")
     p_link.set_defaults(fn=cmd_link)
 
     p_st = sub.add_parser("status", help="watchlist + thesis state at a glance")
