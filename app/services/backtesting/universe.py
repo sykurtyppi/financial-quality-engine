@@ -21,6 +21,10 @@ class UniverseMember:
     ticker: str
     archetype: str
     sector: str
+    # Pin the EDGAR entity when the live ticker->CIK registry no longer points
+    # at the filer whose history the backtest needs (a holding-company
+    # reorganization gives the ticker a brand-new CIK with no past filings).
+    cik: int | None = None
 
 
 UNIVERSE: list[UniverseMember] = [
@@ -62,7 +66,10 @@ UNIVERSE: list[UniverseMember] = [
     UniverseMember("TDG", "serial_acquirer", "Aerospace"),
     UniverseMember("HEI", "serial_acquirer", "Aerospace"),
     # Energy
-    UniverseMember("XOM", "energy", "Energy"),
+    # 2026 holding-company reorganization: the registry maps XOM to ExxonMobil
+    # Holdings Corp (CIK 2115436, facts from FY2026 only). The 2011-2026
+    # history lives under Exxon Mobil Corporation, CIK 34088.
+    UniverseMember("XOM", "energy", "Energy", cik=34088),
     UniverseMember("CVX", "energy", "Energy"),
     UniverseMember("OXY", "energy", "Energy"),
     UniverseMember("DVN", "energy", "Energy"),

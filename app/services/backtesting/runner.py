@@ -74,6 +74,15 @@ def _score_columns(result) -> dict[str, float | str]:
     return row
 
 
+def fetch_member_facts(sec: SecClient, member: UniverseMember) -> dict:
+    """companyfacts for a universe member, honoring a pinned CIK. Without the
+    pin, a ticker whose registry entry moved to a new entity silently scores
+    as `skip_no_pit_data` on every historical as-of (XOM, 2026)."""
+    if member.cik is not None:
+        return sec.company_facts_by_cik(member.cik)
+    return sec.company_facts(member.ticker)
+
+
 def run_backtest(
     out_path: str | Path,
     members: list[UniverseMember] | None = None,
@@ -100,12 +109,12 @@ def run_backtest(
 
         for member in members:
             try:
-                facts = sec.company_facts(member.ticker)
+                facts = fetch_member_facts(sec, member)
             except Exception as e:  # noqa: BLE001
                 logger.warning("companyfacts failed for %s: %s", member.ticker, e)
                 continue
             trimmed = trim_to_mapped_tags(facts)
-            events = fetch_entity_events(sec, member.ticker)
+            events = fetch_entity_events(sec, member.ticker, cik=member.cik)
             series = prices.fetch(member.ticker, PRICE_START, today)
 
             try:
