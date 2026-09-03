@@ -27,6 +27,69 @@
       "baseline_accession": "0000320193-26-000020",
       "expected_report_date": "2026-09-26",
       "note": "print_at inferred from 46 8-K 2.02 acceptances (steady 91d cadence, last print 2026-07-30 20:30Z). FQ4 filing is the 10-K. Verify against company IR."
+    },
+    {
+      "ticker": "MXL",
+      "print_at": "2026-10-15T20:06:00+00:00",
+      "baseline_accession": "0001288469-26-000051",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 42 8-K 2.02 acceptances: min in-band gap 84d of last 6 (84, 91, 92, 98, 84, 91), early-biased; last print 2026-07-23 20:05Z. Verify against company IR."
+    },
+    {
+      "ticker": "BA",
+      "print_at": "2026-10-21T11:31:00+00:00",
+      "baseline_accession": "0001628280-26-050038",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 32 8-K 2.02 acceptances: min in-band gap 85d of last 6 (85, 97, 92, 90, 85, 97), early-biased; last print 2026-07-28 11:31Z. Verify against company IR."
+    },
+    {
+      "ticker": "MSFT",
+      "print_at": "2026-10-28T20:06:00+00:00",
+      "baseline_accession": "0001193125-26-323660",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 25 8-K 2.02 acceptances: min in-band gap 91d of last 6 (91, 91, 91, 91, 91, 91), early-biased; last print 2026-07-29 20:04Z. Verify against company IR."
+    },
+    {
+      "ticker": "META",
+      "print_at": "2026-10-28T20:10:00+00:00",
+      "baseline_accession": "0001628280-26-050705",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 9 8-K 2.02 acceptances: min in-band gap 91d of last 6 (91, 91, 91, 91, 91, 91), early-biased; last print 2026-07-29 20:03Z. Verify against company IR."
+    },
+    {
+      "ticker": "AMKR",
+      "print_at": "2026-10-12T20:11:00+00:00",
+      "baseline_accession": "0001047127-26-000046",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 29 8-K 2.02 acceptances: min in-band gap 77d of last 6 (77, 91, 91, 105, 77, 91), early-biased; last print 2026-07-27 20:08Z. Verify against company IR."
+    },
+    {
+      "ticker": "GLW",
+      "print_at": "2026-10-26T11:04:00+00:00",
+      "baseline_accession": "0000024741-26-000255",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 22 8-K 2.02 acceptances: min in-band gap 90d of last 6 (90, 91, 91, 92, 90, 91), early-biased; last print 2026-07-28 11:03Z. Verify against company IR."
+    },
+    {
+      "ticker": "AMZN",
+      "print_at": "2026-10-21T20:14:00+00:00",
+      "baseline_accession": "0001018724-26-000026",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 24 8-K 2.02 acceptances: min in-band gap 83d of last 6 (84, 91, 91, 98, 83, 92), early-biased; last print 2026-07-30 20:06Z. Verify against company IR."
+    },
+    {
+      "ticker": "AMPX",
+      "print_at": "2026-11-02T20:17:00+00:00",
+      "baseline_accession": "0001899287-26-000059",
+      "expected_report_date": "2026-09-29",
+      "note": "print_at inferred from 18 8-K 2.02 acceptances: min in-band gap 90d of last 6 (49, 91, 91, 118, 63, 90), early-biased; last print 2026-08-04 20:15Z. Verify against company IR."
+    },
+    {
+      "ticker": "KTOS",
+      "print_at": "2026-11-01T20:19:00+00:00",
+      "baseline_accession": "0001069258-26-000077",
+      "expected_report_date": "2026-09-27",
+      "note": "print_at inferred from 26 8-K 2.02 acceptances: min in-band gap 89d of last 6 (70, 92, 89, 111, 72, 90), early-biased; last print 2026-08-04 20:18Z. Verify against company IR."
     }
   ]
 }
