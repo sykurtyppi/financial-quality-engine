@@ -39,10 +39,17 @@ class EntityEvents:
         return any(start < d <= end for d in self.non_reliance_8k_dates)
 
 
-def fetch_entity_events(client: SecClient, ticker: str) -> EntityEvents:
-    cik = client.resolve_cik(ticker)
+def fetch_entity_events(client: SecClient, ticker: str, cik: int | None = None) -> EntityEvents:
+    """`cik` pins the entity when the registry's ticker mapping has moved to a
+    successor filer (see UniverseMember.cik); the cache key follows the CIK so
+    the pinned entity's submissions never alias the ticker's current ones."""
+    if cik is None:
+        cik = client.resolve_cik(ticker)
+        cache_name = f"submissions_{ticker.upper()}.json"
+    else:
+        cache_name = f"submissions_CIK{cik:010d}.json"
     data = client._cached_json(  # noqa: SLF001 - same package family, reuses cache/rate limit
-        f"submissions_{ticker.upper()}.json", SUBMISSIONS_URL.format(cik=cik)
+        cache_name, SUBMISSIONS_URL.format(cik=cik)
     )
     recent = data.get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
