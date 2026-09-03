@@ -1,7 +1,9 @@
 # Thermometer vs composite — 2026Q2 season-archive ablation
 
 Status: the second half of the P1-C kill gate (the first was the distressed-control
-AUC: thermometer 0.856 vs composite 0.713, see `scripts/validate_thermometer.py`).
+company-quarter AUC: thermometer 0.911 vs composite 0.860 on the 2026-09-03
+regenerated backtest — 0.856 vs 0.713 on the July artifact; see
+`scripts/validate_thermometer.py` and `docs/calibration_report.md`).
 This asks the roadmap's other question: **would the live-season cards have read
 differently — and more usefully — under the thermometer than the composite?**
 
