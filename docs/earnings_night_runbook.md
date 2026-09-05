@@ -164,7 +164,9 @@ Per pass, in order:
    forecast date is a cutoff: an early filing triggers on the next pass.
 3. **Act** — a landed filing takes the journal track if its thesis is pinned
    and locked, the bannered `reports/auto/` track otherwise; the audit runs
-   on both (same exit codes as `poll`).
+   on both (same exit codes as `poll`), and after a successful audit the
+   one-page **earnings brief** is written (`scripts/earnings_brief.py`; see
+   below). A failed brief is a warning, never a failed case.
 4. **Re-arm** — once an event completes (exit 0 on either track, or a skip),
    the row is rewritten for the NEXT quarter from the issuer's history: new
    baseline accession (the filing just consumed), next expected period, next
@@ -201,3 +203,36 @@ wait for several audits.
 
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.
+
+## The earnings brief
+
+`reports/briefs/<TICKER>_<print date>.md` — one page per print, written by
+one headless Claude run over primary sources that the script collects
+first and keeps beside the brief (`reports/briefs/<TICKER>/<date>/`):
+
+| Source | Where it comes from |
+|---|---|
+| Earnings release | The 8-K Item 2.02 **EX-99.1**, selected by EDGAR exhibit type (never by filename — NVDA calls it `q2fy27pr.htm`) |
+| Prepared remarks / CFO commentary | Further narrative EX-99 exhibits, when the filer attaches them (NVDA: EX-99.2) |
+| Call transcript | **Not on EDGAR.** Drop a text file at `journal/transcripts/<TICKER>/<print date>.txt` (private, gitignored) or pass `--transcript`; until then the call section reads `UNAVAILABLE` |
+| Engine report + audit | The report the sweep just generated and its `_audit.md` |
+| Last quarter's brief | For the "changed since last quarter" section |
+
+Fixed headings (`.claude/skills/earnings-brief/SKILL.md`): headline · results
+vs the company's own prior guide · guidance · KPIs and segments · management
+framing · the call (prepared remarks, then every question with
+answered/partial/deflected) · engine findings worth carrying · changed since
+last quarter · open questions · sources. Numbers only from the supplied
+files; anything missing is marked, not filled in.
+
+```
+scripts/earnings_brief.py build NVDA                 # re-run any time; e.g. once the transcript exists
+scripts/earnings_brief.py build NVDA --transcript ~/Downloads/nvda_call.txt
+scripts/earnings_brief.py digest --since 2026-10-01  # one page across the season (deterministic)
+scripts/earnings_brief.py tally                      # useful: yes/no counts
+```
+
+Every brief ends in `useful: unset`. Flip it to `yes` or `no` after reading;
+the tally over a season is the low-friction replacement for the journal's
+"did this change anything" question when no blind thesis was written.
+Regenerating a brief keeps a value already set.

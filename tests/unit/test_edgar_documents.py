@@ -308,3 +308,80 @@ class TestStaleSnapWithoutFye:
         result = self._run(tmp_path, "2026-07-01", "2026-03-31")
         assert result.documents == []
         assert any("cannot assign a fiscal quarter" in d for d in result.diagnostics)
+
+
+class TestTypedExhibitLookup:
+    """EX-99 selection by the filing header's document TYPE. Filename
+    heuristics missed every NVDA release (`q2fy27pr.htm`), so the engine's
+    narrative layer never saw an NVDA earnings release."""
+
+    HEADER = (
+        "<HTML><BODY><PRE>&lt;SEC-HEADER&gt;x&lt;/SEC-HEADER&gt;\n"
+        "&lt;DOCUMENT&gt;\n&lt;TYPE&gt;8-K\n&lt;SEQUENCE&gt;1\n&lt;FILENAME&gt;nvda-20260826.htm\n"
+        "&lt;DESCRIPTION&gt;8-K\n&lt;TEXT&gt;\n<a href=\"x\">Document 1</a><br>\n&lt;/DOCUMENT&gt;\n"
+        "&lt;DOCUMENT&gt;\n&lt;TYPE&gt;EX-99.2\n&lt;SEQUENCE&gt;3\n&lt;FILENAME&gt;q2fy27cfocommentary.htm\n"
+        "&lt;DESCRIPTION&gt;EX-99.2\n&lt;TEXT&gt;\n&lt;/DOCUMENT&gt;\n"
+        "&lt;DOCUMENT&gt;\n&lt;TYPE&gt;EX-99.1\n&lt;SEQUENCE&gt;2\n&lt;FILENAME&gt;q2fy27pr.htm\n"
+        "&lt;DESCRIPTION&gt;EX-99.1\n&lt;TEXT&gt;\n&lt;/DOCUMENT&gt;\n"
+        "&lt;DOCUMENT&gt;\n&lt;TYPE&gt;EX-101.SCH\n&lt;SEQUENCE&gt;4\n&lt;FILENAME&gt;nvda.xsd\n"
+        "&lt;DESCRIPTION&gt;XBRL SCHEMA\n&lt;TEXT&gt;\n&lt;/DOCUMENT&gt;\n"
+        "&lt;DOCUMENT&gt;\n&lt;TYPE&gt;GRAPHIC\n&lt;SEQUENCE&gt;5\n&lt;FILENAME&gt;logo.jpg\n"
+        "&lt;TEXT&gt;\n&lt;/DOCUMENT&gt;\n</PRE></BODY></HTML>"
+    )
+
+    def test_parse_index_headers_types_every_document(self):
+        from app.services.ingestion.edgar_documents import parse_index_headers
+
+        docs = parse_index_headers(self.HEADER)
+        assert [(d.type, d.filename, d.sequence) for d in docs] == [
+            ("8-K", "nvda-20260826.htm", 1),
+            ("EX-99.2", "q2fy27cfocommentary.htm", 3),
+            ("EX-99.1", "q2fy27pr.htm", 2),
+            ("EX-101.SCH", "nvda.xsd", 4),
+            ("GRAPHIC", "logo.jpg", 5),
+        ]
+        assert docs[4].description == ""  # DESCRIPTION is optional
+        assert docs[2].exhibit_no == 1 and docs[1].exhibit_no == 2
+
+    class _Client:
+        def __init__(self, header=None, index=None):
+            self.cache_dir = None
+            self.header, self.index = header, index
+
+        def _get(self, url):  # pragma: no cover - not exercised
+            raise AssertionError(url)
+
+    def _patch_fetch(self, monkeypatch, header, index="{}"):
+        from app.services.ingestion import edgar_documents as ed
+
+        def fake_fetch(client, cik, accession, doc):
+            if doc.endswith("index-headers.html"):
+                if header is None:
+                    raise ed.SecClientError("404")
+                return header
+            return index
+
+        monkeypatch.setattr(ed, "_fetch_archive", fake_fetch)
+
+    def test_find_ex99_picks_the_release_by_type_regardless_of_filename(self, monkeypatch):
+        from app.services.ingestion.edgar_documents import _find_ex99
+
+        self._patch_fetch(monkeypatch, self.HEADER)
+        assert _find_ex99(self._Client(), 1045810, "0001045810-26-000073") == [
+            "q2fy27pr.htm", "q2fy27cfocommentary.htm",
+        ]
+
+    def test_find_ex99_release_like_name_still_outranks_lower_exhibit_number(self, monkeypatch):
+        from app.services.ingestion.edgar_documents import _find_ex99
+
+        header = self.HEADER.replace("q2fy27pr.htm", "ex991-tables.htm").replace(
+            "q2fy27cfocommentary.htm", "ex992-earnings-release.htm")
+        self._patch_fetch(monkeypatch, header)
+        assert _find_ex99(self._Client(), 1, "acc")[0] == "ex992-earnings-release.htm"
+
+    def test_find_ex99_falls_back_to_filename_heuristics_without_header(self, monkeypatch):
+        from app.services.ingestion.edgar_documents import _find_ex99
+
+        index = '{"directory": {"item": [{"name": "abc-ex99_1.htm"}, {"name": "abc-index.htm"}]}}'
+        self._patch_fetch(monkeypatch, None, index)
+        assert _find_ex99(self._Client(), 1, "acc") == ["abc-ex99_1.htm"]

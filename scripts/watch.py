@@ -11,8 +11,8 @@
     EDGAR_IDENTITY="Name email" scripts/watch.py poll NVDA
 
     # hands-off: one pass over every watched name (cron this hourly). Adds
-    # anything new in journal/portfolio.txt first, generates + audits whatever
-    # has filed, and re-arms each name for its next quarter.
+    # anything new in journal/portfolio.txt first, generates + audits + briefs
+    # whatever has filed, and re-arms each name for its next quarter.
     EDGAR_IDENTITY="Name email" scripts/watch.py sweep --portfolio journal/portfolio.txt
 
 The poller will NOT generate a *journal* report for a name without a locked
@@ -192,6 +192,21 @@ def _run_audit(report: Path) -> int:
     return subprocess.run(cmd, cwd=ROOT).returncode
 
 
+def _run_brief(ticker: str, report: Path) -> int:
+    """One-page earnings brief (scripts/earnings_brief.py) over the release,
+    the call transcript if one was dropped in, and this report + audit.
+    Best-effort: the report and audit already exist, so a failed brief is a
+    warning, not a failed case — re-run `earnings_brief.py build` by hand."""
+    cmd = [sys.executable, str(ROOT / "scripts" / "earnings_brief.py"), "build", ticker,
+           "--report", str(report)]
+    print(f"  -> {' '.join(cmd[1:])}")
+    rc = subprocess.run(cmd, cwd=ROOT).returncode
+    if rc != 0:
+        print(f"  brief FAILED (exit {rc}) — report and audit are unaffected; re-run "
+              f"`earnings_brief.py build {ticker}` later.", file=sys.stderr)
+    return rc
+
+
 def _pin_for_adhoc(ticker: str, entry_day: str | None) -> tuple[str, str] | None:
     """For an ad-hoc (--since) poll: pin the journal entry explicitly named by
     --entry-day. Returns (day, before_sha256) or None. Never guesses "latest
@@ -240,6 +255,8 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
                   f"`run_audit.py {report}` then "
                   f"`journal.py mark-reported {ticker}`.", file=sys.stderr)
             return 4
+        if not getattr(args, "no_brief", False):
+            _run_brief(ticker, report)
         return _mark_reported(ticker, entry_day)
     if decision.action == "skip":
         return 0
@@ -261,6 +278,8 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
                 print(f"  audit FAILED (exit {arc}); auto-report kept at "
                       f"{report}.", file=sys.stderr)
                 return 4
+            if not getattr(args, "no_brief", False):
+                _run_brief(ticker, report)
         return 0
     print(f"  unknown decision {decision.action!r}", file=sys.stderr)
     return 1
@@ -774,6 +793,8 @@ def main() -> int:
                              "the bannered reports/auto/ artifact when no thesis is locked")
     p_poll.add_argument("--no-audit", action="store_true",
                         help="skip the headless earnings-audit run after generation")
+    p_poll.add_argument("--no-brief", action="store_true",
+                        help="skip the one-page earnings brief after a successful audit")
     p_poll.add_argument("--force", action="store_true",
                         help="with --since on an armed watch: accept a filing that "
                              "does not match the watch's expected report period")
@@ -801,6 +822,8 @@ def main() -> int:
                       help="strict journal mode: refuse (2) instead of the reports/auto/ artifact")
     p_sw.add_argument("--no-audit", action="store_true",
                       help="skip the headless earnings-audit run after generation")
+    p_sw.add_argument("--no-brief", action="store_true",
+                      help="skip the one-page earnings brief after a successful audit")
     p_sw.add_argument("--verbose", action="store_true", help="also print names still waiting")
     p_sw.set_defaults(fn=cmd_sweep)
 
