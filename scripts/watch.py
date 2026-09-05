@@ -374,7 +374,11 @@ def cmd_poll(args: argparse.Namespace) -> int:
                     # was re-armed by that run — consumed, whatever
                     # `--since` would still match.
                     if not adhoc:
-                        current = _find_watch(ticker) or watch
+                        current = _find_watch(ticker)
+                        if current is None:
+                            print(f"  {ticker}: removed from the watchlist by a concurrent "
+                                  f"run (sync --prune) — nothing to do.")
+                            return 0
                         if (current.baseline_accession, current.expected_report_date) != (
                             watch.baseline_accession, watch.expected_report_date
                         ):

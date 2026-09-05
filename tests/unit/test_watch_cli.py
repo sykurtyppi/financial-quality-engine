@@ -702,6 +702,13 @@ class TestPollSweepExclusion:
         assert poll_env.marked  # the case completed; only the re-arm failed
         assert "re-arm FAILED for NVDA" in capsys.readouterr().err
 
+    def test_poll_treats_a_pruned_row_as_nothing_to_do(self, poll_env, monkeypatch):
+        finds = iter([watch_cli._find_watch("NVDA"), None])
+        monkeypatch.setattr(watch_cli, "_find_watch", lambda t: next(finds))
+        _force_decision(monkeypatch, "refuse")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.generate_auto == [] and poll_env.rearm == []
+
     def test_dry_run_poll_never_takes_the_lock(self, poll_env, monkeypatch):
         import fcntl
 
