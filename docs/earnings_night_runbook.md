@@ -6,9 +6,11 @@ Operating procedure for `scripts/watch.py`. Written for NVDA FQ2-27 on
 ## What is and isn't automated
 
 Automated: the reminder before the print, watching EDGAR for the filing,
-running the engine the moment it lands, and the headless earnings-audit pass
+running the engine the moment it lands, the headless earnings-audit pass
 over the generated report (`scripts/run_audit.py`, skippable with
-`--no-audit`).
+`--no-audit`), and — with `sweep` — the calendar itself: every holding in
+`journal/portfolio.txt` is armed from its own filing history, and each name
+is re-armed for its next quarter the moment an event completes.
 
 Not automated, by design: the thesis, the AFTER block, the OUTCOME. Track 1 of
 [evaluation_protocol.md](evaluation_protocol.md) is explicitly the track that
@@ -133,18 +135,59 @@ refused (exit 1) rather than allowed to consume the pinned entry for the
 wrong event. That refusal itself is worth rehearsing once — run the same
 command WITHOUT `--force` and confirm the mismatch error.
 
-## Unattended operation
+## Unattended operation — `sweep`
 
-`poll` is a foreground process by design: it ends by generating a report you are
-expected to read. If you want it started automatically, schedule the *start*,
-not the reading:
+`poll` is one name, one night, foreground. `sweep` is the hands-off version:
+one pass over the whole calendar, every name, then exit. Cron it and the only
+per-season setup is keeping `journal/portfolio.txt` current (one ticker per
+line, `#` comments; private and gitignored).
 
 ```
-# crontab — 20:15Z on 2026-08-26 (adjust TZ for your box)
-15 20 26 8 * cd /path/to/financial_quality_engine && \
+# crontab — hourly; 11 names is ~11 EDGAR requests per pass
+0 * * * * cd /path/to/financial_quality_engine && \
   EDGAR_IDENTITY="Your Name you@example.com" \
-  .venv/bin/python scripts/watch.py poll NVDA >> journal/watch.log 2>&1
+  .venv/bin/python scripts/watch.py sweep --portfolio journal/portfolio.txt \
+  >> journal/watch.log 2>&1
 ```
 
-Check `journal/watch.log` afterwards. Exit 2 in that log means the filing landed
-and nothing was generated because no thesis was on file.
+Per pass, in order:
+
+1. **Sync** (`--portfolio`): any holding not yet watched is armed exactly as
+   `add` would — print hint from its 8-K 2.02 cadence, event identity from its
+   periodic filings. A name that cannot be armed (too little history) is
+   reported and skipped; the pass continues. Names watched but no longer held
+   are listed, and removed only with `--prune` — never while a thesis is
+   pinned to them (that is an event in flight).
+2. **Detect** — every armed watch is checked against fresh EDGAR submissions
+   with the same event-identified `decide()` as `poll`. Nothing about the
+   forecast date is a cutoff: an early filing triggers on the next pass.
+3. **Act** — a landed filing takes the journal track if its thesis is pinned
+   and locked, the bannered `reports/auto/` track otherwise; the audit runs
+   on both (same exit codes as `poll`).
+4. **Re-arm** — once an event completes (exit 0 on either track, or a skip),
+   the row is rewritten for the NEXT quarter from the issuer's history: new
+   baseline accession (the filing just consumed), next expected period, next
+   print hint, pin and label cleared, and a `note` recording the derivation.
+   A failed audit (exit 4) is *not* re-armed, so the next pass retries the
+   same filing. A name therefore never has to be `add`ed twice.
+
+Exit code is the worst per-name code, except that "still waiting" (3) is 0
+and a sweep that finds another sweep already running (an audit can outlast an
+hourly interval; `journal/sweep.lock`) yields with 0. Names still waiting are
+silent unless `--verbose`.
+
+What this does NOT change: the blind thesis. `sweep` never writes into
+`reports/` without a pinned, lock-verified entry — a thesis-less print is the
+auto track, exactly as under `poll`. If you want a journal case for a name,
+`journal.py openv2` + `watch.py link` before the print is still the step
+that only you can take; `due` still tells you when it is time.
+
+Rehearse without side effects:
+
+```
+scripts/watch.py sweep --dry-run --verbose
+scripts/watch.py sync                       # reports what it would arm
+```
+
+Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
+was set and a filing landed with no thesis on file.

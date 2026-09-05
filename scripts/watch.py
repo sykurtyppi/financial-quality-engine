@@ -10,9 +10,18 @@
     # after the print: wait for the filing, then run the report
     EDGAR_IDENTITY="Name email" scripts/watch.py poll NVDA
 
-The poller will NOT generate a report for a name without a locked thesis — see
-app/services/watch/poller.py for why that refusal is the point rather than an
-inconvenience. Calendar lives in journal/watchlist.json.
+    # hands-off: one pass over every watched name (cron this hourly). Adds
+    # anything new in journal/portfolio.txt first, generates + audits whatever
+    # has filed, and re-arms each name for its next quarter.
+    EDGAR_IDENTITY="Name email" scripts/watch.py sweep --portfolio journal/portfolio.txt
+
+The poller will NOT generate a *journal* report for a name without a locked
+thesis — see app/services/watch/poller.py for why that refusal is the point
+rather than an inconvenience; a thesis-less print takes the bannered auto
+track instead. Calendar lives in journal/watchlist.json. After any completed
+event (journal or auto) the watch is RE-ARMED from the issuer's filing
+history — new baseline accession, next expected period, next print hint, pin
+cleared — so a name never has to be added twice.
 
 Exit codes (for cron/alerting):
     0  work completed (report generated, or nothing left to do)
@@ -25,16 +34,18 @@ Exit codes (for cron/alerting):
     4  report generated but the audit FAILED — the report is kept for
        diagnosis, the journal entry is NOT marked reported (retryable)
     `due` returns 1 when a watched name still needs a thesis: that is the alert.
+    `sweep` returns the worst per-name code, except that 3 (waiting) is 0 and
+    a sweep already running elsewhere is 0 (it just yields).
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
-from statistics import median
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +54,7 @@ sys.path.insert(0, str(ROOT))
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.watch import watchlist as wl
 from app.services.watch.infer import infer_print_at
+from app.services.watch.rearm import event_identity, next_arming
 from app.services.journal import store
 from app.services.journal.schema_v2 import verify_lock
 from app.services.watch.poller import (
@@ -50,12 +62,13 @@ from app.services.watch.poller import (
     PollerError,
     decide,
     pinned_thesis_state,
-    recent_filings,
 )
 
 POLITE_INTERVAL_S = 300
 
 AUTO_DIR = ROOT / "reports" / "auto"
+PORTFOLIO = ROOT / "journal" / "portfolio.txt"
+SWEEP_LOCK = ROOT / "journal" / "sweep.lock"
 AUTO_BANNER = (
     "> **AUTO-GENERATED AUDIT ARTIFACT** — no blind thesis was locked before "
     "this print; this report is NOT journal evidence (journal/JOURNAL.md "
@@ -197,9 +210,92 @@ def _pin_for_adhoc(ticker: str, entry_day: str | None) -> tuple[str, str] | None
     return entry_day, entry.before_sha256
 
 
+def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> int:
+    """Carry out a non-wait decision. Exit-code semantics are the module
+    docstring's; shared by `poll` and `sweep` so the two can never drift."""
+    if decision.action == "generate":
+        if args.dry_run:
+            print("  (dry run — not generating)")
+            return 0
+        entry_day = watch.thesis_entry
+        rc = _generate(ticker, entry_day, args.no_docs)
+        if rc != 0:
+            return rc
+        if args.no_audit:
+            # No audit requested — generation completes the case.
+            return _mark_reported(ticker, entry_day)
+        report = _latest_report(ticker, ROOT / "reports")
+        if report is None:
+            print("  generated report not found under reports/ — cannot audit; "
+                  "journal NOT marked reported.", file=sys.stderr)
+            return 4
+        arc = _run_audit(report)
+        if arc != 0:
+            # The report stays on disk for diagnosis; the entry stays
+            # unmarked so the case is retryable. A cron runner must see
+            # this as a failure, not a success with a missing audit.
+            print(f"  audit FAILED (exit {arc}); report kept at {report}; "
+                  f"journal NOT marked reported — re-run the poll or "
+                  f"`run_audit.py {report}` then "
+                  f"`journal.py mark-reported {ticker}`.", file=sys.stderr)
+            return 4
+        return _mark_reported(ticker, entry_day)
+    if decision.action == "skip":
+        return 0
+    if decision.action == "refuse":
+        if args.no_auto:
+            return 2
+        # Ticker-only track: no thesis was locked, so no blind case is
+        # possible — generate the clearly-bannered auto artifact instead
+        # of stopping. The journal gate itself is untouched.
+        if args.dry_run:
+            print("  (dry run — would generate auto-report)")
+            return 0
+        report = _generate_auto(ticker, args.no_docs)
+        if report is None:
+            return 1
+        if not args.no_audit:
+            arc = _run_audit(report)
+            if arc != 0:
+                print(f"  audit FAILED (exit {arc}); auto-report kept at "
+                      f"{report}.", file=sys.stderr)
+                return 4
+        return 0
+    print(f"  unknown decision {decision.action!r}", file=sys.stderr)
+    return 1
+
+
+def _rearm(watch: wl.Watch, decision, submissions: dict) -> None:
+    """Re-arm a watchlist row for its next quarter once this event is done.
+
+    Only called after a COMPLETED event (exit 0 on either track, or skip):
+    a failed audit (exit 4) leaves the identity in place so the next pass
+    retries the same filing. Persistence errors are reported, never raised —
+    the report already exists; a stale calendar row is the lesser problem.
+    """
+    try:
+        arming = next_arming(
+            submissions, watch.forms,
+            filed=decision.filing, previous_expected=watch.expected_report_date,
+        )
+        wl.update_entry(watch.ticker, arming.as_updates())
+    except (wl.WatchlistError, PollerError) as e:
+        print(f"  re-arm FAILED for {watch.ticker}: {e} — the watch still names "
+              f"the consumed event; re-`add` it.", file=sys.stderr)
+        return
+    print(f"  re-armed {watch.ticker}: next period ~{arming.expected_report_date}, "
+          f"baseline {arming.baseline_accession or '(none)'}, "
+          f"prints ~{arming.print_at:%Y-%m-%d %H:%M}Z (pin cleared)")
+
+
+def _completed(decision, rc: int) -> bool:
+    return decision.action == "skip" or (decision.action in ("generate", "refuse") and rc == 0)
+
+
 def cmd_poll(args: argparse.Namespace) -> int:
     ticker = args.ticker.upper()
     watch = _find_watch(ticker)
+    adhoc = watch is None
     if watch is None and not args.since:
         print(f"{ticker} is not on the watchlist ({wl.WATCHLIST}) and no --since given.",
               file=sys.stderr)
@@ -251,54 +347,11 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
         if decision is not None:
             print(f"[{stamp}] attempt {attempt}: {decision.action} — {decision.message}")
-            if decision.action == "generate":
-                if args.dry_run:
-                    print("  (dry run — not generating)")
-                    return 0
-                entry_day = watch.thesis_entry
-                rc = _generate(ticker, entry_day, args.no_docs)
-                if rc != 0:
-                    return rc
-                if args.no_audit:
-                    # No audit requested — generation completes the case.
-                    return _mark_reported(ticker, entry_day)
-                report = _latest_report(ticker, ROOT / "reports")
-                if report is None:
-                    print("  generated report not found under reports/ — cannot audit; "
-                          "journal NOT marked reported.", file=sys.stderr)
-                    return 4
-                arc = _run_audit(report)
-                if arc != 0:
-                    # The report stays on disk for diagnosis; the entry stays
-                    # unmarked so the case is retryable. A cron runner must see
-                    # this as a failure, not a success with a missing audit.
-                    print(f"  audit FAILED (exit {arc}); report kept at {report}; "
-                          f"journal NOT marked reported — re-run the poll or "
-                          f"`run_audit.py {report}` then "
-                          f"`journal.py mark-reported {ticker}`.", file=sys.stderr)
-                    return 4
-                return _mark_reported(ticker, entry_day)
-            if decision.action == "skip":
-                return 0
-            if decision.action == "refuse":
-                if args.no_auto:
-                    return 2
-                # Ticker-only track: no thesis was locked, so no blind case is
-                # possible — generate the clearly-bannered auto artifact instead
-                # of stopping. The journal gate itself is untouched.
-                if args.dry_run:
-                    print("  (dry run — would generate auto-report)")
-                    return 0
-                report = _generate_auto(ticker, args.no_docs)
-                if report is None:
-                    return 1
-                if not args.no_audit:
-                    arc = _run_audit(report)
-                    if arc != 0:
-                        print(f"  audit FAILED (exit {arc}); auto-report kept at "
-                              f"{report}.", file=sys.stderr)
-                        return 4
-                return 0
+            if decision.action != "wait":
+                rc = _act(ticker, watch, decision, args)
+                if not adhoc and not args.dry_run and _completed(decision, rc):
+                    _rearm(watch, decision, submissions)
+                return rc
 
         if args.once:
             return 3  # "not yet" is not a failure; cron should not alert on it
@@ -309,97 +362,222 @@ def cmd_poll(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
-def _event_identity(
-    submissions: dict, forms: tuple[str, ...],
-) -> tuple[str, date | None]:
-    """(baseline_accession, expected_report_date) from the filing history.
-
-    Baseline = newest qualifying accession right now, so only a LATER accession
-    can trigger. Expected period = newest periodic report period + the median
-    in-band period gap (~91d) — what distinguishes THIS event's filing from an
-    intervening earlier quarter's.
-    """
-    wanted = {f.upper() for f in forms}
-    periodic = [
-        f for f in recent_filings(submissions)
-        if f.form.upper() in {"10-Q", "10-K"} and f.report_date is not None
-    ]
-    qualifying = [
-        f for f in recent_filings(submissions)
-        if f.form.upper() in wanted
-        and (not f.form.upper().startswith("8-K") or "2.02" in (f.items or ""))
-    ]
-    baseline = ""
-    if qualifying:
-        newest = max(qualifying, key=lambda f: (f.filing_date, f.accepted or "", f.accession))
-        baseline = newest.accession
-    if not periodic:
-        return baseline, None
-    periods = sorted({f.report_date for f in periodic})
-    gaps = [(b - a).days for a, b in zip(periods, periods[1:])]
-    in_band = [g for g in gaps[-6:] if 75 <= g <= 105]
-    step = int(median(in_band)) if in_band else 91
-    return baseline, periods[-1] + timedelta(days=step)
-
-
-def cmd_add(args: argparse.Namespace) -> int:
-    """Ticker-only entry point: `watch.py add NVDA` and the calendar row is
-    derived from the issuer's own filing history — print estimate from 8-K
-    2.02 cadence (scheduling only), and the event identity (baseline
-    accession + expected report period) that actually decides which filing
-    counts."""
-    ticker = args.ticker.upper()
-    note = args.note
+def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> int:
+    """One pass for one watch: fetch, decide, act, re-arm. Never raises —
+    a sweep must reach every name even when one of them fails."""
+    stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
     try:
-        client = SecClient()
-        submissions = client.submissions_by_cik(client.resolve_cik(ticker))
+        submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
+        decision = decide(watch, submissions)
+    except (PollerError, SecClientError) as e:
+        print(f"[{stamp}] {watch.ticker}: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"[{stamp}] {watch.ticker}: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    if decision.action == "wait":
+        if args.verbose:
+            print(f"[{stamp}] {decision.message}")
+        return 3
+    print(f"[{stamp}] {decision.action} — {decision.message}")
+    try:
+        rc = _act(watch.ticker, watch, decision, args)
+    except Exception as e:  # noqa: BLE001
+        print(f"  {watch.ticker}: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    if not args.dry_run and _completed(decision, rc):
+        _rearm(watch, decision, submissions)
+    return rc
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """The hands-off entry point: one pass over the whole calendar.
+
+    Runs `sync` first when --portfolio is given, so the cron line is the only
+    per-season setup. A second sweep starting while one is still auditing
+    (an audit can outlast an hourly interval) yields immediately instead of
+    generating the same report twice.
+    """
+    SWEEP_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(SWEEP_LOCK, "w") as lock_fh:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"another sweep is running ({SWEEP_LOCK}) — yielding.")
+            return 0
+        try:
+            return _sweep_locked(args)
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
+def _sweep_locked(args: argparse.Namespace) -> int:
+    try:
+        client = SecClient(fresh=True)
     except SecClientError as e:
         print(f"EDGAR unavailable: {e}", file=sys.stderr)
         return 1
+    worst = 0
+    if args.portfolio is not None:
+        worst = _sync(client, Path(args.portfolio), prune=args.prune)
+    watches = wl.load()
+    if not watches:
+        print(f"Watchlist is empty ({wl.WATCHLIST}).")
+        return worst
+    results: dict[str, int] = {}
+    for w in watches:
+        results[w.ticker] = _sweep_one(client, w, args)
+    acted = {t: rc for t, rc in results.items() if rc != 3}
+    waiting = len(results) - len(acted)
+    print(f"sweep: {len(results)} watched, {waiting} waiting"
+          + (", " + ", ".join(f"{t} -> {rc}" for t, rc in acted.items()) if acted else ""))
+    return max([worst, *acted.values()]) if acted else worst
 
-    if args.print_at:
-        print_at = args.print_at
-    else:
+
+def _arm(
+    ticker: str,
+    submissions: dict,
+    *,
+    print_at: str | None = None,
+    forms: tuple[str, ...] | None = None,
+    label: str | None = None,
+    note: str | None = None,
+    expected_period: date | None = None,
+) -> wl.Watch:
+    """Derive a calendar row from the issuer's own filing history and append
+    it: print estimate from 8-K 2.02 cadence (scheduling only), and the event
+    identity (baseline accession + expected report period) that actually
+    decides which filing counts. Raises WatchlistError on anything that
+    cannot be derived, naming the override flag."""
+    if print_at is None:
         est = infer_print_at(submissions)
         if est is None:
-            print(
+            raise wl.WatchlistError(
                 f"{ticker}: cannot infer the print date — needs >=3 regular 8-K "
-                f"Item 2.02 filings in recent history. Pass --print-at explicitly.",
-                file=sys.stderr,
+                f"Item 2.02 filings in recent history. Pass --print-at explicitly."
             )
-            return 1
         print_at = est.print_at.isoformat()
-        note = f"{args.note} · {est.basis}" if args.note else est.basis
+        note = f"{note} · {est.basis}" if note else est.basis
 
-    forms = tuple(f.upper() for f in args.forms.split(",")) if args.forms else wl.DEFAULT_FORMS
-    baseline, expected = _event_identity(submissions, forms)
-    if args.expected_period:
-        expected = date.fromisoformat(args.expected_period)
+    forms = forms or wl.DEFAULT_FORMS
+    baseline, expected = event_identity(submissions, forms)
+    if expected_period is not None:
+        expected = expected_period
     if expected is None:
-        print(f"{ticker}: no periodic filing history to infer the expected report "
-              f"period from — pass --expected-period YYYY-MM-DD.", file=sys.stderr)
-        return 1
-
+        raise wl.WatchlistError(
+            f"{ticker}: no periodic filing history to infer the expected report "
+            f"period from — pass --expected-period YYYY-MM-DD."
+        )
     raw: dict = {
         "ticker": ticker,
         "print_at": print_at,
         "baseline_accession": baseline,
         "expected_report_date": expected.isoformat(),
     }
-    if args.forms:
+    if forms != wl.DEFAULT_FORMS:
         raw["forms"] = list(forms)
-    if args.label:
-        raw["label"] = args.label
+    if label:
+        raw["label"] = label
     if note:
         raw["note"] = note
-    watch = wl.add_entry(raw)
+    return wl.add_entry(raw)
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    """Ticker-only entry point: `watch.py add NVDA` and the calendar row is
+    derived from the issuer's own filing history."""
+    ticker = args.ticker.upper()
+    try:
+        client = SecClient()
+        submissions = client.submissions_by_cik(client.resolve_cik(ticker))
+    except SecClientError as e:
+        print(f"EDGAR unavailable: {e}", file=sys.stderr)
+        return 1
+    forms = tuple(f.upper() for f in args.forms.split(",")) if args.forms else None
+    expected = date.fromisoformat(args.expected_period) if args.expected_period else None
+    try:
+        watch = _arm(ticker, submissions, print_at=args.print_at, forms=forms,
+                     label=args.label, note=args.note, expected_period=expected)
+    except wl.WatchlistError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     print(f"added {watch.ticker}: prints ~{watch.print_at:%Y-%m-%d %H:%M}Z (scheduling hint)")
-    print(f"  event: expected period {expected.isoformat()}, "
-          f"baseline accession {baseline or '(none)'}")
+    print(f"  event: expected period {watch.expected_report_date}, "
+          f"baseline accession {watch.baseline_accession or '(none)'}")
     if watch.note:
         print(f"  note: {watch.note}")
     print(f"  next: `journal.py openv2 {ticker} ...` then `watch.py link {ticker}`")
     return 0
+
+
+def read_portfolio(path: Path) -> list[str]:
+    """Tickers from a holdings file: one per line, `#` comments; anything
+    after the first comma/whitespace is ignored so a line like
+    `NVDA, 100 sh` works. No header-row detection — strip one from a
+    brokerage export first, or it is reported as an unknown ticker."""
+    if not path.is_file():
+        raise wl.WatchlistError(f"portfolio file not found: {path}")
+    out: list[str] = []
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        token = line.replace(",", " ").split()[0].strip().strip('"')
+        try:
+            t = store.safe_ticker(token)
+        except ValueError:
+            continue  # header row, currency line, etc.
+        if t not in out:
+            out.append(t)
+    return out
+
+
+def _sync(client: SecClient, portfolio: Path, *, prune: bool) -> int:
+    """Make the watchlist cover the portfolio: arm every holding not yet
+    watched; with --prune, drop watched names no longer held — except a name
+    with a thesis pinned, which is an event in flight, not a stale row."""
+    try:
+        wanted = read_portfolio(portfolio)
+    except wl.WatchlistError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    watched = {w.ticker: w for w in wl.load()}
+    rc = 0
+    added = 0
+    for t in wanted:
+        if t in watched:
+            continue
+        try:
+            submissions = client.submissions_by_cik(client.resolve_cik(t))
+            w = _arm(t, submissions)
+        except (SecClientError, wl.WatchlistError) as e:
+            print(f"sync: {t} NOT added — {e}", file=sys.stderr)
+            rc = 1
+            continue
+        added += 1
+        print(f"sync: added {t}: prints ~{w.print_at:%Y-%m-%d %H:%M}Z, "
+              f"period ~{w.expected_report_date}")
+    stale = [w for t, w in watched.items() if t not in wanted]
+    for w in stale:
+        if not prune:
+            print(f"sync: {w.ticker} is watched but not in {portfolio.name} (keep; --prune removes)")
+        elif w.thesis_entry:
+            print(f"sync: {w.ticker} not in {portfolio.name} but has a pinned thesis — kept")
+        else:
+            wl.remove_entry(w.ticker)
+            print(f"sync: removed {w.ticker}")
+    print(f"sync: {len(wanted)} in portfolio, {added} added, "
+          f"{len(stale)} watched-but-not-held")
+    return rc
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    try:
+        client = SecClient()
+    except SecClientError as e:
+        print(f"EDGAR unavailable: {e}", file=sys.stderr)
+        return 1
+    return _sync(client, Path(args.portfolio), prune=args.prune)
 
 
 def _linkable_entries(ticker: str) -> list[Path]:
@@ -526,6 +704,28 @@ def main() -> int:
     p_add.add_argument("--expected-period",
                        help="override the inferred fiscal period end (YYYY-MM-DD)")
     p_add.set_defaults(fn=cmd_add)
+
+    p_sw = sub.add_parser("sweep", help="one hands-off pass over every watched name "
+                          "(generate, audit, re-arm); cron this")
+    p_sw.add_argument("--portfolio", nargs="?", const=str(PORTFOLIO), default=None,
+                      help=f"sync from this holdings file first (default {PORTFOLIO.name})")
+    p_sw.add_argument("--prune", action="store_true",
+                      help="with --portfolio: drop watched names no longer held (unpinned only)")
+    p_sw.add_argument("--dry-run", action="store_true", help="detect but do not generate")
+    p_sw.add_argument("--no-docs", action="store_true", help="pass through to report generation")
+    p_sw.add_argument("--no-auto", action="store_true",
+                      help="strict journal mode: refuse (2) instead of the reports/auto/ artifact")
+    p_sw.add_argument("--no-audit", action="store_true",
+                      help="skip the headless earnings-audit run after generation")
+    p_sw.add_argument("--verbose", action="store_true", help="also print names still waiting")
+    p_sw.set_defaults(fn=cmd_sweep)
+
+    p_sync = sub.add_parser("sync", help="arm every holding in a portfolio file")
+    p_sync.add_argument("--portfolio", default=str(PORTFOLIO),
+                        help=f"holdings file, one ticker per line (default {PORTFOLIO})")
+    p_sync.add_argument("--prune", action="store_true",
+                        help="drop watched names no longer held (unpinned only)")
+    p_sync.set_defaults(fn=cmd_sync)
 
     p_link = sub.add_parser("link", help="pin a locked v2 journal entry to the watch")
     p_link.add_argument("ticker")
