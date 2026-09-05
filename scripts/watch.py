@@ -289,6 +289,18 @@ def _rearm(watch: wl.Watch, decision, submissions: dict) -> None:
           f"prints ~{arming.print_at:%Y-%m-%d %H:%M}Z (pin cleared)")
 
 
+def _rearm_guarded(watch: wl.Watch, decision, submissions: dict) -> None:
+    """Re-arm after a completed event without letting ANY persistence crash
+    (disk full, permissions) turn an already-generated, audited, marked case
+    into a traceback — on the sweep it would abort the pass, on a poll it
+    would hide a successful run behind a crash exit."""
+    try:
+        _rearm(watch, decision, submissions)
+    except Exception as e:  # noqa: BLE001
+        print(f"  re-arm FAILED for {watch.ticker}: {type(e).__name__}: {e} — the watch "
+              f"still names the consumed event; re-`add` it.", file=sys.stderr)
+
+
 def _completed(decision, rc: int) -> bool:
     return decision.action == "skip" or (decision.action in ("generate", "refuse") and rc == 0)
 
@@ -351,12 +363,25 @@ def cmd_poll(args: argparse.Namespace) -> int:
             if decision.action != "wait":
                 if args.dry_run:
                     return _act(ticker, watch, decision, args)
-                with _activity_lock(blocking=True):
+                with _activity_lock(timeout=deadline - time.monotonic()) as held:
+                    if not held:
+                        print(f"another sweep or poll held the activity lock ({SWEEP_LOCK}) "
+                              f"for the rest of --max-wait — giving up; re-run.", file=sys.stderr)
+                        return 1
                     # A sweep may have consumed (and re-armed) this event
                     # while we waited for the lock: re-read the row and
-                    # re-decide before acting.
+                    # re-decide before acting. A row whose identity moved
+                    # was re-armed by that run — consumed, whatever
+                    # `--since` would still match.
                     if not adhoc:
-                        watch = _find_watch(ticker) or watch
+                        current = _find_watch(ticker) or watch
+                        if (current.baseline_accession, current.expected_report_date) != (
+                            watch.baseline_accession, watch.expected_report_date
+                        ):
+                            print(f"  {ticker}: re-armed by a concurrent run (baseline now "
+                                  f"{current.baseline_accession or '(none)'}) — nothing to do.")
+                            return 0
+                        watch = current
                     try:
                         submissions = client.submissions_by_cik(cik)
                         decision = decide(watch, submissions, since=since,
@@ -369,7 +394,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
                         return 0
                     rc = _act(ticker, watch, decision, args)
                     if not adhoc and _completed(decision, rc):
-                        _rearm(watch, decision, submissions)
+                        _rearm_guarded(watch, decision, submissions)
                     return rc
 
         if args.once:
@@ -405,32 +430,38 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
         print(f"  {watch.ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     if not args.dry_run and _completed(decision, rc):
-        try:
-            _rearm(watch, decision, submissions)
-        except Exception as e:  # noqa: BLE001 — a re-arm crash must not stop the pass
-            print(f"  re-arm FAILED for {watch.ticker}: {type(e).__name__}: {e} — the watch "
-                  f"still names the consumed event; re-`add` it.", file=sys.stderr)
+        _rearm_guarded(watch, decision, submissions)
     return rc
 
 
+LOCK_RETRY_S = 0.5
+
+
 @contextmanager
-def _activity_lock(*, blocking: bool):
+def _activity_lock(*, timeout: float):
     """One generate/audit/re-arm at a time across `sweep` and `poll`.
 
     Both can otherwise decide "generate" for the same landed filing — the
     cron sweep and a manually started poll — and run two full fetch+audit
-    cycles into the same report path. `sweep` takes it non-blocking (yields
-    with exit 0 when another pass is running); `poll` takes it blocking only
-    once it has something to act on, then re-decides, so a filing the sweep
-    already consumed is a skip rather than a duplicate. Yields True when held.
+    cycles into the same report path. `sweep` takes it with timeout 0
+    (yields with exit 0 when another run is acting); `poll` takes it only
+    once it has something to act on, waiting at most what is left of its
+    own --max-wait, then re-reads the row and re-decides, so a filing the
+    sweep already consumed is a skip rather than a duplicate. Yields True
+    when held, False when the wait ran out.
     """
     SWEEP_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    give_up = time.monotonic() + max(timeout, 0.0)
     with open(SWEEP_LOCK, "w") as lock_fh:
-        try:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-        except BlockingIOError:
-            yield False
-            return
+        while True:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= give_up:
+                    yield False
+                    return
+                time.sleep(min(LOCK_RETRY_S, max(give_up - time.monotonic(), 0.01)))
         try:
             yield True
         finally:
@@ -445,7 +476,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     (an audit can outlast an hourly interval) yields immediately instead of
     generating the same report twice.
     """
-    with _activity_lock(blocking=False) as held:
+    with _activity_lock(timeout=0) as held:
         if not held:
             print(f"another sweep or poll is acting ({SWEEP_LOCK}) — yielding.")
             return 0

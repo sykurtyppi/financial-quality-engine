@@ -192,10 +192,12 @@ scripts/watch.py sync --dry-run             # what it would arm / remove
 ```
 
 `poll` and `sweep` share one activity lock (`journal/sweep.lock`): a manual
-`poll` started during the cron window waits for a running sweep to finish,
-re-checks EDGAR and the (possibly re-armed) row, and simply exits if the
-sweep already consumed the filing — never a second generate+audit of the
-same print.
+`poll` started during the cron window waits for a running sweep to finish
+(at most the rest of its own `--max-wait`, then exit 1), re-checks the row
+and EDGAR, and simply exits 0 if the sweep already consumed the filing —
+never a second generate+audit of the same print. A sweep holds the lock for
+its whole pass, so during a multi-name earnings night a manual `poll` may
+wait for several audits.
 
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.

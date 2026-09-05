@@ -609,20 +609,38 @@ class TestPollSweepExclusion:
         assert poll_env.generate == [] and poll_env.rearm == []
 
     def test_poll_rereads_the_row_before_acting(self, poll_env, monkeypatch):
+        # Same event identity, but a `link` pinned a thesis while we waited
+        # for the lock: the re-decide must see the pinned row.
         seen = []
-        rearmed = watch_cli.wl.Watch(
-            ticker="NVDA", print_at=watch_cli._now("2027-02-10T20:20:00+00:00"),
-            baseline_accession="new", expected_report_date=watch_cli.date(2027, 1, 24),
+        original = watch_cli._find_watch("NVDA")
+        pinned = watch_cli.wl.Watch(
+            ticker="NVDA", print_at=original.print_at,
+            baseline_accession=original.baseline_accession,
+            expected_report_date=original.expected_report_date,
+            thesis_entry="2026-08-25", thesis_sha256="cd" * 32,
         )
-        finds = iter([poll_env and watch_cli._find_watch("NVDA"), rearmed])
+        finds = iter([original, pinned])
         monkeypatch.setattr(watch_cli, "_find_watch", lambda t: next(finds))
         monkeypatch.setattr(
             watch_cli, "decide",
             lambda watch, submissions, since=None, force=False:
-            seen.append(watch.baseline_accession) or Decision("refuse", "x"),
+            seen.append(watch.thesis_entry) or Decision("generate", "x"),
         )
         assert watch_cli.cmd_poll(_poll_args()) == 0
-        assert seen == ["0001045810-26-000052", "new"]  # acted on the re-read row
+        assert seen == ["2026-08-26", "2026-08-25"]
+        assert poll_env.generate == [("NVDA", "2026-08-25")]  # acted on the re-read row
+
+    def test_poll_treats_a_rearmed_row_as_consumed(self, poll_env, monkeypatch):
+        original = watch_cli._find_watch("NVDA")
+        rearmed = watch_cli.wl.Watch(
+            ticker="NVDA", print_at=watch_cli._now("2027-02-10T20:20:00+00:00"),
+            baseline_accession="new", expected_report_date=watch_cli.date(2027, 1, 24),
+        )
+        finds = iter([original, rearmed])
+        monkeypatch.setattr(watch_cli, "_find_watch", lambda t: next(finds))
+        _force_decision(monkeypatch, "refuse")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.generate_auto == [] and poll_env.rearm == []
 
     def test_poll_waits_for_a_running_sweep(self, poll_env, monkeypatch):
         import fcntl
@@ -639,6 +657,50 @@ class TestPollSweepExclusion:
         fcntl.flock(fh, fcntl.LOCK_UN)
         th.join(5)
         assert result["rc"] == 0 and poll_env.generate_auto == ["NVDA"]
+
+    def test_poll_gives_up_on_the_lock_at_max_wait(self, poll_env, monkeypatch, capsys):
+        import fcntl
+
+        _force_decision(monkeypatch, "refuse")
+        with open(watch_cli.SWEEP_LOCK, "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            assert watch_cli.cmd_poll(_poll_args(max_wait=0.3)) == 1
+        assert poll_env.generate_auto == []
+        assert "held the activity lock" in capsys.readouterr().err
+
+    def test_since_poll_racing_a_rearm_exits_0_not_1(self, poll_env, monkeypatch):
+        # The row's identity moved while we waited for the lock: the
+        # concurrent run consumed the event. With --since the re-decide
+        # would raise the since/event mismatch (exit 1); the identity
+        # change must be recognised first.
+        original = watch_cli._find_watch("NVDA")
+        rearmed = watch_cli.wl.Watch(
+            ticker="NVDA", print_at=original.print_at,
+            baseline_accession="0001045810-26-000075",
+            expected_report_date=watch_cli.date(2026, 10, 25),
+        )
+        finds = iter([original, rearmed])
+        monkeypatch.setattr(watch_cli, "_find_watch", lambda t: next(finds))
+        calls = []
+
+        def decide(watch, submissions, since=None, force=False):
+            calls.append(watch.baseline_accession)
+            if len(calls) > 1:
+                raise watch_cli.PollerError("since/event mismatch")
+            return Decision("refuse", "x")
+        monkeypatch.setattr(watch_cli, "decide", decide)
+        assert watch_cli.cmd_poll(_poll_args(since="2026-08-26")) == 0
+        assert calls == ["0001045810-26-000052"] and poll_env.generate_auto == []
+
+    def test_poll_rearm_crash_is_reported_not_raised(self, poll_env, monkeypatch, capsys):
+        _force_decision(monkeypatch, "generate")
+
+        def boom(watch, decision, submissions):
+            raise OSError("disk full")
+        monkeypatch.setattr(watch_cli, "_rearm", boom)
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.marked  # the case completed; only the re-arm failed
+        assert "re-arm FAILED for NVDA" in capsys.readouterr().err
 
     def test_dry_run_poll_never_takes_the_lock(self, poll_env, monkeypatch):
         import fcntl
