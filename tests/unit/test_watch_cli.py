@@ -28,6 +28,7 @@ def _poll_args(**over) -> Namespace:
     base = dict(
         ticker="NVDA", since=None, entry_day=None, interval=0.01, max_wait=1.0,
         once=True, dry_run=False, no_docs=False, no_auto=False, no_audit=False,
+        no_brief=False,
     )
     base.update(over)
     return Namespace(**base)
@@ -84,6 +85,8 @@ def poll_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         watch_cli, "_latest_report", lambda t, d: Path("/tmp/fake_journal.md")
     )
+    calls.brief = []
+    monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: calls.brief.append((t, p)) or 0)
     return calls
 
 
@@ -437,7 +440,7 @@ class TestRearmPersistence:
 
 def _sweep_args(**over) -> Namespace:
     base = dict(portfolio=None, prune=False, dry_run=False, no_docs=False,
-                no_auto=False, no_audit=False, verbose=False)
+                no_auto=False, no_audit=False, no_brief=False, verbose=False)
     base.update(over)
     return Namespace(**base)
 
@@ -589,6 +592,34 @@ class TestPortfolioSync:
         assert rc == 1
         assert sync_env.armed == ["NVDA"]
         assert "AMKR NOT added" in capsys.readouterr().err
+
+
+class TestBriefHook:
+    def test_brief_runs_after_a_successful_audit_on_both_tracks(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.brief == [("NVDA", Path("/tmp/fake_journal.md"))]
+        _force_decision(monkeypatch, "refuse")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.brief[-1] == ("NVDA", Path("/tmp/fake_auto.md"))
+
+    def test_brief_skipped_without_audit_or_with_no_brief(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        assert watch_cli.cmd_poll(_poll_args(no_audit=True)) == 0
+        assert watch_cli.cmd_poll(_poll_args(no_brief=True)) == 0
+        assert poll_env.brief == []
+
+    def test_brief_not_run_after_a_failed_audit(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "refuse")
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        assert watch_cli.cmd_poll(_poll_args()) == 4
+        assert poll_env.brief == []
+
+    def test_brief_failure_does_not_change_the_exit_code(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.marked  # journal case still completed
 
 
 class TestPollSweepExclusion:

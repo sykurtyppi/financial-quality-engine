@@ -222,9 +222,79 @@ def _ex99_sort_key(name: str) -> tuple[int, int, str]:
     return (semantic, exhibit_no, lower)
 
 
+@dataclass(frozen=True)
+class FilingDoc:
+    """One document of a filing as EDGAR types it (the SGML header's
+    <TYPE>/<FILENAME>/<DESCRIPTION>), independent of what the filer named
+    the file."""
+
+    type: str
+    filename: str
+    description: str = ""
+    sequence: int = 0
+
+    @property
+    def exhibit_no(self) -> int:
+        m = re.search(r"99\.?(\d+)", self.type)
+        return int(m.group(1)) if m else 9
+
+
+_HEADER_DOC_RE = re.compile(
+    r"<DOCUMENT>\s*<TYPE>([^<\n]+)\s*(?:<SEQUENCE>(\d+)\s*)?<FILENAME>([^<\n]+)"
+    r"(?:\s*<DESCRIPTION>([^<\n]+))?",
+    re.IGNORECASE,
+)
+
+
+def parse_index_headers(text: str) -> list[FilingDoc]:
+    """Documents from a filing's `<accession>-index-headers.html` (the SGML
+    header rendered HTML-escaped). This is the only place EDGAR states an
+    exhibit's TYPE; filenames are the filer's choice (NVDA: `q2fy27pr.htm`
+    for EX-99.1, `q2fy27cfocommentary.htm` for EX-99.2)."""
+    import html as _html
+
+    body = _html.unescape(text)
+    out = []
+    for m in _HEADER_DOC_RE.finditer(body):
+        out.append(FilingDoc(
+            type=m.group(1).strip().upper(),
+            sequence=int(m.group(2)) if m.group(2) else 0,
+            filename=m.group(3).strip(),
+            description=(m.group(4) or "").strip(),
+        ))
+    return out
+
+
+def filing_documents(client: SecClient, cik: int, accession: str) -> list[FilingDoc]:
+    """Typed document list for a filing; empty when the header cannot be
+    fetched or parsed (callers fall back to filename heuristics)."""
+    try:
+        raw = _fetch_archive(client, cik, accession, f"{accession}-index-headers.html")
+    except Exception:  # noqa: BLE001 — best-effort; the caller has a fallback
+        return []
+    return parse_index_headers(raw)
+
+
 def _find_ex99(client: SecClient, cik: int, accession: str) -> list[str]:
-    """EX-99 exhibit filenames in a filing index, best candidate first.
-    Callers take [0] and should surface the alternatives diagnostically."""
+    """EX-99 exhibit filenames for a filing, best candidate first. Callers
+    take [0] and should surface the alternatives diagnostically.
+
+    Primary source: the filing header's document TYPEs (EX-99.1 is the
+    release whatever the file is called). Fallback when the header is
+    unavailable: the directory index filtered by filename heuristics — which
+    silently found nothing for every NVDA 8-K, since NVDA names its release
+    `q2fy27pr.htm`."""
+    typed = [
+        d for d in filing_documents(client, cik, accession)
+        if d.type.startswith("EX-99") and d.filename.lower().endswith((".htm", ".html"))
+    ]
+    if typed:
+        # Release-like names still outrank; otherwise the exhibit number
+        # EDGAR assigned (99.1 before 99.2), never the filer's file naming.
+        return [d.filename for d in sorted(
+            typed, key=lambda d: (_ex99_sort_key(d.filename)[0], d.exhibit_no, d.sequence)
+        )]
+
     import json as _json
 
     idx_raw = _fetch_archive(client, cik, accession, "index.json")
