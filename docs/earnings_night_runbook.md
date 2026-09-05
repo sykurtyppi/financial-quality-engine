@@ -8,9 +8,10 @@ Operating procedure for `scripts/watch.py`. Written for NVDA FQ2-27 on
 Automated: the reminder before the print, watching EDGAR for the filing,
 running the engine the moment it lands, the headless earnings-audit pass
 over the generated report (`scripts/run_audit.py`, skippable with
-`--no-audit`), and — with `sweep` — the calendar itself: every holding in
-`journal/portfolio.txt` is armed from its own filing history, and each name
-is re-armed for its next quarter the moment an event completes.
+`--no-audit`), and — with `sweep` — the calendar itself: each name is
+re-armed for its next quarter the moment an event completes, and with
+`--portfolio` every holding in `journal/portfolio.txt` is armed from its own
+filing history.
 
 Not automated, by design: the thesis, the AFTER block, the OUTCOME. Track 1 of
 [evaluation_protocol.md](evaluation_protocol.md) is explicitly the track that
@@ -182,12 +183,19 @@ auto track, exactly as under `poll`. If you want a journal case for a name,
 `journal.py openv2` + `watch.py link` before the print is still the step
 that only you can take; `due` still tells you when it is time.
 
-Rehearse without side effects:
+Rehearse without side effects (both write nothing — `--dry-run` covers the
+sync step too):
 
 ```
-scripts/watch.py sweep --dry-run --verbose
-scripts/watch.py sync                       # reports what it would arm
+scripts/watch.py sweep --dry-run --verbose --portfolio journal/portfolio.txt
+scripts/watch.py sync --dry-run             # what it would arm / remove
 ```
+
+`poll` and `sweep` share one activity lock (`journal/sweep.lock`): a manual
+`poll` started during the cron window waits for a running sweep to finish,
+re-checks EDGAR and the (possibly re-armed) row, and simply exits if the
+sweep already consumed the filing — never a second generate+audit of the
+same print.
 
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.

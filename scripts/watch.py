@@ -45,6 +45,7 @@ import fcntl
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -348,10 +349,28 @@ def cmd_poll(args: argparse.Namespace) -> int:
         if decision is not None:
             print(f"[{stamp}] attempt {attempt}: {decision.action} — {decision.message}")
             if decision.action != "wait":
-                rc = _act(ticker, watch, decision, args)
-                if not adhoc and not args.dry_run and _completed(decision, rc):
-                    _rearm(watch, decision, submissions)
-                return rc
+                if args.dry_run:
+                    return _act(ticker, watch, decision, args)
+                with _activity_lock(blocking=True):
+                    # A sweep may have consumed (and re-armed) this event
+                    # while we waited for the lock: re-read the row and
+                    # re-decide before acting.
+                    if not adhoc:
+                        watch = _find_watch(ticker) or watch
+                    try:
+                        submissions = client.submissions_by_cik(cik)
+                        decision = decide(watch, submissions, since=since,
+                                          force=getattr(args, "force", False))
+                    except (PollerError, SecClientError) as e:
+                        print(f"  re-check under lock failed: {e}", file=sys.stderr)
+                        return 1
+                    if decision.action == "wait":
+                        print(f"  {decision.message} — consumed by a concurrent run; nothing to do.")
+                        return 0
+                    rc = _act(ticker, watch, decision, args)
+                    if not adhoc and _completed(decision, rc):
+                        _rearm(watch, decision, submissions)
+                    return rc
 
         if args.once:
             return 3  # "not yet" is not a failure; cron should not alert on it
@@ -386,8 +405,36 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
         print(f"  {watch.ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     if not args.dry_run and _completed(decision, rc):
-        _rearm(watch, decision, submissions)
+        try:
+            _rearm(watch, decision, submissions)
+        except Exception as e:  # noqa: BLE001 — a re-arm crash must not stop the pass
+            print(f"  re-arm FAILED for {watch.ticker}: {type(e).__name__}: {e} — the watch "
+                  f"still names the consumed event; re-`add` it.", file=sys.stderr)
     return rc
+
+
+@contextmanager
+def _activity_lock(*, blocking: bool):
+    """One generate/audit/re-arm at a time across `sweep` and `poll`.
+
+    Both can otherwise decide "generate" for the same landed filing — the
+    cron sweep and a manually started poll — and run two full fetch+audit
+    cycles into the same report path. `sweep` takes it non-blocking (yields
+    with exit 0 when another pass is running); `poll` takes it blocking only
+    once it has something to act on, then re-decides, so a filing the sweep
+    already consumed is a skip rather than a duplicate. Yields True when held.
+    """
+    SWEEP_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(SWEEP_LOCK, "w") as lock_fh:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
@@ -398,17 +445,11 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     (an audit can outlast an hourly interval) yields immediately instead of
     generating the same report twice.
     """
-    SWEEP_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with open(SWEEP_LOCK, "w") as lock_fh:
-        try:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print(f"another sweep is running ({SWEEP_LOCK}) — yielding.")
+    with _activity_lock(blocking=False) as held:
+        if not held:
+            print(f"another sweep or poll is acting ({SWEEP_LOCK}) — yielding.")
             return 0
-        try:
-            return _sweep_locked(args)
-        finally:
-            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        return _sweep_locked(args)
 
 
 def _sweep_locked(args: argparse.Namespace) -> int:
@@ -419,7 +460,7 @@ def _sweep_locked(args: argparse.Namespace) -> int:
         return 1
     worst = 0
     if args.portfolio is not None:
-        worst = _sync(client, Path(args.portfolio), prune=args.prune)
+        worst = _sync(client, Path(args.portfolio), prune=args.prune, dry_run=args.dry_run)
     watches = wl.load()
     if not watches:
         print(f"Watchlist is empty ({wl.WATCHLIST}).")
@@ -532,10 +573,11 @@ def read_portfolio(path: Path) -> list[str]:
     return out
 
 
-def _sync(client: SecClient, portfolio: Path, *, prune: bool) -> int:
+def _sync(client: SecClient, portfolio: Path, *, prune: bool, dry_run: bool = False) -> int:
     """Make the watchlist cover the portfolio: arm every holding not yet
     watched; with --prune, drop watched names no longer held — except a name
-    with a thesis pinned, which is an event in flight, not a stale row."""
+    with a thesis pinned, which is an event in flight, not a stale row.
+    `dry_run` reports every add/remove it would make and writes nothing."""
     try:
         wanted = read_portfolio(portfolio)
     except wl.WatchlistError as e:
@@ -544,8 +586,13 @@ def _sync(client: SecClient, portfolio: Path, *, prune: bool) -> int:
     watched = {w.ticker: w for w in wl.load()}
     rc = 0
     added = 0
+    would = "would add" if dry_run else "added"
     for t in wanted:
         if t in watched:
+            continue
+        if dry_run:
+            added += 1
+            print(f"sync: {would} {t}")
             continue
         try:
             submissions = client.submissions_by_cik(client.resolve_cik(t))
@@ -555,7 +602,7 @@ def _sync(client: SecClient, portfolio: Path, *, prune: bool) -> int:
             rc = 1
             continue
         added += 1
-        print(f"sync: added {t}: prints ~{w.print_at:%Y-%m-%d %H:%M}Z, "
+        print(f"sync: {would} {t}: prints ~{w.print_at:%Y-%m-%d %H:%M}Z, "
               f"period ~{w.expected_report_date}")
     stale = [w for t, w in watched.items() if t not in wanted]
     for w in stale:
@@ -563,10 +610,12 @@ def _sync(client: SecClient, portfolio: Path, *, prune: bool) -> int:
             print(f"sync: {w.ticker} is watched but not in {portfolio.name} (keep; --prune removes)")
         elif w.thesis_entry:
             print(f"sync: {w.ticker} not in {portfolio.name} but has a pinned thesis — kept")
+        elif dry_run:
+            print(f"sync: would remove {w.ticker}")
         else:
             wl.remove_entry(w.ticker)
             print(f"sync: removed {w.ticker}")
-    print(f"sync: {len(wanted)} in portfolio, {added} added, "
+    print(f"sync{' (dry run)' if dry_run else ''}: {len(wanted)} in portfolio, {added} {would}, "
           f"{len(stale)} watched-but-not-held")
     return rc
 
@@ -577,7 +626,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     except SecClientError as e:
         print(f"EDGAR unavailable: {e}", file=sys.stderr)
         return 1
-    return _sync(client, Path(args.portfolio), prune=args.prune)
+    return _sync(client, Path(args.portfolio), prune=args.prune, dry_run=args.dry_run)
 
 
 def _linkable_entries(ticker: str) -> list[Path]:
@@ -725,6 +774,8 @@ def main() -> int:
                         help=f"holdings file, one ticker per line (default {PORTFOLIO})")
     p_sync.add_argument("--prune", action="store_true",
                         help="drop watched names no longer held (unpinned only)")
+    p_sync.add_argument("--dry-run", action="store_true",
+                        help="report what would be armed/removed; write nothing")
     p_sync.set_defaults(fn=cmd_sync)
 
     p_link = sub.add_parser("link", help="pin a locked v2 journal entry to the watch")

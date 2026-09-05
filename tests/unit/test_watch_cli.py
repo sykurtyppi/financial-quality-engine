@@ -45,10 +45,11 @@ class _FakeClient:
 
 
 @pytest.fixture
-def poll_env(monkeypatch):
+def poll_env(monkeypatch, tmp_path):
     """Neutralize network + subprocess; record what the poll routed to."""
     calls = SimpleNamespace(generate=[], generate_auto=[], audit=[], marked=[], rearm=[])
     monkeypatch.setattr(watch_cli, "SecClient", _FakeClient)
+    monkeypatch.setattr(watch_cli, "SWEEP_LOCK", tmp_path / "sweep.lock")  # never the real one
     # Re-arming persists to the watchlist; never let a unit test touch the
     # real journal/watchlist.json.
     monkeypatch.setattr(
@@ -519,19 +520,20 @@ class TestSweep:
         with open(watch_cli.SWEEP_LOCK, "w") as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             assert watch_cli.cmd_sweep(_sweep_args()) == 0
-        assert "another sweep is running" in capsys.readouterr().out
+        assert "another sweep or poll is acting" in capsys.readouterr().out
 
     def test_syncs_the_portfolio_first(self, sweep_env, monkeypatch, tmp_path):
         synced = []
         monkeypatch.setattr(watch_cli, "_sync",
-                            lambda client, path, prune: synced.append((path, prune)) or 0)
+                            lambda client, path, prune, dry_run=False:
+                            synced.append((path, prune, dry_run)) or 0)
         pf = tmp_path / "portfolio.txt"
         pf.write_text("AAPL\n")
         assert watch_cli.cmd_sweep(_sweep_args(portfolio=str(pf), prune=True)) == 0
-        assert synced == [(pf, True)]
+        assert synced == [(pf, True, False)]
 
     def test_sync_failure_is_reported_in_the_exit_code(self, sweep_env, monkeypatch):
-        monkeypatch.setattr(watch_cli, "_sync", lambda client, path, prune: 1)
+        monkeypatch.setattr(watch_cli, "_sync", lambda client, path, prune, dry_run=False: 1)
         assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
 
 
@@ -587,3 +589,137 @@ class TestPortfolioSync:
         assert rc == 1
         assert sync_env.armed == ["NVDA"]
         assert "AMKR NOT added" in capsys.readouterr().err
+
+
+class TestPollSweepExclusion:
+    """One activity lock across poll and sweep: a manual poll cannot
+    duplicate a sweep's generate+audit of the same landed filing."""
+
+    def test_poll_rechecks_under_the_lock_and_yields_if_consumed(self, poll_env, monkeypatch):
+        # First decide (unlocked) says generate; the re-decide under the lock
+        # — after a concurrent sweep consumed and re-armed the event — says
+        # wait. Nothing generated, exit 0.
+        answers = iter(["generate", "wait"])
+        monkeypatch.setattr(
+            watch_cli, "decide",
+            lambda watch, submissions, since=None, force=False:
+            Decision(next(answers), "x"),
+        )
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.generate == [] and poll_env.rearm == []
+
+    def test_poll_rereads_the_row_before_acting(self, poll_env, monkeypatch):
+        seen = []
+        rearmed = watch_cli.wl.Watch(
+            ticker="NVDA", print_at=watch_cli._now("2027-02-10T20:20:00+00:00"),
+            baseline_accession="new", expected_report_date=watch_cli.date(2027, 1, 24),
+        )
+        finds = iter([poll_env and watch_cli._find_watch("NVDA"), rearmed])
+        monkeypatch.setattr(watch_cli, "_find_watch", lambda t: next(finds))
+        monkeypatch.setattr(
+            watch_cli, "decide",
+            lambda watch, submissions, since=None, force=False:
+            seen.append(watch.baseline_accession) or Decision("refuse", "x"),
+        )
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert seen == ["0001045810-26-000052", "new"]  # acted on the re-read row
+
+    def test_poll_waits_for_a_running_sweep(self, poll_env, monkeypatch):
+        import fcntl
+        import threading
+
+        _force_decision(monkeypatch, "refuse")
+        fh = open(watch_cli.SWEEP_LOCK, "w")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        result = {}
+        th = threading.Thread(target=lambda: result.update(rc=watch_cli.cmd_poll(_poll_args())))
+        th.start()
+        th.join(0.3)
+        assert th.is_alive() and poll_env.generate_auto == []  # blocked, not skipped
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        th.join(5)
+        assert result["rc"] == 0 and poll_env.generate_auto == ["NVDA"]
+
+    def test_dry_run_poll_never_takes_the_lock(self, poll_env, monkeypatch):
+        import fcntl
+
+        _force_decision(monkeypatch, "refuse")
+        with open(watch_cli.SWEEP_LOCK, "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            assert watch_cli.cmd_poll(_poll_args(dry_run=True)) == 0
+
+
+class TestSweepRearmIsolation:
+    def test_rearm_crash_does_not_stop_the_pass(self, sweep_env, monkeypatch, capsys):
+        sweep_env.table.update({"AAPL": "refuse", "NVDA": "refuse"})
+
+        def rearm(watch, decision, submissions):
+            if watch.ticker == "AAPL":
+                raise OSError("disk full")
+            sweep_env.rearm.append((watch.ticker, decision.action))
+        monkeypatch.setattr(watch_cli, "_rearm", rearm)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert sweep_env.generate_auto == ["AAPL", "NVDA"]
+        assert sweep_env.rearm == [("NVDA", "refuse")]
+        assert "re-arm FAILED for AAPL" in capsys.readouterr().err
+
+
+class TestSyncDryRun:
+    def test_dry_run_reports_and_writes_nothing(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(watch_cli.wl, "load", lambda path=None: [_watch("AAPL"), _watch("GLW")])
+        monkeypatch.setattr(watch_cli, "_arm", lambda *a, **k: pytest.fail("must not arm"))
+        monkeypatch.setattr(watch_cli.wl, "remove_entry",
+                            lambda *a, **k: pytest.fail("must not remove"))
+        pf = tmp_path / "portfolio.txt"
+        pf.write_text("AAPL\nNVDA\n")
+        rc = watch_cli._sync(_FakeClient(), pf, prune=True, dry_run=True)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "would add NVDA" in out and "would remove GLW" in out
+        assert "sync (dry run)" in out
+
+    def test_sweep_dry_run_makes_the_sync_dry(self, sweep_env, monkeypatch, tmp_path):
+        synced = []
+        monkeypatch.setattr(watch_cli, "_sync",
+                            lambda client, path, prune, dry_run=False: synced.append(dry_run) or 0)
+        pf = tmp_path / "p.txt"
+        pf.write_text("AAPL\n")
+        assert watch_cli.cmd_sweep(_sweep_args(portfolio=str(pf), dry_run=True)) == 0
+        assert synced == [True]
+
+
+class TestEventRoundTrip:
+    """Invariant: once an event completes and the row is re-armed, the SAME
+    submissions payload must decide `wait` — the consumed filing can never
+    trigger again on the next pass."""
+
+    def test_consumed_filing_cannot_retrigger(self, monkeypatch, tmp_path):
+        import json
+
+        from app.services.journal import store
+        from app.services.watch.poller import decide as real_decide
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
+        (tmp_path / "entries").mkdir()
+        p = tmp_path / "watchlist.json"
+        p.write_text(json.dumps({"watchlist": [{
+            "ticker": "NVDA", "print_at": "2026-11-18T20:20:00+00:00",
+            "baseline_accession": "q-1", "expected_report_date": "2026-10-25",
+        }]}))
+        monkeypatch.setattr(watch_cli.wl, "WATCHLIST", p)
+        subs = {"filings": {"recent": {
+            "form": ["10-Q", "8-K", "10-Q"],
+            "accessionNumber": ["q-0", "k-0", "q-1"],
+            "filingDate": ["2026-11-18", "2026-11-18", "2026-08-27"],
+            "reportDate": ["2026-10-25", "2026-11-18", "2026-07-26"],
+            "items": [None, "2.02,9.01", None],
+            "acceptanceDateTime": [None, "2026-11-18T21:20:00.000Z", None],
+            "primaryDocument": [None] * 3,
+        }}}
+        watch = watch_cli.wl.load(p)[0]
+        first = real_decide(watch, subs)
+        assert first.action == "refuse" and first.filing.accession == "q-0"
+        watch_cli._rearm(watch, first, subs)  # auto track completed (rc 0)
+        again = watch_cli.wl.load(p)[0]
+        assert again.baseline_accession == "q-0"
+        assert real_decide(again, subs).action == "wait"
