@@ -135,7 +135,8 @@ class TestAdversarialExhibitLayout:
 
     @pytest.fixture
     def archive(self, monkeypatch):
-        tables = "<p>" + "1,234 5,678 9,012 3,456 " * 60 + "</p>"  # clears the word floor
+        # Clears the word floor, so only the NAME can (and must) demote it.
+        tables = "<p>" + "1,234 5,678 9,012 3,456 " * 60 + "</p>"
         files = {
             "k-new-index-headers.html": self.HEADER,
             "k-old-index-headers.html": self.HEADER,
@@ -154,6 +155,20 @@ class TestAdversarialExhibitLayout:
         assert "exhibit" not in roles  # the tables exhibit is skipped, not demoted
         assert any("ex991-tables.htm: tables/slides by name" in d for d in src.diagnostics)
         assert "Outlook and results" in (src.workdir / "release_EX-99_2.txt").read_text()
+
+
+    def test_sole_exhibit_with_a_tables_like_name_is_still_the_release(self, monkeypatch, tmp_path):
+        header = ("&lt;DOCUMENT&gt;\n&lt;TYPE&gt;EX-99.1\n&lt;SEQUENCE&gt;2\n"
+                  "&lt;FILENAME&gt;q2-supplement.htm\n&lt;/DOCUMENT&gt;\n")
+        files = {"k-new-index-headers.html": header, "k-old-index-headers.html": header,
+                 "q2-supplement.htm": LONG}
+        monkeypatch.setattr(ed, "_fetch_archive", lambda c, cik, acc, doc: files[doc])
+        monkeypatch.setattr(bs, "_fetch_archive", lambda c, cik, acc, doc: files[doc])
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path)
+        roles = {f.role: f.label for f in src.files}
+        assert "q2-supplement.htm" in roles["release"]
+        assert "q2-supplement.htm" in roles["prior_release"]
+        assert any("every EX-99 exhibit is tables/slides-named" in d for d in src.diagnostics)
 
 
 class TestPriorRelease:

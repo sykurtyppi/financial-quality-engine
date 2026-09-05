@@ -43,17 +43,26 @@ MIN_EXHIBIT_WORDS = 100
 _NON_NARRATIVE_RE = re.compile(r"table|supplement|slide|presentation|infographic|deck", re.I)
 
 
-def _narrative_ex99(client: SecClient, cik: int, accession: str) -> list:
-    """The filing's EX-99 html exhibits, release first. Ordering reuses
-    `_ex99_sort_key`'s semantics (release-like names first, tables/slides
-    last, exhibit number only as the tie-break): a filer can ship the tables
-    as EX-99.1 and the release as EX-99.2, so EDGAR's numbering alone is not
-    trusted — the same lesson `_find_ex99` already carries."""
-    ex99 = [
-        d for d in filing_documents(client, cik, accession)
-        if d.type.startswith("EX-99") and d.filename.lower().endswith((".htm", ".html"))
-    ]
-    return sorted(ex99, key=lambda d: (_ex99_sort_key(d.filename)[0], d.exhibit_no, d.sequence))
+def _narrative_ex99(client: SecClient, cik: int, accession: str) -> tuple[list, list]:
+    """(candidates, skipped): the filing's EX-99 html exhibits, release first.
+
+    Ordering reuses `_ex99_sort_key`'s semantics (release-like names first,
+    tables/slides last, exhibit number only as the tie-break): a filer can
+    ship the tables as EX-99.1 and the release as EX-99.2, so EDGAR's
+    numbering alone is not trusted — the same lesson `_find_ex99` carries.
+    Tables/slides-NAMED exhibits are skipped only when a better-named one
+    exists; a filer whose sole exhibit is `q2-supplement.htm` still gets its
+    release read (by word count), rather than losing it to a filename.
+    """
+    ex99 = sorted(
+        (d for d in filing_documents(client, cik, accession)
+         if d.type.startswith("EX-99") and d.filename.lower().endswith((".htm", ".html"))),
+        key=lambda d: (_ex99_sort_key(d.filename)[0], d.exhibit_no, d.sequence),
+    )
+    narrative = [d for d in ex99 if not _NON_NARRATIVE_RE.search(d.filename)]
+    if narrative:
+        return narrative, [d for d in ex99 if d not in narrative]
+    return ex99, []
 
 
 class BriefSourceError(RuntimeError):
@@ -118,9 +127,8 @@ def latest_earnings_8k(submissions: dict, accession: str | None = None) -> Filin
 
 def _release_text(client: SecClient, cik: int, filing: Filing) -> tuple[str, str] | None:
     """(label, text) of a filing's EX-99.1-ranked release, or None."""
-    for d in _narrative_ex99(client, cik, filing.accession):
-        if _NON_NARRATIVE_RE.search(d.filename):
-            continue
+    candidates, _ = _narrative_ex99(client, cik, filing.accession)
+    for d in candidates:
         text = _clean(html_to_text(_fetch_archive(client, cik, filing.accession, d.filename)))
         if len(text.split()) >= MIN_EXHIBIT_WORDS:
             return f"{d.type} {d.filename}", text
@@ -153,18 +161,22 @@ def collect_sources(
     workdir.mkdir(parents=True, exist_ok=True)
     src = BriefSources(ticker=ticker, filing=filing, company=company, workdir=workdir)
 
-    ex99 = _narrative_ex99(client, cik, filing.accession)
+    ex99, skipped = _narrative_ex99(client, cik, filing.accession)
     if not ex99:
         src.diagnostics.append(
             f"8-K {filing.accession}: no typed EX-99 exhibits found in the filing header"
         )
+    elif all(_NON_NARRATIVE_RE.search(d.filename) for d in ex99):
+        src.diagnostics.append(
+            f"8-K {filing.accession}: every EX-99 exhibit is tables/slides-named "
+            f"({', '.join(d.filename for d in ex99)}) — reading them by word count; "
+            "check the release role is right")
+    for d in skipped:
+        # A tables-named EX-99.1 never becomes the release when a better-named
+        # exhibit exists — whatever EDGAR's numbering says.
+        src.diagnostics.append(f"{d.type} {d.filename}: tables/slides by name — skipped")
     release_done = False
     for d in ex99:
-        if _NON_NARRATIVE_RE.search(d.filename):
-            # Applies to the first candidate too: an EX-99.1 named
-            # 'tables' must never become the release.
-            src.diagnostics.append(f"{d.type} {d.filename}: tables/slides by name — skipped")
-            continue
         text = _clean(html_to_text(_fetch_archive(client, cik, filing.accession, d.filename)))
         words = len(text.split())
         if words < MIN_EXHIBIT_WORDS:
