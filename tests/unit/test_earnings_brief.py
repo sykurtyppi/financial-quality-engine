@@ -57,6 +57,8 @@ class _Client:
 def archive(monkeypatch):
     files = {
         "k-new-index-headers.html": HEADER,
+        "k-old-index-headers.html": HEADER.replace("q2pr.htm", "q1pr.htm"),
+        "q1pr.htm": LONG.replace("Revenue grew", "Outlook: revenue expected"),
         "q2pr.htm": LONG,
         "cfo.htm": LONG.replace("Revenue", "Commentary"),
         "slides.htm": LONG,
@@ -81,7 +83,11 @@ class TestCollectSources:
     def test_release_by_type_then_narrative_exhibits_only(self, archive, tmp_path):
         src = bs.collect_sources(_Client(), "nvda", out_root=tmp_path, transcript_root=tmp_path)
         roles = [(f.role, f.path.name) for f in src.files]
-        assert roles == [("release", "release_EX-99_1.txt"), ("exhibit", "exhibit_EX-99_2.txt")]
+        assert roles == [("release", "release_EX-99_1.txt"), ("exhibit", "exhibit_EX-99_2.txt"),
+                         ("prior_release", "prior_release.txt")]
+        prior = next(f for f in src.files if f.role == "prior_release")
+        assert "k-old" in prior.label and "ONLY its outlook" in prior.label
+        assert "Outlook: revenue expected" in prior.path.read_text()
         assert src.workdir == tmp_path / "NVDA" / "2026-08-26"
         assert "Revenue grew" in (src.workdir / "release_EX-99_1.txt").read_text()
         assert any("slides.htm: tables/slides" in d for d in src.diagnostics)
@@ -115,6 +121,20 @@ class TestCollectSources:
         src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path)
         assert src.files == []
         assert any("no typed EX-99" in d for d in src.diagnostics)
+
+
+class TestPriorRelease:
+    def test_prior_is_the_202_before_the_current_one(self):
+        cur = bs.latest_earnings_8k(SUBS)
+        assert bs.prior_earnings_8k(SUBS, cur).accession == "k-old"
+        assert bs.prior_earnings_8k(SUBS, bs.latest_earnings_8k(SUBS, "k-old")) is None
+
+    def test_prior_release_failure_is_a_diagnostic(self, archive, tmp_path):
+        archive["k-old-index-headers.html"] = "<html>nothing typed</html>"
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path)
+        assert [f.role for f in src.files] == ["release", "exhibit"]
+        assert any("prior release 8-K k-old" in d and "prior guide is unavailable" in d
+                   for d in src.diagnostics)
 
 
 class TestFindTranscript:

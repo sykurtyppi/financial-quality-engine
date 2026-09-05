@@ -24,6 +24,7 @@ target prices. Valuation is out of scope here (the audit does that).
 |---|---|---|
 | `release` | 8-K Item 2.02 EX-99.1, stripped to text | Results, guidance, KPIs, management framing — the primary source |
 | `exhibit` | Further EX-99 narrative exhibits (CFO commentary, prepared remarks) | Prepared-remark detail; often has the guide bridge |
+| `prior_release` | The PREVIOUS quarter's EX-99.1 | **Only** its outlook/guidance section — that is the company's own prior guide for this quarter. Never take results from it |
 | `transcript` | Earnings-call transcript (operator-supplied; may be absent) | Prepared remarks + Q&A: what was asked, answered, dodged |
 | `report` | Engine report (`reports/` or `reports/auto/`) | Deterministic quality findings, tiered flags, what changed |
 | `audit` | Headless earnings-audit output, if it ran | Corrected engine findings + benign explanations — prefer over raw report |
@@ -58,13 +59,16 @@ Section rules:
   most consequential change (guide, KPI, capital, disclosure). If nothing is
   consequential, say that.
 - **Results vs the company's own prior guidance** — a table: metric · prior
-  guide (from `prior_brief` or the release's own "outlook was" language; else
-  `not in sources`) · actual · vs guide. Revenue, GAAP and non-GAAP margin/EPS
+  guide (from `prior_release`'s outlook section, else `prior_brief`, else the
+  release's own "outlook was" language; else `not in sources`) · actual ·
+  vs guide (above / within / below the range, with the delta). Revenue, GAAP and non-GAAP margin/EPS
   as the release reports them, FCF or cash flow if given. Note any prior-year
   one-off the release itself calls out. Never invent a prior guide.
 - **Guidance** — table of the new guide per line (revenue, margin, EPS, opex,
-  capex, tax rate — whatever is given) vs the prior guide when the sources
-  hold it; else mark the prior as `not in sources`. Say explicitly whether
+  capex, tax rate — whatever is given) vs what the company guided last time
+  for the *same* line (`prior_release` outlook: the previous quarter's guide,
+  for direction of travel; annual lines compare directly); else mark the
+  prior as `not in sources`. Say explicitly whether
   each line is raised / held / lowered / first-time, and whether the range
   is quarterly or annual.
 - **KPIs and segments** — segment revenue and growth, the operating KPIs the
