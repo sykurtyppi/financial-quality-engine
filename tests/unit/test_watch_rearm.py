@@ -101,6 +101,16 @@ class TestNextArming:
         assert arming.expected_report_date > date(2026, 10, 25)
         assert arming.baseline_accession == "q-0"  # the consumed filing, not q-1
 
+    def test_repaired_row_without_expected_still_steps_past_the_consumed_period(self):
+        # A hand-repaired row (no expected_report_date) plus a stale payload:
+        # the history's newest period IS the one just consumed. Re-arming
+        # onto it would wait forever (the ±21d window never admits the next
+        # quarter), so the consumed filing's own report date anchors the step.
+        stale = _submissions(_history(with_prints=False)[1:])  # q-0 not in it yet
+        a = next_arming(stale, ("10-Q", "10-K"), filed=LANDED, previous_expected=None, now=NOW)
+        assert a.baseline_accession == "q-0"
+        assert a.expected_report_date == date(2027, 1, 24)  # LANDED.report_date + 91d
+
     def test_stale_payload_baselines_on_the_consumed_filing_and_skips_its_print(self):
         # Neither the landed 10-Q nor this print's 8-K is in the payload yet.
         rows = [r for r in _history() if r[1] not in ("q-0", "k-0")]

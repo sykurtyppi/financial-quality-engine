@@ -147,9 +147,30 @@ line, `#` comments; private and gitignored).
 # crontab — hourly; 11 names is ~11 EDGAR requests per pass
 0 * * * * cd /path/to/financial_quality_engine && \
   EDGAR_IDENTITY="Your Name you@example.com" \
+  CLAUDE_BIN="$HOME/.local/bin/claude" \
   .venv/bin/python scripts/watch.py sweep --portfolio journal/portfolio.txt \
   >> journal/watch.log 2>&1
 ```
+
+The scheduler's environment is not your shell's. Two things the audit and
+brief need that cron does not provide:
+
+- **The CLI.** `claude` is resolved as `CLAUDE_BIN`, then PATH, then
+  `~/.local/bin/claude` (`app/services/headless.py`); cron's PATH is
+  `/usr/bin:/bin`, so either set `CLAUDE_BIN` as above or accept the fallback.
+- **A login.** Headless `claude -p` uses the CLI's own stored login, not the
+  desktop app's. Before the season, run `claude` in a terminal and `/login`
+  once, then prove it from a scheduler-shaped environment:
+
+  ```
+  env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin \
+    "$HOME/.local/bin/claude" -p "Reply with exactly: OK"
+  ```
+
+  "Not logged in" or "OAuth session expired" there means every audit and
+  brief of the season would fail (exit 4 on every pass) until you log in.
+  On a Mac that sleeps, prefer a launchd LaunchAgent over cron: it runs in
+  your login session and catches up after a missed hour; cron skips it.
 
 Per pass, in order:
 
@@ -170,12 +191,19 @@ Per pass, in order:
    baseline accession (the filing just consumed), next expected period, next
    print hint, pin and label cleared, and a `note` recording the derivation.
    A failed audit (exit 4) is *not* re-armed, so the next pass retries the
-   same filing. A name therefore never has to be `add`ed twice.
+   same filing. A name therefore never has to be `add`ed twice. If the
+   re-arm itself fails (the row could not be rewritten), the case is still
+   complete but the name exits 1 and says `re-arm FAILED` — that row still
+   names the consumed event and will never fire again until you `add` it.
 
 Exit code is the worst per-name code, except that "still waiting" (3) is 0
 and a sweep that finds another sweep already running (an audit can outlast an
 hourly interval; `journal/sweep.lock`) yields with 0. Names still waiting are
-silent unless `--verbose`.
+silent unless `--verbose` — with one exception: a name still waiting more
+than 21 days past its print hint is named on stderr on every pass, because a
+row whose expected period drifted out of the ±21-day match window looks
+exactly like patience. Check it with `status`; if the period is wrong,
+`add` it again.
 
 What this does NOT change: the blind thesis. `sweep` never writes into
 `reports/` without a pinned, lock-verified entry — a thesis-less print is the

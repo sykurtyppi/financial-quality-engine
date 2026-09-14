@@ -34,8 +34,13 @@ Exit codes (for cron/alerting):
     4  report generated but the audit FAILED — the report is kept for
        diagnosis, the journal entry is NOT marked reported (retryable)
     `due` returns 1 when a watched name still needs a thesis: that is the alert.
+    A completed event whose RE-ARM failed also returns 1: the report exists,
+    but the row still names the consumed event and will never fire again
+    until it is re-`add`ed — a scheduler must see that.
     `sweep` returns the worst per-name code, except that 3 (waiting) is 0 and
-    a sweep already running elsewhere is 0 (it just yields).
+    a sweep already running elsewhere is 0 (it just yields). A name still
+    waiting more than OVERDUE_DAYS past its print hint is named on stderr on
+    every pass, --verbose or not: "waiting" must not hide a mis-armed row.
 """
 
 from __future__ import annotations
@@ -84,6 +89,10 @@ def _now(arg: str | None) -> datetime:
         return datetime.now(timezone.utc)
     dt = datetime.fromisoformat(arg)
     return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _find_watch(ticker: str) -> wl.Watch | None:
@@ -181,7 +190,13 @@ def _generate_auto(ticker: str, no_docs: bool) -> Path | None:
 
 
 def _latest_report(ticker: str, directory: Path) -> Path | None:
-    matches = sorted(directory.glob(f"{ticker}_*.md"), key=lambda p: p.stat().st_mtime)
+    """Newest engine report for the ticker in `directory` — never the audit
+    written beside it (`<stem>_audit.md`), which a retry after a failed
+    brief would otherwise hand to the auditor as "the report"."""
+    matches = sorted(
+        (p for p in directory.glob(f"{ticker}_*.md") if not p.stem.endswith("_audit")),
+        key=lambda p: p.stat().st_mtime,
+    )
     return matches[-1] if matches else None
 
 
@@ -266,7 +281,7 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
     return 1
 
 
-def _rearm(watch: wl.Watch, decision, submissions: dict) -> None:
+def _rearm(watch: wl.Watch, decision, submissions: dict) -> bool:
     """Re-arm a watchlist row for its next quarter once this event is done.
 
     Only called after a COMPLETED event (exit 0 on either track, or skip):
@@ -283,22 +298,26 @@ def _rearm(watch: wl.Watch, decision, submissions: dict) -> None:
     except (wl.WatchlistError, PollerError) as e:
         print(f"  re-arm FAILED for {watch.ticker}: {e} — the watch still names "
               f"the consumed event; re-`add` it.", file=sys.stderr)
-        return
+        return False
     print(f"  re-armed {watch.ticker}: next period ~{arming.expected_report_date}, "
           f"baseline {arming.baseline_accession or '(none)'}, "
           f"prints ~{arming.print_at:%Y-%m-%d %H:%M}Z (pin cleared)")
+    return True
 
 
-def _rearm_guarded(watch: wl.Watch, decision, submissions: dict) -> None:
+def _rearm_guarded(watch: wl.Watch, decision, submissions: dict) -> bool:
     """Re-arm after a completed event without letting ANY persistence crash
     (disk full, permissions) turn an already-generated, audited, marked case
     into a traceback — on the sweep it would abort the pass, on a poll it
-    would hide a successful run behind a crash exit."""
+    would hide a successful run behind a crash exit. Returns False when the
+    row was NOT re-armed: the caller turns that into exit 1, because a row
+    left on its consumed event never fires again and nobody is watching."""
     try:
-        _rearm(watch, decision, submissions)
+        return _rearm(watch, decision, submissions)
     except Exception as e:  # noqa: BLE001
         print(f"  re-arm FAILED for {watch.ticker}: {type(e).__name__}: {e} — the watch "
               f"still names the consumed event; re-`add` it.", file=sys.stderr)
+        return False
 
 
 def _completed(decision, rc: int) -> bool:
@@ -340,7 +359,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
     attempt = 0
     while True:
         attempt += 1
-        stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+        stamp = _utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
         try:
             submissions = client.submissions_by_cik(cik)
             decision = decide(watch, submissions, since=since,
@@ -398,7 +417,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
                         return 0
                     rc = _act(ticker, watch, decision, args)
                     if not adhoc and _completed(decision, rc):
-                        _rearm_guarded(watch, decision, submissions)
+                        if not _rearm_guarded(watch, decision, submissions):
+                            return max(rc, 1)
                     return rc
 
         if args.once:
@@ -413,7 +433,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
 def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> int:
     """One pass for one watch: fetch, decide, act, re-arm. Never raises —
     a sweep must reach every name even when one of them fails."""
-    stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+    now = _utcnow()
+    stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -424,7 +445,15 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
         print(f"[{stamp}] {watch.ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     if decision.action == "wait":
-        if args.verbose:
+        overdue = (now - watch.print_at).days
+        if overdue > OVERDUE_DAYS:
+            # Not verbose-gated: a row whose expected period drifted out of
+            # the match window looks exactly like patience, forever.
+            print(f"[{stamp}] {watch.ticker}: still waiting {overdue}d past its print hint "
+                  f"({watch.print_at:%Y-%m-%d}), expected period {watch.expected_report_date} "
+                  f"— check the row (`status`) and re-`add` if the period is wrong.",
+                  file=sys.stderr)
+        elif args.verbose:
             print(f"[{stamp}] {decision.message}")
         return 3
     print(f"[{stamp}] {decision.action} — {decision.message}")
@@ -434,11 +463,13 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
         print(f"  {watch.ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     if not args.dry_run and _completed(decision, rc):
-        _rearm_guarded(watch, decision, submissions)
+        if not _rearm_guarded(watch, decision, submissions):
+            return max(rc, 1)
     return rc
 
 
 LOCK_RETRY_S = 0.5
+OVERDUE_DAYS = 21  # a print hint this stale with no filing is a mis-armed row, not patience
 
 
 @contextmanager

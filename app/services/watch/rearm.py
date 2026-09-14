@@ -106,13 +106,20 @@ def next_arming(
         # newest accession is OLDER than the one just consumed. Baseline on
         # the consumed filing so it can never re-trigger.
         baseline = filed.accession
+    # The period just reported: the row's expected date if it had one, else
+    # the consumed filing's own report date. A row repaired by hand (no
+    # expected_report_date) must still never re-arm onto the period it just
+    # consumed — with a stale payload the history's newest period IS that
+    # period, and a watch armed on it waits forever (the ±21d match window
+    # never admits the real next quarter).
+    consumed_period = previous_expected or (filed.report_date if filed else None)
     if expected is None:
-        anchor = previous_expected or (filed.filing_date if filed else now.date())
+        anchor = consumed_period or (filed.filing_date if filed else now.date())
         expected = anchor + timedelta(days=DEFAULT_PERIOD_STEP_DAYS)
-    elif previous_expected is not None and expected <= previous_expected:
+    elif consumed_period is not None and expected <= consumed_period:
         # The history's newest period is still the one just reported (or
         # older, when companyfacts-style lag hides it): step past it.
-        expected = previous_expected + timedelta(days=DEFAULT_PERIOD_STEP_DAYS)
+        expected = consumed_period + timedelta(days=DEFAULT_PERIOD_STEP_DAYS)
 
     anchor = filed.filing_date if filed else now.date()
     est = infer_print_at(submissions, now=now)

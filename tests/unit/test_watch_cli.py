@@ -54,7 +54,8 @@ def poll_env(monkeypatch, tmp_path):
     # real journal/watchlist.json.
     monkeypatch.setattr(
         watch_cli, "_rearm",
-        lambda watch, decision, submissions: calls.rearm.append((watch.ticker, decision.action)),
+        lambda watch, decision, submissions:
+        calls.rearm.append((watch.ticker, decision.action)) or True,
     )
     monkeypatch.setattr(
         watch_cli, "_find_watch",
@@ -372,6 +373,37 @@ class TestPollRearm:
         assert watch_cli.cmd_poll(_poll_args()) == 4
         assert poll_env.rearm == []
 
+    def test_failed_generation_returns_its_code_and_audits_nothing(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: 1)
+        assert watch_cli.cmd_poll(_poll_args()) == 1
+        assert poll_env.audit == [] and poll_env.marked == [] and poll_env.rearm == []
+
+    def test_rearm_failure_on_poll_is_exit_1(self, poll_env, monkeypatch, capsys):
+        _force_decision(monkeypatch, "refuse")
+        monkeypatch.setattr(watch_cli, "_rearm", lambda w, d, s: False)
+        assert watch_cli.cmd_poll(_poll_args()) == 1
+        assert poll_env.generate_auto == ["NVDA"]  # the case itself completed
+
+    def test_completed_mapping(self):
+        skip, gen, ref, wait = (Decision(a, "") for a in ("skip", "generate", "refuse", "wait"))
+        assert watch_cli._completed(skip, 4)
+        assert watch_cli._completed(gen, 0) and watch_cli._completed(ref, 0)
+        assert not any(watch_cli._completed(d, rc) for d in (gen, ref) for rc in (1, 2, 4))
+        assert not watch_cli._completed(wait, 0)
+
+    def test_latest_report_never_returns_the_audit(self, tmp_path):
+        import os, time as _t
+
+        rep = tmp_path / "NVDA_2026-09-01.md"
+        rep.write_text("# report")
+        aud = tmp_path / "NVDA_2026-09-01_audit.md"
+        aud.write_text("# audit")
+        later = _t.time() + 10
+        os.utime(aud, (later, later))  # the audit is the newer file
+        assert watch_cli._latest_report("NVDA", tmp_path) == rep
+        assert watch_cli._latest_report("AAPL", tmp_path) is None
+
     def test_strict_refusal_does_not_rearm(self, poll_env, monkeypatch):
         _force_decision(monkeypatch, "refuse")
         assert watch_cli.cmd_poll(_poll_args(no_auto=True)) == 2
@@ -457,6 +489,9 @@ def sweep_env(poll_env, monkeypatch, tmp_path):
     decision table. The sweep lock lives in tmp so tests never contend with
     a real sweep."""
     monkeypatch.setattr(watch_cli, "SWEEP_LOCK", tmp_path / "sweep.lock")
+    # Pin the sweep's clock before the fixture rows' print hint so "overdue"
+    # can never depend on the day the tests happen to run.
+    monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-01T00:00:00+00:00"))
     monkeypatch.setattr(
         watch_cli.wl, "load",
         lambda path=None: [_watch("AAPL"), _watch("MSFT"), _watch("NVDA")],
@@ -535,6 +570,43 @@ class TestSweep:
     def test_sync_failure_is_reported_in_the_exit_code(self, sweep_env, monkeypatch):
         monkeypatch.setattr(watch_cli, "_sync", lambda client, path, prune, dry_run=False: 1)
         assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
+
+    def test_sync_failure_survives_names_that_acted(self, sweep_env, monkeypatch):
+        # Worst code across BOTH the sync and the per-name results: a name
+        # completing cleanly (0) must not mask a failed sync (1), and a failed
+        # audit (4) still outranks it.
+        monkeypatch.setattr(watch_cli, "_sync", lambda client, path, prune, dry_run=False: 1)
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 4
+
+    def test_rearm_failure_is_exit_1_after_a_completed_case(self, sweep_env, monkeypatch, capsys):
+        # The report and audit exist, but the row still names the consumed
+        # event and will never fire again: a scheduler must not see 0.
+        sweep_env.table["AAPL"] = "refuse"
+
+        def boom(watch, decision, submissions):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(watch_cli, "_rearm", boom)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 1
+        assert sweep_env.generate_auto == ["AAPL"]
+        assert "re-arm FAILED for AAPL" in capsys.readouterr().err
+
+    def test_overdue_waiting_name_is_named_without_verbose(self, sweep_env, monkeypatch, capsys):
+        # Rows print 2026-10-29; 30 days later with nothing filed the name is
+        # called out on stderr — a mis-armed row must not hide behind "waiting".
+        monkeypatch.setattr(
+            watch_cli, "_utcnow", lambda: watch_cli._now("2026-11-29T00:00:00+00:00"))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        err = capsys.readouterr().err
+        assert "AAPL: still waiting 30d past its print hint" in err
+        assert "expected period 2026-09-26" in err
+
+    def test_waiting_before_the_print_is_quiet(self, sweep_env, capsys):
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert "still waiting" not in capsys.readouterr().err
 
 
 class TestPortfolioSync:
@@ -698,8 +770,10 @@ class TestPollSweepExclusion:
         def boom(watch, decision, submissions):
             raise OSError("disk full")
         monkeypatch.setattr(watch_cli, "_rearm", boom)
-        assert watch_cli.cmd_poll(_poll_args()) == 0
-        assert poll_env.marked  # the case completed; only the re-arm failed
+        # No traceback, the case itself completed — but the row still names
+        # the consumed event, so the exit code says 1, not "all fine".
+        assert watch_cli.cmd_poll(_poll_args()) == 1
+        assert poll_env.marked
         assert "re-arm FAILED for NVDA" in capsys.readouterr().err
 
     def test_poll_treats_a_pruned_row_as_nothing_to_do(self, poll_env, monkeypatch):
@@ -726,8 +800,10 @@ class TestSweepRearmIsolation:
             if watch.ticker == "AAPL":
                 raise OSError("disk full")
             sweep_env.rearm.append((watch.ticker, decision.action))
+            return True
         monkeypatch.setattr(watch_cli, "_rearm", rearm)
-        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        # The pass reaches NVDA regardless; AAPL's stuck row makes the pass a 1.
+        assert watch_cli.cmd_sweep(_sweep_args()) == 1
         assert sweep_env.generate_auto == ["AAPL", "NVDA"]
         assert sweep_env.rearm == [("NVDA", "refuse")]
         assert "re-arm FAILED for AAPL" in capsys.readouterr().err
