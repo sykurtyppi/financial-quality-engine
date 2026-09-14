@@ -85,11 +85,12 @@ BRIEF_PENDING_RC = 5
 # Sweep aggregate: the worst code across names, by what it means rather than
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
-SEVERITY_ORDER = (1, 4, 2, 5, 3, 0)
+SEVERITY_ORDER = (1, 4, 2, 5, 0)
 
 
 def _worst(codes) -> int:
-    codes = set(codes)
+    """Worst sweep code by severity; 3 (still waiting) counts as 0."""
+    codes = {0 if c == 3 else c for c in codes}
     return next((c for c in SEVERITY_ORDER if c in codes), max(codes, default=0))
 AUTO_BANNER = (
     "> **AUTO-GENERATED AUDIT ARTIFACT** — no blind thesis was locked before "
