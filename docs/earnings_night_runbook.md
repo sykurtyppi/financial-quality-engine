@@ -102,7 +102,9 @@ the failure.
 Exit codes: `0` report generated, audited, and marked · `2` filing landed but
 no thesis (`--no-auto` only; act now) · `3` nothing yet (`--once` only) ·
 `4` report generated but the audit FAILED (journal not marked; retry) ·
-`1` gave up, EDGAR failed, or the watch has no event identity (re-`add` it).
+`5` case complete but the brief FAILED (queued; the next `sweep` retries it) ·
+`1` gave up, EDGAR failed, the watch has no event identity (re-`add` it), or
+the row could not be re-armed after a completed case.
 
 **4. After it generates — read, then fill AFTER**
 
