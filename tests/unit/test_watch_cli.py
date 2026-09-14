@@ -582,8 +582,9 @@ class TestSweep:
         monkeypatch.setattr(watch_cli, "_sync", lambda client, path, prune, dry_run=False: 1)
         sweep_env.table["AAPL"] = "refuse"
         assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
+        # ...and a setup failure (1) is ranked above a failed audit (4).
         monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
-        assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 4
+        assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
 
     def test_rearm_failure_is_exit_1_after_a_completed_case(self, sweep_env, monkeypatch, capsys):
         # The report and audit exist, but the row still names the consumed
@@ -774,7 +775,9 @@ class TestBriefHook:
         (watch_cli.BRIEF_PENDING / "AAPL").write_text(str(report))
 
         def boom(t, p):
-            raise OSError("Disk quota exceeded")
+            if t == "AAPL":  # the queued retry crashes; NVDA's own brief is fine
+                raise OSError("Disk quota exceeded")
+            return 0
         monkeypatch.setattr(watch_cli, "_run_brief", boom)
         sweep_env.table["NVDA"] = "refuse"
         assert watch_cli.cmd_sweep(_sweep_args()) == 5
