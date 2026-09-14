@@ -41,6 +41,24 @@ TRANSCRIPTS = ROOT / "journal" / "transcripts"
 
 MIN_EXHIBIT_WORDS = 100
 _NON_NARRATIVE_RE = re.compile(r"table|supplement|slide|presentation|infographic|deck", re.I)
+_LABEL_CHARS_RE = re.compile(r"[^\w.\-]+")
+_NAME_CHARS_RE = re.compile(r"[^\w .,&'\-]+")
+LABEL_MAX = 60
+
+
+def _safe_label(s: str, limit: int = LABEL_MAX) -> str:
+    """A filer-supplied string (exhibit filename, document type) reduced to a
+    token that can sit in the headless prompt. Anything the prompt says is
+    instruction-level text to the model; only the file CONTENTS are framed as
+    data. EDGAR accepts almost any filename, so a filer's naming must not be
+    able to write a sentence into the instructions."""
+    return _LABEL_CHARS_RE.sub("_", s).strip("_")[:limit] or "unnamed"
+
+
+def _safe_name(s: str, limit: int = LABEL_MAX) -> str:
+    """Company name for the prompt's first line: letters, digits and the
+    punctuation a registrant name carries; one line, bounded."""
+    return " ".join(_NAME_CHARS_RE.sub(" ", s).split())[:limit]
 
 
 def _narrative_ex99(client: SecClient, cik: int, accession: str) -> tuple[list, list]:
@@ -55,7 +73,7 @@ def _narrative_ex99(client: SecClient, cik: int, accession: str) -> tuple[list, 
     release read (by word count), rather than losing it to a filename.
     """
     ex99 = sorted(
-        (d for d in filing_documents(client, cik, accession)
+        (d for d in filing_documents(client, cik, accession, strict=True)
          if d.type.startswith("EX-99") and d.filename.lower().endswith((".htm", ".html"))),
         key=lambda d: (_ex99_sort_key(d.filename)[0], d.exhibit_no, d.sequence),
     )
@@ -131,7 +149,7 @@ def _release_text(client: SecClient, cik: int, filing: Filing) -> tuple[str, str
     for d in candidates:
         text = _clean(html_to_text(_fetch_archive(client, cik, filing.accession, d.filename)))
         if len(text.split()) >= MIN_EXHIBIT_WORDS:
-            return f"{d.type} {d.filename}", text
+            return f"{_safe_label(d.type)} {_safe_label(d.filename)}", text
     return None
 
 
@@ -156,38 +174,45 @@ def collect_sources(
     cik = client.resolve_cik(ticker)
     submissions = client.submissions_by_cik(cik)
     filing = latest_earnings_8k(submissions, accession)
-    company = str(submissions.get("name") or ticker)
+    company = _safe_name(str(submissions.get("name") or ticker)) or ticker
     workdir = (out_root or BRIEFS) / ticker / filing.filing_date.isoformat()
     workdir.mkdir(parents=True, exist_ok=True)
     src = BriefSources(ticker=ticker, filing=filing, company=company, workdir=workdir)
 
+    # A header fetch failure raises here (strict): "EDGAR unreachable" must
+    # never read as "no exhibits" and produce a release-less brief.
     ex99, skipped = _narrative_ex99(client, cik, filing.accession)
-    if not ex99:
-        src.diagnostics.append(
-            f"8-K {filing.accession}: no typed EX-99 exhibits found in the filing header"
-        )
-    elif all(_NON_NARRATIVE_RE.search(d.filename) for d in ex99):
+    if ex99 and all(_NON_NARRATIVE_RE.search(d.filename) for d in ex99):
         src.diagnostics.append(
             f"8-K {filing.accession}: every EX-99 exhibit is tables/slides-named "
-            f"({', '.join(d.filename for d in ex99)}) — reading them by word count; "
-            "check the release role is right")
+            f"({', '.join(_safe_label(d.filename) for d in ex99)}) — reading them by "
+            "word count; check the release role is right")
     for d in skipped:
         # A tables-named EX-99.1 never becomes the release when a better-named
         # exhibit exists — whatever EDGAR's numbering says.
-        src.diagnostics.append(f"{d.type} {d.filename}: tables/slides by name — skipped")
+        src.diagnostics.append(
+            f"{_safe_label(d.type)} {_safe_label(d.filename)}: tables/slides by name — skipped")
     release_done = False
     for d in ex99:
         text = _clean(html_to_text(_fetch_archive(client, cik, filing.accession, d.filename)))
         words = len(text.split())
+        dtype, dname = _safe_label(d.type), _safe_label(d.filename)
         if words < MIN_EXHIBIT_WORDS:
-            src.diagnostics.append(f"{d.type} {d.filename}: {words} words — skipped as non-narrative")
+            src.diagnostics.append(f"{dtype} {dname}: {words} words — skipped as non-narrative")
             continue
         role = "release" if not release_done else "exhibit"
-        out = workdir / (f"release_{d.type.replace('.', '_')}.txt" if role == "release"
-                         else f"exhibit_{d.type.replace('.', '_')}.txt")
+        out = workdir / (f"release_{dtype.replace('.', '_')}.txt" if role == "release"
+                         else f"exhibit_{dtype.replace('.', '_')}.txt")
         out.write_text(text)
-        src.files.append(SourceFile(role, out, f"{d.type} {d.filename} ({words} words)"))
+        src.files.append(SourceFile(role, out, f"{dtype} {dname} ({words} words)"))
         release_done = True
+    if not release_done:
+        # The release is what the brief IS. Without it the run would still
+        # produce a plausible page (report + audit + "UNAVAILABLE"), which
+        # unattended is worse than no page: fail, keep the marker, retry.
+        why = ("no typed EX-99 html exhibit in the filing header" if not ex99
+               else "every EX-99 exhibit is under the narrative word floor")
+        raise BriefSourceError(f"8-K {filing.accession}: {why} — no release to brief")
 
     prior = prior_earnings_8k(submissions, filing)
     if prior is not None:
@@ -220,7 +245,8 @@ def collect_sources(
             raise BriefSourceError(f"transcript not found: {transcript}")
         out = workdir / "transcript.txt"
         out.write_text(transcript.read_text(errors="replace"))
-        src.files.append(SourceFile("transcript", out, f"call transcript ({transcript.name})"))
+        src.files.append(SourceFile(
+            "transcript", out, f"call transcript ({_safe_label(transcript.name)})"))
     else:
         src.diagnostics.append(
             "no call transcript supplied — call section will be UNAVAILABLE "
@@ -235,8 +261,9 @@ def collect_sources(
 
 def find_transcript(ticker: str, event_day: date, root: Path | None = None) -> Path | None:
     """Operator-dropped transcript: journal/transcripts/<TICKER>/<YYYY-MM-DD>.txt
-    for the print's date, else the newest file in that folder dated on/after
-    the print (a transcript is posted after the call, never before)."""
+    for the print's date, else the EARLIEST file in that folder dated on/after
+    the print — the one closest to this call, never next quarter's (a
+    transcript is posted after the call, never before)."""
     folder = (root or TRANSCRIPTS) / safe_ticker(ticker)
     if not folder.is_dir():
         return None

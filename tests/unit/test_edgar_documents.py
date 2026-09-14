@@ -2,6 +2,8 @@
 best-effort section extraction, including the traps found on real filings
 (TOC hits, Unicode apostrophes, in-prose item cross-references)."""
 
+import pytest
+
 from app.schemas.financials import DocumentType
 from app.services.ingestion.edgar_documents import extract_section, html_to_text
 
@@ -378,6 +380,14 @@ class TestTypedExhibitLookup:
             "q2fy27cfocommentary.htm", "ex992-earnings-release.htm")
         self._patch_fetch(monkeypatch, header)
         assert _find_ex99(self._Client(), 1, "acc")[0] == "ex992-earnings-release.htm"
+
+    def test_filing_documents_strict_raises_where_default_returns_empty(self, monkeypatch):
+        from app.services.ingestion import edgar_documents as ed
+
+        self._patch_fetch(monkeypatch, None)
+        assert ed.filing_documents(self._Client(), 1, "acc") == []
+        with pytest.raises(ed.SecClientError):
+            ed.filing_documents(self._Client(), 1, "acc", strict=True)
 
     def test_find_ex99_falls_back_to_filename_heuristics_without_header(self, monkeypatch):
         from app.services.ingestion.edgar_documents import _find_ex99

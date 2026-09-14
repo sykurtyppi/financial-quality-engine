@@ -265,12 +265,21 @@ def parse_index_headers(text: str) -> list[FilingDoc]:
     return out
 
 
-def filing_documents(client: SecClient, cik: int, accession: str) -> list[FilingDoc]:
-    """Typed document list for a filing; empty when the header cannot be
-    fetched or parsed (callers fall back to filename heuristics)."""
+def filing_documents(
+    client: SecClient, cik: int, accession: str, *, strict: bool = False
+) -> list[FilingDoc]:
+    """Typed document list for a filing.
+
+    Default: empty when the header cannot be fetched — for callers with a
+    filename-heuristic fallback (`_find_ex99`). `strict=True` lets the fetch
+    failure propagate instead: a caller with NO fallback (the earnings brief)
+    must not confuse "EDGAR was unreachable" with "this filer has no EX-99",
+    or it ships a brief with the release silently missing."""
     try:
         raw = _fetch_archive(client, cik, accession, f"{accession}-index-headers.html")
-    except Exception:  # noqa: BLE001 — best-effort; the caller has a fallback
+    except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
     return parse_index_headers(raw)
 

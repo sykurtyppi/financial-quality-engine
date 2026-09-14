@@ -187,7 +187,11 @@ Per pass, in order:
    and locked, the bannered `reports/auto/` track otherwise; the audit runs
    on both (same exit codes as `poll`), and after a successful audit the
    one-page **earnings brief** is written (`scripts/earnings_brief.py`; see
-   below). A failed brief is a warning, never a failed case.
+   below). A failed brief does not un-complete the case (the row is still
+   re-armed) but it is not forgotten: the name exits 5, the failure is queued
+   under `reports/briefs/.pending/`, and every later pass retries it first —
+   so a season-long fault (no CLI on the scheduler's PATH, an expired login)
+   shows up as a run of 5s, never as a quiet season without briefs.
 4. **Re-arm** — once an event completes (exit 0 on either track, or a skip),
    the row is rewritten for the NEXT quarter from the issuer's history: new
    baseline accession (the filing just consumed), next expected period, next

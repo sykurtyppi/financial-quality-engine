@@ -33,6 +33,9 @@ Exit codes (for cron/alerting):
     3  still waiting: no qualifying filing yet (normal for a `--once` poll)
     4  report generated but the audit FAILED — the report is kept for
        diagnosis, the journal entry is NOT marked reported (retryable)
+    5  case completed (report, audit, mark, re-arm) but the BRIEF failed —
+       queued under reports/briefs/.pending/ and retried by every later
+       sweep pass until it succeeds; the print is never silently brief-less
     `due` returns 1 when a watched name still needs a thesis: that is the alert.
     A completed event whose RE-ARM failed also returns 1: the report exists,
     but the row still names the consumed event and will never fire again
@@ -75,6 +78,8 @@ POLITE_INTERVAL_S = 300
 AUTO_DIR = ROOT / "reports" / "auto"
 PORTFOLIO = ROOT / "journal" / "portfolio.txt"
 SWEEP_LOCK = ROOT / "journal" / "sweep.lock"
+BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"  # <TICKER> -> report path
+BRIEF_PENDING_RC = 5
 AUTO_BANNER = (
     "> **AUTO-GENERATED AUDIT ARTIFACT** — no blind thesis was locked before "
     "this print; this report is NOT journal evidence (journal/JOURNAL.md "
@@ -210,16 +215,44 @@ def _run_audit(report: Path) -> int:
 def _run_brief(ticker: str, report: Path) -> int:
     """One-page earnings brief (scripts/earnings_brief.py) over the release,
     the call transcript if one was dropped in, and this report + audit.
-    Best-effort: the report and audit already exist, so a failed brief is a
-    warning, not a failed case — re-run `earnings_brief.py build` by hand."""
+
+    The report and audit already exist, so a failed brief does not un-complete
+    the case (the row is still re-armed). But it is not just a warning either:
+    the failure is QUEUED (reports/briefs/.pending/<TICKER> names the report)
+    and every later sweep pass retries it first, so a season-long fault — the
+    CLI missing from a scheduler's PATH, an expired login — cannot quietly
+    leave every print brief-less behind a green exit code."""
     cmd = [sys.executable, str(ROOT / "scripts" / "earnings_brief.py"), "build", ticker,
            "--report", str(report)]
     print(f"  -> {' '.join(cmd[1:])}")
     rc = subprocess.run(cmd, cwd=ROOT).returncode
+    marker = BRIEF_PENDING / ticker
     if rc != 0:
-        print(f"  brief FAILED (exit {rc}) — report and audit are unaffected; re-run "
-              f"`earnings_brief.py build {ticker}` later.", file=sys.stderr)
+        BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{report}\n")
+        print(f"  brief FAILED (exit {rc}) — report and audit are unaffected; queued at "
+              f"{marker} and retried on the next sweep pass (or run "
+              f"`earnings_brief.py build {ticker} --report {report}` by hand).",
+              file=sys.stderr)
+    elif marker.exists():
+        marker.unlink()
     return rc
+
+
+def _retry_pending_brief(ticker: str) -> int:
+    """Re-run a brief queued by an earlier failure. 0 when nothing is queued
+    or the retry succeeded; BRIEF_PENDING_RC when it failed again."""
+    marker = BRIEF_PENDING / ticker
+    if not marker.is_file():
+        return 0
+    report = Path(marker.read_text().strip())
+    if not report.is_file():
+        print(f"  {ticker}: queued brief names a report that no longer exists "
+              f"({report}) — dropping the queue entry.", file=sys.stderr)
+        marker.unlink()
+        return 0
+    print(f"  {ticker}: retrying the queued brief for {report.name}")
+    return BRIEF_PENDING_RC if _run_brief(ticker, report) != 0 else 0
 
 
 def _pin_for_adhoc(ticker: str, entry_day: str | None) -> tuple[str, str] | None:
@@ -270,9 +303,11 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
                   f"`run_audit.py {report}` then "
                   f"`journal.py mark-reported {ticker}`.", file=sys.stderr)
             return 4
+        brief_rc = 0
         if not getattr(args, "no_brief", False):
-            _run_brief(ticker, report)
-        return _mark_reported(ticker, entry_day)
+            brief_rc = _run_brief(ticker, report)
+        rc = _mark_reported(ticker, entry_day)
+        return rc if rc != 0 else (BRIEF_PENDING_RC if brief_rc != 0 else 0)
     if decision.action == "skip":
         return 0
     if decision.action == "refuse":
@@ -293,8 +328,8 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
                 print(f"  audit FAILED (exit {arc}); auto-report kept at "
                       f"{report}.", file=sys.stderr)
                 return 4
-            if not getattr(args, "no_brief", False):
-                _run_brief(ticker, report)
+            if not getattr(args, "no_brief", False) and _run_brief(ticker, report) != 0:
+                return BRIEF_PENDING_RC
         return 0
     print(f"  unknown decision {decision.action!r}", file=sys.stderr)
     return 1
@@ -340,7 +375,12 @@ def _rearm_guarded(watch: wl.Watch, decision, submissions: dict) -> bool:
 
 
 def _completed(decision, rc: int) -> bool:
-    return decision.action == "skip" or (decision.action in ("generate", "refuse") and rc == 0)
+    """Did this event finish, so the row should be re-armed? A queued brief
+    (5) is complete — the report and audit exist, the brief is retried on
+    its own — a failed audit (4) is not."""
+    return decision.action == "skip" or (
+        decision.action in ("generate", "refuse") and rc in (0, BRIEF_PENDING_RC)
+    )
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
@@ -454,6 +494,9 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     a sweep must reach every name even when one of them fails."""
     now = _utcnow()
     stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
+    pending = 0
+    if not args.dry_run and not getattr(args, "no_brief", False):
+        pending = _retry_pending_brief(watch.ticker)
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -474,7 +517,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
                   file=sys.stderr)
         elif args.verbose:
             print(f"[{stamp}] {decision.message}")
-        return 3
+        return pending or 3
     print(f"[{stamp}] {decision.action} — {decision.message}")
     try:
         rc = _act(watch.ticker, watch, decision, args)
@@ -484,7 +527,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     if not args.dry_run and _completed(decision, rc):
         if not _rearm_guarded(watch, decision, submissions):
             return max(rc, 1)
-    return rc
+    return rc if rc not in (0, 3) else (pending or rc)
 
 
 LOCK_RETRY_S = 0.5
