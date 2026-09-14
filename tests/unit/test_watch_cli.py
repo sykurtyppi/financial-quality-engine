@@ -765,6 +765,34 @@ class TestBriefHook:
         assert watch_cli.cmd_sweep(_sweep_args(dry_run=True)) == 0
         assert watch_cli.cmd_sweep(_sweep_args(no_brief=True)) == 0
 
+    def test_queued_brief_retry_crash_is_contained(self, sweep_env, monkeypatch, tmp_path, capsys):
+        # The retry runs before the per-name try block; a disk error there
+        # must not abort the pass for every name after it.
+        report = tmp_path / "AAPL_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli.BRIEF_PENDING.mkdir()
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text(str(report))
+
+        def boom(t, p):
+            raise OSError("Disk quota exceeded")
+        monkeypatch.setattr(watch_cli, "_run_brief", boom)
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert sweep_env.generate_auto == ["NVDA"]  # the pass reached NVDA
+        assert "queued brief retry crashed" in capsys.readouterr().err
+
+    def test_sweep_aggregate_ranks_by_severity_not_number(self, sweep_env, monkeypatch, tmp_path):
+        # AAPL's audit fails (4) while MSFT's brief is queued (5): the pass
+        # says 4 — an audit failure is the louder problem.
+        sweep_env.table.update({"AAPL": "refuse", "MSFT": "refuse"})
+        audits = iter([7, 0])  # AAPL's audit fails, MSFT's succeeds
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: next(audits))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 4
+        assert watch_cli._worst([0, 5]) == 5 and watch_cli._worst([5, 2]) == 2
+        assert watch_cli._worst([2, 4, 5]) == 4 and watch_cli._worst([4, 1]) == 1
+        assert watch_cli._worst([3, 0]) == 0 and watch_cli._worst([]) == 0
+
     def test_queued_brief_does_not_mask_a_failed_audit(self, sweep_env, monkeypatch, tmp_path):
         report = tmp_path / "AAPL_2026-09-01.md"
         report.write_text("# r")

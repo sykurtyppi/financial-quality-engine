@@ -40,8 +40,10 @@ Exit codes (for cron/alerting):
     A completed event whose RE-ARM failed also returns 1: the report exists,
     but the row still names the consumed event and will never fire again
     until it is re-`add`ed — a scheduler must see that.
-    `sweep` returns the worst per-name code, except that 3 (waiting) is 0 and
-    a sweep already running elsewhere is 0 (it just yields). A name still
+    `sweep` returns the worst per-name code — worst by severity, not by
+    number: 1 (setup/EDGAR) > 4 (audit failed) > 2 (refused) > 5 (brief
+    queued) > 0 — except that 3 (waiting) is 0 and a sweep already running
+    elsewhere is 0 (it just yields). A name still
     waiting more than OVERDUE_DAYS past its print hint is named on stderr on
     every pass, --verbose or not: "waiting" must not hide a mis-armed row.
 """
@@ -80,6 +82,15 @@ PORTFOLIO = ROOT / "journal" / "portfolio.txt"
 SWEEP_LOCK = ROOT / "journal" / "sweep.lock"
 BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"  # <TICKER> -> report path
 BRIEF_PENDING_RC = 5
+# Sweep aggregate: the worst code across names, by what it means rather than
+# by its number — a queued brief (5) must never outrank a failed audit (4) on
+# another name, or an alert keyed on the exit code would miss the audit.
+SEVERITY_ORDER = (1, 4, 2, 5, 3, 0)
+
+
+def _worst(codes) -> int:
+    codes = set(codes)
+    return next((c for c in SEVERITY_ORDER if c in codes), max(codes, default=0))
 AUTO_BANNER = (
     "> **AUTO-GENERATED AUDIT ARTIFACT** — no blind thesis was locked before "
     "this print; this report is NOT journal evidence (journal/JOURNAL.md "
@@ -496,7 +507,12 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     pending = 0
     if not args.dry_run and not getattr(args, "no_brief", False):
-        pending = _retry_pending_brief(watch.ticker)
+        try:
+            pending = _retry_pending_brief(watch.ticker)
+        except Exception as e:  # noqa: BLE001 — the queue must not take the pass down
+            print(f"[{stamp}] {watch.ticker}: queued brief retry crashed: "
+                  f"{type(e).__name__}: {e} — still queued.", file=sys.stderr)
+            pending = BRIEF_PENDING_RC
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -600,7 +616,7 @@ def _sweep_locked(args: argparse.Namespace) -> int:
     waiting = len(results) - len(acted)
     print(f"sweep: {len(results)} watched, {waiting} waiting"
           + (", " + ", ".join(f"{t} -> {rc}" for t, rc in acted.items()) if acted else ""))
-    return max([worst, *acted.values()]) if acted else worst
+    return _worst([worst, *acted.values()])
 
 
 def _arm(
