@@ -269,12 +269,37 @@ def update_entry(ticker: str, updates: dict, path: Path | None = None) -> Watch:
         )
         if row is None:
             raise WatchlistError(f"{t} is not on the watchlist ({p})")
-        merged = {**row, **updates}
+        # None clears a field (re-arming drops the spent pin and label);
+        # the row never persists explicit nulls.
+        merged = {k: v for k, v in {**row, **updates}.items() if v is not None}
         watch = parse_watch(merged)  # validate before touching the file
         row.clear()
         row.update(merged)
         _atomic_write(p, data)
     return watch
+
+
+def remove_entry(ticker: str, path: Path | None = None) -> None:
+    """Drop the row for ``ticker``. Unknown tickers raise, so a prune that
+    thinks it removed something it did not is impossible."""
+    p = path or WATCHLIST
+    if not p.exists():
+        raise WatchlistError(f"{p}: no watchlist to update")
+    with _write_lock(p):
+        try:
+            data = json.loads(p.read_text())
+        except json.JSONDecodeError as e:
+            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+        if isinstance(data, list):
+            data = {"watchlist": data}
+        items = data.setdefault("watchlist", [])
+        t = store.safe_ticker(ticker)
+        keep = [it for it in items
+                if not (isinstance(it, dict) and str(it.get("ticker", "")).upper() == t)]
+        if len(keep) == len(items):
+            raise WatchlistError(f"{t} is not on the watchlist ({p})")
+        data["watchlist"] = keep
+        _atomic_write(p, data)
 
 
 def due(watches: list[Watch], within_hours: float, now: datetime | None = None) -> list[Watch]:

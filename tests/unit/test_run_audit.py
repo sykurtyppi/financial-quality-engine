@@ -43,6 +43,21 @@ def test_success_writes_stdout_next_to_report(tmp_path, monkeypatch):
     assert (tmp_path / "KTOS_2026-07-31_audit.md").read_text() == "AUDIT TEXT"
 
 
+def test_invokes_the_resolved_cli_path_not_a_bare_name(tmp_path, monkeypatch):
+    report = tmp_path / "KTOS_2026-07-31.md"
+    report.write_text("# report")
+    seen = {}
+    monkeypatch.setenv("CLAUDE_BIN", "/opt/claude/bin/claude")
+
+    def run(argv, **k):
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout="AUDIT", stderr="")
+
+    monkeypatch.setattr(run_audit.subprocess, "run", run)
+    assert run_audit.run_audit(report) == 0
+    assert seen["argv"][:2] == ["/opt/claude/bin/claude", "-p"]
+
+
 def test_nonzero_exit_fails_without_writing(tmp_path, monkeypatch):
     report = tmp_path / "KTOS_2026-07-31.md"
     report.write_text("# report")

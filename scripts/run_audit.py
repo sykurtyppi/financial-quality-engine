@@ -23,6 +23,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from app.services.headless import claude_command  # noqa: E402
 
 DEFAULT_TIMEOUT_S = 1800.0
 
@@ -51,12 +54,12 @@ def run_audit(report_path: Path, timeout: float = DEFAULT_TIMEOUT_S) -> int:
     prompt = build_prompt(ticker, report_path)
     try:
         proc = subprocess.run(
-            ["claude", "-p", prompt],
+            [claude_command(), "-p", prompt],
             capture_output=True, text=True, timeout=timeout, cwd=ROOT,
         )
     except FileNotFoundError:
-        print("`claude` CLI not found on PATH — cannot run the headless audit.",
-              file=sys.stderr)
+        print(f"Claude CLI not found at {claude_command()!r} — set CLAUDE_BIN or put "
+              "`claude` on PATH; cannot run the headless audit.", file=sys.stderr)
         return 1
     except subprocess.TimeoutExpired:
         print(f"Audit timed out after {timeout / 60:.0f} min.", file=sys.stderr)
