@@ -11,8 +11,8 @@
     EDGAR_IDENTITY="Name email" scripts/watch.py poll NVDA
 
     # hands-off: one pass over every watched name (cron this hourly). Adds
-    # anything new in journal/portfolio.txt first, generates + audits whatever
-    # has filed, and re-arms each name for its next quarter.
+    # anything new in journal/portfolio.txt first, generates + audits + briefs
+    # whatever has filed, and re-arms each name for its next quarter.
     EDGAR_IDENTITY="Name email" scripts/watch.py sweep --portfolio journal/portfolio.txt
 
 The poller will NOT generate a *journal* report for a name without a locked
@@ -33,12 +33,17 @@ Exit codes (for cron/alerting):
     3  still waiting: no qualifying filing yet (normal for a `--once` poll)
     4  report generated but the audit FAILED — the report is kept for
        diagnosis, the journal entry is NOT marked reported (retryable)
+    5  case completed (report, audit, mark, re-arm) but the BRIEF failed —
+       queued under reports/briefs/.pending/ and retried by every later
+       sweep pass until it succeeds; the print is never silently brief-less
     `due` returns 1 when a watched name still needs a thesis: that is the alert.
     A completed event whose RE-ARM failed also returns 1: the report exists,
     but the row still names the consumed event and will never fire again
     until it is re-`add`ed — a scheduler must see that.
-    `sweep` returns the worst per-name code, except that 3 (waiting) is 0 and
-    a sweep already running elsewhere is 0 (it just yields). A name still
+    `sweep` returns the worst per-name code — worst by severity, not by
+    number: 1 (setup/EDGAR) > 4 (audit failed) > 2 (refused) > 5 (brief
+    queued) > 0 — except that 3 (waiting) is 0 and a sweep already running
+    elsewhere is 0 (it just yields). A name still
     waiting more than OVERDUE_DAYS past its print hint is named on stderr on
     every pass, --verbose or not: "waiting" must not hide a mis-armed row.
 """
@@ -75,6 +80,18 @@ POLITE_INTERVAL_S = 300
 AUTO_DIR = ROOT / "reports" / "auto"
 PORTFOLIO = ROOT / "journal" / "portfolio.txt"
 SWEEP_LOCK = ROOT / "journal" / "sweep.lock"
+BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"  # <TICKER> -> report path
+BRIEF_PENDING_RC = 5
+# Sweep aggregate: the worst code across names, by what it means rather than
+# by its number — a queued brief (5) must never outrank a failed audit (4) on
+# another name, or an alert keyed on the exit code would miss the audit.
+SEVERITY_ORDER = (1, 4, 2, 5, 0)
+
+
+def _worst(codes) -> int:
+    """Worst sweep code by severity; 3 (still waiting) counts as 0."""
+    codes = {0 if c == 3 else c for c in codes}
+    return next((c for c in SEVERITY_ORDER if c in codes), max(codes, default=0))
 AUTO_BANNER = (
     "> **AUTO-GENERATED AUDIT ARTIFACT** — no blind thesis was locked before "
     "this print; this report is NOT journal evidence (journal/JOURNAL.md "
@@ -207,6 +224,49 @@ def _run_audit(report: Path) -> int:
     return subprocess.run(cmd, cwd=ROOT).returncode
 
 
+def _run_brief(ticker: str, report: Path) -> int:
+    """One-page earnings brief (scripts/earnings_brief.py) over the release,
+    the call transcript if one was dropped in, and this report + audit.
+
+    The report and audit already exist, so a failed brief does not un-complete
+    the case (the row is still re-armed). But it is not just a warning either:
+    the failure is QUEUED (reports/briefs/.pending/<TICKER> names the report)
+    and every later sweep pass retries it first, so a season-long fault — the
+    CLI missing from a scheduler's PATH, an expired login — cannot quietly
+    leave every print brief-less behind a green exit code."""
+    cmd = [sys.executable, str(ROOT / "scripts" / "earnings_brief.py"), "build", ticker,
+           "--report", str(report)]
+    print(f"  -> {' '.join(cmd[1:])}")
+    rc = subprocess.run(cmd, cwd=ROOT).returncode
+    marker = BRIEF_PENDING / ticker
+    if rc != 0:
+        BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{report}\n")
+        print(f"  brief FAILED (exit {rc}) — report and audit are unaffected; queued at "
+              f"{marker} and retried on the next sweep pass (or run "
+              f"`earnings_brief.py build {ticker} --report {report}` by hand).",
+              file=sys.stderr)
+    elif marker.exists():
+        marker.unlink()
+    return rc
+
+
+def _retry_pending_brief(ticker: str) -> int:
+    """Re-run a brief queued by an earlier failure. 0 when nothing is queued
+    or the retry succeeded; BRIEF_PENDING_RC when it failed again."""
+    marker = BRIEF_PENDING / ticker
+    if not marker.is_file():
+        return 0
+    report = Path(marker.read_text().strip())
+    if not report.is_file():
+        print(f"  {ticker}: queued brief names a report that no longer exists "
+              f"({report}) — dropping the queue entry.", file=sys.stderr)
+        marker.unlink()
+        return 0
+    print(f"  {ticker}: retrying the queued brief for {report.name}")
+    return BRIEF_PENDING_RC if _run_brief(ticker, report) != 0 else 0
+
+
 def _pin_for_adhoc(ticker: str, entry_day: str | None) -> tuple[str, str] | None:
     """For an ad-hoc (--since) poll: pin the journal entry explicitly named by
     --entry-day. Returns (day, before_sha256) or None. Never guesses "latest
@@ -255,7 +315,11 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
                   f"`run_audit.py {report}` then "
                   f"`journal.py mark-reported {ticker}`.", file=sys.stderr)
             return 4
-        return _mark_reported(ticker, entry_day)
+        brief_rc = 0
+        if not getattr(args, "no_brief", False):
+            brief_rc = _run_brief(ticker, report)
+        rc = _mark_reported(ticker, entry_day)
+        return rc if rc != 0 else (BRIEF_PENDING_RC if brief_rc != 0 else 0)
     if decision.action == "skip":
         return 0
     if decision.action == "refuse":
@@ -276,6 +340,8 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
                 print(f"  audit FAILED (exit {arc}); auto-report kept at "
                       f"{report}.", file=sys.stderr)
                 return 4
+            if not getattr(args, "no_brief", False) and _run_brief(ticker, report) != 0:
+                return BRIEF_PENDING_RC
         return 0
     print(f"  unknown decision {decision.action!r}", file=sys.stderr)
     return 1
@@ -321,7 +387,12 @@ def _rearm_guarded(watch: wl.Watch, decision, submissions: dict) -> bool:
 
 
 def _completed(decision, rc: int) -> bool:
-    return decision.action == "skip" or (decision.action in ("generate", "refuse") and rc == 0)
+    """Did this event finish, so the row should be re-armed? A queued brief
+    (5) is complete — the report and audit exist, the brief is retried on
+    its own — a failed audit (4) is not."""
+    return decision.action == "skip" or (
+        decision.action in ("generate", "refuse") and rc in (0, BRIEF_PENDING_RC)
+    )
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
@@ -435,6 +506,14 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     a sweep must reach every name even when one of them fails."""
     now = _utcnow()
     stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
+    pending = 0
+    if not args.dry_run and not getattr(args, "no_brief", False):
+        try:
+            pending = _retry_pending_brief(watch.ticker)
+        except Exception as e:  # noqa: BLE001 — the queue must not take the pass down
+            print(f"[{stamp}] {watch.ticker}: queued brief retry crashed: "
+                  f"{type(e).__name__}: {e} — still queued.", file=sys.stderr)
+            pending = BRIEF_PENDING_RC
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -455,7 +534,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
                   file=sys.stderr)
         elif args.verbose:
             print(f"[{stamp}] {decision.message}")
-        return 3
+        return pending or 3
     print(f"[{stamp}] {decision.action} — {decision.message}")
     try:
         rc = _act(watch.ticker, watch, decision, args)
@@ -465,7 +544,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     if not args.dry_run and _completed(decision, rc):
         if not _rearm_guarded(watch, decision, submissions):
             return max(rc, 1)
-    return rc
+    return rc if rc not in (0, 3) else (pending or rc)
 
 
 LOCK_RETRY_S = 0.5
@@ -538,7 +617,7 @@ def _sweep_locked(args: argparse.Namespace) -> int:
     waiting = len(results) - len(acted)
     print(f"sweep: {len(results)} watched, {waiting} waiting"
           + (", " + ", ".join(f"{t} -> {rc}" for t, rc in acted.items()) if acted else ""))
-    return max([worst, *acted.values()]) if acted else worst
+    return _worst([worst, *acted.values()])
 
 
 def _arm(
@@ -805,6 +884,8 @@ def main() -> int:
                              "the bannered reports/auto/ artifact when no thesis is locked")
     p_poll.add_argument("--no-audit", action="store_true",
                         help="skip the headless earnings-audit run after generation")
+    p_poll.add_argument("--no-brief", action="store_true",
+                        help="skip the one-page earnings brief after a successful audit")
     p_poll.add_argument("--force", action="store_true",
                         help="with --since on an armed watch: accept a filing that "
                              "does not match the watch's expected report period")
@@ -832,6 +913,8 @@ def main() -> int:
                       help="strict journal mode: refuse (2) instead of the reports/auto/ artifact")
     p_sw.add_argument("--no-audit", action="store_true",
                       help="skip the headless earnings-audit run after generation")
+    p_sw.add_argument("--no-brief", action="store_true",
+                      help="skip the one-page earnings brief after a successful audit")
     p_sw.add_argument("--verbose", action="store_true", help="also print names still waiting")
     p_sw.set_defaults(fn=cmd_sweep)
 

@@ -28,6 +28,7 @@ def _poll_args(**over) -> Namespace:
     base = dict(
         ticker="NVDA", since=None, entry_day=None, interval=0.01, max_wait=1.0,
         once=True, dry_run=False, no_docs=False, no_auto=False, no_audit=False,
+        no_brief=False,
     )
     base.update(over)
     return Namespace(**base)
@@ -50,6 +51,7 @@ def poll_env(monkeypatch, tmp_path):
     calls = SimpleNamespace(generate=[], generate_auto=[], audit=[], marked=[], rearm=[])
     monkeypatch.setattr(watch_cli, "SecClient", _FakeClient)
     monkeypatch.setattr(watch_cli, "SWEEP_LOCK", tmp_path / "sweep.lock")  # never the real one
+    monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")  # nor the real queue
     # Re-arming persists to the watchlist; never let a unit test touch the
     # real journal/watchlist.json.
     monkeypatch.setattr(
@@ -85,6 +87,8 @@ def poll_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         watch_cli, "_latest_report", lambda t, d: Path("/tmp/fake_journal.md")
     )
+    calls.brief = []
+    monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: calls.brief.append((t, p)) or 0)
     return calls
 
 
@@ -469,7 +473,7 @@ class TestRearmPersistence:
 
 def _sweep_args(**over) -> Namespace:
     base = dict(portfolio=None, prune=False, dry_run=False, no_docs=False,
-                no_auto=False, no_audit=False, verbose=False)
+                no_auto=False, no_audit=False, no_brief=False, verbose=False)
     base.update(over)
     return Namespace(**base)
 
@@ -578,8 +582,9 @@ class TestSweep:
         monkeypatch.setattr(watch_cli, "_sync", lambda client, path, prune, dry_run=False: 1)
         sweep_env.table["AAPL"] = "refuse"
         assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
+        # ...and a setup failure (1) is ranked above a failed audit (4).
         monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
-        assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 4
+        assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
 
     def test_rearm_failure_is_exit_1_after_a_completed_case(self, sweep_env, monkeypatch, capsys):
         # The report and audit exist, but the row still names the consumed
@@ -661,6 +666,145 @@ class TestPortfolioSync:
         assert rc == 1
         assert sync_env.armed == ["NVDA"]
         assert "AMKR NOT added" in capsys.readouterr().err
+
+
+class TestBriefHook:
+    def test_brief_runs_after_a_successful_audit_on_both_tracks(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.brief == [("NVDA", Path("/tmp/fake_journal.md"))]
+        _force_decision(monkeypatch, "refuse")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert poll_env.brief[-1] == ("NVDA", Path("/tmp/fake_auto.md"))
+
+    def test_brief_skipped_without_audit_or_with_no_brief(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        assert watch_cli.cmd_poll(_poll_args(no_audit=True)) == 0
+        assert watch_cli.cmd_poll(_poll_args(no_brief=True)) == 0
+        assert poll_env.brief == []
+
+    def test_brief_not_run_after_a_failed_audit(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "refuse")
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        assert watch_cli.cmd_poll(_poll_args()) == 4
+        assert poll_env.brief == []
+
+    def test_brief_failure_is_exit_5_but_the_case_still_completes(self, poll_env, monkeypatch):
+        # Report, audit, mark and re-arm all happen; only the brief is queued.
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
+        _force_decision(monkeypatch, "generate")
+        assert watch_cli.cmd_poll(_poll_args()) == 5
+        assert poll_env.marked and poll_env.rearm == [("NVDA", "generate")]
+        _force_decision(monkeypatch, "refuse")
+        assert watch_cli.cmd_poll(_poll_args()) == 5
+        assert poll_env.rearm[-1] == ("NVDA", "refuse")
+
+    def test_mark_failure_outranks_a_queued_brief(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
+        monkeypatch.setattr(watch_cli, "_mark_reported", lambda t, day: 1)
+        assert watch_cli.cmd_poll(_poll_args()) == 1
+        assert poll_env.rearm == []  # not completed
+
+    def test_run_brief_queues_on_failure_and_clears_on_success(self, monkeypatch, tmp_path, capsys):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        report = tmp_path / "NVDA_2026-09-01.md"
+        report.write_text("# r")
+        rcs = iter([2, 0])
+        seen = []
+        monkeypatch.setattr(watch_cli.subprocess, "run",
+                            lambda cmd, **k: seen.append(cmd) or SimpleNamespace(returncode=next(rcs)))
+        assert watch_cli._run_brief("NVDA", report) == 2
+        marker = tmp_path / "pending" / "NVDA"
+        assert marker.read_text().strip() == str(report)
+        assert "queued at" in capsys.readouterr().err
+        assert seen[0][1:] == [str(watch_cli.ROOT / "scripts" / "earnings_brief.py"),
+                               "build", "NVDA", "--report", str(report)]
+        assert watch_cli._run_brief("NVDA", report) == 0
+        assert not marker.exists()
+
+    def test_retry_pending_brief(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        assert watch_cli._retry_pending_brief("NVDA") == 0  # nothing queued
+        report = tmp_path / "NVDA_2026-09-01.md"
+        report.write_text("# r")
+        (tmp_path / "pending").mkdir()
+        marker = tmp_path / "pending" / "NVDA"
+        marker.write_text(f"{report}\n")
+        ran = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: ran.append((t, p)) or 2)
+        assert watch_cli._retry_pending_brief("NVDA") == 5
+        assert ran == [("NVDA", report)]
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 0)
+        assert watch_cli._retry_pending_brief("NVDA") == 0
+        # A queue entry whose report vanished is dropped, not retried forever.
+        marker.write_text(str(tmp_path / "gone.md"))
+        assert watch_cli._retry_pending_brief("NVDA") == 0
+        assert not marker.exists()
+        assert "no longer exists" in capsys.readouterr().err
+
+    def test_sweep_retries_queued_briefs_before_deciding(self, sweep_env, monkeypatch, tmp_path, capsys):
+        report = tmp_path / "AAPL_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli.BRIEF_PENDING.mkdir()
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text(str(report))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)  # still failing
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5  # AAPL waiting, but its brief is still queued
+        assert "AAPL -> 5" in capsys.readouterr().out
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 0)  # fixed (login restored)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+
+    def test_sweep_dry_run_and_no_brief_leave_the_queue_alone(self, sweep_env, monkeypatch, tmp_path):
+        report = tmp_path / "AAPL_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli.BRIEF_PENDING.mkdir()
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text(str(report))
+        monkeypatch.setattr(watch_cli, "_run_brief",
+                            lambda t, p: pytest.fail("must not retry"))
+        assert watch_cli.cmd_sweep(_sweep_args(dry_run=True)) == 0
+        assert watch_cli.cmd_sweep(_sweep_args(no_brief=True)) == 0
+
+    def test_queued_brief_retry_crash_is_contained(self, sweep_env, monkeypatch, tmp_path, capsys):
+        # The retry runs before the per-name try block; a disk error there
+        # must not abort the pass for every name after it.
+        report = tmp_path / "AAPL_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli.BRIEF_PENDING.mkdir()
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text(str(report))
+
+        def boom(t, p):
+            if t == "AAPL":  # the queued retry crashes; NVDA's own brief is fine
+                raise OSError("Disk quota exceeded")
+            return 0
+        monkeypatch.setattr(watch_cli, "_run_brief", boom)
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert sweep_env.generate_auto == ["NVDA"]  # the pass reached NVDA
+        assert "queued brief retry crashed" in capsys.readouterr().err
+
+    def test_sweep_aggregate_ranks_by_severity_not_number(self, sweep_env, monkeypatch, tmp_path):
+        # AAPL's audit fails (4) while MSFT's brief is queued (5): the pass
+        # says 4 — an audit failure is the louder problem.
+        sweep_env.table.update({"AAPL": "refuse", "MSFT": "refuse"})
+        audits = iter([7, 0])  # AAPL's audit fails, MSFT's succeeds
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: next(audits))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 4
+        assert watch_cli._worst([0, 5]) == 5 and watch_cli._worst([5, 2]) == 2
+        assert watch_cli._worst([2, 4, 5]) == 4 and watch_cli._worst([4, 1]) == 1
+        assert watch_cli._worst([3, 0]) == 0 and watch_cli._worst([]) == 0
+
+    def test_queued_brief_does_not_mask_a_failed_audit(self, sweep_env, monkeypatch, tmp_path):
+        report = tmp_path / "AAPL_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli.BRIEF_PENDING.mkdir()
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text(str(report))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 4
 
 
 class TestPollSweepExclusion:
