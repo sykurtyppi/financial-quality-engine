@@ -73,6 +73,18 @@ class TestLatestEarnings8K:
     def test_newest_202_wins_and_non_202_ignored(self):
         assert bs.latest_earnings_8k(SUBS).accession == "k-new"
 
+    def test_amendment_never_becomes_the_print(self):
+        # An 8-K/A with Item 2.02 a week after the print must not move the
+        # print's identity (and the brief's filename) mid-window.
+        rec = {k: list(v) for k, v in SUBS["filings"]["recent"].items()}
+        rec["form"].insert(0, "8-K/A"); rec["accessionNumber"].insert(0, "k-amend")
+        rec["filingDate"].insert(0, "2026-09-02"); rec["reportDate"].insert(0, "2026-08-26")
+        rec["items"].insert(0, "2.02,9.01"); rec["acceptanceDateTime"].insert(0, None)
+        rec["primaryDocument"].insert(0, None)
+        subs = {"name": "X", "filings": {"recent": rec}}
+        assert bs.latest_earnings_8k(subs).accession == "k-new"
+        assert [f.accession for f in bs.earnings_8ks(subs)] == ["k-new", "k-old"]
+
     def test_explicit_accession_must_be_a_202(self):
         assert bs.latest_earnings_8k(SUBS, "k-old").accession == "k-old"
         with pytest.raises(bs.BriefSourceError, match="not an Item 2.02"):
@@ -211,6 +223,17 @@ class TestPriorRelease:
         assert bs.prior_earnings_8k(SUBS, cur).accession == "k-old"
         assert bs.prior_earnings_8k(SUBS, bs.latest_earnings_8k(SUBS, "k-old")) is None
 
+    def test_a_second_202_from_the_same_print_is_not_last_quarters_guide(self):
+        # Preliminary results (2.02) on Aug 20, final release Aug 26: the
+        # prior guide is May's release, never the preliminary one.
+        rec = {k: list(v) for k, v in SUBS["filings"]["recent"].items()}
+        rec["form"].insert(1, "8-K"); rec["accessionNumber"].insert(1, "k-prelim")
+        rec["filingDate"].insert(1, "2026-08-20"); rec["reportDate"].insert(1, "2026-08-20")
+        rec["items"].insert(1, "2.02"); rec["acceptanceDateTime"].insert(1, None)
+        rec["primaryDocument"].insert(1, None)
+        subs = {"name": "X", "filings": {"recent": rec}}
+        assert bs.prior_earnings_8k(subs, bs.latest_earnings_8k(subs)).accession == "k-old"
+
     def test_prior_release_failure_is_a_diagnostic(self, archive, tmp_path):
         archive["k-old-index-headers.html"] = "<html>nothing typed</html>"
         src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path)
@@ -326,11 +349,17 @@ class TestCliBuild:
         rep.parent.mkdir()
         rep.write_text("# report")
         monkeypatch.setattr(brief_cli, "latest_report", lambda t: rep)
+        # Delivery would post a real notification and copy into the real
+        # drop folder: record instead.
+        delivered = []
+        monkeypatch.setattr(brief_cli, "deliver",
+                            lambda t, out, print_night=False: delivered.append((t, out, print_night)))
+        monkeypatch.setattr(brief_cli, "DELIVERED", delivered, raising=False)
         return tmp_path
 
     def _args(self, **over):
         base = dict(ticker="nvda", accession=None, transcript=None, report=None,
-                    timeout=5.0, dry_run=False)
+                    timeout=5.0, dry_run=False, no_report=False, no_deliver=False)
         base.update(over)
         return Namespace(**base)
 
@@ -371,6 +400,136 @@ class TestCliBuild:
     def test_no_engine_report_is_a_setup_error(self, env, monkeypatch):
         monkeypatch.setattr(brief_cli, "latest_report", lambda t: None)
         assert brief_cli.cmd_build(self._args()) == 1
+
+    def test_delivers_after_writing_unless_opted_out(self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert brief_cli.DELIVERED == [("NVDA", env / "NVDA_2026-08-26.md", False)]
+        assert brief_cli.cmd_build(self._args(no_deliver=True)) == 0
+        assert len(brief_cli.DELIVERED) == 1
+
+    def test_no_report_builds_a_print_night_brief(self, env, monkeypatch, capsys):
+        monkeypatch.setattr(brief_cli, "latest_report", lambda t: pytest.fail("must not look"))
+        prompts = []
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: prompts.append(prompt)
+                            or (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "- report:" not in prompts[0] and "- audit:" not in prompts[0]
+        assert "print-night brief" in prompts[0]
+        assert brief_cli.DELIVERED[-1][2] is True  # announced as the print-night variant
+
+    def test_build_records_how_the_brief_was_built(self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        meta = brief_cli.read_built_meta("NVDA", "2026-08-26")
+        assert meta["kind"] == "print-night" and meta["accession"] == "k-new"
+        assert meta["report"] is None and meta["at"]
+        assert brief_cli.cmd_build(self._args()) == 0
+        meta = brief_cli.read_built_meta("NVDA", "2026-08-26")
+        assert meta["kind"] == "full" and meta["report"].endswith("NVDA_2026-09-01.md")
+
+    def test_no_report_never_downgrades_a_full_brief(self, env, monkeypatch, capsys):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nfull findings\n", ""))
+        assert brief_cli.cmd_build(self._args()) == 0
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0  # 0: a queue entry clears
+        assert "full findings" in (env / "NVDA_2026-08-26.md").read_text()
+        assert "could downgrade it" in capsys.readouterr().out
+
+    def test_no_record_is_treated_as_full_and_a_print_night_record_allows_rebuild(
+            self, env, monkeypatch, capsys):
+        out = env / "NVDA_2026-08-26.md"
+        out.write_text("# old\n## Headline\npre-sidecar full brief\n\n---\nuseful: unset\n")
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "pre-sidecar full brief" in out.read_text()
+        assert "no build record" in capsys.readouterr().out
+        # A recorded print-night brief IS rebuilt by another --no-report run.
+        brief_cli.write_built_meta("NVDA", "2026-08-26", kind="print-night", accession="k-new",
+                                   report=None)
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nrebuilt\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "rebuilt" in out.read_text()
+
+    def test_record_write_failure_does_not_fail_the_build(self, env, monkeypatch, capsys):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+
+        def boom(*a, **k):
+            raise OSError("read-only")
+        monkeypatch.setattr(brief_cli, "write_built_meta", boom)
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert (env / "NVDA_2026-08-26.md").exists()
+        assert "build record not written" in capsys.readouterr().err
+
+    def test_no_report_wins_over_an_explicit_report(self, env, monkeypatch):
+        prompts = []
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: prompts.append(prompt)
+                            or (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True, report=str(env / "nope.md"))) == 0
+        assert "- report:" not in prompts[0]
+
+    def test_no_report_failure_does_not_write(self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless", lambda prompt, timeout: (1, "", "boom"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 2
+        assert not (env / "NVDA_2026-08-26.md").exists()
+
+    def test_deliver_never_fails_the_build(self, tmp_path, monkeypatch, capsys):
+        brief = tmp_path / "NVDA_2026-08-26.md"
+        brief.write_text("# x\n## Headline\nh\n")
+
+        def boom(b):
+            raise RuntimeError("file provider busy")
+        monkeypatch.setattr(brief_cli, "publish", boom)
+        brief_cli.deliver("NVDA", brief)  # no exception
+        assert "delivery failed" in capsys.readouterr().err
+        brief_cli.deliver("NVDA", tmp_path / "missing.md")  # read failure: same
+        assert "delivery failed" in capsys.readouterr().err
+
+    def test_deliver_tells_apart_no_folder_from_a_failed_copy_and_logs_lost_notifications(
+            self, tmp_path, monkeypatch, capsys):
+        brief = tmp_path / "NVDA_2026-08-26.md"
+        brief.write_text("# x\n## Headline\nh\n")
+        notes = []
+        monkeypatch.setattr(brief_cli, "notify", lambda t, m: notes.append(m) or False)
+        monkeypatch.setattr(brief_cli, "publish", lambda b: None)
+        brief_cli.deliver("NVDA", brief)
+        out = capsys.readouterr()
+        assert "no drop folder configured" in out.out and "notification NOT delivered" in out.err
+
+        def fail(b):
+            raise OSError("iCloud busy")
+        monkeypatch.setattr(brief_cli, "publish", fail)
+        brief_cli.deliver("NVDA", brief)
+        out = capsys.readouterr()
+        assert "drop-folder copy FAILED" in out.err and "copy failed (see above)" in out.out
+        assert notes[-1].startswith("(drop-folder copy failed) h")
+
+    def test_main_wires_the_new_flags(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(brief_cli, "cmd_build", lambda a: seen.setdefault("args", a) and 0)
+        monkeypatch.setattr(brief_cli.sys, "argv",
+                            ["earnings_brief.py", "build", "nvda", "--no-report", "--no-deliver"])
+        assert brief_cli.main() == 0
+        assert seen["args"].no_report is True and seen["args"].no_deliver is True
+
+    def test_deliver_copies_and_notifies_with_the_headline(self, tmp_path, monkeypatch):
+        brief = tmp_path / "NVDA_2026-08-26.md"
+        brief.write_text("# NVDA\n## Headline\nRevenue beat; guide raised.\n\n## Guidance\nx\n")
+        copied, notes = [], []
+        monkeypatch.setattr(brief_cli, "publish", lambda b: copied.append(b) or tmp_path / "drop" / b.name)
+        monkeypatch.setattr(brief_cli, "notify", lambda t, m: notes.append((t, m)) or True)
+        brief_cli.deliver("NVDA", brief, print_night=True)
+        assert copied == [brief]
+        assert notes == [("NVDA print-night brief ready", "Revenue beat; guide raised.")]
 
     def test_explicit_missing_report_is_a_setup_error(self, env, monkeypatch, capsys):
         monkeypatch.setattr(brief_cli, "run_headless",

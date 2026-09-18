@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from app.services.ingestion.edgar_documents import (
@@ -112,21 +112,30 @@ class BriefSources:
         return self.filing.filing_date.isoformat()
 
 
+MIN_PRIOR_GAP_DAYS = 45  # a "prior quarter" release is at least this much older than the current
+
+
 def earnings_8ks(submissions: dict) -> list[Filing]:
-    """Every 8-K with Item 2.02, newest first."""
+    """Every original 8-K with Item 2.02, newest first. Amendments (8-K/A)
+    are excluded: an amended exhibit days after the print would otherwise
+    become "the newest earnings 8-K", moving the print's identity — and the
+    brief's filename — mid-window, so the print-night brief and the 10-Q
+    rebuild would land on two different files."""
     hits = [
         f for f in recent_filings(submissions)
-        if f.form.upper().startswith("8-K") and "2.02" in (f.items or "")
+        if f.form.upper().startswith("8-K") and "/A" not in f.form.upper()
+        and "2.02" in (f.items or "")
     ]
     return sorted(hits, key=lambda f: (f.filing_date, f.accepted or "", f.accession), reverse=True)
 
 
 def prior_earnings_8k(submissions: dict, current: Filing) -> Filing | None:
-    """The 2.02 8-K before `current` — its Outlook section is the company's
-    own prior guide for the quarter `current` reports."""
-    older = [f for f in earnings_8ks(submissions)
-             if (f.filing_date, f.accepted or "", f.accession)
-             < (current.filing_date, current.accepted or "", current.accession)]
+    """The 2.02 8-K a quarter before `current` — its Outlook section is the
+    company's own prior guide for the quarter `current` reports. Must be at
+    least MIN_PRIOR_GAP_DAYS older: a second 2.02 8-K from the same print
+    (preliminary then final results) is not last quarter's guide."""
+    cutoff = current.filing_date - timedelta(days=MIN_PRIOR_GAP_DAYS)
+    older = [f for f in earnings_8ks(submissions) if f.filing_date <= cutoff]
     return older[0] if older else None
 
 

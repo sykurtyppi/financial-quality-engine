@@ -29,10 +29,11 @@ or produced no brief (sources are kept in reports/briefs/<TICKER>/<date>/).
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,6 +46,7 @@ from app.services.brief.sources import (
     SourceFile,
     collect_sources,
 )
+from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal.store import safe_ticker
@@ -89,6 +91,36 @@ def prior_brief(ticker: str, before: date, root: Path | None = None) -> Path | N
 
 def brief_path(ticker: str, event_day: str, root: Path | None = None) -> Path:
     return (root or BRIEFS) / f"{ticker}_{event_day}.md"
+
+
+BUILT_FILE = "built.json"  # sidecar beside the sources: how the brief on disk was built
+
+
+def built_meta_path(ticker: str, event_day: str, root: Path | None = None) -> Path:
+    return (root or BRIEFS) / ticker / event_day / BUILT_FILE
+
+
+def read_built_meta(ticker: str, event_day: str, root: Path | None = None) -> dict | None:
+    """{"kind": "full"|"print-night", "accession": ..., "report": ..., "at": ...}
+    for the brief on disk, or None when there is no record (a brief from
+    before the sidecar existed, or none at all)."""
+    p = built_meta_path(ticker, event_day, root)
+    try:
+        meta = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def write_built_meta(ticker: str, event_day: str, *, kind: str, accession: str,
+                     report: Path | None, root: Path | None = None) -> None:
+    p = built_meta_path(ticker, event_day, root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "kind": kind, "accession": accession,
+        "report": str(report) if report else None,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }, indent=2) + "\n")
 
 
 def build_prompt(src: BriefSources) -> str:
@@ -151,12 +183,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     except SecClientError as e:
         print(f"EDGAR unavailable: {e}", file=sys.stderr)
         return 1
-    report = Path(args.report) if args.report else latest_report(ticker)
-    if report is None:
+    no_report = getattr(args, "no_report", False)
+    report = None if no_report else (Path(args.report) if args.report else latest_report(ticker))
+    if report is None and not no_report:
         print(f"{ticker}: no engine report under reports/ or reports/auto/ — generate one "
-              f"first (watch.py poll/sweep, or journal.py report).", file=sys.stderr)
+              f"first (watch.py poll/sweep, or journal.py report), or pass --no-report for "
+              "a print-night brief from the release and call alone.", file=sys.stderr)
         return 1
-    if not report.is_file():
+    if report is not None and not report.is_file():
         # An explicit --report that does not exist must not quietly become a
         # brief with no engine findings in it.
         print(f"{ticker}: --report {report} does not exist.", file=sys.stderr)
@@ -169,6 +203,11 @@ def cmd_build(args: argparse.Namespace) -> int:
             transcript=Path(args.transcript) if args.transcript else None,
             report=report, audit=audit_for(report),
         )
+        if no_report:
+            src.diagnostics.append(
+                "print-night brief: the engine report and audit are not available yet "
+                "(they follow the 10-Q) — the engine-findings section is UNAVAILABLE; "
+                "this brief is rebuilt with them when the 10-Q lands")
         prior = prior_brief(ticker, src.filing.filing_date)
         if prior is not None:
             src.files.append(SourceFile("prior_brief", prior, prior.name))
@@ -181,6 +220,18 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     prompt = build_prompt(src)
     out = brief_path(ticker, src.event_day)
+    existing = read_built_meta(ticker, src.event_day)
+    if no_report and out.exists() and (existing is None or existing.get("kind") != "print-night"):
+        # A print-night build must never downgrade a brief that already
+        # carries the engine findings (a queued retry racing a hand-built
+        # full brief, or a stray --no-report by hand). No record at all is
+        # treated the same way — a brief from before the sidecar existed, or
+        # one whose record failed to write, is assumed full. Nothing to do:
+        # exit 0 so a queue entry for it is cleared.
+        built = f"built {existing.get('at')}" if existing else "no build record"
+        print(f"{ticker}: {out.name} already exists ({built}) — a print-night rebuild "
+              "could downgrade it; nothing to do (the 10-Q rebuild still refreshes it).")
+        return 0
     print(f"{ticker}: 8-K {src.filing.accession} filed {src.event_day}; "
           f"{len(src.files)} source file(s); call {'present' if src.has_transcript else 'UNAVAILABLE'}")
     for d in src.diagnostics:
@@ -198,8 +249,50 @@ def cmd_build(args: argparse.Namespace) -> int:
         return 2
     keep = useful_value(out.read_text()) if out.exists() else "unset"
     out.write_text(finalize(stdout, keep))
+    try:
+        write_built_meta(ticker, src.event_day, kind="print-night" if no_report else "full",
+                         accession=src.filing.accession, report=report)
+    except OSError as e:
+        # The brief is written; a missing record only makes it read as
+        # "full", the safe direction. Never fail the build over it.
+        print(f"  build record not written ({e}) — the brief is treated as full "
+              "until it is rebuilt", file=sys.stderr)
     print(f"brief -> {out}" + (f" (useful: {keep} carried over)" if keep != "unset" else ""))
+    if not getattr(args, "no_deliver", False):
+        deliver(ticker, out, print_night=no_report)
     return 0
+
+
+def deliver(ticker: str, brief: Path, *, print_night: bool = False) -> None:
+    """Copy the brief to the drop folder and post a notification. Both
+    best-effort: the brief on disk is the record; delivery is how you hear
+    about it without opening a terminal."""
+    try:
+        text = brief.read_text(errors="replace")
+        headline = _section(text, "Headline") or "(no headline)"
+        copy_failed = False
+        try:
+            copied = publish(brief)
+        except OSError as e:
+            copied, copy_failed = None, True
+            print(f"  drop-folder copy FAILED: {e}", file=sys.stderr)
+        if copied:
+            where = f" — copied to {copied}"
+        elif copy_failed:
+            where = " — drop-folder copy failed (see above)"
+        else:
+            where = " — no drop folder configured (set FQE_BRIEF_DROP or sign in to iCloud Drive)"
+        print(f"delivered{where}")
+        kind = "print-night brief" if print_night else "brief"
+        body = headline if not copy_failed else f"(drop-folder copy failed) {headline}"
+        if not notify(f"{ticker} {kind} ready", body):
+            # The whole point of the notification is the case where nobody
+            # reads this log — so the failure to notify at least lives here.
+            print("  notification NOT delivered (osascript unavailable, FQE_NO_NOTIFY set, or "
+                  f"no login session) — the brief is at {brief}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — the brief is written; delivery must not fail the build
+        print(f"  delivery failed: {type(e).__name__}: {e} — the brief is at {brief}",
+              file=sys.stderr)
 
 
 def _section(text: str, title: str) -> str:
@@ -277,6 +370,11 @@ def main() -> int:
     b.add_argument("--transcript", help="call transcript text file (default: "
                    "journal/transcripts/<TICKER>/<print date>.txt if present)")
     b.add_argument("--report", help="engine report path (default: newest for the ticker)")
+    b.add_argument("--no-report", action="store_true",
+                   help="print-night brief from the release and call alone (no engine "
+                        "report yet); rebuilt with the report when the 10-Q lands")
+    b.add_argument("--no-deliver", action="store_true",
+                   help="write the brief only; no drop-folder copy, no notification")
     b.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     b.add_argument("--dry-run", action="store_true",
                    help="collect sources and print the prompt; no headless run")

@@ -52,6 +52,9 @@ def poll_env(monkeypatch, tmp_path):
     monkeypatch.setattr(watch_cli, "SecClient", _FakeClient)
     monkeypatch.setattr(watch_cli, "SWEEP_LOCK", tmp_path / "sweep.lock")  # never the real one
     monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")  # nor the real queue
+    monkeypatch.setattr(watch_cli, "BRIEFS", tmp_path / "briefs")  # nor the real briefs
+    calls.notified = []
+    monkeypatch.setattr(watch_cli, "notify", lambda t, m: calls.notified.append((t, m)) or True)
     # Re-arming persists to the watchlist; never let a unit test touch the
     # real journal/watchlist.json.
     monkeypatch.setattr(
@@ -718,7 +721,7 @@ class TestBriefHook:
                             lambda cmd, **k: seen.append(cmd) or SimpleNamespace(returncode=next(rcs)))
         assert watch_cli._run_brief("NVDA", report) == 2
         marker = tmp_path / "pending" / "NVDA"
-        assert marker.read_text().strip() == str(report)
+        assert watch_cli._queue_read("NVDA") == (str(report), 1)
         assert "queued at" in capsys.readouterr().err
         assert seen[0][1:] == [str(watch_cli.ROOT / "scripts" / "earnings_brief.py"),
                                "build", "NVDA", "--report", str(report)]
@@ -755,6 +758,17 @@ class TestBriefHook:
         assert "AAPL -> 5" in capsys.readouterr().out
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 0)  # fixed (login restored)
         assert watch_cli.cmd_sweep(_sweep_args()) == 0
+
+    def test_queue_is_not_retried_in_the_pass_that_rebuilds_anyway(self, sweep_env, monkeypatch, tmp_path):
+        # A queued print-night brief ("-") and the 10-Q landing in the same
+        # pass: one build, with the report — never a --no-report retry first.
+        watch_cli.BRIEF_PENDING.mkdir()
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text("-\n")
+        built = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: built.append((t, r)) or 0)
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert built == [("AAPL", Path("/tmp/fake_auto.md"))]
 
     def test_sweep_dry_run_and_no_brief_leave_the_queue_alone(self, sweep_env, monkeypatch, tmp_path):
         report = tmp_path / "AAPL_2026-09-01.md"
@@ -805,6 +819,274 @@ class TestBriefHook:
         monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
         sweep_env.table["AAPL"] = "refuse"
         assert watch_cli.cmd_sweep(_sweep_args()) == 4
+
+
+class TestPrintNightBrief:
+    """The earnings 8-K fires a brief-only pass; the 10-Q track is untouched."""
+
+    @staticmethod
+    def _k(monkeypatch, filed="2026-10-13", acc="k-1"):
+        from app.services.watch.poller import Filing
+
+        monkeypatch.setattr(
+            watch_cli, "latest_earnings_8k",
+            lambda subs: Filing("8-K", acc, watch_cli.date.fromisoformat(filed), items="2.02,9.01"))
+
+    def test_fires_once_on_a_fresh_8k_while_the_10q_is_awaited(self, sweep_env, monkeypatch, capsys):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        built = []
+
+        def run_brief(t, report):
+            built.append((t, report))
+            (watch_cli.BRIEFS / f"{t}_2026-10-13.md").parent.mkdir(parents=True, exist_ok=True)
+            (watch_cli.BRIEFS / f"{t}_2026-10-13.md").write_text("# brief")
+            return 0
+        monkeypatch.setattr(watch_cli, "_run_brief", run_brief)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert built == [("AAPL", None), ("MSFT", None), ("NVDA", None)]  # every name is "waiting"
+        assert "print-night brief" in capsys.readouterr().out
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert len(built) == 3  # the brief on disk is the idempotency key
+        assert sweep_env.rearm == []  # the 10-Q track did not move
+
+    def test_stale_8k_is_last_quarters_news(self, sweep_env, monkeypatch):
+        self._k(monkeypatch, filed="2026-08-26")
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-01T00:00:00+00:00"))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not build"))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+
+    def test_failure_is_queued_as_5_and_not_rebuilt_while_queued(self, sweep_env, monkeypatch):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        calls = []
+
+        def failing(t, report):
+            calls.append(t)
+            watch_cli.BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
+            (watch_cli.BRIEF_PENDING / t).write_text(f"{watch_cli.NO_REPORT_MARK}\n")
+            return 2
+        monkeypatch.setattr(watch_cli, "_run_brief", failing)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert calls == ["AAPL", "MSFT", "NVDA"]
+        # next pass: the queue retry runs it (once per name), the trigger does not add a second
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert calls == ["AAPL", "MSFT", "NVDA"] * 2
+
+    def test_retry_of_a_queued_print_night_brief_passes_no_report(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        (tmp_path / "pending").mkdir()
+        (tmp_path / "pending" / "NVDA").write_text("-\n")
+        ran = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: ran.append((t, r)) or 0)
+        assert watch_cli._retry_pending_brief("NVDA") == 0
+        assert ran == [("NVDA", None)]
+
+    def test_run_brief_without_report_uses_no_report_and_queues_a_dash(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        seen = []
+        monkeypatch.setattr(watch_cli.subprocess, "run",
+                            lambda cmd, **k: seen.append(cmd) or SimpleNamespace(returncode=2))
+        assert watch_cli._run_brief("NVDA", None) == 2
+        assert seen[0][-3:] == ["build", "NVDA", "--no-report"]
+        assert watch_cli._queue_read("NVDA") == ("-", 1)
+        assert watch_cli._run_brief("NVDA", None) == 2  # same target: attempts climb
+        assert watch_cli._queue_read("NVDA") == ("-", 2)
+
+    def test_retry_cap_drops_a_hopeless_print_night_brief(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        watch_cli._queue_write("NVDA", "-", watch_cli.PRINT_BRIEF_MAX_ATTEMPTS)
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not run"))
+        assert watch_cli._retry_pending_brief("NVDA") == 5  # says so once
+        assert "giving up" in capsys.readouterr().err
+        assert watch_cli._queue_read("NVDA") is None
+        assert watch_cli._retry_pending_brief("NVDA") == 0
+        # A queued FULL brief has no cap: there is no later rebuild to fall back on.
+        report = tmp_path / "NVDA_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli._queue_write("NVDA", str(report), 99)
+        ran = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: ran.append(r) or 0)
+        assert watch_cli._retry_pending_brief("NVDA") == 0 and ran == [report]
+
+    def test_crash_in_the_trigger_leaves_an_honest_queue_entry(self, sweep_env, monkeypatch, capsys):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+
+        def boom(t, r):
+            raise OSError("disk")
+        monkeypatch.setattr(watch_cli, "_run_brief", boom)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert watch_cli._queue_read("AAPL") == ("-", 1)
+        assert "print-night brief crashed" in capsys.readouterr().err
+
+    def test_window_boundary_is_inclusive_at_14_days(self, sweep_env, monkeypatch):
+        self._k(monkeypatch, filed="2026-10-01")
+        built = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: built.append(t) or 0)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-15T23:59:00+00:00"))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0 and built == ["AAPL", "MSFT", "NVDA"]
+        built.clear()
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-16T00:01:00+00:00"))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0 and built == []
+
+    def test_strict_no_auto_mode_builds_no_brief_either(self, sweep_env, monkeypatch):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not build"))
+        assert watch_cli.cmd_sweep(_sweep_args(no_auto=True)) == 0
+
+    def test_failed_audit_still_gets_a_print_night_brief_and_stays_4(self, sweep_env, monkeypatch):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        built = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: built.append((t, r)) or 0)
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 4
+        assert ("NVDA", None) in built  # the release is news tonight; the audit retries
+
+    def test_act_crash_skips_the_trigger(self, sweep_env, monkeypatch):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        built = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: built.append(t) or 0)
+
+        def crash(*a, **k):
+            raise RuntimeError("x")
+        monkeypatch.setattr(watch_cli, "_act", crash)
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 1
+        assert "NVDA" not in built and built == ["AAPL", "MSFT"]
+
+    def test_same_day_second_8k_rebuilds_a_print_night_brief_but_never_a_full_one(
+            self, sweep_env, monkeypatch, capsys):
+        import json
+
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T23:05:00+00:00"))
+        built = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: built.append(t) or 0)
+        for t in ("AAPL", "MSFT", "NVDA"):
+            (watch_cli.BRIEFS / t / "2026-10-13").mkdir(parents=True)
+            (watch_cli.BRIEFS / f"{t}_2026-10-13.md").write_text("# brief")
+        # AAPL: print-night from the preliminary accession; MSFT: full; NVDA: no record
+        (watch_cli.BRIEFS / "AAPL" / "2026-10-13" / "built.json").write_text(
+            json.dumps({"kind": "print-night", "accession": "k-prelim"}))
+        (watch_cli.BRIEFS / "MSFT" / "2026-10-13" / "built.json").write_text(
+            json.dumps({"kind": "full", "accession": "k-prelim"}))
+        self._k(monkeypatch, acc="k-final")
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert built == ["AAPL"]
+        assert "superseded k-prelim" in capsys.readouterr().out
+        self._k(monkeypatch, acc="k-prelim")  # same accession as before: nothing
+        built.clear()
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0 and built == []
+        # A queued marker wins over the supersede: the queue's own retry runs
+        # (once), the trigger does not add a second, and nothing claims
+        # "rebuilding" for a rebuild that did not happen.
+        self._k(monkeypatch, acc="k-final2")
+        watch_cli._queue_write("AAPL", "-", 1)
+        capsys.readouterr()
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0 and built == ["AAPL"]
+        assert "superseded" not in capsys.readouterr().out
+
+    def test_real_payload_reaches_the_trigger_end_to_end(self, sweep_env, monkeypatch):
+        # No _k patch: the sweep's own submissions flow through the real
+        # latest_earnings_8k (8-K/A excluded, newest 2.02 wins).
+        rec = {
+            "form": ["8-K/A", "8-K", "10-Q", "8-K"],
+            "accessionNumber": ["k-a", "k-new", "q-1", "k-old"],
+            "filingDate": ["2026-10-14", "2026-10-13", "2026-08-05", "2026-07-30"],
+            "reportDate": ["2026-10-13", "2026-10-13", "2026-06-27", "2026-07-30"],
+            "items": ["2.02,9.01", "2.02,9.01", None, "2.02,9.01"],
+            "acceptanceDateTime": [None] * 4, "primaryDocument": [None] * 4,
+        }
+
+        class Client(_FakeClient):
+            def submissions_by_cik(self, cik):
+                return {"filings": {"recent": rec}}
+        monkeypatch.setattr(watch_cli, "SecClient", Client)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-14T22:05:00+00:00"))
+        built = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: built.append(t) or 0)
+        assert watch_cli.cmd_sweep(_sweep_args(verbose=True)) == 0
+        assert built == ["AAPL", "MSFT", "NVDA"]
+        # the key is the ORIGINAL 8-K's date, not the amendment's
+        for t in built:
+            assert not (watch_cli.BRIEFS / f"{t}_2026-10-14.md").exists()
+
+    def test_dry_run_reports_but_does_not_build(self, sweep_env, monkeypatch, capsys):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not build"))
+        assert watch_cli.cmd_sweep(_sweep_args(dry_run=True)) == 0
+        assert "dry run — not building" in capsys.readouterr().out
+
+    def test_no_brief_flag_and_a_crash_are_contained(self, sweep_env, monkeypatch, capsys):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not build"))
+        assert watch_cli.cmd_sweep(_sweep_args(no_brief=True)) == 0
+
+        def boom(subs):
+            raise OSError("disk")
+        monkeypatch.setattr(watch_cli, "latest_earnings_8k", boom)
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: 0)  # NVDA's own brief is fine
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert sweep_env.generate_auto == ["NVDA"]  # the pass still acted
+        assert "print-night brief crashed" in capsys.readouterr().err
+
+    def test_same_pass_as_the_10q_builds_the_brief_once(self, sweep_env, monkeypatch):
+        # The audit hook writes the brief; the print-night trigger then finds it.
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        built = []
+
+        def run_brief(t, report):
+            built.append((t, report))
+            watch_cli.BRIEFS.mkdir(parents=True, exist_ok=True)
+            (watch_cli.BRIEFS / f"{t}_2026-10-13.md").write_text("# brief")
+            return 0
+        monkeypatch.setattr(watch_cli, "_run_brief", run_brief)
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert built.count(("NVDA", Path("/tmp/fake_auto.md"))) == 1
+        assert ("NVDA", None) not in built
+
+
+class TestSweepNotifications:
+    def test_clean_pass_is_silent_and_problems_are_one_notification(self, sweep_env, monkeypatch):
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert sweep_env.notified == []
+        audits = iter([7])
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: next(audits, 0))
+        monkeypatch.setattr(watch_cli, "_sync", lambda client, path, prune, dry_run=False: 1)
+        assert watch_cli.cmd_sweep(_sweep_args(portfolio="x.txt")) == 1
+        assert sweep_env.notified == [("FQE sweep needs attention",
+                                       "portfolio sync: error; AAPL: audit FAILED")]
+
+    def test_wording_for_refusal_and_queued_brief(self, sweep_env, monkeypatch):
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args(no_auto=True)) == 2
+        assert sweep_env.notified[-1][1] == "AAPL: refused (no thesis)"
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert sweep_env.notified[-1][1] == "AAPL: brief queued"
+
+    def test_undelivered_notification_is_logged(self, sweep_env, monkeypatch, capsys):
+        monkeypatch.setattr(watch_cli, "notify", lambda t, m: False)
+        sweep_env.table["AAPL"] = watch_cli.PollerError("x")
+        assert watch_cli.cmd_sweep(_sweep_args()) == 1
+        assert "notification NOT delivered" in capsys.readouterr().err
+
+    def test_dry_run_never_notifies(self, sweep_env, monkeypatch):
+        sweep_env.table["AAPL"] = watch_cli.PollerError("x")
+        assert watch_cli.cmd_sweep(_sweep_args(dry_run=True)) == 1
+        assert sweep_env.notified == []
 
 
 class TestPollSweepExclusion:
