@@ -326,11 +326,17 @@ class TestCliBuild:
         rep.parent.mkdir()
         rep.write_text("# report")
         monkeypatch.setattr(brief_cli, "latest_report", lambda t: rep)
+        # Delivery would post a real notification and copy into the real
+        # drop folder: record instead.
+        delivered = []
+        monkeypatch.setattr(brief_cli, "deliver",
+                            lambda t, out, print_night=False: delivered.append((t, out, print_night)))
+        monkeypatch.setattr(brief_cli, "DELIVERED", delivered, raising=False)
         return tmp_path
 
     def _args(self, **over):
         base = dict(ticker="nvda", accession=None, transcript=None, report=None,
-                    timeout=5.0, dry_run=False)
+                    timeout=5.0, dry_run=False, no_report=False, no_deliver=False)
         base.update(over)
         return Namespace(**base)
 
@@ -371,6 +377,40 @@ class TestCliBuild:
     def test_no_engine_report_is_a_setup_error(self, env, monkeypatch):
         monkeypatch.setattr(brief_cli, "latest_report", lambda t: None)
         assert brief_cli.cmd_build(self._args()) == 1
+
+    def test_delivers_after_writing_unless_opted_out(self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert brief_cli.DELIVERED == [("NVDA", env / "NVDA_2026-08-26.md", False)]
+        assert brief_cli.cmd_build(self._args(no_deliver=True)) == 0
+        assert len(brief_cli.DELIVERED) == 1
+
+    def test_no_report_builds_a_print_night_brief(self, env, monkeypatch, capsys):
+        monkeypatch.setattr(brief_cli, "latest_report", lambda t: pytest.fail("must not look"))
+        prompts = []
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: prompts.append(prompt)
+                            or (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "- report:" not in prompts[0] and "- audit:" not in prompts[0]
+        assert "print-night brief" in prompts[0]
+        assert brief_cli.DELIVERED[-1][2] is True  # announced as the print-night variant
+
+    def test_no_report_failure_does_not_write(self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless", lambda prompt, timeout: (1, "", "boom"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 2
+        assert not (env / "NVDA_2026-08-26.md").exists()
+
+    def test_deliver_copies_and_notifies_with_the_headline(self, tmp_path, monkeypatch):
+        brief = tmp_path / "NVDA_2026-08-26.md"
+        brief.write_text("# NVDA\n## Headline\nRevenue beat; guide raised.\n\n## Guidance\nx\n")
+        copied, notes = [], []
+        monkeypatch.setattr(brief_cli, "publish", lambda b: copied.append(b) or tmp_path / "drop" / b.name)
+        monkeypatch.setattr(brief_cli, "notify", lambda t, m: notes.append((t, m)) or True)
+        brief_cli.deliver("NVDA", brief, print_night=True)
+        assert copied == [brief]
+        assert notes == [("NVDA print-night brief ready", "Revenue beat; guide raised.")]
 
     def test_explicit_missing_report_is_a_setup_error(self, env, monkeypatch, capsys):
         monkeypatch.setattr(brief_cli, "run_headless",

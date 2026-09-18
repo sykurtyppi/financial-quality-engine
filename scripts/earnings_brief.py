@@ -45,6 +45,7 @@ from app.services.brief.sources import (
     SourceFile,
     collect_sources,
 )
+from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal.store import safe_ticker
@@ -151,12 +152,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     except SecClientError as e:
         print(f"EDGAR unavailable: {e}", file=sys.stderr)
         return 1
-    report = Path(args.report) if args.report else latest_report(ticker)
-    if report is None:
+    no_report = getattr(args, "no_report", False)
+    report = None if no_report else (Path(args.report) if args.report else latest_report(ticker))
+    if report is None and not no_report:
         print(f"{ticker}: no engine report under reports/ or reports/auto/ — generate one "
-              f"first (watch.py poll/sweep, or journal.py report).", file=sys.stderr)
+              f"first (watch.py poll/sweep, or journal.py report), or pass --no-report for "
+              "a print-night brief from the release and call alone.", file=sys.stderr)
         return 1
-    if not report.is_file():
+    if report is not None and not report.is_file():
         # An explicit --report that does not exist must not quietly become a
         # brief with no engine findings in it.
         print(f"{ticker}: --report {report} does not exist.", file=sys.stderr)
@@ -169,6 +172,11 @@ def cmd_build(args: argparse.Namespace) -> int:
             transcript=Path(args.transcript) if args.transcript else None,
             report=report, audit=audit_for(report),
         )
+        if no_report:
+            src.diagnostics.append(
+                "print-night brief: the engine report and audit are not available yet "
+                "(they follow the 10-Q) — the engine-findings section is UNAVAILABLE; "
+                "this brief is rebuilt with them when the 10-Q lands")
         prior = prior_brief(ticker, src.filing.filing_date)
         if prior is not None:
             src.files.append(SourceFile("prior_brief", prior, prior.name))
@@ -199,7 +207,26 @@ def cmd_build(args: argparse.Namespace) -> int:
     keep = useful_value(out.read_text()) if out.exists() else "unset"
     out.write_text(finalize(stdout, keep))
     print(f"brief -> {out}" + (f" (useful: {keep} carried over)" if keep != "unset" else ""))
+    if not getattr(args, "no_deliver", False):
+        deliver(ticker, out, print_night=no_report)
     return 0
+
+
+def deliver(ticker: str, brief: Path, *, print_night: bool = False) -> None:
+    """Copy the brief to the drop folder and post a notification. Both
+    best-effort: the brief on disk is the record; delivery is how you hear
+    about it without opening a terminal."""
+    text = brief.read_text(errors="replace")
+    headline = _section(text, "Headline") or "(no headline)"
+    try:
+        copied = publish(brief)
+    except OSError as e:
+        copied = None
+        print(f"  drop-folder copy failed: {e}", file=sys.stderr)
+    where = f" — copied to {copied}" if copied else " — no drop folder (set FQE_BRIEF_DROP)"
+    print(f"delivered{where}")
+    kind = "print-night brief" if print_night else "brief"
+    notify(f"{ticker} {kind} ready", headline)
 
 
 def _section(text: str, title: str) -> str:
@@ -277,6 +304,11 @@ def main() -> int:
     b.add_argument("--transcript", help="call transcript text file (default: "
                    "journal/transcripts/<TICKER>/<print date>.txt if present)")
     b.add_argument("--report", help="engine report path (default: newest for the ticker)")
+    b.add_argument("--no-report", action="store_true",
+                   help="print-night brief from the release and call alone (no engine "
+                        "report yet); rebuilt with the report when the 10-Q lands")
+    b.add_argument("--no-deliver", action="store_true",
+                   help="write the brief only; no drop-folder copy, no notification")
     b.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     b.add_argument("--dry-run", action="store_true",
                    help="collect sources and print the prompt; no headless run")

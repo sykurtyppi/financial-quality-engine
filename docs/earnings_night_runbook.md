@@ -238,6 +238,33 @@ wait for several audits.
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.
 
+## Print night vs the 10-Q, and how you hear about it
+
+The engine report needs the quarter's XBRL facts, so the report/audit track
+fires when the **10-Q/10-K** lands. The brief is a read of the print itself,
+so `sweep` also fires a **brief-only pass on the earnings 8-K** (Item 2.02)
+the hour it appears: release plus call transcript, engine findings marked
+UNAVAILABLE. When the 10-Q lands the same brief file is rebuilt with the
+engine findings (your `useful:` value carries over). For NVDA the two are
+minutes apart; for a small cap the 10-Q can be weeks later. The brief's
+filename (`<TICKER>_<8-K date>.md`) is the only state: no brief for that
+date within 14 days of the 8-K means build one. A failed print-night brief
+is queued and retried like any other (exit 5).
+
+Delivery is local and publishes nothing (the repo is public; `reports/` is
+not in it):
+
+- **Notification.** A macOS notification when a brief is written (title is
+  the ticker, body is the brief's headline), and one per pass when
+  something needs you (an audit failed, a brief is queued, a name refused).
+  A clean pass is silent. `FQE_NO_NOTIFY=1` turns notifications off.
+- **Drop folder.** Every finished brief is copied to
+  `iCloud Drive/Earnings Briefs/` — readable in Files on your phone — or to
+  `FQE_BRIEF_DROP=<dir>` if set. Rebuilds overwrite, so the phone shows the
+  latest version. `earnings_brief.py build --no-deliver` skips both.
+
+A print-night brief by hand: `scripts/earnings_brief.py build NVDA --no-report`.
+
 ## The earnings brief
 
 `reports/briefs/<TICKER>_<print date>.md` — one page per print, written by
