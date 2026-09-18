@@ -250,11 +250,24 @@ minutes apart; for a small cap the 10-Q can be weeks later. The brief's
 filename (`<TICKER>_<8-K date>.md`) is the only state: no brief for that
 date within 14 days of the 8-K means build one. A failed print-night brief
 is queued and retried like any other (exit 5) — but never in the pass that
-is about to rebuild it with the engine report anyway. Amended 8-Ks (8-K/A)
-never count as the print, so a corrected exhibit days later cannot move the
-brief to a second file; the prior-quarter guide must be at least 45 days
-older than the print, so a preliminary-results 8-K is never mistaken for
-last quarter's release.
+is about to rebuild it with the engine report anyway, and at most six times
+(the 10-Q rebuild is its second chance; an hourly paid run for weeks is
+not). Amended 8-Ks (8-K/A) never count as the print, so a corrected exhibit
+days later cannot move the brief to a second file; the prior-quarter guide
+must be at least 45 days older than the print, so a preliminary-results
+8-K is never mistaken for last quarter's release. Two earnings 8-Ks within
+the window (Boeing's preliminary-then-final pattern) each get a brief; if
+they share a day, the print-night brief is rebuilt from the newer one.
+
+Each brief records how it was built in `reports/briefs/<T>/<date>/built.json`
+(`kind`: `print-night` or `full`, the 8-K accession, the report path). A
+print-night build never downgrades a brief that already carries the engine
+findings — a queued retry or a stray `--no-report` by hand is a no-op then.
+
+Two deliberate limits: `poll` is the 10-Q track only (on print night, run
+`earnings_brief.py build TICKER --no-report` by hand if you are at the
+keyboard), and `--no-auto` means nothing unattended for a thesis-less name,
+the brief included.
 
 Delivery is local and publishes nothing (the repo is public; `reports/` is
 not in it):
@@ -265,8 +278,12 @@ not in it):
   A clean pass is silent. `FQE_NO_NOTIFY=1` turns notifications off.
 - **Drop folder.** Every finished brief is copied to
   `iCloud Drive/Earnings Briefs/` — readable in Files on your phone — or to
-  `FQE_BRIEF_DROP=<dir>` if set. Rebuilds overwrite, so the phone shows the
-  latest version. `earnings_brief.py build --no-deliver` skips both.
+  `FQE_BRIEF_DROP=<dir>` (use an absolute path) if set. Rebuilds overwrite,
+  so the phone shows the latest version. `earnings_brief.py build
+  --no-deliver` skips both. "Copied to" means written to that folder on this
+  Mac; whether iCloud syncs it is iCloud's business — if you are signed
+  out, the copy sits here. A notification that could not be posted, and a
+  copy that failed, are both said so in the log.
 
 A print-night brief by hand: `scripts/earnings_brief.py build NVDA --no-report`.
 

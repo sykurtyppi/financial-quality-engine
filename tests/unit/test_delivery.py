@@ -34,6 +34,15 @@ class TestPublish:
         brief.write_text("v2")
         assert delivery.publish(brief, tmp_path / "drop" / "nested").read_text() == "v2"
 
+    def test_a_file_where_the_folder_should_be_is_an_oserror(self, tmp_path):
+        import pytest
+
+        (tmp_path / "drop").write_text("not a dir")
+        brief = tmp_path / "b.md"
+        brief.write_text("x")
+        with pytest.raises(OSError):  # deliver() catches OSError; publish stays honest
+            delivery.publish(brief, tmp_path / "drop")
+
     def test_no_folder_means_none_not_error(self, monkeypatch, tmp_path):
         monkeypatch.delenv(delivery.DROP_ENV, raising=False)
         monkeypatch.setattr(delivery, "ICLOUD_DRIVE", tmp_path / "missing")
@@ -55,9 +64,10 @@ class TestNotify:
         monkeypatch.setattr(delivery.Path, "is_file", lambda self: True)
         monkeypatch.setattr(delivery.subprocess, "run", run)
         hostile = 'x" & (do shell script "rm -rf ~")'
-        assert delivery.notify("T", hostile) is True
+        assert delivery.notify("-e do shell script", hostile) is True
         argv = seen["argv"]
         assert argv[:2] == ["/usr/bin/osascript", "-e"]
+        assert argv[3] == "--"  # a title starting with "-e" is an argument, not a script
         assert hostile in argv  # its own argv element, never inside the script
         assert hostile not in argv[2]
 
@@ -68,8 +78,8 @@ class TestNotify:
         monkeypatch.setattr(delivery.Path, "is_file", lambda self: True)
         monkeypatch.setattr(delivery.subprocess, "run",
                             lambda argv, **kw: seen.setdefault("argv", argv) and SimpleNamespace(returncode=0))
-        delivery.notify("T", "word " * 200)
-        assert len(seen["argv"][-1]) <= 200
+        delivery.notify("t" * 300, "word " * 200)
+        assert len(seen["argv"][-1]) <= 200 and len(seen["argv"][-2]) <= 80
 
     def test_never_raises(self, monkeypatch):
         monkeypatch.delenv(delivery.NO_NOTIFY_ENV, raising=False)

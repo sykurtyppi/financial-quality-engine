@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import subprocess
 import sys
 import time
@@ -92,10 +93,15 @@ POLITE_INTERVAL_S = 300
 AUTO_DIR = ROOT / "reports" / "auto"
 PORTFOLIO = ROOT / "journal" / "portfolio.txt"
 SWEEP_LOCK = ROOT / "journal" / "sweep.lock"
-BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"  # <TICKER> -> report path, or "-"
+BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"  # <TICKER>: target line + attempts line
 BRIEF_PENDING_RC = 5
-NO_REPORT_MARK = "-"  # queue entry for a print-night brief (no engine report yet)
+NO_REPORT_MARK = "-"  # queue target for a print-night brief (no engine report yet)
 PRINT_BRIEF_WINDOW_DAYS = 14  # an earnings 8-K older than this is last quarter's, not news
+# A print-night brief that keeps failing is retried this many times (hourly
+# passes), then dropped: the 10-Q rebuild is its second chance, and an hourly
+# paid headless run for weeks is not. A queued FULL brief (report on disk) has
+# no such cap — there is no later rebuild to fall back on.
+PRINT_BRIEF_MAX_ATTEMPTS = 6
 # Sweep aggregate: the worst code across names, by what it means rather than
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
@@ -255,31 +261,64 @@ def _run_brief(ticker: str, report: Path | None) -> int:
     rc = subprocess.run(cmd, cwd=ROOT).returncode
     marker = BRIEF_PENDING / ticker
     if rc != 0:
-        BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
-        marker.write_text(f"{NO_REPORT_MARK if report is None else report}\n")
-        print(f"  brief FAILED (exit {rc}) — queued at {marker} and retried on the next "
-              f"sweep pass (or run `earnings_brief.py {' '.join(cmd[2:])}` by hand).",
-              file=sys.stderr)
+        target = NO_REPORT_MARK if report is None else str(report)
+        prior = _queue_read(ticker)
+        attempts = (prior[1] + 1) if prior and prior[0] == target else 1
+        _queue_write(ticker, target, attempts)
+        print(f"  brief FAILED (exit {rc}) — queued at {marker} (attempt {attempts}) and "
+              f"retried on the next sweep pass (or run "
+              f"`earnings_brief.py {' '.join(cmd[2:])}` by hand).", file=sys.stderr)
     elif marker.exists():
         marker.unlink()
     return rc
+
+
+def _queue_read(ticker: str) -> tuple[str, int] | None:
+    """(target, attempts) from the queue marker: target is a report path or
+    NO_REPORT_MARK. None when nothing is queued."""
+    marker = BRIEF_PENDING / ticker
+    if not marker.is_file():
+        return None
+    lines = marker.read_text().splitlines()
+    target = lines[0].strip() if lines else ""
+    attempts = 1
+    for line in lines[1:]:
+        if line.startswith("attempts="):
+            try:
+                attempts = int(line.split("=", 1)[1])
+            except ValueError:
+                pass
+    return (target, attempts) if target else None
+
+
+def _queue_write(ticker: str, target: str, attempts: int) -> None:
+    BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
+    (BRIEF_PENDING / ticker).write_text(f"{target}\nattempts={attempts}\n")
 
 
 def _retry_pending_brief(ticker: str) -> int:
     """Re-run a brief queued by an earlier failure. 0 when nothing is queued
     or the retry succeeded; BRIEF_PENDING_RC when it failed again."""
     marker = BRIEF_PENDING / ticker
-    if not marker.is_file():
+    queued = _queue_read(ticker)
+    if queued is None:
         return 0
-    raw = marker.read_text().strip()
-    report: Path | None = None if raw == NO_REPORT_MARK else Path(raw)
+    target, attempts = queued
+    report: Path | None = None if target == NO_REPORT_MARK else Path(target)
     if report is not None and not report.is_file():
         print(f"  {ticker}: queued brief names a report that no longer exists "
               f"({report}) — dropping the queue entry.", file=sys.stderr)
         marker.unlink()
         return 0
+    if report is None and attempts >= PRINT_BRIEF_MAX_ATTEMPTS:
+        print(f"  {ticker}: print-night brief failed {attempts} times — giving up on it; the "
+              f"brief is built with the engine findings when the 10-Q lands, or run "
+              f"`earnings_brief.py build {ticker} --no-report` by hand.", file=sys.stderr)
+        marker.unlink()
+        return BRIEF_PENDING_RC  # one last non-zero so the pass says so
     print(f"  {ticker}: retrying the queued "
-          f"{'print-night brief' if report is None else 'brief for ' + report.name}")
+          f"{'print-night brief' if report is None else 'brief for ' + report.name}"
+          f" (attempt {attempts + 1})")
     return BRIEF_PENDING_RC if _run_brief(ticker, report) != 0 else 0
 
 
@@ -294,19 +333,33 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
     later rebuilds the same file with the engine findings, this pass sees it
     exists and stays quiet. 0, or BRIEF_PENDING_RC when the run failed
     (queued). Never raises."""
-    if getattr(args, "no_brief", False):
+    if getattr(args, "no_brief", False) or getattr(args, "no_auto", False):
+        # --no-auto is "nothing unattended for a thesis-less name": that
+        # covers the brief too.
         return 0
+    stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     try:
         k = latest_earnings_8k(submissions)
-    except (BriefSourceError, PollerError):
+    except (BriefSourceError, PollerError) as e:
+        if args.verbose:
+            print(f"[{stamp}] {watch.ticker}: no earnings 8-K to brief ({e})")
         return 0
+    # UTC calendar days against EDGAR's US-Eastern filing date: at most a
+    # day of skew at the edge of a two-week window.
     if (now.date() - k.filing_date).days > PRINT_BRIEF_WINDOW_DAYS:
         return 0
-    if (BRIEFS / f"{watch.ticker}_{k.filing_date.isoformat()}.md").exists():
-        return 0
+    day = k.filing_date.isoformat()
+    if (BRIEFS / f"{watch.ticker}_{day}.md").exists():
+        meta = _built_meta(watch.ticker, day)
+        # Same day, second 2.02 8-K (preliminary then final): a print-night
+        # brief built from the earlier accession is rebuilt from the newer
+        # one; a full brief is never touched here.
+        if meta is None or meta.get("kind") == "full" or meta.get("accession") == k.accession:
+            return 0
+        print(f"[{stamp}] {watch.ticker}: a newer earnings 8-K {k.accession} superseded "
+              f"{meta.get('accession')} the same day — rebuilding the print-night brief")
     if (BRIEF_PENDING / watch.ticker).exists():
         return 0  # already queued by an earlier failure; the retry owns it
-    stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     print(f"[{stamp}] {watch.ticker}: earnings 8-K {k.accession} filed {k.filing_date} — "
           f"print-night brief (engine findings follow with the 10-Q)")
     if args.dry_run:
@@ -315,12 +368,27 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
     return BRIEF_PENDING_RC if _run_brief(watch.ticker, None) != 0 else 0
 
 
+def _built_meta(ticker: str, day: str) -> dict | None:
+    """The brief's build record (reports/briefs/<T>/<day>/built.json), or None."""
+    try:
+        meta = json.loads((BRIEFS / ticker / day / "built.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
 def _print_night_guarded(watch, submissions, args, now) -> int:
     try:
         return _print_night_brief(watch, submissions, args, now)
     except Exception as e:  # noqa: BLE001 — never takes the pass down
         print(f"  {watch.ticker}: print-night brief crashed: {type(e).__name__}: {e}",
               file=sys.stderr)
+        try:
+            # Keep the queue an honest record: the next pass retries it there.
+            if _queue_read(watch.ticker) is None:
+                _queue_write(watch.ticker, NO_REPORT_MARK, 1)
+        except OSError:
+            pass
         return BRIEF_PENDING_RC
 
 
@@ -699,8 +767,9 @@ def _notify_problems(sync_rc: int, acted: dict, args: argparse.Namespace) -> Non
     problems = [f"{t}: {_RC_WORDS.get(rc, rc)}" for t, rc in acted.items() if rc != 0]
     if sync_rc != 0:
         problems.insert(0, f"portfolio sync: {_RC_WORDS.get(sync_rc, sync_rc)}")
-    if problems:
-        notify("FQE sweep needs attention", "; ".join(problems))
+    if problems and not notify("FQE sweep needs attention", "; ".join(problems)):
+        print("notification NOT delivered (osascript unavailable, FQE_NO_NOTIFY set, or no "
+              "login session) — read this log: " + "; ".join(problems), file=sys.stderr)
 
 
 def _arm(

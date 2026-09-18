@@ -70,7 +70,9 @@ def notify(title: str, message: str) -> bool:
     script = 'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run'
     try:
         proc = subprocess.run(
-            [osascript, "-e", script, _clip(title, 80), _clip(message)],
+            # `--` ends option parsing: a title or message starting with "-e"
+            # is an argument to the script, never a second script fragment.
+            [osascript, "-e", script, "--", _clip(title, 80), _clip(message)],
             capture_output=True, text=True, timeout=NOTIFY_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):

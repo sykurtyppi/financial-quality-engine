@@ -420,6 +420,35 @@ class TestCliBuild:
         assert "print-night brief" in prompts[0]
         assert brief_cli.DELIVERED[-1][2] is True  # announced as the print-night variant
 
+    def test_build_records_how_the_brief_was_built(self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        meta = brief_cli.read_built_meta("NVDA", "2026-08-26")
+        assert meta["kind"] == "print-night" and meta["accession"] == "k-new"
+        assert meta["report"] is None and meta["at"]
+        assert brief_cli.cmd_build(self._args()) == 0
+        meta = brief_cli.read_built_meta("NVDA", "2026-08-26")
+        assert meta["kind"] == "full" and meta["report"].endswith("NVDA_2026-09-01.md")
+
+    def test_no_report_never_downgrades_a_full_brief(self, env, monkeypatch, capsys):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nfull findings\n", ""))
+        assert brief_cli.cmd_build(self._args()) == 0
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0  # 0: a queue entry clears
+        assert "full findings" in (env / "NVDA_2026-08-26.md").read_text()
+        assert "would downgrade it" in capsys.readouterr().out
+
+    def test_no_report_wins_over_an_explicit_report(self, env, monkeypatch):
+        prompts = []
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: prompts.append(prompt)
+                            or (0, "# NVDA\n## Headline\nok\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True, report=str(env / "nope.md"))) == 0
+        assert "- report:" not in prompts[0]
+
     def test_no_report_failure_does_not_write(self, env, monkeypatch):
         monkeypatch.setattr(brief_cli, "run_headless", lambda prompt, timeout: (1, "", "boom"))
         assert brief_cli.cmd_build(self._args(no_report=True)) == 2
@@ -436,6 +465,33 @@ class TestCliBuild:
         assert "delivery failed" in capsys.readouterr().err
         brief_cli.deliver("NVDA", tmp_path / "missing.md")  # read failure: same
         assert "delivery failed" in capsys.readouterr().err
+
+    def test_deliver_tells_apart_no_folder_from_a_failed_copy_and_logs_lost_notifications(
+            self, tmp_path, monkeypatch, capsys):
+        brief = tmp_path / "NVDA_2026-08-26.md"
+        brief.write_text("# x\n## Headline\nh\n")
+        notes = []
+        monkeypatch.setattr(brief_cli, "notify", lambda t, m: notes.append(m) or False)
+        monkeypatch.setattr(brief_cli, "publish", lambda b: None)
+        brief_cli.deliver("NVDA", brief)
+        out = capsys.readouterr()
+        assert "no drop folder configured" in out.out and "notification NOT delivered" in out.err
+
+        def fail(b):
+            raise OSError("iCloud busy")
+        monkeypatch.setattr(brief_cli, "publish", fail)
+        brief_cli.deliver("NVDA", brief)
+        out = capsys.readouterr()
+        assert "drop-folder copy FAILED" in out.err and "copy failed (see above)" in out.out
+        assert notes[-1].startswith("(drop-folder copy failed) h")
+
+    def test_main_wires_the_new_flags(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(brief_cli, "cmd_build", lambda a: seen.setdefault("args", a) and 0)
+        monkeypatch.setattr(brief_cli.sys, "argv",
+                            ["earnings_brief.py", "build", "nvda", "--no-report", "--no-deliver"])
+        assert brief_cli.main() == 0
+        assert seen["args"].no_report is True and seen["args"].no_deliver is True
 
     def test_deliver_copies_and_notifies_with_the_headline(self, tmp_path, monkeypatch):
         brief = tmp_path / "NVDA_2026-08-26.md"

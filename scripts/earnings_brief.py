@@ -29,10 +29,11 @@ or produced no brief (sources are kept in reports/briefs/<TICKER>/<date>/).
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,6 +91,36 @@ def prior_brief(ticker: str, before: date, root: Path | None = None) -> Path | N
 
 def brief_path(ticker: str, event_day: str, root: Path | None = None) -> Path:
     return (root or BRIEFS) / f"{ticker}_{event_day}.md"
+
+
+BUILT_FILE = "built.json"  # sidecar beside the sources: how the brief on disk was built
+
+
+def built_meta_path(ticker: str, event_day: str, root: Path | None = None) -> Path:
+    return (root or BRIEFS) / ticker / event_day / BUILT_FILE
+
+
+def read_built_meta(ticker: str, event_day: str, root: Path | None = None) -> dict | None:
+    """{"kind": "full"|"print-night", "accession": ..., "report": ..., "at": ...}
+    for the brief on disk, or None when there is no record (a brief from
+    before the sidecar existed, or none at all)."""
+    p = built_meta_path(ticker, event_day, root)
+    try:
+        meta = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def write_built_meta(ticker: str, event_day: str, *, kind: str, accession: str,
+                     report: Path | None, root: Path | None = None) -> None:
+    p = built_meta_path(ticker, event_day, root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "kind": kind, "accession": accession,
+        "report": str(report) if report else None,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }, indent=2) + "\n")
 
 
 def build_prompt(src: BriefSources) -> str:
@@ -189,6 +220,16 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     prompt = build_prompt(src)
     out = brief_path(ticker, src.event_day)
+    existing = read_built_meta(ticker, src.event_day)
+    if no_report and out.exists() and existing is not None and existing.get("kind") == "full":
+        # A print-night build must never downgrade a brief that already
+        # carries the engine findings (a queued retry racing a hand-built
+        # full brief, or a stray --no-report by hand). Nothing to do: exit 0
+        # so a queue entry for it is cleared.
+        print(f"{ticker}: {out.name} already carries the engine findings "
+              f"(built {existing.get('at')}) — a print-night rebuild would downgrade it; "
+              "nothing to do.")
+        return 0
     print(f"{ticker}: 8-K {src.filing.accession} filed {src.event_day}; "
           f"{len(src.files)} source file(s); call {'present' if src.has_transcript else 'UNAVAILABLE'}")
     for d in src.diagnostics:
@@ -206,6 +247,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         return 2
     keep = useful_value(out.read_text()) if out.exists() else "unset"
     out.write_text(finalize(stdout, keep))
+    write_built_meta(ticker, src.event_day, kind="print-night" if no_report else "full",
+                     accession=src.filing.accession, report=report)
     print(f"brief -> {out}" + (f" (useful: {keep} carried over)" if keep != "unset" else ""))
     if not getattr(args, "no_deliver", False):
         deliver(ticker, out, print_night=no_report)
@@ -219,15 +262,26 @@ def deliver(ticker: str, brief: Path, *, print_night: bool = False) -> None:
     try:
         text = brief.read_text(errors="replace")
         headline = _section(text, "Headline") or "(no headline)"
+        copy_failed = False
         try:
             copied = publish(brief)
         except OSError as e:
-            copied = None
-            print(f"  drop-folder copy failed: {e}", file=sys.stderr)
-        where = f" — copied to {copied}" if copied else " — no drop folder (set FQE_BRIEF_DROP)"
+            copied, copy_failed = None, True
+            print(f"  drop-folder copy FAILED: {e}", file=sys.stderr)
+        if copied:
+            where = f" — copied to {copied}"
+        elif copy_failed:
+            where = " — drop-folder copy failed (see above)"
+        else:
+            where = " — no drop folder configured (set FQE_BRIEF_DROP or sign in to iCloud Drive)"
         print(f"delivered{where}")
         kind = "print-night brief" if print_night else "brief"
-        notify(f"{ticker} {kind} ready", headline)
+        body = headline if not copy_failed else f"(drop-folder copy failed) {headline}"
+        if not notify(f"{ticker} {kind} ready", body):
+            # The whole point of the notification is the case where nobody
+            # reads this log — so the failure to notify at least lives here.
+            print("  notification NOT delivered (osascript unavailable, FQE_NO_NOTIFY set, or "
+                  f"no login session) — the brief is at {brief}", file=sys.stderr)
     except Exception as e:  # noqa: BLE001 — the brief is written; delivery must not fail the build
         print(f"  delivery failed: {type(e).__name__}: {e} — the brief is at {brief}",
               file=sys.stderr)
