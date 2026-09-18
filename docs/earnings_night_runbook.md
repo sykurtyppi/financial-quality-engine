@@ -249,7 +249,12 @@ engine findings (your `useful:` value carries over). For NVDA the two are
 minutes apart; for a small cap the 10-Q can be weeks later. The brief's
 filename (`<TICKER>_<8-K date>.md`) is the only state: no brief for that
 date within 14 days of the 8-K means build one. A failed print-night brief
-is queued and retried like any other (exit 5).
+is queued and retried like any other (exit 5) — but never in the pass that
+is about to rebuild it with the engine report anyway. Amended 8-Ks (8-K/A)
+never count as the print, so a corrected exhibit days later cannot move the
+brief to a second file; the prior-quarter guide must be at least 45 days
+older than the print, so a preliminary-results 8-K is never mistaken for
+last quarter's release.
 
 Delivery is local and publishes nothing (the repo is public; `reports/` is
 not in it):

@@ -759,6 +759,17 @@ class TestBriefHook:
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 0)  # fixed (login restored)
         assert watch_cli.cmd_sweep(_sweep_args()) == 0
 
+    def test_queue_is_not_retried_in_the_pass_that_rebuilds_anyway(self, sweep_env, monkeypatch, tmp_path):
+        # A queued print-night brief ("-") and the 10-Q landing in the same
+        # pass: one build, with the report — never a --no-report retry first.
+        watch_cli.BRIEF_PENDING.mkdir()
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text("-\n")
+        built = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: built.append((t, r)) or 0)
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert built == [("AAPL", Path("/tmp/fake_auto.md"))]
+
     def test_sweep_dry_run_and_no_brief_leave_the_queue_alone(self, sweep_env, monkeypatch, tmp_path):
         report = tmp_path / "AAPL_2026-09-01.md"
         report.write_text("# r")

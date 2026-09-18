@@ -73,6 +73,18 @@ class TestLatestEarnings8K:
     def test_newest_202_wins_and_non_202_ignored(self):
         assert bs.latest_earnings_8k(SUBS).accession == "k-new"
 
+    def test_amendment_never_becomes_the_print(self):
+        # An 8-K/A with Item 2.02 a week after the print must not move the
+        # print's identity (and the brief's filename) mid-window.
+        rec = {k: list(v) for k, v in SUBS["filings"]["recent"].items()}
+        rec["form"].insert(0, "8-K/A"); rec["accessionNumber"].insert(0, "k-amend")
+        rec["filingDate"].insert(0, "2026-09-02"); rec["reportDate"].insert(0, "2026-08-26")
+        rec["items"].insert(0, "2.02,9.01"); rec["acceptanceDateTime"].insert(0, None)
+        rec["primaryDocument"].insert(0, None)
+        subs = {"name": "X", "filings": {"recent": rec}}
+        assert bs.latest_earnings_8k(subs).accession == "k-new"
+        assert [f.accession for f in bs.earnings_8ks(subs)] == ["k-new", "k-old"]
+
     def test_explicit_accession_must_be_a_202(self):
         assert bs.latest_earnings_8k(SUBS, "k-old").accession == "k-old"
         with pytest.raises(bs.BriefSourceError, match="not an Item 2.02"):
@@ -210,6 +222,17 @@ class TestPriorRelease:
         cur = bs.latest_earnings_8k(SUBS)
         assert bs.prior_earnings_8k(SUBS, cur).accession == "k-old"
         assert bs.prior_earnings_8k(SUBS, bs.latest_earnings_8k(SUBS, "k-old")) is None
+
+    def test_a_second_202_from_the_same_print_is_not_last_quarters_guide(self):
+        # Preliminary results (2.02) on Aug 20, final release Aug 26: the
+        # prior guide is May's release, never the preliminary one.
+        rec = {k: list(v) for k, v in SUBS["filings"]["recent"].items()}
+        rec["form"].insert(1, "8-K"); rec["accessionNumber"].insert(1, "k-prelim")
+        rec["filingDate"].insert(1, "2026-08-20"); rec["reportDate"].insert(1, "2026-08-20")
+        rec["items"].insert(1, "2.02"); rec["acceptanceDateTime"].insert(1, None)
+        rec["primaryDocument"].insert(1, None)
+        subs = {"name": "X", "filings": {"recent": rec}}
+        assert bs.prior_earnings_8k(subs, bs.latest_earnings_8k(subs)).accession == "k-old"
 
     def test_prior_release_failure_is_a_diagnostic(self, archive, tmp_path):
         archive["k-old-index-headers.html"] = "<html>nothing typed</html>"
@@ -401,6 +424,18 @@ class TestCliBuild:
         monkeypatch.setattr(brief_cli, "run_headless", lambda prompt, timeout: (1, "", "boom"))
         assert brief_cli.cmd_build(self._args(no_report=True)) == 2
         assert not (env / "NVDA_2026-08-26.md").exists()
+
+    def test_deliver_never_fails_the_build(self, tmp_path, monkeypatch, capsys):
+        brief = tmp_path / "NVDA_2026-08-26.md"
+        brief.write_text("# x\n## Headline\nh\n")
+
+        def boom(b):
+            raise RuntimeError("file provider busy")
+        monkeypatch.setattr(brief_cli, "publish", boom)
+        brief_cli.deliver("NVDA", brief)  # no exception
+        assert "delivery failed" in capsys.readouterr().err
+        brief_cli.deliver("NVDA", tmp_path / "missing.md")  # read failure: same
+        assert "delivery failed" in capsys.readouterr().err
 
     def test_deliver_copies_and_notifies_with_the_headline(self, tmp_path, monkeypatch):
         brief = tmp_path / "NVDA_2026-08-26.md"

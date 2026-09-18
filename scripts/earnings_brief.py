@@ -216,17 +216,21 @@ def deliver(ticker: str, brief: Path, *, print_night: bool = False) -> None:
     """Copy the brief to the drop folder and post a notification. Both
     best-effort: the brief on disk is the record; delivery is how you hear
     about it without opening a terminal."""
-    text = brief.read_text(errors="replace")
-    headline = _section(text, "Headline") or "(no headline)"
     try:
-        copied = publish(brief)
-    except OSError as e:
-        copied = None
-        print(f"  drop-folder copy failed: {e}", file=sys.stderr)
-    where = f" — copied to {copied}" if copied else " — no drop folder (set FQE_BRIEF_DROP)"
-    print(f"delivered{where}")
-    kind = "print-night brief" if print_night else "brief"
-    notify(f"{ticker} {kind} ready", headline)
+        text = brief.read_text(errors="replace")
+        headline = _section(text, "Headline") or "(no headline)"
+        try:
+            copied = publish(brief)
+        except OSError as e:
+            copied = None
+            print(f"  drop-folder copy failed: {e}", file=sys.stderr)
+        where = f" — copied to {copied}" if copied else " — no drop folder (set FQE_BRIEF_DROP)"
+        print(f"delivered{where}")
+        kind = "print-night brief" if print_night else "brief"
+        notify(f"{ticker} {kind} ready", headline)
+    except Exception as e:  # noqa: BLE001 — the brief is written; delivery must not fail the build
+        print(f"  delivery failed: {type(e).__name__}: {e} — the brief is at {brief}",
+              file=sys.stderr)
 
 
 def _section(text: str, title: str) -> str:

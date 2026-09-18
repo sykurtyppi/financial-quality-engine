@@ -564,13 +564,6 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     now = _utcnow()
     stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     pending = 0
-    if not args.dry_run and not getattr(args, "no_brief", False):
-        try:
-            pending = _retry_pending_brief(watch.ticker)
-        except Exception as e:  # noqa: BLE001 — the queue must not take the pass down
-            print(f"[{stamp}] {watch.ticker}: queued brief retry crashed: "
-                  f"{type(e).__name__}: {e} — still queued.", file=sys.stderr)
-            pending = BRIEF_PENDING_RC
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -581,6 +574,17 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
         print(f"[{stamp}] {watch.ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     if decision.action == "wait":
+        # A queued brief is retried only while the 10-Q track is idle: when
+        # this pass is about to generate, the audit hook rebuilds the brief
+        # with the engine report and clears the queue itself — retrying first
+        # would spend a headless run on a version overwritten minutes later.
+        if not args.dry_run and not getattr(args, "no_brief", False):
+            try:
+                pending = _retry_pending_brief(watch.ticker)
+            except Exception as e:  # noqa: BLE001 — the queue must not take the pass down
+                print(f"[{stamp}] {watch.ticker}: queued brief retry crashed: "
+                      f"{type(e).__name__}: {e} — still queued.", file=sys.stderr)
+                pending = BRIEF_PENDING_RC
         overdue = (now - watch.print_at).days
         if overdue > OVERDUE_DAYS:
             # Not verbose-gated: a row whose expected period drifted out of
