@@ -439,7 +439,35 @@ class TestCliBuild:
                             lambda prompt, timeout: pytest.fail("must not run"))
         assert brief_cli.cmd_build(self._args(no_report=True)) == 0  # 0: a queue entry clears
         assert "full findings" in (env / "NVDA_2026-08-26.md").read_text()
-        assert "would downgrade it" in capsys.readouterr().out
+        assert "could downgrade it" in capsys.readouterr().out
+
+    def test_no_record_is_treated_as_full_and_a_print_night_record_allows_rebuild(
+            self, env, monkeypatch, capsys):
+        out = env / "NVDA_2026-08-26.md"
+        out.write_text("# old\n## Headline\npre-sidecar full brief\n\n---\nuseful: unset\n")
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "pre-sidecar full brief" in out.read_text()
+        assert "no build record" in capsys.readouterr().out
+        # A recorded print-night brief IS rebuilt by another --no-report run.
+        brief_cli.write_built_meta("NVDA", "2026-08-26", kind="print-night", accession="k-new",
+                                   report=None)
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nrebuilt\n", ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "rebuilt" in out.read_text()
+
+    def test_record_write_failure_does_not_fail_the_build(self, env, monkeypatch, capsys):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+
+        def boom(*a, **k):
+            raise OSError("read-only")
+        monkeypatch.setattr(brief_cli, "write_built_meta", boom)
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert (env / "NVDA_2026-08-26.md").exists()
+        assert "build record not written" in capsys.readouterr().err
 
     def test_no_report_wins_over_an_explicit_report(self, env, monkeypatch):
         prompts = []

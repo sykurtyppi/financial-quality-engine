@@ -221,14 +221,16 @@ def cmd_build(args: argparse.Namespace) -> int:
     prompt = build_prompt(src)
     out = brief_path(ticker, src.event_day)
     existing = read_built_meta(ticker, src.event_day)
-    if no_report and out.exists() and existing is not None and existing.get("kind") == "full":
+    if no_report and out.exists() and (existing is None or existing.get("kind") != "print-night"):
         # A print-night build must never downgrade a brief that already
         # carries the engine findings (a queued retry racing a hand-built
-        # full brief, or a stray --no-report by hand). Nothing to do: exit 0
-        # so a queue entry for it is cleared.
-        print(f"{ticker}: {out.name} already carries the engine findings "
-              f"(built {existing.get('at')}) — a print-night rebuild would downgrade it; "
-              "nothing to do.")
+        # full brief, or a stray --no-report by hand). No record at all is
+        # treated the same way — a brief from before the sidecar existed, or
+        # one whose record failed to write, is assumed full. Nothing to do:
+        # exit 0 so a queue entry for it is cleared.
+        built = f"built {existing.get('at')}" if existing else "no build record"
+        print(f"{ticker}: {out.name} already exists ({built}) — a print-night rebuild "
+              "could downgrade it; nothing to do (the 10-Q rebuild still refreshes it).")
         return 0
     print(f"{ticker}: 8-K {src.filing.accession} filed {src.event_day}; "
           f"{len(src.files)} source file(s); call {'present' if src.has_transcript else 'UNAVAILABLE'}")
@@ -247,8 +249,14 @@ def cmd_build(args: argparse.Namespace) -> int:
         return 2
     keep = useful_value(out.read_text()) if out.exists() else "unset"
     out.write_text(finalize(stdout, keep))
-    write_built_meta(ticker, src.event_day, kind="print-night" if no_report else "full",
-                     accession=src.filing.accession, report=report)
+    try:
+        write_built_meta(ticker, src.event_day, kind="print-night" if no_report else "full",
+                         accession=src.filing.accession, report=report)
+    except OSError as e:
+        # The brief is written; a missing record only makes it read as
+        # "full", the safe direction. Never fail the build over it.
+        print(f"  build record not written ({e}) — the brief is treated as full "
+              "until it is rebuilt", file=sys.stderr)
     print(f"brief -> {out}" + (f" (useful: {keep} carried over)" if keep != "unset" else ""))
     if not getattr(args, "no_deliver", False):
         deliver(ticker, out, print_night=no_report)

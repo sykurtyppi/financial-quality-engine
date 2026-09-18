@@ -983,6 +983,14 @@ class TestPrintNightBrief:
         self._k(monkeypatch, acc="k-prelim")  # same accession as before: nothing
         built.clear()
         assert watch_cli.cmd_sweep(_sweep_args()) == 0 and built == []
+        # A queued marker wins over the supersede: the queue's own retry runs
+        # (once), the trigger does not add a second, and nothing claims
+        # "rebuilding" for a rebuild that did not happen.
+        self._k(monkeypatch, acc="k-final2")
+        watch_cli._queue_write("AAPL", "-", 1)
+        capsys.readouterr()
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0 and built == ["AAPL"]
+        assert "superseded" not in capsys.readouterr().out
 
     def test_real_payload_reaches_the_trigger_end_to_end(self, sweep_env, monkeypatch):
         # No _k patch: the sweep's own submissions flow through the real

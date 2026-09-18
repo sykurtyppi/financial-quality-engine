@@ -349,17 +349,21 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
     if (now.date() - k.filing_date).days > PRINT_BRIEF_WINDOW_DAYS:
         return 0
     day = k.filing_date.isoformat()
+    superseded = None
     if (BRIEFS / f"{watch.ticker}_{day}.md").exists():
         meta = _built_meta(watch.ticker, day)
         # Same day, second 2.02 8-K (preliminary then final): a print-night
         # brief built from the earlier accession is rebuilt from the newer
-        # one; a full brief is never touched here.
-        if meta is None or meta.get("kind") == "full" or meta.get("accession") == k.accession:
+        # one; a full brief — or one with no record — is never touched here.
+        if meta is None or meta.get("kind") != "print-night" \
+                or meta.get("accession") == k.accession:
             return 0
-        print(f"[{stamp}] {watch.ticker}: a newer earnings 8-K {k.accession} superseded "
-              f"{meta.get('accession')} the same day — rebuilding the print-night brief")
+        superseded = meta.get("accession")
     if (BRIEF_PENDING / watch.ticker).exists():
         return 0  # already queued by an earlier failure; the retry owns it
+    if superseded:
+        print(f"[{stamp}] {watch.ticker}: a newer earnings 8-K {k.accession} superseded "
+              f"{superseded} the same day — rebuilding the print-night brief")
     print(f"[{stamp}] {watch.ticker}: earnings 8-K {k.accession} filed {k.filing_date} — "
           f"print-night brief (engine findings follow with the 10-Q)")
     if args.dry_run:
