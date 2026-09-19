@@ -70,7 +70,8 @@ def open_submit(
 
 
 @app.get("/report/{ticker}", response_class=HTMLResponse)
-def report_view(request: Request, ticker: str, date: str | None = None):
+def report_view(request: Request, ticker: str, date: str | None = None,
+                error: str | None = None):
     try:
         path = store.find_entry(ticker, date)
     except ValueError:
@@ -82,7 +83,6 @@ def report_view(request: Request, ticker: str, date: str | None = None):
         return RedirectResponse("/open?error=Write+a+thesis+before+generating+a+report.", status_code=303)
 
     report_file = reporting.report_path(ticker, entry["day"])
-    error = None
     if not entry["is_reported"]:
         # First view: generate the networked report, then lock the thesis. Serialize
         # per entry and re-check under the lock so a double-request generates once.
@@ -109,7 +109,12 @@ def _render_report(markdown_text: str) -> str:
     filer-authored excerpts (MD&A, risk factors, releases), so it is untrusted
     text: every `<`, `>` and `&` is escaped BEFORE markdown, which otherwise
     passes raw HTML straight through. Headings, tables and lists still
-    render; a tag inside a filing renders as the literal characters."""
+    render; a tag inside a filing renders as the literal characters.
+
+    Known limit: markdown escapes the inside of code spans itself, so a
+    backtick-quoted `&` would render double-escaped. Generated reports
+    contain no code spans today; if one is ever added, switch to sanitizing
+    the OUTPUT with an allow-list instead."""
     return md.markdown(_html.escape(markdown_text, quote=False),
                        extensions=["tables", "sane_lists"])
 

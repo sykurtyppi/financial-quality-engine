@@ -95,6 +95,9 @@ def test_impact_refused_before_the_report_exists(client):
     assert r.status_code == 303 and "Generate+the+report" in r.headers["location"]
     e = store.parse_entry(store.find_entry("KO"))
     assert not e.get("verdict") and not e.get("what_happened")
+    # ...and the refusal is shown where the user lands, not dropped.
+    r = client.get(r.headers["location"])
+    assert r.status_code == 200 and "Generate the report before recording its impact" in r.text
 
 
 def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):

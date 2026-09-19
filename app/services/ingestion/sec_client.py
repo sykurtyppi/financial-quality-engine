@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -85,9 +86,17 @@ class SecClient:
             # then parse) left a truncated response on disk to be served
             # as-is until it aged out.
             raise SecClientError(f"SEC response for {url} is not valid JSON: {e}") from e
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, path)  # atomic: a reader sees the old entry or the new one, never half
+        # Unique per call, not per process: the web UI serves concurrent
+        # report views from threads of one process, and they all resolve
+        # CIKs through the same company_tickers.json entry.
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)  # atomic: a reader sees the old entry or the new one, never half
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         return parsed
 
     def resolve_cik(self, ticker: str) -> int:
