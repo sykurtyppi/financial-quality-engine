@@ -1,0 +1,120 @@
+"""Structured, source-grounded read of an earnings brief.
+
+The brief is still prose for a human, but this section has a deliberately
+small contract so a later web/API surface can render it without parsing an
+LLM's adjectives. It describes the print; it does not rate the investment.
+"""
+
+from __future__ import annotations
+
+import re
+from enum import Enum
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class AssessmentRead(str, Enum):
+    FAVORABLE = "favorable"
+    MIXED = "mixed"
+    UNFAVORABLE = "unfavorable"
+    NOT_ASSESSABLE = "not assessable"
+
+
+DIMENSIONS = {
+    "results_vs_prior_guidance": "Results vs prior guidance",
+    "forward_guidance": "Forward guidance",
+    "operating_kpis": "Operating KPIs",
+    "cash_and_earnings_quality": "Cash and earnings quality",
+    "balance_sheet_and_capital": "Balance sheet and capital",
+}
+_LABEL_TO_KEY = {label.lower(): key for key, label in DIMENSIONS.items()}
+
+
+class AssessmentDimension(BaseModel):
+    key: str
+    label: str
+    read: AssessmentRead
+    evidence: str = Field(min_length=1)
+
+
+class QuarterAssessment(BaseModel):
+    overall: AssessmentRead
+    dimensions: list[AssessmentDimension]
+
+    @model_validator(mode="after")
+    def _complete_once(self) -> "QuarterAssessment":
+        keys = [item.key for item in self.dimensions]
+        expected = list(DIMENSIONS)
+        if keys != expected:
+            raise ValueError(
+                "quarter assessment dimensions must appear exactly once and in order: "
+                + ", ".join(DIMENSIONS.values())
+            )
+        return self
+
+
+def _section(markdown: str, title: str) -> str | None:
+    match = re.search(
+        rf"^## {re.escape(title)}\s*$\n(.*?)(?=^## |\Z)",
+        markdown,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else None
+
+
+def _table_cells(line: str) -> list[str]:
+    body = line.strip().strip("|")
+    cells = re.split(r"(?<!\\)\|", body)
+    return [cell.strip().replace("\\|", "|") for cell in cells]
+
+
+def parse_quarter_assessment(markdown: str) -> QuarterAssessment:
+    """Parse and validate the fixed ``## Quarter assessment`` section.
+
+    Raises ValueError when the model omitted a dimension, invented a read, or
+    blurred the print assessment into an investment recommendation.
+    """
+    section = _section(markdown, "Quarter assessment")
+    if section is None:
+        raise ValueError("missing `## Quarter assessment` section")
+
+    dimensions: list[AssessmentDimension] = []
+    for line in section.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = _table_cells(line)
+        if len(cells) != 3:
+            continue
+        label, read_text, evidence = cells
+        if label.lower() == "dimension" or set("".join(cells)) <= {"-", ":", " "}:
+            continue
+        key = _LABEL_TO_KEY.get(label.lower())
+        if key is None:
+            raise ValueError(f"unknown quarter-assessment dimension: {label!r}")
+        try:
+            read = AssessmentRead(read_text.lower())
+        except ValueError as e:
+            raise ValueError(f"invalid assessment read for {label}: {read_text!r}") from e
+        if not evidence:
+            raise ValueError(f"missing evidence for quarter-assessment dimension: {label}")
+        dimensions.append(
+            AssessmentDimension(key=key, label=DIMENSIONS[key], read=read, evidence=evidence)
+        )
+
+    overall_match = re.search(
+        r"^\*\*Overall earnings read:\*\*\s*([^\n]+)$", section, re.MULTILINE
+    )
+    if overall_match is None:
+        raise ValueError("missing `**Overall earnings read:**` line")
+    try:
+        overall = AssessmentRead(overall_match.group(1).strip().lower())
+    except ValueError as e:
+        raise ValueError(
+            f"invalid overall earnings read: {overall_match.group(1).strip()!r}"
+        ) from e
+
+    investment_line = re.search(r"^\*\*Investment context:\*\*\s*(.+)$", section, re.MULTILINE)
+    if investment_line is None or "not assessed" not in investment_line.group(1).lower():
+        raise ValueError("investment context must be present and explicitly `not assessed`")
+
+    return QuarterAssessment(overall=overall, dimensions=dimensions)

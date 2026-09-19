@@ -323,12 +323,20 @@ first and keeps beside the brief (`reports/briefs/<TICKER>/<date>/`):
 | Engine report + audit | The report the sweep just generated and its `_audit.md` |
 | Last quarter's brief | For the "changed since last quarter" section |
 
-Fixed headings (`.claude/skills/earnings-brief/SKILL.md`): headline · results
-vs the company's own prior guide · guidance · KPIs and segments · management
-framing · the call (prepared remarks, then every question with
+Fixed headings (`.claude/skills/earnings-brief/SKILL.md`): headline · a
+five-dimensional quarter assessment · standing assumptions · results vs the
+company's own prior guide · guidance · KPIs and segments · management framing ·
+the call (prepared remarks, then every question with
 answered/partial/deflected) · engine findings worth carrying · changed since
 last quarter · open questions · sources. Numbers only from the supplied
 files; anything missing is marked, not filled in.
+
+The quarter assessment says whether the reported results, forward guidance,
+operating KPIs, cash/earnings quality, and balance-sheet/capital evidence were
+favorable, mixed, unfavorable, or not assessable. It is validated before the
+brief is written and also saved as `reports/briefs/<TICKER>/<date>/assessment.json`
+for a later UI/API. It deliberately does not rate the investment: price,
+valuation, market expectations, and required return are a separate plane.
 
 ```
 scripts/earnings_brief.py build NVDA                 # re-run any time; e.g. once the transcript exists
