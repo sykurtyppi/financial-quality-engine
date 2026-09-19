@@ -323,12 +323,28 @@ class TestV2ReadOnly:
         p2.write_text(p2.read_text().replace("One of three", "Rewritten after the fact"))
         assert "lock broken" in client.get("/").text
 
-    def test_an_unreadable_entry_does_not_take_the_dashboard_down(self, client, tmp_path):
+    def test_an_unreadable_entry_is_shown_as_unreadable(self, client):
+        # The fence has to be the real one (`---json`) or the file is not a
+        # v2 entry at all and this never exercises the handler it is named
+        # for — which is exactly how this test passed while testing nothing.
         _seed_v2()
-        (store.ENTRIES / "CCC_2026-07-28.md").write_text(
-            "---\nschema_version: 2\n---\n{not json at all")
+        (store.ENTRIES / "CCC_2026-07-28.md").write_text("---json\n{not json at all\n---\n")
         r = client.get("/")
-        assert r.status_code == 200 and "MXL" in r.text
+        assert r.status_code == 200
+        assert "MXL" in r.text and "CCC" in r.text and "unreadable" in r.text
+
+    def test_a_locked_case_we_cannot_read_still_appears(self, client):
+        # `is_v2` answers False for an unreadable file, which would drop it
+        # from the one surface meant to show every locked case.
+        _seed_v2()
+        p = store.ENTRIES / "DDD_2026-07-29.md"
+        p.write_text("---json\n{}\n---\n")
+        p.chmod(0o000)
+        try:
+            r = client.get("/")
+            assert r.status_code == 200 and "DDD" in r.text and "unreadable" in r.text
+        finally:
+            p.chmod(0o600)
 
     def test_write_routes_refuse_a_v2_case_and_say_where_to_go(self, client):
         _seed_v2()
@@ -347,3 +363,18 @@ class TestV2ReadOnly:
         loc = client.get("/report/MXL").headers["location"]
         r = client.get(loc)
         assert r.status_code == 200 and "preregistered (v2) case" in r.text
+
+
+def test_one_unreadable_entry_does_not_lose_every_other_case(client, tmp_path):
+    # A file the parser cannot read used to raise straight out of the tally
+    # and 500 the dashboard, losing the count of every readable case with it.
+    _seed("KO", "steady staple", 3, "hold")
+    bad = store.ENTRIES / "ZZZ_2026-07-29.md"
+    bad.write_text("# not really an entry\n")
+    bad.chmod(0o000)
+    try:
+        r = client.get("/")
+        assert r.status_code == 200 and "KO" in r.text
+        assert store.tally()["unreadable"] == ["ZZZ_2026-07-29.md"]
+    finally:
+        bad.chmod(0o600)

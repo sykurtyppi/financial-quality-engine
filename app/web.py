@@ -12,6 +12,7 @@ only to reduce the friction of running the journal so it actually gets run.
 from __future__ import annotations
 
 import html as _html
+import os
 import re
 import threading
 from pathlib import Path
@@ -53,6 +54,11 @@ def _v2_rows() -> list[dict]:
     rows: list[dict] = []
     for p in store.list_entries():
         if not store.is_v2(p):
+            # `is_v2` answers False for a file it cannot read, which would
+            # make an unreadable entry vanish from the one surface meant to
+            # show every locked case. Unreadable is a state worth seeing.
+            if not os.access(p, os.R_OK):
+                rows.append({"ticker": p.stem, "day": "", "unreadable": "cannot be read"})
             continue
         try:
             e = store.load_v2(p)
