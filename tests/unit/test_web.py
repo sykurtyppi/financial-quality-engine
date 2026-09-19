@@ -106,6 +106,21 @@ def test_report_links_only_to_safe_url_schemes(client):
     assert 'href="https://www.sec.gov/x"' in r.text and 'href="/reports/x.md"' in r.text
 
 
+def test_url_scheme_allowlist_keeps_relative_targets(client):
+    # A scheme allowlist, not a prefix guess: an unschemed target is relative
+    # and stays, and control characters cannot smuggle a scheme past it
+    # (browsers strip them, so this must too).
+    from app import web
+
+    for keep in ("docs/report.md", "x.md?q=1", "./a", "../a", "/a", "#a",
+                 "https://sec.gov/x", "HTTP://sec.gov/x", "mailto:a@b.c"):
+        assert web._safe_url(keep) == keep, keep
+    for block in ("javascript:alert(1)", "JaVaScRiPt:x", "data:text/html,x",
+                  "vbscript:x", "file:///etc/passwd", "ftp://x/y",
+                  "java\nscript:alert(1)", "\tjavascript:x", " javascript:x"):
+        assert web._safe_url(block) == "#blocked-url", block
+
+
 def test_impact_refused_before_the_report_exists(client):
     client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
     r = client.post("/impact/KO", data={"verdict": "helped", "what_happened": "guided down"})

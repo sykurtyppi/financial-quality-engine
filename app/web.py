@@ -105,10 +105,23 @@ def report_view(request: Request, ticker: str, date: str | None = None,
     )
 
 
-_UNSAFE_URL_RE = re.compile(
-    r'''\s(href|src)\s*=\s*(["'])\s*(?!(?:https?:|mailto:|/|\#|\.))[^"']*\2''',
-    re.I,
-)
+_URL_ATTR_RE = re.compile(r'''(\s(?:href|src)\s*=\s*)(["'])([^"']*)\2''', re.I)
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+_SAFE_SCHEMES = {"http", "https", "mailto"}
+_BLOCKED_URL = "#blocked-url"
+
+
+def _safe_url(raw: str) -> str:
+    """Keep relative targets and the three schemes a report legitimately
+    needs; neutralize everything else. A URL with NO scheme is relative
+    (`docs/x.md`, `./x`, `/x`, `#x`) and is kept as-is. Whitespace and
+    control characters are removed before the scheme is read, because
+    browsers strip them too: `java\\nscript:` is `javascript:` to Chrome."""
+    probe = "".join(ch for ch in raw if ord(ch) > 0x20 and ord(ch) != 0x7F)
+    m = _SCHEME_RE.match(probe)
+    if m is None:
+        return raw  # relative
+    return raw if m.group(1).lower() in _SAFE_SCHEMES else _BLOCKED_URL
 
 
 def _render_report(markdown_text: str) -> str:
@@ -128,7 +141,13 @@ def _render_report(markdown_text: str) -> str:
     # from `[text](url)` — and a filing can write `[click](javascript:...)`.
     # Only http(s), mailto and relative targets survive; anything else
     # (javascript:, data:, vbscript:, file:) loses its target.
-    return _UNSAFE_URL_RE.sub(r' \1="#blocked-url"', html)
+    #
+    # Rewriting attributes with a regex is sound HERE only because the input
+    # was escaped first, so the sole markup in `html` is what markdown itself
+    # emitted. If this renderer is ever exposed beyond loopback, or ever
+    # stops escaping its input, replace it with a parsed allowlist sanitizer.
+    return _URL_ATTR_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{_safe_url(m.group(3))}{m.group(2)}", html)
 
 
 @app.get("/impact/{ticker}", response_class=HTMLResponse)

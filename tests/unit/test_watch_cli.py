@@ -721,7 +721,7 @@ class TestBriefHook:
                             lambda cmd, **k: seen.append(cmd) or SimpleNamespace(returncode=next(rcs)))
         assert watch_cli._run_brief("NVDA", report) == 2
         marker = tmp_path / "pending" / "NVDA"
-        assert watch_cli._queue_read("NVDA") == (str(report), 1)
+        assert watch_cli._queue_read("NVDA") == (str(report), 1, "")
         assert "queued at" in capsys.readouterr().err
         assert seen[0][1:] == [str(watch_cli.ROOT / "scripts" / "earnings_brief.py"),
                                "build", "NVDA", "--report", str(report)]
@@ -891,9 +891,9 @@ class TestPrintNightBrief:
                             lambda cmd, **k: seen.append(cmd) or SimpleNamespace(returncode=2))
         assert watch_cli._run_brief("NVDA", None) == 2
         assert seen[0][-3:] == ["build", "NVDA", "--no-report"]
-        assert watch_cli._queue_read("NVDA") == ("-", 1)
+        assert watch_cli._queue_read("NVDA") == ("-", 1, "")
         assert watch_cli._run_brief("NVDA", None) == 2  # same target: attempts climb
-        assert watch_cli._queue_read("NVDA") == ("-", 2)
+        assert watch_cli._queue_read("NVDA") == ("-", 2, "")
 
     def test_retry_cap_drops_a_hopeless_print_night_brief(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
@@ -920,7 +920,7 @@ class TestPrintNightBrief:
             raise OSError("disk")
         monkeypatch.setattr(watch_cli, "_run_brief", boom)
         assert watch_cli.cmd_sweep(_sweep_args()) == 5
-        assert watch_cli._queue_read("AAPL") == ("-", 1)
+        assert watch_cli._queue_read("AAPL") == ("-", 1, "")
         assert "print-night brief crashed" in capsys.readouterr().err
 
     def test_window_boundary_is_inclusive_at_14_days(self, sweep_env, monkeypatch):
@@ -1308,11 +1308,34 @@ class TestBriefRetryCap:
         report.write_text("# r")
         watch_cli._queue_write("NVDA", str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not run"))
-        assert watch_cli._retry_pending_brief("NVDA") == 5
+        monkeypatch.setattr(watch_cli, "_utcnow",
+                            lambda: watch_cli._now("2026-10-13T09:00:00+00:00"))
+        assert watch_cli._retry_pending_brief("NVDA") == 5  # alerts once
         assert "no longer retrying" in capsys.readouterr().err
-        # every later pass still reports it, still spends nothing
+        # Later passes the same day still LOG it and still spend nothing, but
+        # do not alert again: an hourly notification about a state that cannot
+        # change on its own is how a real alert gets ignored.
+        monkeypatch.setattr(watch_cli, "_utcnow",
+                            lambda: watch_cli._now("2026-10-13T23:00:00+00:00"))
+        assert watch_cli._retry_pending_brief("NVDA") == 0
+        assert "no longer retrying" in capsys.readouterr().err
+        # ...and it reminds you once a day, every day, until you act.
+        monkeypatch.setattr(watch_cli, "_utcnow",
+                            lambda: watch_cli._now("2026-10-14T00:30:00+00:00"))
         assert watch_cli._retry_pending_brief("NVDA") == 5
-        assert watch_cli._queue_read("NVDA") == (str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
+        assert watch_cli._queue_read("NVDA")[:2] == (str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
+
+    def test_a_new_failure_rearms_the_alert(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        report = tmp_path / "NVDA_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli._queue_write("NVDA", str(report), 2, alerted="2026-10-13")
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(watch_cli.subprocess, "run",
+                            lambda cmd, **k: SimpleNamespace(returncode=2))
+        assert watch_cli._run_brief("NVDA", report) == 2
+        assert watch_cli._queue_read("NVDA") == (str(report), 3, "")
 
     def test_below_the_cap_a_full_brief_still_retries(self, monkeypatch, tmp_path):
         monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")

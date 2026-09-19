@@ -29,11 +29,31 @@ def _fresh_for(monkeypatch, argv: list[str]) -> bool:
 
 
 @pytest.mark.parametrize("argv,expected", [
-    (["report", "NVDA"], True),          # the documented command
+    (["report", "NVDA"], True),              # the documented command
     (["report", "NVDA", "--fresh"], True),   # kept for scripts and the runbook
     (["report", "NVDA", "--no-fresh"], False),
-    (["open", "NVDA"], True),            # `open` generates a report too
-    (["open", "NVDA", "--no-fresh"], False),
 ])
 def test_freshness_defaults(monkeypatch, argv, expected):
     assert _fresh_for(monkeypatch, argv) is expected
+
+
+def test_only_the_report_command_takes_freshness_flags(monkeypatch, capsys):
+    # `open` locks a thesis; it does not fetch anything, so a freshness flag
+    # there would be decoration. Both build_report call sites live under
+    # `report` (the v1 path and _cmd_report_v2).
+    import ast
+
+    monkeypatch.setattr(sys, "argv", ["journal.py", "open", "NVDA", "--no-fresh"])
+    with pytest.raises(SystemExit):
+        with contextlib.redirect_stderr(io.StringIO()):
+            journal_cli.main()
+
+    src = (ROOT / "scripts" / "journal.py").read_text()
+    calls = [i + 1 for i, line in enumerate(src.splitlines()) if "build_report(" in line]
+    owners = {
+        fn.name
+        for fn in ast.walk(ast.parse(src))
+        if isinstance(fn, ast.FunctionDef)
+        and any(fn.lineno <= c <= (fn.end_lineno or fn.lineno) for c in calls)
+    }
+    assert owners == {"cmd_report", "_cmd_report_v2"}

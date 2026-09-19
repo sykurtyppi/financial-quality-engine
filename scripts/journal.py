@@ -683,10 +683,12 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def _freshness(parser) -> None:
-        """A generated report LOCKS the thesis against what it fetched, so the
-        default bypasses the EDGAR cache: on a filing day a <24h cached answer
-        can predate the very filing the case is about. `--fresh` stays an
-        accepted no-op so documented commands and scripts keep working."""
+        """For the commands that GENERATE a report (only `report`, on both the
+        v1 and v2 paths). A generated report LOCKS the thesis against what it
+        fetched, so the default bypasses the EDGAR cache: on a filing day a
+        <24h cached answer can predate the very filing the case is about.
+        `--fresh` stays an accepted no-op so documented commands and scripts
+        keep working."""
         parser.add_argument("--no-fresh", dest="fresh", action="store_false", default=True,
                             help="allow <24h cached EDGAR JSON (default: bypass the cache)")
         parser.add_argument("--fresh", dest="fresh", action="store_true", default=True,
@@ -697,7 +699,6 @@ def main() -> int:
     p_open.add_argument("--thesis")
     p_open.add_argument("--conviction", type=int, choices=range(1, 6))
     p_open.add_argument("--action")
-    _freshness(p_open)
     p_open.set_defaults(func=cmd_open)
 
     p_rep = sub.add_parser("report", help="lock the thesis timestamp and generate the report")
