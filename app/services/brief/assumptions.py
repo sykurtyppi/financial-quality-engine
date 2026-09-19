@@ -41,7 +41,7 @@ def parse_assumptions(text: str) -> list[str]:
         if not m:
             continue
         item = " ".join(m.group(1).split())
-        if item.startswith("[ ]") or item.startswith("[x]"):
+        if item[:3].lower() in ("[ ]", "[x]"):  # checkbox bullets, either case
             item = item[3:].strip()
         if item:
             out.append(item[:MAX_ASSUMPTION_CHARS])

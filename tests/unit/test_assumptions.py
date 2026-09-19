@@ -15,10 +15,11 @@ class TestParse:
                 "* Gross margin stays above 70%\n"
                 "2) Buybacks offset SBC\n"
                 "- [ ] No new China restrictions\n"
+                "- [X] Capex guide holds\n"
                 "prose line that is not an assumption\n")
         assert asm.parse_assumptions(text) == [
             "DC revenue keeps growing >50% YoY", "Gross margin stays above 70%",
-            "Buybacks offset SBC", "No new China restrictions"]
+            "Buybacks offset SBC", "No new China restrictions", "Capex guide holds"]
 
     def test_bounded(self):
         assert asm.parse_assumptions("- " + "x" * 1000)[0] == "x" * asm.MAX_ASSUMPTION_CHARS

@@ -53,6 +53,16 @@ class _Client:
         return SUBS
 
 
+@pytest.fixture(autouse=True)
+def _no_real_assumptions(monkeypatch, tmp_path):
+    # collect_sources reads journal/assumptions/<T>.md by default; no test in
+    # this module may see the operator's real file (an extra `assumptions`
+    # role would change exact-list assertions depending on the machine).
+    from app.services.brief import assumptions as asm
+
+    monkeypatch.setattr(asm, "ASSUMPTIONS", tmp_path / "_assumptions_isolated")
+
+
 @pytest.fixture
 def archive(monkeypatch):
     files = {
