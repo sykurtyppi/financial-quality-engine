@@ -295,11 +295,15 @@ any single fetch, forever. The engine already catches the loud case (two
 filings both presenting the same period); the quiet one can only be caught by
 having kept what the number used to be.
 
-So every sweep pass snapshots each watched name's companyfacts once a day,
-into `data/vintages/CIK…/<date>.json.gz` (gitignored; about 0.3 MB a
-snapshot, and identical content is never stored twice). Nothing here can be
-back-filled: a quarter that goes uncaptured is gone. That is why capture
-runs now, before anything reads from it.
+So every sweep pass (and every `poll`) snapshots each watched name's
+companyfacts once a day, into `data/vintages/CIK…/<date>-<hash>.json.gz`
+(gitignored; about 0.3 MB a snapshot, named for its content so two documents
+on one day are two files and identical content is stored once). Companyfacts
+itself cannot be rewound: it is a live view, and a value it no longer carries
+cannot be asked for. An as-filed history may be reconstructible from SEC
+DERA's quarterly data sets, but that is a separate project at quarterly
+granularity — not a substitute for a daily snapshot taken now. That is why
+capture runs before anything reads from it.
 
 ```
 scripts/vintage.py capture NVDA        # by hand; the sweep does this daily
@@ -308,16 +312,24 @@ scripts/vintage.py diff NVDA           # newest two snapshots
 scripts/vintage.py diff NVDA --from 2026-09-19 --to 2026-12-01 --since 2025-01-01
 ```
 
-A diff reports two things: a scored figure whose value **changed**, and one
-that **disappeared**. New periods are not reported — an ordinary filing adds
-those. Share counts are excluded unless you pass `--splits`: a stock split
+A diff reports two things about the figures the engine actually scores: one
+whose value **changed**, and one that **disappeared**. New periods are not
+reported — an ordinary filing adds those. A field the filer moved to another
+XBRL tag is compared, not called a disappearance, and the new tag is named.
+Share counts are excluded unless you pass `--splits`: a stock split
 retroactively rewrites every prior share count, and on the first real capture
 NVDA's ten-for-one split was the only thing the diff found. `--no-vintage`
-turns the sweep's capture off.
+turns capture off.
 
-Expect empty diffs. A restatement is rare; the store earns its keep on the
-quarter it is not empty, which is exactly the quarter you cannot reconstruct
-afterwards.
+**Read a finding as context, not an alarm.** Nothing the diff can see has an
+amended filing behind it — that is exactly what makes it invisible to the
+report's own restatement section, and it also means the ordinary explanations
+come first: a discontinued operation or spinoff re-presented, a segment
+reclassification, a taxonomy migration. At the published base rate for
+genuine restatements, eleven holdings should produce roughly one true finding
+every year or two, and a handful of benign ones along the way. The store
+earns its keep on the quarter that is not benign, which is exactly the
+quarter you cannot reconstruct afterwards.
 
 ## Standing assumptions — the thesis without the journal
 

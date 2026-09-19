@@ -8,9 +8,13 @@ the new value and the change is invisible from any single fetch, forever.
 
 The only way to see it is to have kept what the number used to be. So this
 stores the raw document, unmodified, each time it changes, and diffs one
-vintage against another. Nothing here can be back-filled: a quarter that goes
-uncaptured is gone, which is why capture runs from the sweep from the day it
-lands rather than waiting for the surfacing work.
+vintage against another. Nothing here can be back-filled FROM COMPANYFACTS:
+it is a live view, and a value it no longer carries cannot be asked for. SEC
+DERA's quarterly Financial Statement Data Sets publish numeric facts as
+filed, so an as-filed history may be reconstructible from them — a separate
+project, at quarterly granularity and with a publication lag, not a
+substitute for a daily snapshot taken now. That is why capture runs from the
+day it lands rather than waiting for the surfacing work.
 
 Layout (gitignored — it is bulk source data, ~0.3 MB gzipped per snapshot):
 
@@ -49,17 +53,27 @@ from app.services.ingestion.companyfacts_mapper import (
     _parse_date,
     _unit_for,
 )
-from app.services.ingestion.restatements import SPLIT_ADJUSTED_FIELDS
+from app.services.ingestion.restatements import (
+    DEFAULT_MATERIALITY_PCT,
+    SPLIT_ADJUSTED_FIELDS,
+    _active_tag,
+    _rows,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 VINTAGES = ROOT / "data" / "vintages"
 MANIFEST = "manifest.json"
 LOCK = ".lock"
 LOCK_TIMEOUT_S = 30.0
-_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([0-9a-f]{6,64}))?\.json\.gz$")
-# Same floor as the within-snapshot detector, so the two tiers speak in one
-# voice about what counts as a revision.
-DEFAULT_MATERIALITY_PCT = 0.005
+_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([0-9a-f]{6,64}))?(?:-\d+)?\.json\.gz$")
+# The materiality floor is the within-snapshot detector's, imported rather
+# than restated: the two tiers describe the same thing and a second copy
+# would drift apart unnoticed.
+# What reading a snapshot can raise when the file is not a readable archive.
+# gzip raises EOFError on a truncated member — which subclasses neither
+# OSError nor ValueError, so it escapes the obvious handler and would reach
+# the CLI as a traceback and the sweep as a lost pass.
+UNREADABLE = (OSError, ValueError, EOFError)
 
 
 def cik_dir(cik: int, root: Path | None = None) -> Path:
@@ -82,6 +96,44 @@ def digest_of(facts: dict) -> str:
 
 def snapshot_name(day: date, digest: str) -> str:
     return f"{day.isoformat()}-{digest[:12]}.json.gz"
+
+
+def snapshot_day(path: Path) -> str:
+    """The capture date out of a snapshot filename. Not `name.split(".")[0]`:
+    a content-addressed name carries the digest too."""
+    m = _NAME_RE.match(path.name)
+    return m.group(1) if m else path.name.split(".")[0]
+
+
+def _sweep_orphans(d: Path, older_than_s: float = 3600.0) -> None:
+    """Remove temp files a hard kill left behind. Only ours, only stale, and
+    only under the lock — a partial write is never a snapshot, but it should
+    not accumulate either."""
+    cutoff = time.time() - older_than_s
+    for p in d.glob(".*.tmp"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
+
+
+def _free_path(d: Path, day: date, sha: str) -> Path:
+    """Where this document goes. The name carries a 48-bit prefix of the
+    digest, ample to tell a day's documents apart — but a collision would mean
+    writing over a snapshot that is NOT this content, so it is checked rather
+    than assumed. Costs a hash only when a name is already taken."""
+    out = d / snapshot_name(day, sha)
+    n = 1
+    while out.exists():
+        try:
+            if digest_of(load_vintage(out)) == sha:
+                return out  # same content, same name: nothing to disambiguate
+        except UNREADABLE:
+            pass  # unreadable: do not trust it, and never write over it
+        out = d / f"{day.isoformat()}-{sha[:12]}-{n}.json.gz"
+        n += 1
+    return out
 
 
 @contextmanager
@@ -115,30 +167,40 @@ def _cik_lock(cik: int, root: Path | None = None, timeout: float | None = None):
 
 
 def _entry_for(path: Path) -> dict:
-    """A manifest entry rebuilt from a file on disk. The digest comes from the
-    filename when it carries one, and from the content otherwise (snapshots
-    written before names were content-addressed)."""
+    """A manifest entry rebuilt from a file on disk.
+
+    `sha256` is always the FULL digest of the content or an empty string —
+    never the truncated prefix the filename carries. A short value in a field
+    named sha256 is a lie the "do we already hold this?" check would have to
+    reason around; an empty one says plainly that the file is there and
+    cannot be read.
+    """
     m = _NAME_RE.match(path.name)
-    captured = m.group(1) if m else ""
-    sha = (m.group(2) if m else "") or ""
-    if len(sha) != 64:
-        try:
-            sha = digest_of(load_vintage(path))
-        except (OSError, ValueError):
-            sha = sha or ""
-    return {"captured": captured, "sha256": sha, "file": path.name,
-            "bytes": path.stat().st_size}
+    try:
+        sha = digest_of(load_vintage(path))
+    except UNREADABLE:
+        sha = ""
+    return {"captured": m.group(1) if m else "", "sha256": sha,
+            "file": path.name, "bytes": path.stat().st_size}
 
 
-def reconcile_manifest(cik: int, root: Path | None = None) -> list[dict]:
+def reconcile_manifest(cik: int, root: Path | None = None,
+                       skip: set[str] | None = None) -> list[dict]:
     """Snapshot entries rebuilt from the files on disk. The manifest is an
     index, never the archive: losing it must not make capture think there is
-    no history and start again."""
-    return [_entry_for(p) for p in list_vintages(cik, root)]
+    no history and start again.
+
+    `skip` names files the caller already has an entry for. Rebuilding one
+    entry means decompressing and re-hashing a multi-megabyte document, and
+    capture reads the manifest on every pass of an hourly job — so an index
+    that is already correct must cost nothing.
+    """
+    skip = skip or set()
+    return [_entry_for(p) for p in list_vintages(cik, root) if p.name not in skip]
 
 
 def read_manifest(cik: int, root: Path | None = None) -> dict:
-    """{"last_checked": "YYYY-MM-DD"|None, "snapshots": [{captured, sha256, file, bytes}]}.
+    """{"last_checked", "problem_days", "snapshots": [{captured, sha256, file, bytes}]}.
 
     A missing or unreadable manifest is rebuilt from the snapshots on disk, so
     a corrupt index can never erase the history that capture compares against.
@@ -148,20 +210,43 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
     except (OSError, ValueError):
         data = None
     if not isinstance(data, dict) or not isinstance(data.get("snapshots"), list):
-        return {"last_checked": None, "snapshots": reconcile_manifest(cik, root)}
+        return {"last_checked": None, "problem_days": 0, "observations": [],
+                "snapshots": reconcile_manifest(cik, root)}
     data.setdefault("last_checked", None)
-    known = {s.get("file") for s in data["snapshots"] if isinstance(s, dict)}
-    data["snapshots"] = [s for s in data["snapshots"] if isinstance(s, dict)]
-    data["snapshots"] += [e for e in reconcile_manifest(cik, root) if e["file"] not in known]
+    data.setdefault("problem_days", 0)
+    data.setdefault("observations", [])
+    # An entry with no digest is kept: it records a file we hold but cannot
+    # read, which is exactly the thing an operator needs to see.
+    data["snapshots"] = [s for s in data["snapshots"]
+                         if isinstance(s, dict) and s.get("file")]
+    known = {s["file"] for s in data["snapshots"]}
+    data["snapshots"] += reconcile_manifest(cik, root, skip=known)
     data["snapshots"].sort(key=lambda s: (s.get("captured", ""), s.get("file", "")))
     return data
+
+
+def _observe(man: dict, day: date, sha: str) -> None:
+    """Record WHICH document was live on which day.
+
+    Content is stored once, so a document that goes A, then B, then back to A
+    leaves two files and no way to tell B was ever live — the archive would
+    imply A had stood the whole time. The snapshots are the data; this is the
+    order they were seen in, and it cannot be reconstructed later.
+    """
+    obs = man.setdefault("observations", [])
+    if obs and obs[-1].get("sha256") == sha and obs[-1].get("date") == day.isoformat():
+        return
+    obs.append({"date": day.isoformat(), "sha256": sha})
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        with tmp.open("w") as fh:
+            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())  # a rename is atomic; the bytes must be there first
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -176,11 +261,19 @@ class Capture:
     checked: date
     path: Path | None
     sha256: str
-    reason: str  # captured | unchanged | already checked today | busy
+    reason: str  # captured | unchanged | already checked today | busy | failed
+    detail: str = ""
 
     @property
     def wrote(self) -> bool:
         return self.path is not None
+
+    @property
+    def problem(self) -> bool:
+        """True when this pass archived nothing for a reason that needs a
+        human eventually — a wedged lock or a failed write, not the ordinary
+        "nothing changed"."""
+        return self.reason in ("busy", "failed")
 
 
 def capture(
@@ -204,7 +297,15 @@ def capture(
     cik = client.resolve_cik(ticker)
     with _cik_lock(cik, root) as held:
         if not held:
-            return Capture(cik, today, None, "", "busy")
+            man = read_manifest(cik, root)
+            man["problem_days"] = int(man.get("problem_days") or 0) + 1
+            try:
+                _write_json_atomic(_manifest_path(cik, root), man)
+            except OSError:
+                pass
+            return Capture(cik, today, None, "", "busy",
+                           f"another capture holds the lock ({cik_dir(cik, root) / LOCK})")
+        _sweep_orphans(cik_dir(cik, root))
         man = read_manifest(cik, root)
         if not force and man.get("last_checked") == today.isoformat():
             newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
@@ -215,20 +316,41 @@ def capture(
         sha = hashlib.sha256(raw).hexdigest()
         man["last_checked"] = today.isoformat()
         known = {s.get("sha256") for s in man["snapshots"]}
+        _observe(man, today, sha)
         if sha in known:
+            man["problem_days"] = 0
             _write_json_atomic(_manifest_path(cik, root), man)
             return Capture(cik, today, None, sha, "unchanged")
 
-        out = cik_dir(cik, root) / snapshot_name(today, sha)
+        # Record that today's fetch HAPPENED before attempting the larger,
+        # more failure-prone archive write. Otherwise a failing write leaves
+        # `last_checked` unset and the daily gate never closes, turning one
+        # multi-megabyte fetch a day into one an hour for as long as the
+        # disk stays broken — while archiving nothing either way.
+        try:
+            _write_json_atomic(_manifest_path(cik, root), man)
+        except OSError:
+            pass  # the write below will fail too and is the one that matters
+
+        out = _free_path(cik_dir(cik, root), today, sha)
         tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
         try:
             # mtime=0: the archive bytes depend only on the content, so an
             # unchanged document cannot look changed to anything comparing files.
-            with tmp.open("wb") as fobj, gzip.GzipFile(
-                filename="", mode="wb", fileobj=fobj, mtime=0
-            ) as fh:
-                fh.write(raw)
+            with tmp.open("wb") as fobj:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=fobj, mtime=0) as fh:
+                    fh.write(raw)
+                fobj.flush()
+                os.fsync(fobj.fileno())  # survive a power loss, not just a kill
             os.replace(tmp, out)
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            man["problem_days"] = int(man.get("problem_days") or 0) + 1
+            try:
+                _write_json_atomic(_manifest_path(cik, root), man)
+            except OSError:
+                pass
+            return Capture(cik, today, None, sha, "failed", f"{type(e).__name__}: {e}")
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -237,6 +359,7 @@ def capture(
         man["snapshots"] = [s for s in man["snapshots"] if s.get("file") != out.name]
         man["snapshots"].append(_entry_for(out))
         man["snapshots"].sort(key=lambda s: (s.get("captured", ""), s.get("file", "")))
+        man["problem_days"] = 0
         _write_json_atomic(_manifest_path(cik, root), man)
         return Capture(cik, today, out, sha, "captured")
 
@@ -293,72 +416,86 @@ class VintageChange:
     new_accession: str = ""
     new_form: str = ""
     pct_change: float | None = None
+    new_tag: str = ""  # set when the filer moved the field to another XBRL tag
+
+    @property
+    def moved_tag(self) -> bool:
+        return bool(self.new_tag) and self.new_tag != self.key.tag
 
 
-def _scored_tags(include_split_adjusted: bool = False) -> dict[tuple[str, str], tuple[str, str]]:
-    """(taxonomy, tag) -> (field_name, unit) for every field the engine scores.
+def _scored_tags(include_split_adjusted: bool = False) -> dict[str, tuple]:
+    """field_name -> (candidate tags, unit) for every field the engine scores.
 
     Share counts are excluded by default, for the reason the within-snapshot
     detector excludes them: a stock split retroactively rewrites every prior
     share count, which is a corporate action and not a revision. Measured on
     the first real capture — NVDA's June 2024 ten-for-one split produced four
     "revisions" of exactly 900%, and they were the only findings in the file.
-    That is precisely the noise this store would otherwise drown in.
     """
-    out: dict[tuple[str, str], tuple[str, str]] = {}
+    out: dict[str, tuple] = {}
     for field_name, candidates in {**INSTANT_FIELDS, **FLOW_FIELDS}.items():
         if not include_split_adjusted and field_name in SPLIT_ADJUSTED_FIELDS:
             continue
-        unit = _unit_for(field_name)
-        for taxonomy, tag in candidates:
-            out.setdefault((taxonomy, tag), (field_name, unit))
+        out[field_name] = (candidates, _unit_for(field_name))
     return out
 
 
-def _latest_by_key(facts: dict, scored_only: bool,
-                   include_split_adjusted: bool = False) -> dict[FactKey, dict]:
-    """The value each (tag, period) currently stands at — latest filed wins,
-    exactly what the mapper scores."""
-    wanted = _scored_tags(include_split_adjusted)
-    out: dict[FactKey, dict] = {}
+def _series(facts: dict, scored_only: bool,
+            include_split_adjusted: bool = False) -> dict[tuple, dict]:
+    """(field, start, end) -> the value that period currently stands at.
+
+    Keyed by FIELD, not by tag. A filer that moves a field to another XBRL
+    tag has not changed the number, and keying by tag would read the move as
+    a disappearance and an appearance — the sibling detector's docstring is
+    explicit that comparing across tags fabricates a restatement at every
+    taxonomy change. Keying by field compares like with like.
+
+    Within a snapshot the tag is chosen the way the engine chooses it —
+    `_active_tag`, best coverage — so a revision reported here is a revision
+    to the number a report would show, not to some abandoned candidate tag
+    carrying stale data. The unit is the field's unit, with the same
+    mis-filed-share-count fallback the sibling detector uses.
+
+    Same-day filed ties resolve as the mapper's `_dedupe_latest_filed` does:
+    the FIRST row at the latest filed date wins (`>`, not `>=`), over rows in
+    companyfacts order. Round-8 of the sibling detector was a bug where
+    sorting and taking the last diverged from scoring; do not "tidy" this
+    into a sort.
+    """
+    out: dict[tuple, dict] = {}
+
+    def _take(field: str, taxonomy: str, tag: str, unit: str) -> None:
+        for row in _rows(facts, taxonomy, tag, unit):
+            try:
+                end = _parse_date(row["end"])
+                filed = _parse_date(row["filed"])
+                val = float(row["val"])
+                start = _parse_date(row["start"]) if row.get("start") else None
+            except (KeyError, TypeError, ValueError):
+                continue
+            k = (field, start, end)
+            prev = out.get(k)
+            if prev is None or filed > prev["filed"]:
+                out[k] = {"filed": filed, "val": val, "accn": row.get("accn", ""),
+                          "form": row.get("form", ""),
+                          "key": FactKey(taxonomy, tag, unit, start, end)}
+
+    if scored_only:
+        for field, (candidates, unit) in _scored_tags(include_split_adjusted).items():
+            active = _active_tag(facts, candidates, unit)
+            if active is not None:
+                _take(field, active[0], active[1], unit)
+        return out
+
+    # Every tag, each its own series: an unfiltered view for a human asking
+    # what moved anywhere, not the engine's view of a company.
     for taxonomy, tags in (facts.get("facts") or {}).items():
         if not isinstance(tags, dict):
             continue
         for tag, concept in tags.items():
-            if scored_only and (taxonomy, tag) not in wanted:
-                continue
-            for unit, rows in ((concept or {}).get("units") or {}).items():
-                if not isinstance(rows, list):
-                    continue
-                for row in rows:
-                    try:
-                        end = _parse_date(row["end"])
-                        filed = _parse_date(row["filed"])
-                        val = float(row["val"])
-                        start = _parse_date(row["start"]) if row.get("start") else None
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    k = FactKey(taxonomy, tag, unit, start, end)
-                    prev = out.get(k)
-                    if prev is None or filed > prev["filed"]:
-                        out[k] = {"filed": filed, "val": val,
-                                  "accn": row.get("accn", ""), "form": row.get("form", "")}
+            for unit in ((concept or {}).get("units") or {}):
+                _take(f"{taxonomy}:{tag}", taxonomy, tag, unit)
     return out
-
-
-def _same_field_elsewhere(latest: dict, names: dict, field_name: str,
-                          key: FactKey) -> tuple[FactKey, dict] | None:
-    """The same field's value for this exact period under a DIFFERENT tag in
-    the newer snapshot, or None. A filer migrating a field to another XBRL
-    tag has not withdrawn the figure — but it may also have changed it while
-    moving, so the caller compares rather than simply staying quiet."""
-    if not field_name:
-        return None
-    for k2, row in latest.items():
-        if (k2.start == key.start and k2.end == key.end and k2.tag != key.tag
-                and names.get((k2.taxonomy, k2.tag), ("", ""))[0] == field_name):
-            return k2, row
-    return None
 
 
 def diff_vintages(
@@ -373,44 +510,36 @@ def diff_vintages(
     """Prior-period figures that changed or vanished between two snapshots.
 
     Facts ADDED are deliberately not reported: an ordinary new filing adds
-    facts for new periods, which is not a revision, and separating a genuine
-    back-fill from that needs a period-age rule there is no data to calibrate
-    yet. Revisions and withdrawals are the blind spot this store exists for.
+    facts for new periods, which is not a revision, and telling a genuine
+    back-fill from that needs a period-age rule there is no data to
+    calibrate yet. Revisions and withdrawals are the blind spot this store
+    exists for.
 
-    Share counts are excluded unless `include_split_adjusted`: see
-    `_scored_tags`. A split is not a restatement.
+    Share counts are excluded unless `include_split_adjusted`: a split is not
+    a restatement.
     """
-    a = _latest_by_key(older, scored_only, include_split_adjusted)
-    b = _latest_by_key(newer, scored_only, include_split_adjusted)
-    names = _scored_tags(include_split_adjusted)
+    a = _series(older, scored_only, include_split_adjusted)
+    b = _series(newer, scored_only, include_split_adjusted)
     changes: list[VintageChange] = []
     for k, old in a.items():
-        if since is not None and k.end < since:
+        field_name, _start, end = k
+        if since is not None and end < since:
             continue
-        field_name = names.get((k.taxonomy, k.tag), ("", ""))[0] or k.tag
         new = b.get(k)
         if new is None:
-            # A filer moving a field to another XBRL tag has not withdrawn
-            # the figure — the period still has a value, under a different
-            # tag for the same field. Compare against THAT rather than
-            # suppressing: a migration can carry a revision with it, and
-            # silence would be the one outcome this store cannot afford.
-            moved = _same_field_elsewhere(b, names, field_name, k)
-            if moved is None:
-                changes.append(VintageChange(
-                    "withdrawn", field_name, k, old["val"], old["filed"],
-                    old.get("accn", ""), old.get("form", "")))
-                continue
-            new = moved[1]
+            changes.append(VintageChange(
+                "withdrawn", field_name, old["key"], old["val"], old["filed"],
+                old.get("accn", ""), old.get("form", "")))
+            continue
         if new["val"] == old["val"]:
             continue
         pct = None if old["val"] == 0 else abs(new["val"] - old["val"]) / abs(old["val"])
         if pct is not None and pct < materiality_pct:
             continue
         changes.append(VintageChange(
-            "revised", field_name, k, old["val"], old["filed"],
+            "revised", field_name, old["key"], old["val"], old["filed"],
             old.get("accn", ""), old.get("form", ""), new["val"], new["filed"],
-            new.get("accn", ""), new.get("form", ""), pct))
+            new.get("accn", ""), new.get("form", ""), pct, new["key"].tag))
     changes.sort(key=lambda c: (c.key.end, c.field_name, c.key.tag), reverse=True)
     return changes
 
@@ -421,10 +550,21 @@ def render_changes(changes: list[VintageChange], older: str, newer: str) -> str:
     head = f"### Vintage diff — {older} → {newer}\n"
     if not changes:
         return head + "\nNo prior-period figure changed or disappeared between these snapshots.\n"
-    lines = [head, "", "| Field | Period | Was | Now | Change | Originally filed |",
-             "|---|---|---|---|---|---|"]
+    lines = [
+        head, "",
+        "_Context, not an alarm._ Nothing found here has an amended filing "
+        "behind it — that is what makes it invisible to the within-snapshot "
+        "detector, and it also means the ordinary explanations come first: a "
+        "discontinued operation or a spinoff re-presented, a segment "
+        "reclassification, a taxonomy migration. Read the filing before "
+        "calling any of it a restatement.",
+        "",
+        "| Field | Period | Was | Now | Change | Originally filed |",
+        "|---|---|---|---|---|---|"]
     for c in changes:
         now = "withdrawn" if c.kind == "withdrawn" else f"{c.new_value:,.0f}"
+        if c.moved_tag:
+            now += f" (now tagged {c.new_tag})"
         pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
         filed = f"{c.old_filed} {c.old_form} {c.old_accession}".strip()
         lines.append(

@@ -579,6 +579,10 @@ def cmd_poll(args: argparse.Namespace) -> int:
         print(f"EDGAR unavailable: {e}", file=sys.stderr)
         return 1
 
+    # An ad-hoc poll is the ONLY thing that ever runs against a name outside
+    # the watchlist, and an uncaptured quarter cannot be recovered later.
+    _capture_vintage(ticker, client, args, _utcnow())
+
     deadline = time.monotonic() + args.max_wait
     attempt = 0
     while True:
@@ -655,7 +659,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
 
 def _capture_vintage(ticker: str, client: SecClient, args: argparse.Namespace,
-                     now: datetime) -> None:
+                     now: datetime) -> int:
     """Snapshot this name's companyfacts if it changed today.
 
     A company can revise a prior figure without re-presenting the original,
@@ -665,8 +669,8 @@ def _capture_vintage(ticker: str, client: SecClient, args: argparse.Namespace,
     per name. Best-effort by construction: the season does not stop because an
     archive write failed.
     """
-    if args.dry_run or getattr(args, "no_vintage", False):
-        return
+    if getattr(args, "dry_run", False) or getattr(args, "no_vintage", False):
+        return 0
     try:
         res = capture_vintage(client, ticker, now=now)
         if res.wrote:
@@ -675,8 +679,31 @@ def _capture_vintage(ticker: str, client: SecClient, args: argparse.Namespace,
             # here would abort the pass for every name after this one.
             print(f"[{now:%Y-%m-%d %H:%M:%SZ}] {ticker}: companyfacts changed — "
                   f"vintage {res.path.name} ({res.path.stat().st_size / 1024:.0f} KB)")
+        if res.problem:
+            # A wedged lock archived nothing and would otherwise print nothing
+            # at all — indistinguishable in the log from an ordinary quiet
+            # day, for a store whose whole premise is that a missed day is
+            # missed for good.
+            print(f"  {ticker}: no vintage today ({res.reason}): {res.detail}", file=sys.stderr)
+            return VINTAGE_STALE_DAYS and _vintage_rc(ticker)
+        return 0
     except Exception as e:  # noqa: BLE001 — an archive must never cost a print
         print(f"  {ticker}: vintage capture failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return _vintage_rc(ticker)
+
+
+def _vintage_rc(ticker: str) -> int:
+    """1 once a name's capture has been failing for VINTAGE_STALE_DAYS, so the
+    pass exits non-zero and the notification names it; 0 before that, because
+    a single bad day is not worth waking anyone."""
+    try:
+        from app.services.ingestion.vintages import read_manifest
+        from app.services.ingestion.sec_client import SecClient as _C
+
+        days = int(read_manifest(_C().resolve_cik(ticker)).get("problem_days") or 0)
+    except Exception:  # noqa: BLE001 — the counter is advisory, never fatal
+        return 0
+    return 1 if days >= VINTAGE_STALE_DAYS else 0
 
 
 def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> int:
@@ -685,7 +712,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     now = _utcnow()
     stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     pending = 0
-    _capture_vintage(watch.ticker, client, args, now)
+    vintage_rc = _capture_vintage(watch.ticker, client, args, now)
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -719,7 +746,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
             print(f"[{stamp}] {decision.message}")
         # The 10-Q is not here yet — but the earnings 8-K may be.
         pending = pending or _print_night_guarded(watch, submissions, args, now)
-        return pending or 3
+        return pending or vintage_rc or 3
     print(f"[{stamp}] {decision.action} — {decision.message}")
     try:
         rc = _act(watch.ticker, watch, decision, args)
@@ -733,11 +760,15 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     # in which case this is a no-op; if the audit failed (4) the print-night
     # brief still goes out — the release is news tonight, the audit can retry.
     pending = pending or _print_night_guarded(watch, submissions, args, now)
-    return rc if rc not in (0, 3) else (pending or rc)
+    return rc if rc not in (0, 3) else (pending or vintage_rc or rc)
 
 
 LOCK_RETRY_S = 0.5
 OVERDUE_DAYS = 21  # a print hint this stale with no filing is a mis-armed row, not patience
+# A capture can fail for a day without anyone caring. Failing for this many
+# days running means the archive is not being written and nobody has noticed
+# — which for a store that cannot be back-filled is worth an alert.
+VINTAGE_STALE_DAYS = 2
 
 
 @contextmanager
@@ -902,26 +933,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def read_portfolio(path: Path) -> list[str]:
-    """Tickers from a holdings file: one per line, `#` comments; anything
-    after the first comma/whitespace is ignored so a line like
-    `NVDA, 100 sh` works. No header-row detection — strip one from a
-    brokerage export first, or it is reported as an unknown ticker."""
-    if not path.is_file():
-        raise wl.WatchlistError(f"portfolio file not found: {path}")
-    out: list[str] = []
-    for line in path.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        token = line.replace(",", " ").split()[0].strip().strip('"')
-        try:
-            t = store.safe_ticker(token)
-        except ValueError:
-            continue  # header row, currency line, etc.
-        if t not in out:
-            out.append(t)
-    return out
+read_portfolio = wl.read_portfolio  # shared with vintage.py; one reader, one format
 
 
 def _sync(client: SecClient, portfolio: Path, *, prune: bool, dry_run: bool = False) -> int:
