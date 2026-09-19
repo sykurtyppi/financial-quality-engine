@@ -287,6 +287,28 @@ not in it):
 
 A print-night brief by hand: `scripts/earnings_brief.py build NVDA --no-report`.
 
+## Standing assumptions — the thesis without the journal
+
+A brief with no thesis has nothing to measure against, and a blind thesis
+per print is the thing there was never time for. The middle path: write
+down, once per holding, the two or three things you are assuming, and every
+brief reports each one as **held / challenged / no news** with the fact and
+the file that decided it.
+
+```
+scripts/earnings_brief.py assume NVDA "Data-center revenue keeps growing >50% YoY"
+scripts/earnings_brief.py assume NVDA "Buybacks at least offset SBC dilution"
+scripts/earnings_brief.py assume NVDA            # list them
+```
+
+That writes `journal/assumptions/NVDA.md` (private, gitignored — it reveals
+holdings; hand-editing the bullets is fine). Retire an assumption by
+deleting its line. The brief's `## Your assumptions` section is the second
+thing on the page; the digest carries it too. A verdict is only ever
+`held` or `challenged` when a supplied document states the fact — otherwise
+`no news` — so a run of `no news` across a season is itself information:
+the assumption is not something the prints can test.
+
 ## The earnings brief
 
 `reports/briefs/<TICKER>_<print date>.md` — one page per print, written by

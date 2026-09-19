@@ -39,6 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.services.brief.assumptions import add_assumption, assumptions_path, load_assumptions
 from app.services.brief.sources import (
     BRIEFS,
     BriefSourceError,
@@ -321,6 +322,9 @@ def build_digest(paths: list[Path], since: date, today: date) -> str:
         lines += [f"## {title}", f"_{p.name} · useful: {useful_value(text)}_", ""]
         head = _section(text, "Headline") or "_(no Headline section)_"
         lines += [head, ""]
+        assumptions = _section(text, "Your assumptions")
+        if assumptions and not assumptions.startswith("UNAVAILABLE"):
+            lines += ["**Your assumptions**", assumptions, ""]
         changed = _section(text, "Changed since last quarter")
         if changed:
             lines += ["**Changed since last quarter**", changed, ""]
@@ -340,6 +344,21 @@ def cmd_digest(args: argparse.Namespace) -> int:
     out.write_text(text)
     print(text)
     print(f"digest -> {out}")
+    return 0
+
+
+def cmd_assume(args: argparse.Namespace) -> int:
+    ticker = safe_ticker(args.ticker)
+    if args.text:
+        p = add_assumption(ticker, " ".join(args.text))
+        print(f"added to {p}")
+    items = load_assumptions(ticker)
+    if not items:
+        print(f"{ticker}: no standing assumptions yet ({assumptions_path(ticker)})")
+        return 0
+    print(f"{ticker}: {len(items)} standing assumption(s) — {assumptions_path(ticker)}")
+    for i, a in enumerate(items, 1):
+        print(f"  {i}. {a}")
     return 0
 
 
@@ -387,6 +406,12 @@ def main() -> int:
 
     t = sub.add_parser("tally", help="count useful: yes/no across briefs")
     t.set_defaults(fn=cmd_tally)
+
+    a = sub.add_parser("assume", help="add a standing assumption for a holding, or list them")
+    a.add_argument("ticker")
+    a.add_argument("text", nargs="*", help='the assumption, e.g. "DC revenue keeps growing >50%% YoY" '
+                                            "(omit to list)")
+    a.set_defaults(fn=cmd_assume)
 
     args = p.parse_args()
     try:

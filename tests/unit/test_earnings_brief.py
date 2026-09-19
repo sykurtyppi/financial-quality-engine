@@ -53,6 +53,16 @@ class _Client:
         return SUBS
 
 
+@pytest.fixture(autouse=True)
+def _no_real_assumptions(monkeypatch, tmp_path):
+    # collect_sources reads journal/assumptions/<T>.md by default; no test in
+    # this module may see the operator's real file (an extra `assumptions`
+    # role would change exact-list assertions depending on the machine).
+    from app.services.brief import assumptions as asm
+
+    monkeypatch.setattr(asm, "ASSUMPTIONS", tmp_path / "_assumptions_isolated")
+
+
 @pytest.fixture
 def archive(monkeypatch):
     files = {
@@ -120,6 +130,25 @@ class TestCollectSources:
         with pytest.raises(bs.BriefSourceError, match="transcript not found"):
             bs.collect_sources(_Client(), "NVDA", out_root=tmp_path,
                                transcript=tmp_path / "missing.txt")
+
+    def test_assumptions_attached_as_a_numbered_data_file(self, archive, tmp_path):
+        from app.services.brief import assumptions as asm
+
+        asm.add_assumption("NVDA", "DC revenue keeps growing >50% YoY", root=tmp_path / "asm")
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "asm")
+        f = next(x for x in src.files if x.role == "assumptions")
+        assert f.path == tmp_path / "NVDA" / "2026-08-26" / "assumptions.txt"
+        assert "1. DC revenue keeps growing >50% YoY" in f.path.read_text()
+        assert "1 standing assumption(s)" in f.label
+        assert not any("no standing assumptions" in d for d in src.diagnostics)
+        assert "- assumptions:" in brief_cli.build_prompt(src)
+
+    def test_no_assumptions_is_a_diagnostic(self, archive, tmp_path):
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "none")
+        assert not any(x.role == "assumptions" for x in src.files)
+        assert any("no standing assumptions on file for NVDA" in d for d in src.diagnostics)
 
     def test_report_and_audit_attached_when_present(self, archive, tmp_path):
         rep = tmp_path / "NVDA_2026-08-26.md"
@@ -281,6 +310,31 @@ class TestCliHelpers:
         assert brief_cli.prior_brief("NVDA", date(2026, 8, 26), tmp_path).name == "NVDA_2026-05-20.md"
         assert brief_cli.prior_brief("NVDA", date(2026, 2, 25), tmp_path) is None
 
+    def test_digest_carries_the_assumptions_section_but_not_unavailable(self, tmp_path):
+        (tmp_path / "NVDA_2026-08-26.md").write_text(
+            "# NVDA brief\n## Headline\nh\n## Your assumptions\n| 1 | DC | held | release |\n"
+            "## Changed since last quarter\nc\n\n---\nuseful: unset\n")
+        (tmp_path / "AAPL_2026-08-27.md").write_text(
+            "# AAPL brief\n## Headline\nh\n## Your assumptions\nUNAVAILABLE — none\n"
+            "\n---\nuseful: unset\n")
+        text = brief_cli.build_digest(
+            [tmp_path / "NVDA_2026-08-26.md", tmp_path / "AAPL_2026-08-27.md"],
+            date(2026, 8, 1), date(2026, 9, 1))
+        assert "**Your assumptions**\n| 1 | DC | held | release |" in text
+        assert text.count("**Your assumptions**") == 1
+
+    def test_assume_cli_adds_and_lists(self, monkeypatch, tmp_path, capsys):
+        from app.services.brief import assumptions as asm
+
+        monkeypatch.setattr(asm, "ASSUMPTIONS", tmp_path)
+        monkeypatch.setattr(brief_cli.sys, "argv",
+                            ["earnings_brief.py", "assume", "nvda", "DC", "revenue", "grows"])
+        assert brief_cli.main() == 0
+        assert (tmp_path / "NVDA.md").exists()
+        monkeypatch.setattr(brief_cli.sys, "argv", ["earnings_brief.py", "assume", "nvda"])
+        assert brief_cli.main() == 0
+        assert "1. DC revenue grows" in capsys.readouterr().out
+
     def test_digest_takes_headline_and_changed_sections(self, tmp_path):
         (tmp_path / "NVDA_2026-08-26.md").write_text(
             "# NVDA — FQ2-27 — earnings brief\n\n## Headline\nRevenue $96.2B.\n\n"
@@ -356,6 +410,8 @@ class TestCliBuild:
         monkeypatch.setattr(brief_cli, "BRIEFS", tmp_path)
         monkeypatch.setattr(bs, "BRIEFS", tmp_path)
         monkeypatch.setattr(bs, "TRANSCRIPTS", tmp_path / "transcripts")
+        from app.services.brief import assumptions as asm
+        monkeypatch.setattr(asm, "ASSUMPTIONS", tmp_path / "assumptions")
         rep = tmp_path / "engine" / "NVDA_2026-09-01.md"
         rep.parent.mkdir()
         rep.write_text("# report")
