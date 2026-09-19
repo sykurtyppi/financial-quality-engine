@@ -669,12 +669,14 @@ def _capture_vintage(ticker: str, client: SecClient, args: argparse.Namespace,
         return
     try:
         res = capture_vintage(client, ticker, now=now)
+        if res.wrote:
+            # Inside the guard: `_sweep_one` promises never to raise, and the
+            # loop that calls it has no guard of its own, so a failed stat()
+            # here would abort the pass for every name after this one.
+            print(f"[{now:%Y-%m-%d %H:%M:%SZ}] {ticker}: companyfacts changed — "
+                  f"vintage {res.path.name} ({res.path.stat().st_size / 1024:.0f} KB)")
     except Exception as e:  # noqa: BLE001 — an archive must never cost a print
         print(f"  {ticker}: vintage capture failed: {type(e).__name__}: {e}", file=sys.stderr)
-        return
-    if res.wrote:
-        print(f"[{now:%Y-%m-%d %H:%M:%SZ}] {ticker}: companyfacts changed — "
-              f"vintage {res.path.name} ({res.path.stat().st_size / 1024:.0f} KB)")
 
 
 def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> int:
@@ -1088,6 +1090,8 @@ def main() -> int:
                              "the bannered reports/auto/ artifact when no thesis is locked")
     p_poll.add_argument("--no-audit", action="store_true",
                         help="skip the headless earnings-audit run after generation")
+    p_poll.add_argument("--no-vintage", action="store_true",
+                        help="skip the daily companyfacts snapshot (data/vintages/)")
     p_poll.add_argument("--no-brief", action="store_true",
                         help="skip the one-page earnings brief after a successful audit")
     p_poll.add_argument("--force", action="store_true",

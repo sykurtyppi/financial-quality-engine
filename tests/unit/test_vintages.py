@@ -43,11 +43,13 @@ class TestCapture:
         payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1")])
         res = v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path)
         assert res.wrote and res.reason == "captured"
-        assert res.path.name == "2026-09-19.json.gz"
+        # Named for its CONTENT, not just the day — see TestSameDayRevision.
+        assert res.path.name == v.snapshot_name(date(2026, 9, 19), res.sha256)
+        assert res.path.name.startswith("2026-09-19-") and res.path.name.endswith(".json.gz")
         assert v.load_vintage(res.path) == payload
         man = v.read_manifest(1045810, tmp_path)
         assert man["last_checked"] == "2026-09-19"
-        assert [s["file"] for s in man["snapshots"]] == ["2026-09-19.json.gz"]
+        assert [s["file"] for s in man["snapshots"]] == [res.path.name]
         assert man["snapshots"][0]["sha256"] == res.sha256
 
     def test_same_day_second_call_does_not_even_fetch(self, tmp_path):
@@ -91,12 +93,38 @@ class TestCapture:
         b = v.capture(_Client(payload), "NVDA", now=NEXT_DAY, root=tmp_path / "b").path
         assert a.read_bytes() == b.read_bytes()
 
-    def test_a_corrupt_manifest_does_not_lose_the_snapshots(self, tmp_path):
+    def test_a_corrupt_manifest_is_rebuilt_from_disk(self, tmp_path):
+        payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        first = v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path)
+        (v.cik_dir(1045810, tmp_path) / v.MANIFEST).write_text("{not json")
+        man = v.read_manifest(1045810, tmp_path)
+        assert [s["file"] for s in man["snapshots"]] == [first.path.name]
+        assert man["snapshots"][0]["sha256"] == first.sha256  # recovered from the name
+
+    def test_a_lost_manifest_does_not_make_capture_re_store_what_it_has(self, tmp_path):
+        # The manifest is an index; the files are the archive. A corrupt index
+        # must not make capture think there is no history and start again.
         payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
         v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path)
-        (v.cik_dir(1045810, tmp_path) / v.MANIFEST).write_text("{not json")
-        assert v.read_manifest(1045810, tmp_path) == {"last_checked": None, "snapshots": []}
-        assert len(v.list_vintages(1045810, tmp_path)) == 1  # disk is the record
+        (v.cik_dir(1045810, tmp_path) / v.MANIFEST).unlink()
+        res = v.capture(_Client(payload), "NVDA", now=NEXT_DAY, root=tmp_path)
+        assert not res.wrote and res.reason == "unchanged"
+        assert len(v.list_vintages(1045810, tmp_path)) == 1
+
+    def test_a_legacy_date_named_snapshot_is_still_indexed(self, tmp_path):
+        # Snapshots written before names carried a digest are real data.
+        import gzip as _gzip
+
+        payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        d = v.cik_dir(1045810, tmp_path)
+        d.mkdir(parents=True)
+        with _gzip.open(d / "2026-09-18.json.gz", "wb") as fh:
+            fh.write(v.canonical_bytes(payload))
+        man = v.read_manifest(1045810, tmp_path)
+        assert [s["file"] for s in man["snapshots"]] == ["2026-09-18.json.gz"]
+        assert man["snapshots"][0]["sha256"] == v.digest_of(payload)  # hashed from content
+        # ...and capture recognises it as already held.
+        assert v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path).reason == "unchanged"
 
     def test_no_temp_files_survive(self, tmp_path):
         payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
@@ -201,3 +229,86 @@ class TestSplitsAreNotRestatements:
         after["facts"]["us-gaap"].update(self._shares(24_890_000_000, "2025-05-29")["facts"]["us-gaap"])
         changes = v.diff_vintages(before, after)
         assert [c.field_name for c in changes] == ["total_assets"]
+
+
+class TestSameDayRevisionIsNotLost:
+    """The case the store exists for, and the one it used to destroy: a
+    filing lands mid-day, the document changes, and the morning's snapshot —
+    the only record of what the number used to be — must survive."""
+
+    def test_two_different_documents_on_one_day_are_two_snapshots(self, tmp_path):
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1")])
+        after = _facts([("2026-06-30", "2026-09-19", 1200.0, "10-K", "acc-2")])
+        client = _Client(before, after)
+        morning = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        afternoon = v.capture(client, "NVDA", now=AT.replace(hour=17), root=tmp_path, force=True)
+        assert morning.wrote and afternoon.wrote
+        assert morning.path != afternoon.path
+        files = v.list_vintages(1045810, tmp_path)
+        assert len(files) == 2
+        assert v.load_vintage(morning.path) == before      # the pre-revision value survives
+        assert v.load_vintage(afternoon.path) == after
+        assert len(v.read_manifest(1045810, tmp_path)["snapshots"]) == 2
+        # ...and the diff across them is exactly the revision.
+        changes = v.diff_vintages(v.load_vintage(morning.path), v.load_vintage(afternoon.path))
+        assert [c.kind for c in changes] == ["revised"]
+
+    def test_identical_content_twice_in_one_day_is_still_one_file(self, tmp_path):
+        payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        client = _Client(payload, payload)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        again = v.capture(client, "NVDA", now=AT, root=tmp_path, force=True)
+        assert first.wrote and not again.wrote and again.reason == "unchanged"
+        assert len(v.list_vintages(1045810, tmp_path)) == 1
+
+    def test_content_already_held_is_never_stored_again(self, tmp_path):
+        # A filer reverting a value should not re-store a document we have.
+        a = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        b = _facts([("2026-06-30", "2026-09-19", 1200.0, "10-K", "b")])
+        client = _Client(a, b, a)
+        v.capture(client, "NVDA", now=AT, root=tmp_path)
+        v.capture(client, "NVDA", now=NEXT_DAY, root=tmp_path)
+        back = v.capture(client, "NVDA", now=NEXT_DAY.replace(day=21), root=tmp_path)
+        assert not back.wrote and len(v.list_vintages(1045810, tmp_path)) == 2
+
+
+class TestConcurrentCapture:
+    def test_a_second_capture_yields_rather_than_racing_the_manifest(self, tmp_path, monkeypatch):
+        # Two writers building a manifest from the same stale read is how the
+        # index silently loses a snapshot. The loser does nothing instead.
+        import fcntl
+
+        payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        d = v.cik_dir(1045810, tmp_path)
+        d.mkdir(parents=True)
+        monkeypatch.setattr(v, "LOCK_TIMEOUT_S", 0.2)
+        with (d / v.LOCK).open("w") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            res = v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path)
+        assert not res.wrote and res.reason == "busy"
+        assert v.list_vintages(1045810, tmp_path) == []
+        # released: the next attempt proceeds normally
+        assert v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path).wrote
+
+
+class TestTagSwitchIsNotAWithdrawal:
+    def test_a_field_that_moved_tags_is_not_reported_gone(self):
+        # Both tags are candidates for `inventory`; the period still has a
+        # value, so this is a taxonomy migration, not a disappearance.
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")], tag="InventoryNet")
+        after = _facts([("2026-06-30", "2026-11-01", 1000.0, "10-K", "b")], tag="InventoryGross")
+        assert v.diff_vintages(before, after) == []
+
+    def test_a_move_that_also_changed_the_value_is_still_reported(self):
+        # A migration can carry a revision with it; silence would be the one
+        # outcome this store cannot afford.
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")], tag="InventoryNet")
+        after = _facts([("2026-06-30", "2026-11-01", 1400.0, "10-K", "b")], tag="InventoryGross")
+        changes = v.diff_vintages(before, after)
+        assert [(c.kind, c.field_name) for c in changes] == [("revised", "inventory")]
+        assert (changes[0].old_value, changes[0].new_value) == (1000.0, 1400.0)
+
+    def test_a_genuine_disappearance_is_still_reported(self):
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        after = {"facts": {"us-gaap": {"Assets": {"units": {"USD": []}}}}}
+        assert [c.kind for c in v.diff_vintages(before, after)] == ["withdrawn"]

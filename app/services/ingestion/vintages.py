@@ -15,21 +15,31 @@ lands rather than waiting for the surfacing work.
 Layout (gitignored — it is bulk source data, ~0.3 MB gzipped per snapshot):
 
     data/vintages/CIK##########/manifest.json
-    data/vintages/CIK##########/<YYYY-MM-DD>.json.gz
+    data/vintages/CIK##########/<YYYY-MM-DD>-<sha12>.json.gz
 
-The manifest records every snapshot with its sha256, and the last date the
-source was checked at all — so an unchanged document costs one fetch a day,
-not one an hour, and "we looked and it was identical" stays distinguishable
-from "we never looked".
+A snapshot is named for its CONTENT, not just the day: two captures on one
+day that differ are two different documents, and the earlier one is exactly
+what a mid-day revision would otherwise erase. Identical content resolves to
+the same name and is written once.
+
+The manifest indexes the snapshots and records the last date the source was
+checked at all — so an unchanged document costs one fetch a day, not one an
+hour, and "we looked and it was identical" stays distinguishable from "we
+never looked". The files on disk are the record; the manifest is rebuilt from
+them if it is ever lost.
 """
 
 from __future__ import annotations
 
+import fcntl
 import gzip
 import hashlib
 import json
 import os
-from dataclasses import dataclass, field
+import re
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -44,6 +54,9 @@ from app.services.ingestion.restatements import SPLIT_ADJUSTED_FIELDS
 ROOT = Path(__file__).resolve().parents[3]
 VINTAGES = ROOT / "data" / "vintages"
 MANIFEST = "manifest.json"
+LOCK = ".lock"
+LOCK_TIMEOUT_S = 30.0
+_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([0-9a-f]{6,64}))?\.json\.gz$")
 # Same floor as the within-snapshot detector, so the two tiers speak in one
 # voice about what counts as a revision.
 DEFAULT_MATERIALITY_PCT = 0.005
@@ -57,17 +70,90 @@ def _manifest_path(cik: int, root: Path | None = None) -> Path:
     return cik_dir(cik, root) / MANIFEST
 
 
+def canonical_bytes(facts: dict) -> bytes:
+    """The bytes a snapshot's digest is taken over. Canonical, so the same
+    document always hashes the same way however it arrived."""
+    return json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
+
+
+def digest_of(facts: dict) -> str:
+    return hashlib.sha256(canonical_bytes(facts)).hexdigest()
+
+
+def snapshot_name(day: date, digest: str) -> str:
+    return f"{day.isoformat()}-{digest[:12]}.json.gz"
+
+
+@contextmanager
+def _cik_lock(cik: int, root: Path | None = None, timeout: float | None = None):
+    """One capture at a time per company. The manifest is a read-modify-write
+    and the sweep is not the only writer — `vintage.py capture` is a
+    documented manual command — so without this two runs can each build a
+    manifest from the same stale read and the last one erases the other's
+    snapshot record. Yields False if the lock cannot be taken in time; the
+    caller then does nothing, which is the safe outcome for an archive."""
+    # Read at call time, never bound as a default: a default freezes the
+    # module constant at import and cannot be tuned or tested.
+    timeout = LOCK_TIMEOUT_S if timeout is None else timeout
+    d = cik_dir(cik, root)
+    d.mkdir(parents=True, exist_ok=True)
+    give_up = time.monotonic() + max(timeout, 0.0)
+    with (d / LOCK).open("w") as fh:
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= give_up:
+                    yield False
+                    return
+                time.sleep(0.2)
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _entry_for(path: Path) -> dict:
+    """A manifest entry rebuilt from a file on disk. The digest comes from the
+    filename when it carries one, and from the content otherwise (snapshots
+    written before names were content-addressed)."""
+    m = _NAME_RE.match(path.name)
+    captured = m.group(1) if m else ""
+    sha = (m.group(2) if m else "") or ""
+    if len(sha) != 64:
+        try:
+            sha = digest_of(load_vintage(path))
+        except (OSError, ValueError):
+            sha = sha or ""
+    return {"captured": captured, "sha256": sha, "file": path.name,
+            "bytes": path.stat().st_size}
+
+
+def reconcile_manifest(cik: int, root: Path | None = None) -> list[dict]:
+    """Snapshot entries rebuilt from the files on disk. The manifest is an
+    index, never the archive: losing it must not make capture think there is
+    no history and start again."""
+    return [_entry_for(p) for p in list_vintages(cik, root)]
+
+
 def read_manifest(cik: int, root: Path | None = None) -> dict:
     """{"last_checked": "YYYY-MM-DD"|None, "snapshots": [{captured, sha256, file, bytes}]}.
-    A missing or unreadable manifest reads as empty — the snapshots on disk are
-    the real record; the manifest is an index over them."""
+
+    A missing or unreadable manifest is rebuilt from the snapshots on disk, so
+    a corrupt index can never erase the history that capture compares against.
+    """
     try:
         data = json.loads(_manifest_path(cik, root).read_text())
     except (OSError, ValueError):
-        return {"last_checked": None, "snapshots": []}
+        data = None
     if not isinstance(data, dict) or not isinstance(data.get("snapshots"), list):
-        return {"last_checked": None, "snapshots": []}
+        return {"last_checked": None, "snapshots": reconcile_manifest(cik, root)}
     data.setdefault("last_checked", None)
+    known = {s.get("file") for s in data["snapshots"] if isinstance(s, dict)}
+    data["snapshots"] = [s for s in data["snapshots"] if isinstance(s, dict)]
+    data["snapshots"] += [e for e in reconcile_manifest(cik, root) if e["file"] not in known]
+    data["snapshots"].sort(key=lambda s: (s.get("captured", ""), s.get("file", "")))
     return data
 
 
@@ -90,7 +176,7 @@ class Capture:
     checked: date
     path: Path | None
     sha256: str
-    reason: str  # "captured" | "unchanged" | "already checked today"
+    reason: str  # captured | unchanged | already checked today | busy
 
     @property
     def wrote(self) -> bool:
@@ -109,44 +195,50 @@ def capture(
 
     Once a day per name unless `force`: the document changes on filing days,
     not hourly, and the sweep calls this on every pass. Identical content is
-    never stored twice — the manifest records that we looked.
+    never stored twice, and DIFFERENT content is never stored over — a second
+    capture on a day a filing landed is a second file, because the earlier one
+    is precisely what the revision would otherwise erase.
     """
     now = now or datetime.now(timezone.utc)
     today = now.date()
     cik = client.resolve_cik(ticker)
-    man = read_manifest(cik, root)
-    if not force and man.get("last_checked") == today.isoformat():
-        newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
-        return Capture(cik, today, None, newest, "already checked today")
+    with _cik_lock(cik, root) as held:
+        if not held:
+            return Capture(cik, today, None, "", "busy")
+        man = read_manifest(cik, root)
+        if not force and man.get("last_checked") == today.isoformat():
+            newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
+            return Capture(cik, today, None, newest, "already checked today")
 
-    raw = json.dumps(client.company_facts_by_cik(cik), sort_keys=True,
-                     separators=(",", ":")).encode()
-    digest = hashlib.sha256(raw).hexdigest()
-    man["last_checked"] = today.isoformat()
-    if man["snapshots"] and man["snapshots"][-1]["sha256"] == digest:
+        facts = client.company_facts_by_cik(cik)
+        raw = canonical_bytes(facts)
+        sha = hashlib.sha256(raw).hexdigest()
+        man["last_checked"] = today.isoformat()
+        known = {s.get("sha256") for s in man["snapshots"]}
+        if sha in known:
+            _write_json_atomic(_manifest_path(cik, root), man)
+            return Capture(cik, today, None, sha, "unchanged")
+
+        out = cik_dir(cik, root) / snapshot_name(today, sha)
+        tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+        try:
+            # mtime=0: the archive bytes depend only on the content, so an
+            # unchanged document cannot look changed to anything comparing files.
+            with tmp.open("wb") as fobj, gzip.GzipFile(
+                filename="", mode="wb", fileobj=fobj, mtime=0
+            ) as fh:
+                fh.write(raw)
+            os.replace(tmp, out)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        # Append-only: an entry is added, never replaced. Two snapshots on one
+        # day are two entries.
+        man["snapshots"] = [s for s in man["snapshots"] if s.get("file") != out.name]
+        man["snapshots"].append(_entry_for(out))
+        man["snapshots"].sort(key=lambda s: (s.get("captured", ""), s.get("file", "")))
         _write_json_atomic(_manifest_path(cik, root), man)
-        return Capture(cik, today, None, digest, "unchanged")
-
-    out = cik_dir(cik, root) / f"{today.isoformat()}.json.gz"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
-    try:
-        # mtime=0: the archive bytes depend only on the content, so an
-        # unchanged document cannot look changed to anything comparing files.
-        with gzip.GzipFile(filename="", mode="wb", fileobj=tmp.open("wb"), mtime=0) as fh:
-            fh.write(raw)
-        os.replace(tmp, out)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    man["snapshots"] = [s for s in man["snapshots"] if s.get("file") != out.name]
-    man["snapshots"].append({
-        "captured": today.isoformat(), "sha256": digest,
-        "file": out.name, "bytes": out.stat().st_size,
-    })
-    man["snapshots"].sort(key=lambda s: (s["captured"], s["file"]))
-    _write_json_atomic(_manifest_path(cik, root), man)
-    return Capture(cik, today, out, digest, "captured")
+        return Capture(cik, today, out, sha, "captured")
 
 
 def list_vintages(cik: int, root: Path | None = None) -> list[Path]:
@@ -254,6 +346,21 @@ def _latest_by_key(facts: dict, scored_only: bool,
     return out
 
 
+def _same_field_elsewhere(latest: dict, names: dict, field_name: str,
+                          key: FactKey) -> tuple[FactKey, dict] | None:
+    """The same field's value for this exact period under a DIFFERENT tag in
+    the newer snapshot, or None. A filer migrating a field to another XBRL
+    tag has not withdrawn the figure — but it may also have changed it while
+    moving, so the caller compares rather than simply staying quiet."""
+    if not field_name:
+        return None
+    for k2, row in latest.items():
+        if (k2.start == key.start and k2.end == key.end and k2.tag != key.tag
+                and names.get((k2.taxonomy, k2.tag), ("", ""))[0] == field_name):
+            return k2, row
+    return None
+
+
 def diff_vintages(
     older: dict,
     newer: dict,
@@ -283,10 +390,18 @@ def diff_vintages(
         field_name = names.get((k.taxonomy, k.tag), ("", ""))[0] or k.tag
         new = b.get(k)
         if new is None:
-            changes.append(VintageChange(
-                "withdrawn", field_name, k, old["val"], old["filed"],
-                old.get("accn", ""), old.get("form", "")))
-            continue
+            # A filer moving a field to another XBRL tag has not withdrawn
+            # the figure — the period still has a value, under a different
+            # tag for the same field. Compare against THAT rather than
+            # suppressing: a migration can carry a revision with it, and
+            # silence would be the one outcome this store cannot afford.
+            moved = _same_field_elsewhere(b, names, field_name, k)
+            if moved is None:
+                changes.append(VintageChange(
+                    "withdrawn", field_name, k, old["val"], old["filed"],
+                    old.get("accn", ""), old.get("form", "")))
+                continue
+            new = moved[1]
         if new["val"] == old["val"]:
             continue
         pct = None if old["val"] == 0 else abs(new["val"] - old["val"]) / abs(old["val"])

@@ -28,7 +28,7 @@ def _poll_args(**over) -> Namespace:
     base = dict(
         ticker="NVDA", since=None, entry_day=None, interval=0.01, max_wait=1.0,
         once=True, dry_run=False, no_docs=False, no_auto=False, no_audit=False,
-        no_brief=False,
+        no_brief=False, no_vintage=False,
     )
     base.update(over)
     return Namespace(**base)
