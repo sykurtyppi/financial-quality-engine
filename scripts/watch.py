@@ -38,6 +38,10 @@ Exit codes (for cron/alerting):
        sweep pass until it succeeds; the print is never silently brief-less.
        Also: a PRINT-NIGHT brief (8-K-triggered, see below) failed and is
        queued the same way.
+    6  the companyfacts vintage capture has been failing for days for a
+       watched name. Ranked below every code above it — a print that did not
+       complete is more urgent — but non-zero, because an archive nobody is
+       writing cannot be back-filled once the quarter passes.
 
 Print night vs 10-Q: the engine report needs the quarter's XBRL, so the
 report/audit track fires on the 10-Q/10-K. The brief is a read of the
@@ -110,7 +114,7 @@ BRIEF_MAX_ATTEMPTS = PRINT_BRIEF_MAX_ATTEMPTS
 # Sweep aggregate: the worst code across names, by what it means rather than
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
-SEVERITY_ORDER = (1, 4, 2, 5, 0)
+SEVERITY_ORDER = (1, 4, 2, 5, 6, 0)
 
 
 def _worst(codes) -> int:
@@ -685,25 +689,30 @@ def _capture_vintage(ticker: str, client: SecClient, args: argparse.Namespace,
             # day, for a store whose whole premise is that a missed day is
             # missed for good.
             print(f"  {ticker}: no vintage today ({res.reason}): {res.detail}", file=sys.stderr)
-            return VINTAGE_STALE_DAYS and _vintage_rc(ticker)
+            return _vintage_rc(ticker, client)
         return 0
     except Exception as e:  # noqa: BLE001 — an archive must never cost a print
         print(f"  {ticker}: vintage capture failed: {type(e).__name__}: {e}", file=sys.stderr)
-        return _vintage_rc(ticker)
+        return _vintage_rc(ticker, client)
 
 
-def _vintage_rc(ticker: str) -> int:
+def _vintage_rc(ticker: str, client: SecClient) -> int:
     """1 once a name's capture has been failing for VINTAGE_STALE_DAYS, so the
     pass exits non-zero and the notification names it; 0 before that, because
-    a single bad day is not worth waking anyone."""
+    a single bad day is not worth waking anyone.
+
+    Takes the pass's own client. Building a new one here would ignore the
+    caller's identity and cache settings and could block on a live EDGAR
+    request — inside the error path of a job whose contract is to reach every
+    name — and would slip past the client every test injects.
+    """
     try:
         from app.services.ingestion.vintages import read_manifest
-        from app.services.ingestion.sec_client import SecClient as _C
 
-        days = int(read_manifest(_C().resolve_cik(ticker)).get("problem_days") or 0)
+        days = int(read_manifest(client.resolve_cik(ticker)).get("problem_days") or 0)
     except Exception:  # noqa: BLE001 — the counter is advisory, never fatal
         return 0
-    return 1 if days >= VINTAGE_STALE_DAYS else 0
+    return VINTAGE_STALE_RC if days >= VINTAGE_STALE_DAYS else 0
 
 
 def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> int:
@@ -769,6 +778,7 @@ OVERDUE_DAYS = 21  # a print hint this stale with no filing is a mis-armed row, 
 # days running means the archive is not being written and nobody has noticed
 # — which for a store that cannot be back-filled is worth an alert.
 VINTAGE_STALE_DAYS = 2
+VINTAGE_STALE_RC = 6
 
 
 @contextmanager
@@ -841,7 +851,8 @@ def _sweep_locked(args: argparse.Namespace) -> int:
     return _worst([worst, *acted.values()])
 
 
-_RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED", 5: "brief queued"}
+_RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED",
+             5: "brief queued", 6: "vintage capture stalled"}
 
 
 def _notify_problems(sync_rc: int, acted: dict, args: argparse.Namespace) -> None:

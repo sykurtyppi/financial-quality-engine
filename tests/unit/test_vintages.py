@@ -514,3 +514,16 @@ class TestOrphanCleanup:
         v._sweep_orphans(d)
         assert not stale.exists() and fresh.exists()
         assert v.list_vintages(1045810, tmp_path) == []  # never mistaken for snapshots
+
+
+def test_same_day_filed_ties_resolve_as_the_mapper_does():
+    # The mapper keeps the FIRST fact at the latest filed date (`>`, not
+    # `>=`). The sibling detector had a bug here once; this pins the diff to
+    # the same rule so a revision it reports matches what the engine scores.
+    rows = [("2026-06-30", "2026-08-01", 100.0, "10-Q", "first"),
+            ("2026-06-30", "2026-08-01", 999.0, "10-Q", "second-same-day")]
+    before = _facts([("2026-06-30", "2026-05-01", 50.0, "10-Q", "older")])
+    after = _facts(rows)
+    changes = v.diff_vintages(before, after)
+    assert len(changes) == 1
+    assert changes[0].new_value == 100.0 and changes[0].new_accession == "first"

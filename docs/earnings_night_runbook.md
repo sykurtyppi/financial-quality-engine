@@ -319,7 +319,10 @@ XBRL tag is compared, not called a disappearance, and the new tag is named.
 Share counts are excluded unless you pass `--splits`: a stock split
 retroactively rewrites every prior share count, and on the first real capture
 NVDA's ten-for-one split was the only thing the diff found. `--no-vintage`
-turns capture off.
+turns capture off. A capture that fails for two days running makes the pass
+exit 6 and names the company in the notification — ranked below every
+print-related code, because a print that did not complete is more urgent,
+but not silent, because this is the one thing that cannot be back-filled.
 
 **Read a finding as context, not an alarm.** Nothing the diff can see has an
 amended filing behind it — that is exactly what makes it invisible to the

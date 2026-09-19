@@ -1383,3 +1383,51 @@ class TestVintageCapture:
                             lambda *a, **k: pytest.fail("must not capture"))
         assert watch_cli.cmd_sweep(_sweep_args(dry_run=True)) == 0
         assert watch_cli.cmd_sweep(_sweep_args(no_vintage=True)) == 0
+
+
+class TestVintageEscalation:
+    """A capture failing for one day is noise; failing for days running means
+    the archive is not being written and nobody has noticed."""
+
+    def _failing(self, monkeypatch, days: int):
+        def boom(client, ticker, now=None):
+            raise OSError("disk full")
+        monkeypatch.setattr(watch_cli, "capture_vintage", boom)
+        monkeypatch.setattr(
+            watch_cli, "_vintage_rc",
+            lambda t, c: watch_cli.VINTAGE_STALE_RC if days >= watch_cli.VINTAGE_STALE_DAYS else 0)
+
+    def test_one_bad_day_does_not_wake_anyone(self, sweep_env, monkeypatch, capsys):
+        self._failing(monkeypatch, days=1)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert sweep_env.notified == []
+        assert "vintage capture failed" in capsys.readouterr().err
+
+    def test_a_stalled_archive_reaches_the_exit_code_and_the_notification(
+            self, sweep_env, monkeypatch):
+        self._failing(monkeypatch, days=watch_cli.VINTAGE_STALE_DAYS)
+        assert watch_cli.cmd_sweep(_sweep_args()) == watch_cli.VINTAGE_STALE_RC
+        assert sweep_env.notified and "vintage capture stalled" in sweep_env.notified[-1][1]
+
+    def test_a_stalled_archive_never_masks_a_failed_audit(self, sweep_env, monkeypatch):
+        self._failing(monkeypatch, days=watch_cli.VINTAGE_STALE_DAYS)
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 4   # the audit is the louder problem
+
+    def test_the_rc_helper_uses_the_pass_client_and_never_builds_its_own(self, monkeypatch):
+        # Building one here would ignore the caller's identity and cache and
+        # could block on a live request inside an error path.
+        monkeypatch.setattr(watch_cli, "SecClient",
+                            lambda *a, **k: pytest.fail("must not construct a client"))
+        asked = []
+
+        class C:
+            def resolve_cik(self, t):
+                asked.append(t)
+                return 1045810
+
+        monkeypatch.setattr("app.services.ingestion.vintages.read_manifest",
+                            lambda cik, root=None: {"problem_days": 9})
+        assert watch_cli._vintage_rc("NVDA", C()) == watch_cli.VINTAGE_STALE_RC
+        assert asked == ["NVDA"]
