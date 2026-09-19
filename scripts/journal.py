@@ -89,7 +89,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     try:
         out, distress = build_report(
             entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat(),
-            fresh=getattr(args, "fresh", False),
+            fresh=getattr(args, "fresh", True),
         )
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
@@ -138,7 +138,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         entry = store.parse_entry(path)
         out, distress = build_report(
             args.ticker, with_docs=not args.no_docs, report_day=entry["day"],
-            fresh=getattr(args, "fresh", False),
+            fresh=getattr(args, "fresh", True),
         )
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
@@ -682,11 +682,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Decision-impact journal for the earnings-quality engine")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    def _freshness(parser) -> None:
+        """A generated report LOCKS the thesis against what it fetched, so the
+        default bypasses the EDGAR cache: on a filing day a <24h cached answer
+        can predate the very filing the case is about. `--fresh` stays an
+        accepted no-op so documented commands and scripts keep working."""
+        parser.add_argument("--no-fresh", dest="fresh", action="store_false", default=True,
+                            help="allow <24h cached EDGAR JSON (default: bypass the cache)")
+        parser.add_argument("--fresh", dest="fresh", action="store_true", default=True,
+                            help="bypass the EDGAR cache (now the default; kept for scripts)")
+
     p_open = sub.add_parser("open", help="lock your prior view before reading the report")
     p_open.add_argument("ticker")
     p_open.add_argument("--thesis")
     p_open.add_argument("--conviction", type=int, choices=range(1, 6))
     p_open.add_argument("--action")
+    _freshness(p_open)
     p_open.set_defaults(func=cmd_open)
 
     p_rep = sub.add_parser("report", help="lock the thesis timestamp and generate the report")
@@ -696,8 +707,7 @@ def main() -> int:
     p_rep.add_argument("--defer-mark", action="store_true",
                        help="generate but do NOT stamp `reported` — the watch flow "
                             "stamps only after a successful audit (mark-reported)")
-    p_rep.add_argument("--fresh", action="store_true",
-                       help="bypass the EDGAR cache (use on filing night)")
+    _freshness(p_rep)
     p_rep.set_defaults(func=cmd_report)
 
     p_mark = sub.add_parser("mark-reported",

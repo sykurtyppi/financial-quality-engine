@@ -12,6 +12,7 @@ only to reduce the friction of running the journal so it actually gets run.
 from __future__ import annotations
 
 import html as _html
+import re
 import threading
 from pathlib import Path
 
@@ -104,6 +105,12 @@ def report_view(request: Request, ticker: str, date: str | None = None,
     )
 
 
+_UNSAFE_URL_RE = re.compile(
+    r'''\s(href|src)\s*=\s*(["'])\s*(?!(?:https?:|mailto:|/|\#|\.))[^"']*\2''',
+    re.I,
+)
+
+
 def _render_report(markdown_text: str) -> str:
     """Markdown -> HTML for the template's `| safe` slot. The report quotes
     filer-authored excerpts (MD&A, risk factors, releases), so it is untrusted
@@ -115,8 +122,13 @@ def _render_report(markdown_text: str) -> str:
     backtick-quoted `&` would render double-escaped. Generated reports
     contain no code spans today; if one is ever added, switch to sanitizing
     the OUTPUT with an allow-list instead."""
-    return md.markdown(_html.escape(markdown_text, quote=False),
+    html = md.markdown(_html.escape(markdown_text, quote=False),
                        extensions=["tables", "sane_lists"])
+    # Escaping the input stops raw tags, but markdown builds its OWN anchors
+    # from `[text](url)` — and a filing can write `[click](javascript:...)`.
+    # Only http(s), mailto and relative targets survive; anything else
+    # (javascript:, data:, vbscript:, file:) loses its target.
+    return _UNSAFE_URL_RE.sub(r' \1="#blocked-url"', html)
 
 
 @app.get("/impact/{ticker}", response_class=HTMLResponse)

@@ -903,10 +903,11 @@ class TestPrintNightBrief:
         assert "giving up" in capsys.readouterr().err
         assert watch_cli._queue_read("NVDA") is None
         assert watch_cli._retry_pending_brief("NVDA") == 0
-        # A queued FULL brief has no cap: there is no later rebuild to fall back on.
+        # A queued FULL brief past the cap is kept and reported, never re-run
+        # (see TestBriefRetryCap); below the cap it still retries.
         report = tmp_path / "NVDA_2026-09-01.md"
         report.write_text("# r")
-        watch_cli._queue_write("NVDA", str(report), 99)
+        watch_cli._queue_write("NVDA", str(report), 1)
         ran = []
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: ran.append(r) or 0)
         assert watch_cli._retry_pending_brief("NVDA") == 0 and ran == [report]
@@ -1294,3 +1295,30 @@ class TestEventRoundTrip:
         again = watch_cli.wl.load(p)[0]
         assert again.baseline_accession == "q-0"
         assert real_decide(again, subs).action == "wait"
+
+
+class TestBriefRetryCap:
+    """A repeated brief failure is deterministic (a contract the model keeps
+    missing, a source that cannot be built): stop paying for retries, keep
+    saying so."""
+
+    def test_full_brief_stops_retrying_but_keeps_the_queue_entry(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        report = tmp_path / "NVDA_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli._queue_write("NVDA", str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not run"))
+        assert watch_cli._retry_pending_brief("NVDA") == 5
+        assert "no longer retrying" in capsys.readouterr().err
+        # every later pass still reports it, still spends nothing
+        assert watch_cli._retry_pending_brief("NVDA") == 5
+        assert watch_cli._queue_read("NVDA") == (str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
+
+    def test_below_the_cap_a_full_brief_still_retries(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
+        report = tmp_path / "NVDA_2026-09-01.md"
+        report.write_text("# r")
+        watch_cli._queue_write("NVDA", str(report), watch_cli.BRIEF_MAX_ATTEMPTS - 1)
+        ran = []
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: ran.append(r) or 0)
+        assert watch_cli._retry_pending_brief("NVDA") == 0 and ran == [report]

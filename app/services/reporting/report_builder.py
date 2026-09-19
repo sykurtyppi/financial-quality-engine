@@ -142,7 +142,7 @@ def _collect_streams(
 
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
-        footprints = _pit_footprints(detect_restatements(facts, period_since=cutoff), report_date)
+        footprints = detect_restatements(facts, period_since=cutoff, as_of=report_date)
         body_sections.append(render_restatements_section(footprints))
         tier1_events += _restatement_tier1_lines(footprints)
     except Exception as e:  # noqa: BLE001
@@ -317,6 +317,8 @@ def _pit_dates(dates, since: date, report_date: date) -> list[date]:
 
 
 def _pit_footprints(footprints, report_date: date):
-    """Restatement footprints whose revising filing was on file by
-    report_date; a revision filed later is future knowledge."""
+    """Deprecated: filtering FINISHED footprints erased amendments that were
+    known at report_date but whose figure a later comparative touched again.
+    `detect_restatements(as_of=...)` filters the facts instead. Kept only so
+    an out-of-tree caller does not break; do not use."""
     return [f for f in footprints if f.current_filed <= report_date]

@@ -97,11 +97,15 @@ BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"  # <TICKER>: target lin
 BRIEF_PENDING_RC = 5
 NO_REPORT_MARK = "-"  # queue target for a print-night brief (no engine report yet)
 PRINT_BRIEF_WINDOW_DAYS = 14  # an earnings 8-K older than this is last quarter's, not news
-# A print-night brief that keeps failing is retried this many times (hourly
-# passes), then dropped: the 10-Q rebuild is its second chance, and an hourly
-# paid headless run for weeks is not. A queued FULL brief (report on disk) has
-# no such cap — there is no later rebuild to fall back on.
+# A brief that keeps failing is retried this many times (hourly passes), then
+# left alone: each retry is a paid headless run, and a DETERMINISTIC failure
+# (the model drifting from the brief contract, a source that cannot be built)
+# never gets better by running it again. A print-night brief is then dropped —
+# the 10-Q rebuild is its second chance. A FULL brief has no later rebuild, so
+# its queue entry is KEPT and every pass keeps saying so (exit 5, notified)
+# without spending anything: giving up retrying is not giving up telling you.
 PRINT_BRIEF_MAX_ATTEMPTS = 6
+BRIEF_MAX_ATTEMPTS = PRINT_BRIEF_MAX_ATTEMPTS
 # Sweep aggregate: the worst code across names, by what it means rather than
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
@@ -310,12 +314,20 @@ def _retry_pending_brief(ticker: str) -> int:
               f"({report}) — dropping the queue entry.", file=sys.stderr)
         marker.unlink()
         return 0
-    if report is None and attempts >= PRINT_BRIEF_MAX_ATTEMPTS:
-        print(f"  {ticker}: print-night brief failed {attempts} times — giving up on it; the "
-              f"brief is built with the engine findings when the 10-Q lands, or run "
-              f"`earnings_brief.py build {ticker} --no-report` by hand.", file=sys.stderr)
-        marker.unlink()
-        return BRIEF_PENDING_RC  # one last non-zero so the pass says so
+    if attempts >= BRIEF_MAX_ATTEMPTS:
+        if report is None:
+            print(f"  {ticker}: print-night brief failed {attempts} times — giving up on it; "
+                  f"the brief is built with the engine findings when the 10-Q lands, or run "
+                  f"`earnings_brief.py build {ticker} --no-report` by hand.", file=sys.stderr)
+            marker.unlink()
+        else:
+            # Kept, not retried: nothing else will produce this brief, so the
+            # operator has to see it every pass until they act.
+            print(f"  {ticker}: brief for {report.name} failed {attempts} times — no longer "
+                  f"retrying (a repeated failure is deterministic: run "
+                  f"`earnings_brief.py build {ticker} --report {report}` to see the error). "
+                  f"Queued at {marker}; delete it to silence this.", file=sys.stderr)
+        return BRIEF_PENDING_RC
     print(f"  {ticker}: retrying the queued "
           f"{'print-night brief' if report is None else 'brief for ' + report.name}"
           f" (attempt {attempts + 1})")
