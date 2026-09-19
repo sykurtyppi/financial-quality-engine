@@ -28,7 +28,7 @@ def _poll_args(**over) -> Namespace:
     base = dict(
         ticker="NVDA", since=None, entry_day=None, interval=0.01, max_wait=1.0,
         once=True, dry_run=False, no_docs=False, no_auto=False, no_audit=False,
-        no_brief=False,
+        no_brief=False, no_vintage=False,
     )
     base.update(over)
     return Namespace(**base)
@@ -55,6 +55,13 @@ def poll_env(monkeypatch, tmp_path):
     monkeypatch.setattr(watch_cli, "BRIEFS", tmp_path / "briefs")  # nor the real briefs
     calls.notified = []
     monkeypatch.setattr(watch_cli, "notify", lambda t, m: calls.notified.append((t, m)) or True)
+    # Never let a test reach the real companyfacts archive under data/vintages/.
+    calls.vintages = []
+    monkeypatch.setattr(
+        watch_cli, "capture_vintage",
+        lambda client, ticker, now=None: calls.vintages.append(ticker) or SimpleNamespace(
+            wrote=False, path=None, reason="unchanged"),
+    )
     # Re-arming persists to the watchlist; never let a unit test touch the
     # real journal/watchlist.json.
     monkeypatch.setattr(
@@ -476,7 +483,8 @@ class TestRearmPersistence:
 
 def _sweep_args(**over) -> Namespace:
     base = dict(portfolio=None, prune=False, dry_run=False, no_docs=False,
-                no_auto=False, no_audit=False, no_brief=False, verbose=False)
+                no_auto=False, no_audit=False, no_brief=False, no_vintage=False,
+                verbose=False)
     base.update(over)
     return Namespace(**base)
 
@@ -1345,3 +1353,81 @@ class TestBriefRetryCap:
         ran = []
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: ran.append(r) or 0)
         assert watch_cli._retry_pending_brief("NVDA") == 0 and ran == [report]
+
+
+class TestVintageCapture:
+    """A quarter that goes uncaptured is gone, so the snapshot runs from every
+    pass — and can never cost a print."""
+
+    def test_captured_on_every_pass_and_reported_when_it_changed(self, sweep_env, monkeypatch, capsys):
+        monkeypatch.setattr(
+            watch_cli, "capture_vintage",
+            lambda client, ticker, now=None: SimpleNamespace(
+                wrote=True, reason="captured",
+                path=SimpleNamespace(name=f"{ticker}.json.gz", stat=lambda: SimpleNamespace(st_size=3072))))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        out = capsys.readouterr().out
+        assert out.count("companyfacts changed") == 3
+
+    def test_a_failed_capture_is_a_warning_not_a_failed_pass(self, sweep_env, monkeypatch, capsys):
+        def boom(client, ticker, now=None):
+            raise OSError("disk full")
+        monkeypatch.setattr(watch_cli, "capture_vintage", boom)
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0        # the print still happened
+        assert sweep_env.generate_auto == ["NVDA"]
+        assert "vintage capture failed" in capsys.readouterr().err
+
+    def test_dry_run_and_opt_out_capture_nothing(self, sweep_env, monkeypatch):
+        monkeypatch.setattr(watch_cli, "capture_vintage",
+                            lambda *a, **k: pytest.fail("must not capture"))
+        assert watch_cli.cmd_sweep(_sweep_args(dry_run=True)) == 0
+        assert watch_cli.cmd_sweep(_sweep_args(no_vintage=True)) == 0
+
+
+class TestVintageEscalation:
+    """A capture failing for one day is noise; failing for days running means
+    the archive is not being written and nobody has noticed."""
+
+    def _failing(self, monkeypatch, days: int):
+        def boom(client, ticker, now=None):
+            raise OSError("disk full")
+        monkeypatch.setattr(watch_cli, "capture_vintage", boom)
+        monkeypatch.setattr(
+            watch_cli, "_vintage_rc",
+            lambda t, c: watch_cli.VINTAGE_STALE_RC if days >= watch_cli.VINTAGE_STALE_DAYS else 0)
+
+    def test_one_bad_day_does_not_wake_anyone(self, sweep_env, monkeypatch, capsys):
+        self._failing(monkeypatch, days=1)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert sweep_env.notified == []
+        assert "vintage capture failed" in capsys.readouterr().err
+
+    def test_a_stalled_archive_reaches_the_exit_code_and_the_notification(
+            self, sweep_env, monkeypatch):
+        self._failing(monkeypatch, days=watch_cli.VINTAGE_STALE_DAYS)
+        assert watch_cli.cmd_sweep(_sweep_args()) == watch_cli.VINTAGE_STALE_RC
+        assert sweep_env.notified and "vintage capture stalled" in sweep_env.notified[-1][1]
+
+    def test_a_stalled_archive_never_masks_a_failed_audit(self, sweep_env, monkeypatch):
+        self._failing(monkeypatch, days=watch_cli.VINTAGE_STALE_DAYS)
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: 7)
+        sweep_env.table["AAPL"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 4   # the audit is the louder problem
+
+    def test_the_rc_helper_uses_the_pass_client_and_never_builds_its_own(self, monkeypatch):
+        # Building one here would ignore the caller's identity and cache and
+        # could block on a live request inside an error path.
+        monkeypatch.setattr(watch_cli, "SecClient",
+                            lambda *a, **k: pytest.fail("must not construct a client"))
+        asked = []
+
+        class C:
+            def resolve_cik(self, t):
+                asked.append(t)
+                return 1045810
+
+        monkeypatch.setattr("app.services.ingestion.vintages.read_manifest",
+                            lambda cik, root=None: {"problem_days": 9})
+        assert watch_cli._vintage_rc("NVDA", C()) == watch_cli.VINTAGE_STALE_RC
+        assert asked == ["NVDA"]

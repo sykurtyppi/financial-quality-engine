@@ -68,9 +68,11 @@ class SecClient:
         except Exception as e:  # noqa: BLE001 - surface every network failure loudly
             raise SecClientError(f"SEC request failed for {url}: {e}") from e
 
-    def _cached_json(self, cache_name: str, url: str, max_age_s: float = 86400.0) -> dict:
+    def _cached_json(self, cache_name: str, url: str, max_age_s: float = 86400.0,
+                     *, honor_fresh: bool = True) -> dict:
         path = self.cache_dir / cache_name
-        if not self.fresh and path.exists() and (time.time() - path.stat().st_mtime) < max_age_s:
+        use_cache = not (self.fresh and honor_fresh)
+        if use_cache and path.exists() and (time.time() - path.stat().st_mtime) < max_age_s:
             try:
                 return json.loads(path.read_text())
             except ValueError:
@@ -100,7 +102,12 @@ class SecClient:
         return parsed
 
     def resolve_cik(self, ticker: str) -> int:
-        table = self._cached_json("company_tickers.json", TICKERS_URL)
+        # `fresh` exists so a filing-day answer is never served from a <24h
+        # cache. A ticker-to-CIK map is not filing-day data: a company's CIK
+        # does not change when it files. Re-downloading this ~1 MB table for
+        # every name on every pass of an hourly job is pure waste and one
+        # more chance for a transient failure to cost a name.
+        table = self._cached_json("company_tickers.json", TICKERS_URL, honor_fresh=False)
         want = ticker.upper()
         for entry in table.values():
             if entry.get("ticker", "").upper() == want:
