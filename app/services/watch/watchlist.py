@@ -311,3 +311,29 @@ def due(watches: list[Watch], within_hours: float, now: datetime | None = None) 
     """
     now = now or datetime.now(timezone.utc)
     return [w for w in watches if 0 < w.hours_until(now) <= within_hours]
+
+def read_portfolio(path: Path) -> list[str]:
+    """Tickers from a holdings file: one per line, `#` comments; anything
+    after the first comma/whitespace is ignored so a line like
+    `NVDA, 100 sh` works. No header-row detection — strip one from a
+    brokerage export first, or it is reported as an unknown ticker.
+
+    Lives here rather than in a script because both `watch.py sync` and
+    `vintage.py capture` read the same file, and two readers of one format
+    drift.
+    """
+    if not path.is_file():
+        raise WatchlistError(f"portfolio file not found: {path}")
+    out: list[str] = []
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        token = line.replace(",", " ").split()[0].strip().strip('"')
+        try:
+            t = store.safe_ticker(token)
+        except ValueError:
+            continue  # header row, currency line, etc.
+        if t not in out:
+            out.append(t)
+    return out

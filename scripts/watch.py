@@ -38,6 +38,10 @@ Exit codes (for cron/alerting):
        sweep pass until it succeeds; the print is never silently brief-less.
        Also: a PRINT-NIGHT brief (8-K-triggered, see below) failed and is
        queued the same way.
+    6  the companyfacts vintage capture has been failing for days for a
+       watched name. Ranked below every code above it — a print that did not
+       complete is more urgent — but non-zero, because an archive nobody is
+       writing cannot be back-filled once the quarter passes.
 
 Print night vs 10-Q: the engine report needs the quarter's XBRL, so the
 report/audit track fires on the 10-Q/10-K. The brief is a read of the
@@ -74,6 +78,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.brief.sources import BRIEFS, BriefSourceError, latest_earnings_8k
+from app.services.ingestion.vintages import capture as capture_vintage
 from app.services.delivery import notify
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.watch import watchlist as wl
@@ -109,7 +114,7 @@ BRIEF_MAX_ATTEMPTS = PRINT_BRIEF_MAX_ATTEMPTS
 # Sweep aggregate: the worst code across names, by what it means rather than
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
-SEVERITY_ORDER = (1, 4, 2, 5, 0)
+SEVERITY_ORDER = (1, 4, 2, 5, 6, 0)
 
 
 def _worst(codes) -> int:
@@ -578,6 +583,10 @@ def cmd_poll(args: argparse.Namespace) -> int:
         print(f"EDGAR unavailable: {e}", file=sys.stderr)
         return 1
 
+    # An ad-hoc poll is the ONLY thing that ever runs against a name outside
+    # the watchlist, and an uncaptured quarter cannot be recovered later.
+    _capture_vintage(ticker, client, args, _utcnow())
+
     deadline = time.monotonic() + args.max_wait
     attempt = 0
     while True:
@@ -653,12 +662,66 @@ def cmd_poll(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def _capture_vintage(ticker: str, client: SecClient, args: argparse.Namespace,
+                     now: datetime) -> int:
+    """Snapshot this name's companyfacts if it changed today.
+
+    A company can revise a prior figure without re-presenting the original,
+    leaving companyfacts holding only the new value — invisible from any single
+    fetch. Only a snapshot taken BEFORE the revision can show it, and nothing
+    can be back-filled, so this runs from every pass and costs one fetch a day
+    per name. Best-effort by construction: the season does not stop because an
+    archive write failed.
+    """
+    if getattr(args, "dry_run", False) or getattr(args, "no_vintage", False):
+        return 0
+    try:
+        res = capture_vintage(client, ticker, now=now)
+        if res.wrote:
+            # Inside the guard: `_sweep_one` promises never to raise, and the
+            # loop that calls it has no guard of its own, so a failed stat()
+            # here would abort the pass for every name after this one.
+            print(f"[{now:%Y-%m-%d %H:%M:%SZ}] {ticker}: companyfacts changed — "
+                  f"vintage {res.path.name} ({res.path.stat().st_size / 1024:.0f} KB)")
+        if res.problem:
+            # A wedged lock archived nothing and would otherwise print nothing
+            # at all — indistinguishable in the log from an ordinary quiet
+            # day, for a store whose whole premise is that a missed day is
+            # missed for good.
+            print(f"  {ticker}: no vintage today ({res.reason}): {res.detail}", file=sys.stderr)
+            return _vintage_rc(ticker, client)
+        return 0
+    except Exception as e:  # noqa: BLE001 — an archive must never cost a print
+        print(f"  {ticker}: vintage capture failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return _vintage_rc(ticker, client)
+
+
+def _vintage_rc(ticker: str, client: SecClient) -> int:
+    """1 once a name's capture has been failing for VINTAGE_STALE_DAYS, so the
+    pass exits non-zero and the notification names it; 0 before that, because
+    a single bad day is not worth waking anyone.
+
+    Takes the pass's own client. Building a new one here would ignore the
+    caller's identity and cache settings and could block on a live EDGAR
+    request — inside the error path of a job whose contract is to reach every
+    name — and would slip past the client every test injects.
+    """
+    try:
+        from app.services.ingestion.vintages import read_manifest
+
+        days = int(read_manifest(client.resolve_cik(ticker)).get("problem_days") or 0)
+    except Exception:  # noqa: BLE001 — the counter is advisory, never fatal
+        return 0
+    return VINTAGE_STALE_RC if days >= VINTAGE_STALE_DAYS else 0
+
+
 def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> int:
     """One pass for one watch: fetch, decide, act, re-arm. Never raises —
     a sweep must reach every name even when one of them fails."""
     now = _utcnow()
     stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     pending = 0
+    vintage_rc = _capture_vintage(watch.ticker, client, args, now)
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -692,7 +755,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
             print(f"[{stamp}] {decision.message}")
         # The 10-Q is not here yet — but the earnings 8-K may be.
         pending = pending or _print_night_guarded(watch, submissions, args, now)
-        return pending or 3
+        return pending or vintage_rc or 3
     print(f"[{stamp}] {decision.action} — {decision.message}")
     try:
         rc = _act(watch.ticker, watch, decision, args)
@@ -706,11 +769,16 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
     # in which case this is a no-op; if the audit failed (4) the print-night
     # brief still goes out — the release is news tonight, the audit can retry.
     pending = pending or _print_night_guarded(watch, submissions, args, now)
-    return rc if rc not in (0, 3) else (pending or rc)
+    return rc if rc not in (0, 3) else (pending or vintage_rc or rc)
 
 
 LOCK_RETRY_S = 0.5
 OVERDUE_DAYS = 21  # a print hint this stale with no filing is a mis-armed row, not patience
+# A capture can fail for a day without anyone caring. Failing for this many
+# days running means the archive is not being written and nobody has noticed
+# — which for a store that cannot be back-filled is worth an alert.
+VINTAGE_STALE_DAYS = 2
+VINTAGE_STALE_RC = 6
 
 
 @contextmanager
@@ -783,7 +851,8 @@ def _sweep_locked(args: argparse.Namespace) -> int:
     return _worst([worst, *acted.values()])
 
 
-_RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED", 5: "brief queued"}
+_RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED",
+             5: "brief queued", 6: "vintage capture stalled"}
 
 
 def _notify_problems(sync_rc: int, acted: dict, args: argparse.Namespace) -> None:
@@ -875,26 +944,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def read_portfolio(path: Path) -> list[str]:
-    """Tickers from a holdings file: one per line, `#` comments; anything
-    after the first comma/whitespace is ignored so a line like
-    `NVDA, 100 sh` works. No header-row detection — strip one from a
-    brokerage export first, or it is reported as an unknown ticker."""
-    if not path.is_file():
-        raise wl.WatchlistError(f"portfolio file not found: {path}")
-    out: list[str] = []
-    for line in path.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        token = line.replace(",", " ").split()[0].strip().strip('"')
-        try:
-            t = store.safe_ticker(token)
-        except ValueError:
-            continue  # header row, currency line, etc.
-        if t not in out:
-            out.append(t)
-    return out
+read_portfolio = wl.read_portfolio  # shared with vintage.py; one reader, one format
 
 
 def _sync(client: SecClient, portfolio: Path, *, prune: bool, dry_run: bool = False) -> int:
@@ -1063,6 +1113,8 @@ def main() -> int:
                              "the bannered reports/auto/ artifact when no thesis is locked")
     p_poll.add_argument("--no-audit", action="store_true",
                         help="skip the headless earnings-audit run after generation")
+    p_poll.add_argument("--no-vintage", action="store_true",
+                        help="skip the daily companyfacts snapshot (data/vintages/)")
     p_poll.add_argument("--no-brief", action="store_true",
                         help="skip the one-page earnings brief after a successful audit")
     p_poll.add_argument("--force", action="store_true",
@@ -1094,6 +1146,8 @@ def main() -> int:
                       help="skip the headless earnings-audit run after generation")
     p_sw.add_argument("--no-brief", action="store_true",
                       help="skip the one-page earnings brief after a successful audit")
+    p_sw.add_argument("--no-vintage", action="store_true",
+                      help="skip the daily companyfacts snapshot (data/vintages/)")
     p_sw.add_argument("--verbose", action="store_true", help="also print names still waiting")
     p_sw.set_defaults(fn=cmd_sweep)
 

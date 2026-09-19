@@ -287,6 +287,53 @@ not in it):
 
 A print-night brief by hand: `scripts/earnings_brief.py build NVDA --no-report`.
 
+## The vintage store — what the numbers used to say
+
+A company can revise a prior figure and simply not re-present the original.
+Companyfacts then holds only the new value, and the change is invisible from
+any single fetch, forever. The engine already catches the loud case (two
+filings both presenting the same period); the quiet one can only be caught by
+having kept what the number used to be.
+
+So every sweep pass (and every `poll`) snapshots each watched name's
+companyfacts once a day, into `data/vintages/CIK…/<date>-<hash>.json.gz`
+(gitignored; about 0.3 MB a snapshot, named for its content so two documents
+on one day are two files and identical content is stored once). Companyfacts
+itself cannot be rewound: it is a live view, and a value it no longer carries
+cannot be asked for. An as-filed history may be reconstructible from SEC
+DERA's quarterly data sets, but that is a separate project at quarterly
+granularity — not a substitute for a daily snapshot taken now. That is why
+capture runs before anything reads from it.
+
+```
+scripts/vintage.py capture NVDA        # by hand; the sweep does this daily
+scripts/vintage.py list NVDA
+scripts/vintage.py diff NVDA           # newest two snapshots
+scripts/vintage.py diff NVDA --from 2026-09-19 --to 2026-12-01 --since 2025-01-01
+```
+
+A diff reports two things about the figures the engine actually scores: one
+whose value **changed**, and one that **disappeared**. New periods are not
+reported — an ordinary filing adds those. A field the filer moved to another
+XBRL tag is compared, not called a disappearance, and the new tag is named.
+Share counts are excluded unless you pass `--splits`: a stock split
+retroactively rewrites every prior share count, and on the first real capture
+NVDA's ten-for-one split was the only thing the diff found. `--no-vintage`
+turns capture off. A capture that fails for two days running makes the pass
+exit 6 and names the company in the notification — ranked below every
+print-related code, because a print that did not complete is more urgent,
+but not silent, because this is the one thing that cannot be back-filled.
+
+**Read a finding as context, not an alarm.** Nothing the diff can see has an
+amended filing behind it — that is exactly what makes it invisible to the
+report's own restatement section, and it also means the ordinary explanations
+come first: a discontinued operation or spinoff re-presented, a segment
+reclassification, a taxonomy migration. At the published base rate for
+genuine restatements, eleven holdings should produce roughly one true finding
+every year or two, and a handful of benign ones along the way. The store
+earns its keep on the quarter that is not benign, which is exactly the
+quarter you cannot reconstruct afterwards.
+
 ## Standing assumptions — the thesis without the journal
 
 A brief with no thesis has nothing to measure against, and a blind thesis

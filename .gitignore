@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 data/*.db
 data/cache/
+data/vintages/
 .DS_Store
 reports/
 data/kpi_pairs.json
