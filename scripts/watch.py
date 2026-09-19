@@ -74,6 +74,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.brief.sources import BRIEFS, BriefSourceError, latest_earnings_8k
+from app.services.ingestion.vintages import capture as capture_vintage
 from app.services.delivery import notify
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.watch import watchlist as wl
@@ -653,12 +654,36 @@ def cmd_poll(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def _capture_vintage(ticker: str, client: SecClient, args: argparse.Namespace,
+                     now: datetime) -> None:
+    """Snapshot this name's companyfacts if it changed today.
+
+    A company can revise a prior figure without re-presenting the original,
+    leaving companyfacts holding only the new value — invisible from any single
+    fetch. Only a snapshot taken BEFORE the revision can show it, and nothing
+    can be back-filled, so this runs from every pass and costs one fetch a day
+    per name. Best-effort by construction: the season does not stop because an
+    archive write failed.
+    """
+    if args.dry_run or getattr(args, "no_vintage", False):
+        return
+    try:
+        res = capture_vintage(client, ticker, now=now)
+    except Exception as e:  # noqa: BLE001 — an archive must never cost a print
+        print(f"  {ticker}: vintage capture failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return
+    if res.wrote:
+        print(f"[{now:%Y-%m-%d %H:%M:%SZ}] {ticker}: companyfacts changed — "
+              f"vintage {res.path.name} ({res.path.stat().st_size / 1024:.0f} KB)")
+
+
 def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> int:
     """One pass for one watch: fetch, decide, act, re-arm. Never raises —
     a sweep must reach every name even when one of them fails."""
     now = _utcnow()
     stamp = now.strftime("%Y-%m-%d %H:%M:%SZ")
     pending = 0
+    _capture_vintage(watch.ticker, client, args, now)
     try:
         submissions = client.submissions_by_cik(client.resolve_cik(watch.ticker))
         decision = decide(watch, submissions)
@@ -1094,6 +1119,8 @@ def main() -> int:
                       help="skip the headless earnings-audit run after generation")
     p_sw.add_argument("--no-brief", action="store_true",
                       help="skip the one-page earnings brief after a successful audit")
+    p_sw.add_argument("--no-vintage", action="store_true",
+                      help="skip the daily companyfacts snapshot (data/vintages/)")
     p_sw.add_argument("--verbose", action="store_true", help="also print names still waiting")
     p_sw.set_defaults(fn=cmd_sweep)
 

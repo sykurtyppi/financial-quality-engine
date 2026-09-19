@@ -55,6 +55,13 @@ def poll_env(monkeypatch, tmp_path):
     monkeypatch.setattr(watch_cli, "BRIEFS", tmp_path / "briefs")  # nor the real briefs
     calls.notified = []
     monkeypatch.setattr(watch_cli, "notify", lambda t, m: calls.notified.append((t, m)) or True)
+    # Never let a test reach the real companyfacts archive under data/vintages/.
+    calls.vintages = []
+    monkeypatch.setattr(
+        watch_cli, "capture_vintage",
+        lambda client, ticker, now=None: calls.vintages.append(ticker) or SimpleNamespace(
+            wrote=False, path=None, reason="unchanged"),
+    )
     # Re-arming persists to the watchlist; never let a unit test touch the
     # real journal/watchlist.json.
     monkeypatch.setattr(
@@ -476,7 +483,8 @@ class TestRearmPersistence:
 
 def _sweep_args(**over) -> Namespace:
     base = dict(portfolio=None, prune=False, dry_run=False, no_docs=False,
-                no_auto=False, no_audit=False, no_brief=False, verbose=False)
+                no_auto=False, no_audit=False, no_brief=False, no_vintage=False,
+                verbose=False)
     base.update(over)
     return Namespace(**base)
 
@@ -1345,3 +1353,33 @@ class TestBriefRetryCap:
         ran = []
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: ran.append(r) or 0)
         assert watch_cli._retry_pending_brief("NVDA") == 0 and ran == [report]
+
+
+class TestVintageCapture:
+    """A quarter that goes uncaptured is gone, so the snapshot runs from every
+    pass — and can never cost a print."""
+
+    def test_captured_on_every_pass_and_reported_when_it_changed(self, sweep_env, monkeypatch, capsys):
+        monkeypatch.setattr(
+            watch_cli, "capture_vintage",
+            lambda client, ticker, now=None: SimpleNamespace(
+                wrote=True, reason="captured",
+                path=SimpleNamespace(name=f"{ticker}.json.gz", stat=lambda: SimpleNamespace(st_size=3072))))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        out = capsys.readouterr().out
+        assert out.count("companyfacts changed") == 3
+
+    def test_a_failed_capture_is_a_warning_not_a_failed_pass(self, sweep_env, monkeypatch, capsys):
+        def boom(client, ticker, now=None):
+            raise OSError("disk full")
+        monkeypatch.setattr(watch_cli, "capture_vintage", boom)
+        sweep_env.table["NVDA"] = "refuse"
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0        # the print still happened
+        assert sweep_env.generate_auto == ["NVDA"]
+        assert "vintage capture failed" in capsys.readouterr().err
+
+    def test_dry_run_and_opt_out_capture_nothing(self, sweep_env, monkeypatch):
+        monkeypatch.setattr(watch_cli, "capture_vintage",
+                            lambda *a, **k: pytest.fail("must not capture"))
+        assert watch_cli.cmd_sweep(_sweep_args(dry_run=True)) == 0
+        assert watch_cli.cmd_sweep(_sweep_args(no_vintage=True)) == 0

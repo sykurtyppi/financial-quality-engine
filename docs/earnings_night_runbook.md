@@ -287,6 +287,38 @@ not in it):
 
 A print-night brief by hand: `scripts/earnings_brief.py build NVDA --no-report`.
 
+## The vintage store — what the numbers used to say
+
+A company can revise a prior figure and simply not re-present the original.
+Companyfacts then holds only the new value, and the change is invisible from
+any single fetch, forever. The engine already catches the loud case (two
+filings both presenting the same period); the quiet one can only be caught by
+having kept what the number used to be.
+
+So every sweep pass snapshots each watched name's companyfacts once a day,
+into `data/vintages/CIK…/<date>.json.gz` (gitignored; about 0.3 MB a
+snapshot, and identical content is never stored twice). Nothing here can be
+back-filled: a quarter that goes uncaptured is gone. That is why capture
+runs now, before anything reads from it.
+
+```
+scripts/vintage.py capture NVDA        # by hand; the sweep does this daily
+scripts/vintage.py list NVDA
+scripts/vintage.py diff NVDA           # newest two snapshots
+scripts/vintage.py diff NVDA --from 2026-09-19 --to 2026-12-01 --since 2025-01-01
+```
+
+A diff reports two things: a scored figure whose value **changed**, and one
+that **disappeared**. New periods are not reported — an ordinary filing adds
+those. Share counts are excluded unless you pass `--splits`: a stock split
+retroactively rewrites every prior share count, and on the first real capture
+NVDA's ten-for-one split was the only thing the diff found. `--no-vintage`
+turns the sweep's capture off.
+
+Expect empty diffs. A restatement is rare; the store earns its keep on the
+quarter it is not empty, which is exactly the quarter you cannot reconstruct
+afterwards.
+
 ## Standing assumptions — the thesis without the journal
 
 A brief with no thesis has nothing to measure against, and a blind thesis
