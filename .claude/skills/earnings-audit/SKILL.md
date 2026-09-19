@@ -196,14 +196,16 @@ every input you estimated rather than read.
 
 ## Phase 4 — Correction table for known metric artifacts
 
-**Apply these before reporting any engine output.** Each was hand-corrected in 5 of 5 live runs;
-they are measurements, not opinions.
+**Apply these before reporting any engine output.** Rows 4–6 were hand-corrected in 5 of 5
+live runs on v0.3. Rows 1–3 describe v0.3 artifacts that **v0.4 fixed in the engine** — they
+are kept so you recognise the symptom, but the correction is now to VERIFY, never to re-apply
+the old fix: dividing a TTM leverage figure by four understates leverage ~4x.
 
 | # | Artifact | Symptom | Correction |
 |---|---|---|---|
-| 1 | **Quarterly-EBITDA leverage** | `net_debt_to_ebitda` divides net debt by **one quarter's** EBITDA → overstates leverage ~4x. GLW showed 7.39x (top red flag, 90/100); actual ~1.85x. | Annualize the denominator. Cross-check against interest coverage. |
-| 2 | **Boilerplate adjustment language** | `adjustment_recurrence_ratio` = 1.0, concern 88/100 — matching "integration" inside Office 365 risk text, "one-time" inside a TCJA note copy-pasted since 2018. | Discount on mega-caps and any filer with stable boilerplate. Read the cited excerpt before reporting. |
-| 3 | **Seasonal FCF trough read as trend** | GLW Q1 FCF margin 0.7% → flagged Cash Conversion 62. Q2 adjusted FCF was $1.42B, a 30% margin. | Check the same quarter a year prior before calling FCF deterioration. |
+| 1 | **Leverage window (fixed in v0.4)** | `net_debt_to_ebitda` is computed on **trailing-four-quarter** EBITDA (`registry.py`, `_ttm_metrics`). Pre-v0.4 it used one quarter and read ~4x too high (GLW 7.39x vs ~1.85x). | Do NOT annualize or divide. If leverage still looks ~4x too high, check the coverage line: with fewer than four contiguous quarters the engine reports a stub, not a TTM figure — say so and compute TTM yourself from the filings. Cross-check against interest coverage. |
+| 2 | **Adjustment-keyword ratio (retired in v0.4)** | `adjustment_recurrence_ratio` was measured as noise (clean controls 91% vs restaters 90%; 11/11 live false positives) and is out of scoring. If it appears at all it is evidence-only. | Never discount or raise a block for it, and never treat boilerplate as a finding. The adjustment LEDGER (itemised, per filing) is the input to read instead. |
+| 3 | **Seasonal spreads (YoY since v0.4)** | Receivables/inventory spreads and day-count trends compare the same quarter a year prior, so a Q1 trough no longer flags on its own (GLW's 0.7% Q1 FCF margin did on v0.3). | FCF *margin level* can still read low in a seasonal quarter: before calling FCF deterioration, state the same-quarter-prior-year figure from the filing. |
 | 4 | **FCF blind to non-operating funding** | CFO − capex ignores CHIPS grants, investment tax credits, and customer prepayments. AMKR flagged FCF/NI = −0.954 while funded by a $407M grant, a 35% ITC, and a $1.5B NVIDIA prepayment. | Search the filing for grants/incentives/prepayments before interpreting negative FCF. |
 | 5 | **Dilution blind to sponsor sell-downs** | FPS scored Capital Integrity **10/100 (lowest concern)** while the sponsor sold four times in five months. Float expands; the company issues nothing; share-count metrics see nothing. | Read the 424B4 use-of-proceeds. "We will not receive any of the proceeds" is the tell. |
 | 6 | **Thin-history scores** | <8 quarters → renormalized weights, missing blocks, meaningless composite. | Lead with the coverage caveat; do not headline the score. |

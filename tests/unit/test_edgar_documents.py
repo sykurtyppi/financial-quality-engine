@@ -37,6 +37,14 @@ class TestHtmlToText:
         assert '"discussion"' in text
         assert "<p>" not in text
 
+    def test_entity_encoded_markup_never_becomes_markup(self):
+        # `&lt;img ...&gt;` in a filing decoded to a live tag after tag
+        # stripping — and the web UI renders report excerpts as HTML.
+        out = html_to_text('<p>Revenue &lt;img src=x onerror=alert(1)&gt; grew</p>')
+        assert "<" not in out and "onerror" not in out
+        out = html_to_text("&amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;")
+        assert "<" not in out and "alert(1)" not in out
+
     def test_drops_scripts(self):
         assert "alert" not in html_to_text("<script>alert(1)</script><p>body</p>")
 

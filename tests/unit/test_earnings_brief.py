@@ -255,6 +255,17 @@ class TestFindTranscript:
         assert bs.find_transcript("NVDA", date(2026, 9, 30), tmp_path) is None
         assert bs.find_transcript("AMD", date(2026, 8, 26), tmp_path) is None
 
+    def test_next_quarters_transcript_is_never_this_calls(self, tmp_path):
+        folder = tmp_path / "NVDA"
+        folder.mkdir()
+        (folder / "2026-11-19.txt").write_text("next quarter's call")
+        assert bs.find_transcript("NVDA", date(2026, 8, 26), tmp_path) is None
+        (folder / "2026-09-02.txt").write_text("posted a week after")  # day 7: in
+        assert bs.find_transcript("NVDA", date(2026, 8, 26), tmp_path).name == "2026-09-02.txt"
+        (folder / "2026-09-02.txt").unlink()
+        (folder / "2026-09-03.txt").write_text("day 8: out")
+        assert bs.find_transcript("NVDA", date(2026, 8, 26), tmp_path) is None
+
 
 class TestCliHelpers:
     def test_finalize_guarantees_footer_and_carries_useful(self):

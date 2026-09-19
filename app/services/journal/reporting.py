@@ -79,6 +79,7 @@ def build_report(
         warnings=diag.warnings,
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
+        fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
     )
     if banner:
         report = f"{banner}\n\n{report}"

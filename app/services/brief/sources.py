@@ -113,6 +113,7 @@ class BriefSources:
 
 
 MIN_PRIOR_GAP_DAYS = 45  # a "prior quarter" release is at least this much older than the current
+TRANSCRIPT_MAX_LAG_DAYS = 7  # a transcript more than a week after the print is another call's
 
 
 def earnings_8ks(submissions: dict) -> list[Filing]:
@@ -270,17 +271,20 @@ def collect_sources(
 
 def find_transcript(ticker: str, event_day: date, root: Path | None = None) -> Path | None:
     """Operator-dropped transcript: journal/transcripts/<TICKER>/<YYYY-MM-DD>.txt
-    for the print's date, else the EARLIEST file in that folder dated on/after
-    the print — the one closest to this call, never next quarter's (a
-    transcript is posted after the call, never before)."""
+    for the print's date, else the EARLIEST file in that folder dated within
+    TRANSCRIPT_MAX_LAG_DAYS after the print (a transcript is posted after the
+    call, never before — and one dated a quarter later is the NEXT call's,
+    which must never be summarized as this one)."""
     folder = (root or TRANSCRIPTS) / safe_ticker(ticker)
     if not folder.is_dir():
         return None
     exact = folder / f"{event_day.isoformat()}.txt"
     if exact.is_file():
         return exact
+    latest_ok = (event_day + timedelta(days=TRANSCRIPT_MAX_LAG_DAYS)).isoformat()
     later = sorted(
         p for p in folder.glob("*.txt")
-        if re.match(r"\d{4}-\d{2}-\d{2}", p.stem) and p.stem[:10] >= event_day.isoformat()
+        if re.match(r"\d{4}-\d{2}-\d{2}", p.stem)
+        and event_day.isoformat() <= p.stem[:10] <= latest_ok
     )
     return later[0] if later else None

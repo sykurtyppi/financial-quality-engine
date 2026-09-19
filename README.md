@@ -80,6 +80,8 @@ All weights are **v0/v0.3 heuristics** and every output says so.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
+# Reproducible (what CI runs): exact versions, then the project without re-resolving
+.venv/bin/pip install -r requirements.lock && .venv/bin/pip install --no-deps -e .
 
 # Run the test suite (237 tests incl. golden report + calibration snapshot)
 .venv/bin/pytest
