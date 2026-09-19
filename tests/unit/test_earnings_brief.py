@@ -43,6 +43,9 @@ SUBS = {
 }
 
 
+from tests.unit._brief_fixtures import valid_brief as _valid_brief
+
+
 class _Client:
     cache_dir = None
 
@@ -338,6 +341,8 @@ class TestCliHelpers:
     def test_digest_takes_headline_and_changed_sections(self, tmp_path):
         (tmp_path / "NVDA_2026-08-26.md").write_text(
             "# NVDA — FQ2-27 — earnings brief\n\n## Headline\nRevenue $96.2B.\n\n"
+            "## Quarter assessment\n| Dimension | Read | Evidence |\n"
+            "|---|---|---|\n| Forward guidance | mixed | release: margin held |\n\n"
             "## Guidance\n| a | b |\n\n## Changed since last quarter\n- guide raised\n\n"
             "---\nuseful: yes\n")
         (tmp_path / "AAPL_2026-07-31.md").write_text("# AAPL\n## Headline\nold.\n")
@@ -347,6 +352,8 @@ class TestCliHelpers:
         text = brief_cli.build_digest(paths, date(2026, 8, 1), date(2026, 9, 5))
         assert "## NVDA — FQ2-27 — earnings brief" in text
         assert "Revenue $96.2B." in text and "- guide raised" in text
+        assert "**Quarter assessment**" in text
+        assert "| Forward guidance | mixed | release: margin held |" in text
         assert "| a | b |" not in text
         assert "useful: yes" in text
 
@@ -432,16 +439,19 @@ class TestCliBuild:
 
     def test_writes_the_brief_with_footer(self, env, monkeypatch):
         monkeypatch.setattr(brief_cli, "run_headless",
-                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+                            lambda prompt, timeout: (0, _valid_brief(), ""))
         assert brief_cli.cmd_build(self._args()) == 0
         out = env / "NVDA_2026-08-26.md"
         assert out.read_text().endswith("---\nuseful: unset\n")
+        assert '"overall": "mixed"' in (
+            env / "NVDA" / "2026-08-26" / "assessment.json"
+        ).read_text()
 
     def test_regeneration_keeps_a_set_useful_value(self, env, monkeypatch):
         out = env / "NVDA_2026-08-26.md"
         out.write_text("# old\n## Headline\nold\n\n---\nuseful: yes\n")
         monkeypatch.setattr(brief_cli, "run_headless",
-                            lambda prompt, timeout: (0, "# new\n## Headline\nnew\n", ""))
+                            lambda prompt, timeout: (0, _valid_brief("new"), ""))
         assert brief_cli.cmd_build(self._args()) == 0
         assert "new" in out.read_text() and out.read_text().endswith("useful: yes\n")
 
@@ -457,6 +467,17 @@ class TestCliBuild:
                             lambda prompt, timeout: (0, "I could not read the files.", ""))
         assert brief_cli.cmd_build(self._args()) == 2
 
+    def test_output_without_valid_quarter_assessment_is_a_failure(
+            self, env, monkeypatch, capsys):
+        monkeypatch.setattr(
+            brief_cli, "run_headless",
+            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""),
+        )
+
+        assert brief_cli.cmd_build(self._args()) == 2
+        assert "invalid brief" in capsys.readouterr().err
+        assert not (env / "NVDA_2026-08-26.md").exists()
+
     def test_dry_run_prints_prompt_and_writes_nothing(self, env, monkeypatch, capsys):
         monkeypatch.setattr(brief_cli, "run_headless",
                             lambda prompt, timeout: pytest.fail("must not run"))
@@ -470,7 +491,7 @@ class TestCliBuild:
 
     def test_delivers_after_writing_unless_opted_out(self, env, monkeypatch):
         monkeypatch.setattr(brief_cli, "run_headless",
-                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+                            lambda prompt, timeout: (0, _valid_brief(), ""))
         assert brief_cli.cmd_build(self._args()) == 0
         assert brief_cli.DELIVERED == [("NVDA", env / "NVDA_2026-08-26.md", False)]
         assert brief_cli.cmd_build(self._args(no_deliver=True)) == 0
@@ -481,7 +502,7 @@ class TestCliBuild:
         prompts = []
         monkeypatch.setattr(brief_cli, "run_headless",
                             lambda prompt, timeout: prompts.append(prompt)
-                            or (0, "# NVDA\n## Headline\nok\n", ""))
+                            or (0, _valid_brief(), ""))
         assert brief_cli.cmd_build(self._args(no_report=True)) == 0
         assert "- report:" not in prompts[0] and "- audit:" not in prompts[0]
         assert "print-night brief" in prompts[0]
@@ -489,7 +510,7 @@ class TestCliBuild:
 
     def test_build_records_how_the_brief_was_built(self, env, monkeypatch):
         monkeypatch.setattr(brief_cli, "run_headless",
-                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+                            lambda prompt, timeout: (0, _valid_brief(), ""))
         assert brief_cli.cmd_build(self._args(no_report=True)) == 0
         meta = brief_cli.read_built_meta("NVDA", "2026-08-26")
         assert meta["kind"] == "print-night" and meta["accession"] == "k-new"
@@ -500,7 +521,7 @@ class TestCliBuild:
 
     def test_no_report_never_downgrades_a_full_brief(self, env, monkeypatch, capsys):
         monkeypatch.setattr(brief_cli, "run_headless",
-                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nfull findings\n", ""))
+                            lambda prompt, timeout: (0, _valid_brief("full findings"), ""))
         assert brief_cli.cmd_build(self._args()) == 0
         monkeypatch.setattr(brief_cli, "run_headless",
                             lambda prompt, timeout: pytest.fail("must not run"))
@@ -521,13 +542,13 @@ class TestCliBuild:
         brief_cli.write_built_meta("NVDA", "2026-08-26", kind="print-night", accession="k-new",
                                    report=None)
         monkeypatch.setattr(brief_cli, "run_headless",
-                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nrebuilt\n", ""))
+                            lambda prompt, timeout: (0, _valid_brief("rebuilt"), ""))
         assert brief_cli.cmd_build(self._args(no_report=True)) == 0
         assert "rebuilt" in out.read_text()
 
     def test_record_write_failure_does_not_fail_the_build(self, env, monkeypatch, capsys):
         monkeypatch.setattr(brief_cli, "run_headless",
-                            lambda prompt, timeout: (0, "# NVDA\n## Headline\nok\n", ""))
+                            lambda prompt, timeout: (0, _valid_brief(), ""))
 
         def boom(*a, **k):
             raise OSError("read-only")
@@ -540,7 +561,7 @@ class TestCliBuild:
         prompts = []
         monkeypatch.setattr(brief_cli, "run_headless",
                             lambda prompt, timeout: prompts.append(prompt)
-                            or (0, "# NVDA\n## Headline\nok\n", ""))
+                            or (0, _valid_brief(), ""))
         assert brief_cli.cmd_build(self._args(no_report=True, report=str(env / "nope.md"))) == 0
         assert "- report:" not in prompts[0]
 

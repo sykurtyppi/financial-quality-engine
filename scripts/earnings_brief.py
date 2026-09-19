@@ -39,7 +39,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.brief.assumptions import add_assumption, assumptions_path, load_assumptions
+from app.services.brief.assumptions import (
+    add_assumption,
+    assumptions_path,
+    load_assumptions,
+    parse_assumptions,
+)
 from app.services.brief.sources import (
     BRIEFS,
     BriefSourceError,
@@ -47,6 +52,7 @@ from app.services.brief.sources import (
     SourceFile,
     collect_sources,
 )
+from app.services.brief.validation import validate_brief
 from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
@@ -243,13 +249,36 @@ def cmd_build(args: argparse.Namespace) -> int:
         return 0
 
     rc, stdout, stderr = run_headless(prompt, args.timeout)
-    if rc != 0 or "## Headline" not in stdout:
+    if rc != 0:
         print(f"brief FAILED (exit {rc}); sources kept in {src.workdir}", file=sys.stderr)
         if stderr:
             print(stderr, file=sys.stderr)
         return 2
+    try:
+        assumptions_file = next((f.path for f in src.files if f.role == "assumptions"), None)
+        expected_assumptions = (
+            parse_assumptions(assumptions_file.read_text(errors="replace"))
+            if assumptions_file is not None
+            else []
+        )
+        assessment = validate_brief(stdout, expected_assumptions=expected_assumptions)
+    except (OSError, ValueError) as e:
+        print(f"brief FAILED (invalid brief: {e}); sources kept in "
+              f"{src.workdir}", file=sys.stderr)
+        return 2
     keep = useful_value(out.read_text()) if out.exists() else "unset"
     out.write_text(finalize(stdout, keep))
+    # Stable machine-readable contract for a later web/API surface. The human
+    # brief remains the primary artifact; this sidecar avoids reparsing model
+    # prose when a client only needs the five-dimensional print assessment.
+    try:
+        (src.workdir / "assessment.json").write_text(
+            assessment.model_dump_json(indent=2) + "\n"
+        )
+    except OSError as e:
+        # Best-effort, like the build record below: the brief is written and
+        # valid; a missing sidecar must not fail the build or skip the record.
+        print(f"  assessment sidecar not written ({e})", file=sys.stderr)
     try:
         write_built_meta(ticker, src.event_day, kind="print-night" if no_report else "full",
                          accession=src.filing.accession, report=report)
@@ -315,13 +344,17 @@ def briefs_in_window(since: date, root: Path | None = None) -> list[Path]:
 def build_digest(paths: list[Path], since: date, today: date) -> str:
     lines = [f"# Earnings digest — prints since {since.isoformat()}",
              f"_Compiled {today.isoformat()} from {len(paths)} brief(s). Each entry is the "
-             f"brief's own Headline and Changed-since-last-quarter sections, verbatim._", ""]
+             f"brief's own Headline, Quarter-assessment, and "
+             f"Changed-since-last-quarter sections, verbatim._", ""]
     for p in paths:
         text = p.read_text()
         title = text.splitlines()[0].lstrip("# ").strip() if text else p.stem
         lines += [f"## {title}", f"_{p.name} · useful: {useful_value(text)}_", ""]
         head = _section(text, "Headline") or "_(no Headline section)_"
         lines += [head, ""]
+        assessment = _section(text, "Quarter assessment")
+        if assessment:
+            lines += ["**Quarter assessment**", assessment, ""]
         assumptions = _section(text, "Your assumptions")
         if assumptions and not assumptions.startswith("UNAVAILABLE"):
             lines += ["**Your assumptions**", assumptions, ""]

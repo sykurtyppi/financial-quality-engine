@@ -133,6 +133,18 @@ historical controls, each documented honestly (including the failures):
 - [kpi_llm_validation](docs/kpi_llm_validation.md) + [kpi_definition_isolation_spike](docs/kpi_definition_isolation_spike.md) — the KPI-drift signal, and why it was shelved
 - A decision-impact journal ([journal/JOURNAL.md](journal/JOURNAL.md)) tests the one open question no historical run can answer: does surfacing the validated signals change a real decision?
 
+## Earnings summaries
+
+`scripts/earnings_brief.py` turns one earnings event into a source-grounded
+brief: results versus the company's own prior guidance, the new guide, KPIs and
+segments, management framing, the call when a transcript is supplied, engine
+findings, and what changed since the prior quarter. A fixed quarter assessment
+separately labels results, guidance, KPIs, cash quality, and capital evidence as
+`favorable`, `mixed`, `unfavorable`, or `not assessable`; it never converts a
+good print into a buy/sell/hold conclusion. The validated assessment is also
+written as JSON for future UI/API clients. See
+[docs/earnings_night_runbook.md](docs/earnings_night_runbook.md).
+
 ### Running the journal
 
 The journal has a CLI and an optional local web UI over the *same* markdown
@@ -152,17 +164,19 @@ export EDGAR_IDENTITY="Your Name you@example.com"
 .venv/bin/uvicorn app.web:app        # http://127.0.0.1:8000
 ```
 
-## LLM layer (grounded materiality adjudicator)
+## LLM surfaces
 
-The one place an LLM is used is as a *judge*, not an author: given the prior and
-current definition of one non-GAAP metric, it rules whether the change is
-material. It is blind to outcomes, its output is validated against a grounding
-contract (no banned vocabulary, no ungrounded numbers, quoted clauses must be
-substrings of the source), it is cached, and it degrades to a deterministic
-fallback on any failure. Phase 4 kept the adjudicator (it improved precision)
-but shelved the underlying signal — see
-[docs/kpi_drift_llm_design.md](docs/kpi_drift_llm_design.md) and
-[docs/kpi_llm_validation.md](docs/kpi_llm_validation.md).
+The scoring and evidence engine remains deterministic. Two optional LLM
+surfaces sit after it: a grounded materiality adjudicator for one non-GAAP KPI
+definition comparison, and the earnings-brief writer over an explicit bundle of
+primary-source files plus the engine report. The adjudicator validates quoted
+clauses against its input and degrades to a deterministic fallback; the
+underlying KPI signal remains shelved. The brief is interpretive output, not a
+fact source: its required quarter-assessment vocabulary and structure are
+validated, while every number and conclusion must name supplied evidence. See
+[docs/kpi_drift_llm_design.md](docs/kpi_drift_llm_design.md),
+[docs/kpi_llm_validation.md](docs/kpi_llm_validation.md), and
+[docs/earnings_night_runbook.md](docs/earnings_night_runbook.md).
 
 ## Honest limitations
 

@@ -40,7 +40,11 @@ def parse_assumptions(text: str) -> list[str]:
         m = _BULLET_RE.match(line)
         if not m:
             continue
-        item = " ".join(m.group(1).split())
+        # A `|` would split the brief's table cell and drop the whole row,
+        # which fails the brief for this holding every time until the file is
+        # edited by hand. Neutralize it at the source, where both the file we
+        # hand the model and the text we compare against come from.
+        item = " ".join(m.group(1).replace("|", "/").split())
         if item[:3].lower() in ("[ ]", "[x]"):  # checkbox bullets, either case
             item = item[3:].strip()
         if item:
@@ -57,7 +61,7 @@ def load_assumptions(ticker: str, root: Path | None = None) -> list[str]:
 
 def add_assumption(ticker: str, text: str, root: Path | None = None) -> Path:
     """Append one assumption; creates the file with a header the first time."""
-    item = " ".join(text.split())
+    item = " ".join(text.replace("|", "/").split())
     if not item:
         raise ValueError("an assumption needs some text")
     if len(item) > MAX_ASSUMPTION_CHARS:

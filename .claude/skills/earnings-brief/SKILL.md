@@ -48,6 +48,7 @@ known-artifact table).
 _Print <filing date> · sources: <list roles present> · call: <present | UNAVAILABLE>_
 
 ## Headline
+## Quarter assessment
 ## Your assumptions
 ## Results vs the company's own prior guidance
 ## Guidance
@@ -66,8 +67,30 @@ Section rules:
   beat/missed the company's *own* prior guide (not consensus), and the single
   most consequential change (guide, KPI, capital, disclosure). If nothing is
   consequential, say that.
+- **Quarter assessment** — a fixed table with exactly these five rows and
+  exactly these columns:
+
+  `Dimension | Read | Evidence`
+
+  The rows, in order, are `Results vs prior guidance`, `Forward guidance`,
+  `Operating KPIs`, `Cash and earnings quality`, and `Balance sheet and
+  capital`. `Read` is exactly one of `favorable`, `mixed`, `unfavorable`, or
+  `not assessable`. Evidence is one short, source-named fact from the supplied
+  files; use `not in supplied sources` when the read is not assessable. After
+  the table, include these two lines:
+
+  `**Overall earnings read:** <favorable | mixed | unfavorable | not assessable>`
+
+  `**Investment context:** not assessed — price, valuation, expectations, and
+  the user's required return are separate from whether the quarter was good.`
+
+  The overall read summarizes the print only. Never turn it into buy/sell/hold,
+  never infer consensus expectations, and never call a favorable quarter a
+  favorable investment.
 - **Your assumptions** — only from `assumptions`, in its numbering. A table:
-  # · assumption (verbatim, shortened if long) · verdict · evidence. Verdict
+  # · assumption (verbatim) · verdict · evidence. Copy each assumption
+  exactly as given: no rewording, no shortening, no added emphasis or
+  markdown escaping, and keep each table row on ONE line. Verdict
   is exactly one of `held` (a stated fact in the supplied files supports it
   this quarter), `challenged` (a stated fact contradicts it or management
   walked it back), `no news` (nothing in the files bears on it). The
