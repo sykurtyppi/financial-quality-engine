@@ -14,6 +14,13 @@ from app.services.journal import reporting, store
 from app.web import app
 
 
+def _seed(ticker: str, thesis: str = "a thesis", conviction: int = 3, action: str = "hold"):
+    """A legacy (v1) case, written straight to the store. The web form that
+    used to create these is retired — only the format's READ paths remain — so
+    tests seed them the way the v1 CLI still does."""
+    return store.open_entry(ticker, thesis, conviction, action)
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
@@ -35,17 +42,29 @@ def test_dashboard_empty(client):
     assert "Dashboard" in r.text and "No cases yet" in r.text
 
 
-def test_open_creates_entry(client):
-    r = client.post("/open", data={"ticker": "nvda", "thesis": "beat priced in", "conviction": 3, "action": "hold"})
-    assert r.status_code == 303 and r.headers["location"] == "/"
-    assert store.find_entry("NVDA") is not None
-    # duplicate open is rejected with an error redirect
-    r2 = client.post("/open", data={"ticker": "nvda", "thesis": "again", "conviction": 3, "action": "hold"})
-    assert r2.status_code == 303 and "already+exists" in r2.headers["location"]
+def test_the_web_no_longer_opens_cases(client):
+    # A v1 entry has no hash-locked BEFORE block, so it can never be
+    # preregistered evidence. The form is retired, not repaired — and the
+    # refusal is at the route, so a stale bookmark or forged POST is refused
+    # too, whatever it sends.
+    r = client.post("/open", data={"ticker": "nvda", "thesis": "beat priced in",
+                                   "conviction": 3, "action": "hold"})
+    assert r.status_code == 303 and "/open?error=" in r.headers["location"]
+    assert store.find_entry("NVDA") is None
+    assert client.post("/open", data={}).status_code == 303          # no fields at all
+    assert client.post("/open", data={"ticker": "../../../pwned"}).status_code == 303
+    assert store.list_entries() == []
+
+
+def test_open_page_points_at_the_cli(client):
+    r = client.get("/open")
+    assert r.status_code == 200
+    assert "openv2" in r.text and "retired" in r.text
+    assert 'action="/open"' not in r.text        # the form itself is gone
 
 
 def test_report_locks_and_renders(client):
-    client.post("/open", data={"ticker": "AAPL", "thesis": "clean compounder", "conviction": 4, "action": "hold"})
+    _seed("AAPL", "clean compounder", 4, "hold")
     r = client.get("/report/AAPL")
     assert r.status_code == 200
     assert "AAPL report" in r.text and "<table>" in r.text          # markdown rendered to HTML
@@ -71,13 +90,13 @@ def test_first_report_is_generated_fresh(client, monkeypatch):
         return p, "ok"
 
     monkeypatch.setattr(reporting, "build_report", build)
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     assert client.get("/report/KO").status_code == 200
     assert seen["fresh"] is True  # the thesis locks against what was fetched
 
 
 def test_report_excerpts_render_as_text_not_markup(client):
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     p = reporting.report_path("KO", store.today())
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("# KO report\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n"
@@ -92,7 +111,7 @@ def test_report_excerpts_render_as_text_not_markup(client):
 def test_report_links_only_to_safe_url_schemes(client):
     # Escaping the input stops raw tags, but markdown builds anchors from
     # `[text](url)` — and a filing can write `[click](javascript:...)`.
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     p = reporting.report_path("KO", store.today())
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("# KO report\n\n[a](javascript:alert(1)) [b](data:text/html,x) "
@@ -122,7 +141,7 @@ def test_url_scheme_allowlist_keeps_relative_targets(client):
 
 
 def test_impact_refused_before_the_report_exists(client):
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     r = client.post("/impact/KO", data={"verdict": "helped", "what_happened": "guided down"})
     assert r.status_code == 303 and "Generate+the+report" in r.headers["location"]
     e = store.parse_entry(store.find_entry("KO"))
@@ -137,7 +156,7 @@ def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):
         raise RuntimeError("missing EDGAR_IDENTITY")
 
     monkeypatch.setattr(reporting, "build_report", fail_build)
-    client.post("/open", data={"ticker": "CRM", "thesis": "margin reset credible", "conviction": 3, "action": "hold"})
+    _seed("CRM", "margin reset credible", 3, "hold")
 
     r = client.get("/report/CRM")
 
@@ -147,7 +166,7 @@ def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):
 
 
 def test_report_for_dated_entry_reads_same_file_it_generates(client):
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     p = store.find_entry("KO")
     old = p.with_name("KO_2026-01-15.md")
     p.rename(old)
@@ -161,7 +180,7 @@ def test_report_for_dated_entry_reads_same_file_it_generates(client):
 
 
 def test_impact_saves_fields(client):
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     client.get("/report/KO")  # the AFTER block is only writable once the report exists
     r = client.post("/impact/KO", data={"impact": "changed_confidence", "conviction_after": "4",
                                         "verdict": "helped", "what_happened": "guided down"})
@@ -172,7 +191,7 @@ def test_impact_saves_fields(client):
 
 def test_impact_form_renders(client):
     # GET /impact renders impact.html — the template not otherwise exercised by tests.
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     r = client.get("/impact/KO")
     assert r.status_code == 200
     assert "Impact" in r.text and "Verdict" in r.text and "changed_thesis" in r.text
@@ -180,7 +199,7 @@ def test_impact_form_renders(client):
 
 def test_dashboard_with_entries_renders(client):
     # Exercises the queue/table markup that only appears once cases exist.
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     r = client.get("/")
     assert r.status_code == 200
     assert "KO" in r.text and "report pending" in r.text  # unreported case shows in the queue
@@ -191,15 +210,16 @@ def test_missing_entry_redirects(client):
     assert client.get("/report/NOPE").status_code == 303
 
 
-def test_open_rejects_traversal_ticker(client, tmp_path):
-    r = client.post("/open", data={"ticker": "../../../pwned", "thesis": "x", "conviction": 3, "action": "hold"})
-    assert r.status_code == 303 and "Invalid+ticker" in r.headers["location"]
-    # no file created anywhere outside the entries dir
+def test_no_web_path_writes_outside_the_entries_dir(client, tmp_path):
+    for bad in ("../../../pwned", "..%2Fpwned", "PWNED/../x"):
+        client.post("/open", data={"ticker": bad, "thesis": "x", "conviction": 3})
+        client.get(f"/report/{bad}")
+        client.get(f"/impact/{bad}")
     assert not list(tmp_path.rglob("*pwned*")) and not list(tmp_path.rglob("*PWNED*"))
 
 
 def test_conviction_after_is_a_validated_select(client):
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     r = client.get("/impact/KO")
     assert '<select id="conviction_after"' in r.text
     # options 1-5 present, free-text input is gone
@@ -209,13 +229,13 @@ def test_conviction_after_is_a_validated_select(client):
 
 
 def test_unreported_report_links_get_loading_class(client):
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     r = client.get("/")
     assert "js-gen" in r.text and "data-loading-text" in r.text
 
 
 def test_dashboard_shows_stale_outcome_banner(client):
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     p = store.find_entry("KO")
     store.mark_reported(p)
     store.set_field(p, "impact", "no_value")
@@ -229,7 +249,7 @@ def test_dashboard_shows_stale_outcome_banner(client):
 def test_dashboard_omits_reported_but_after_not_filled_from_stale_banner(client):
     # Codex review catch: a reported case with a stale timestamp but an empty
     # AFTER block must show as "after needed", never inflate the outcome banner.
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     p = store.find_entry("KO")
     store.mark_reported(p)
     store.set_field(p, "reported", "2020-01-01T00:00:00Z")  # old, AFTER left blank
@@ -242,7 +262,7 @@ def test_dashboard_omits_reported_but_after_not_filled_from_stale_banner(client)
 def test_impact_rejects_forged_conviction_after(client):
     # Codex review catch: the <select> only ever submits 1-5, but a forged POST
     # or curl call could send anything. The route must reject it at the boundary.
-    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    _seed("KO", "steady staple", 3, "hold")
     client.get("/report/KO")  # AFTER fields are only writable once the report exists
     r = client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "99"})
     assert r.status_code == 303
@@ -255,3 +275,75 @@ def test_impact_rejects_forged_conviction_after(client):
     # a legitimate value still writes normally
     client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "4"})
     assert store.parse_entry(store.find_entry("KO"))["conviction_after"] == "4"
+
+
+def _seed_v2(locked: bool = True, ticker: str = "MXL", day: str = "2026-07-27"):
+    """A preregistered (v2) case, written the way `openv2` writes one."""
+    from datetime import date, datetime, timezone
+
+    from app.services.journal.schema_v2 import (
+        Assumption, BeforeBlock, EntryV2, lock_entry,
+    )
+
+    entry = EntryV2(
+        ticker=ticker,
+        day=date.fromisoformat(day),
+        opened=datetime(2026, 7, 27, 9, 41, tzinfo=timezone.utc),
+        before=BeforeBlock(
+            thesis="One of three optical DSP suppliers.",
+            conviction=4,
+            intended_action="hold",
+            assumptions=[Assumption(
+                metric="revenue", comparator=">", threshold=1_000_000_000.0,
+                window="FY2026Q2", source="10-Q", resolve_by=date(2026, 8, 15))],
+        ),
+    )
+    if locked:
+        entry = lock_entry(entry)
+    return store.save_v2(entry)
+
+
+class TestV2ReadOnly:
+    """v2 entries were invisible in the web UI: the dashboard tallies only v1,
+    and every write route parses v1 markdown. Invisible is worse than plain —
+    a hash-locked case is the only kind that can become evidence."""
+
+    def test_dashboard_lists_preregistered_cases(self, client):
+        _seed_v2()
+        r = client.get("/")
+        assert r.status_code == 200
+        assert "Preregistered cases" in r.text and "MXL" in r.text
+        assert "locked" in r.text and "2026-07-27" in r.text
+
+    def test_unlocked_and_tampered_cases_are_labelled(self, client):
+        p = _seed_v2(locked=False, ticker="AAA")
+        assert "unlocked" in client.get("/").text
+        p.unlink()
+        p2 = _seed_v2(locked=True, ticker="BBB")
+        p2.write_text(p2.read_text().replace("One of three", "Rewritten after the fact"))
+        assert "lock broken" in client.get("/").text
+
+    def test_an_unreadable_entry_does_not_take_the_dashboard_down(self, client, tmp_path):
+        _seed_v2()
+        (store.ENTRIES / "CCC_2026-07-28.md").write_text(
+            "---\nschema_version: 2\n---\n{not json at all")
+        r = client.get("/")
+        assert r.status_code == 200 and "MXL" in r.text
+
+    def test_write_routes_refuse_a_v2_case_and_say_where_to_go(self, client):
+        _seed_v2()
+        for url in ("/report/MXL", "/impact/MXL"):
+            r = client.get(url)
+            assert r.status_code == 303 and r.headers["location"].startswith("/?error=")
+            assert "journal.py" in r.headers["location"]
+        r = client.post("/impact/MXL", data={"verdict": "helped"})
+        assert r.status_code == 303 and "journal.py" in r.headers["location"]
+        # nothing was written into the locked file
+        entry = store.load_v2(store.find_entry("MXL"))
+        assert entry.after.impact is None and entry.outcome.verdict is None
+
+    def test_the_dashboard_shows_the_refusal(self, client):
+        _seed_v2()
+        loc = client.get("/report/MXL").headers["location"]
+        r = client.get(loc)
+        assert r.status_code == 200 and "preregistered (v2) case" in r.text

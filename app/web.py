@@ -15,6 +15,7 @@ import html as _html
 import re
 import threading
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import markdown as md
 from fastapi import FastAPI, Form, Request
@@ -39,35 +40,72 @@ def _gen_lock(key: str) -> threading.Lock:
         return _gen_locks.setdefault(key, threading.Lock())
 
 
+OPENV2_HINT = 'scripts/journal.py openv2 <TICKER> --thesis "..." --conviction 3'
+
+
+def _v2_rows() -> list[dict]:
+    """Preregistered (v2) entries, read-only. The web UI never wrote these and
+    no longer writes any entry; without this they were simply invisible here,
+    which is worse than plain — a hash-locked case is the only kind that can
+    become evidence."""
+    from app.services.journal.schema_v2 import open_assumption_indices, verify_lock
+
+    rows: list[dict] = []
+    for p in store.list_entries():
+        if not store.is_v2(p):
+            continue
+        try:
+            e = store.load_v2(p)
+        except (ValueError, OSError) as exc:
+            rows.append({"ticker": p.stem, "day": "", "unreadable": str(exc)})
+            continue
+        locked = e.locked_at is not None
+        rows.append({
+            "ticker": e.ticker,
+            "day": e.day.isoformat(),
+            "thesis": e.before.thesis,
+            "conviction": e.before.conviction,
+            "locked": locked,
+            "lock_broken": locked and not verify_lock(e),
+            "reported": e.reported is not None,
+            "assumptions": len(e.before.assumptions),
+            "open_assumptions": len(open_assumption_indices(e)),
+            "unreadable": None,
+        })
+    rows.sort(key=lambda r: (r["day"], r["ticker"]), reverse=True)
+    return rows
+
+
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request):
-    return templates.TemplateResponse(request, "dashboard.html", {"t": store.tally()})
+def dashboard(request: Request, error: str | None = None):
+    return templates.TemplateResponse(
+        request, "dashboard.html",
+        {"t": store.tally(), "v2": _v2_rows(), "openv2_hint": OPENV2_HINT, "error": error},
+    )
 
 
 @app.get("/open", response_class=HTMLResponse)
 def open_form(request: Request, error: str | None = None):
-    return templates.TemplateResponse(request, "open.html", {"error": error})
+    # The v1 form is retired, not repaired: a v1 entry has no hash-locked
+    # BEFORE block, so it can never be preregistered evidence. New cases are
+    # opened with `openv2` on the CLI, which locks the block as it writes it.
+    return templates.TemplateResponse(
+        request, "open.html", {"error": error, "openv2_hint": OPENV2_HINT})
 
 
 @app.post("/open")
 def open_submit(
-    ticker: str = Form(...),
-    thesis: str = Form(...),
-    conviction: int = Form(...),
+    ticker: str = Form(""),
+    thesis: str = Form(""),
+    conviction: int = Form(3),
     action: str = Form("hold"),
 ):
-    if not thesis.strip():
-        return RedirectResponse("/open?error=Write+your+thesis+first.", status_code=303)
-    try:
-        store.open_entry(ticker.strip(), thesis.strip(), conviction, action.strip())
-    except ValueError:
-        return RedirectResponse("/open?error=Invalid+ticker+symbol.", status_code=303)
-    except FileExistsError:
-        return RedirectResponse(
-            f"/open?error=An+entry+for+{store.safe_ticker(ticker)}+today+already+exists.",
-            status_code=303,
-        )
-    return RedirectResponse("/", status_code=303)
+    # Refused at the boundary, so a stale bookmark or a forged POST cannot
+    # create a format we have retired.
+    return RedirectResponse(
+        "/open?error=The+web+form+no+longer+opens+cases.+Use+openv2+on+the+CLI.",
+        status_code=303,
+    )
 
 
 @app.get("/report/{ticker}", response_class=HTMLResponse)
@@ -79,6 +117,13 @@ def report_view(request: Request, ticker: str, date: str | None = None,
         return RedirectResponse("/", status_code=303)
     if path is None:
         return RedirectResponse("/", status_code=303)
+    if store.is_v2(path):
+        return RedirectResponse(
+            "/?error=" + quote_plus(
+                f"{store.safe_ticker(ticker)} is a preregistered (v2) case. The web UI shows "
+                "it read-only; generate its report with `scripts/journal.py report` so the "
+                "lock is verified."),
+            status_code=303)
     entry = store.parse_entry(path)
     if not entry["has_thesis"]:
         return RedirectResponse("/open?error=Write+a+thesis+before+generating+a+report.", status_code=303)
@@ -158,6 +203,12 @@ def impact_form(request: Request, ticker: str, date: str | None = None):
         return RedirectResponse("/", status_code=303)
     if path is None:
         return RedirectResponse("/", status_code=303)
+    if store.is_v2(path):
+        return RedirectResponse(
+            "/?error=" + quote_plus(
+                f"{store.safe_ticker(ticker)} is a preregistered (v2) case. Record its AFTER "
+                "block with `scripts/journal.py after`, which verifies the lock first."),
+            status_code=303)
     return templates.TemplateResponse(
         request, "impact.html",
         {"entry": store.parse_entry(path),
@@ -184,6 +235,10 @@ def impact_submit(
         return RedirectResponse("/", status_code=303)
     if path is None:
         return RedirectResponse("/", status_code=303)
+    if store.is_v2(path):
+        return RedirectResponse("/?error=" + quote_plus(
+            f"{store.safe_ticker(ticker)} is a preregistered (v2) case; use "
+            "`scripts/journal.py after`."), status_code=303)
     if not store.is_reported(path.read_text()):
         # AFTER/outcome fields recorded before the report exists are
         # hindsight, not evidence: the journal's whole point is a verdict
