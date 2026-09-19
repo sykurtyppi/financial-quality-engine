@@ -10,6 +10,7 @@ import re
 from collections.abc import Sequence
 
 from app.services.brief.assessment import QuarterAssessment, parse_quarter_assessment
+from app.services.brief.text import fold_row, normalize, split_row, unwrap
 
 
 REQUIRED_HEADINGS = (
@@ -39,10 +40,10 @@ def _section(markdown: str, title: str) -> str | None:
 
 
 def _cells(line: str) -> list[str]:
-    return [
-        cell.strip().replace("\\|", "|")
-        for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))
-    ]
+    # Pivot on the verdict cell (held / challenged / no news): a stray pipe in
+    # the assumption text and an extra trailing column both produce a surplus,
+    # and only the content tells them apart.
+    return fold_row(split_row(line), 4, ASSUMPTION_VERDICTS, pivot_at=2)
 
 
 def _validate_assumptions(markdown: str, expected: Sequence[str]) -> None:
@@ -51,7 +52,7 @@ def _validate_assumptions(markdown: str, expected: Sequence[str]) -> None:
         raise ValueError("missing `## Your assumptions` section")
 
     if not expected:
-        lines = [line.strip() for line in section.splitlines() if line.strip()]
+        lines = [normalize(line) for line in section.splitlines() if line.strip()]
         if (
             len(lines) != 1
             or not lines[0].startswith("UNAVAILABLE")
@@ -71,6 +72,8 @@ def _validate_assumptions(markdown: str, expected: Sequence[str]) -> None:
         if len(cells) != 4:
             continue
         number, assumption, verdict, evidence = cells
+        number, verdict = unwrap(number), unwrap(verdict)
+        assumption, evidence = normalize(assumption), normalize(evidence)
         if number == "#" or set("".join(cells)) <= {"-", ":", " "}:
             continue
         try:
@@ -91,18 +94,25 @@ def _validate_assumptions(markdown: str, expected: Sequence[str]) -> None:
             + ", ".join(str(number) for number in expected_numbers)
         )
     for index, assumption, _verdict, _evidence in rows:
-        if assumption != expected[index - 1]:
-            raise ValueError(f"assumption row {index} does not match its source text")
+        if assumption != normalize(expected[index - 1]):
+            raise ValueError(
+                f"assumption row {index} does not match its source text "
+                f"(expected {expected[index - 1]!r}, got {assumption!r})")
 
 
 def validate_brief(
     markdown: str, *, expected_assumptions: Sequence[str]
 ) -> QuarterAssessment:
     """Validate the fixed brief shape and return its structured assessment."""
-    headings = tuple(re.findall(r"^## (.+?)\s*$", markdown, re.MULTILINE))
-    if headings != REQUIRED_HEADINGS:
+    # Compared normalized: a typographic apostrophe in "the company's own
+    # prior guidance" is the same heading to every reader, and rejecting the
+    # whole brief over it costs the print.
+    headings = tuple(normalize(h) for h in re.findall(r"^## (.+?)\s*$", markdown, re.MULTILINE))
+    if headings != tuple(normalize(h) for h in REQUIRED_HEADINGS):
+        expected = [h for h in REQUIRED_HEADINGS if normalize(h) not in headings]
         raise ValueError(
             "brief headings must appear exactly once and in the required order"
+            + (f" (missing or renamed: {', '.join(expected)})" if expected else "")
         )
     assessment = parse_quarter_assessment(markdown)
     _validate_assumptions(markdown, expected_assumptions)

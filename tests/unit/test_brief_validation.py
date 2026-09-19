@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.brief.validation import validate_brief
-from tests.unit.test_earnings_brief import _valid_brief
+from tests.unit._brief_fixtures import valid_brief as _valid_brief
 
 
 def test_accepts_complete_brief_without_assumptions():

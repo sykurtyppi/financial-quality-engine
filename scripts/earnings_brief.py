@@ -271,9 +271,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     # Stable machine-readable contract for a later web/API surface. The human
     # brief remains the primary artifact; this sidecar avoids reparsing model
     # prose when a client only needs the five-dimensional print assessment.
-    (src.workdir / "assessment.json").write_text(
-        assessment.model_dump_json(indent=2) + "\n"
-    )
+    try:
+        (src.workdir / "assessment.json").write_text(
+            assessment.model_dump_json(indent=2) + "\n"
+        )
+    except OSError as e:
+        # Best-effort, like the build record below: the brief is written and
+        # valid; a missing sidecar must not fail the build or skip the record.
+        print(f"  assessment sidecar not written ({e})", file=sys.stderr)
     try:
         write_built_meta(ticker, src.event_day, kind="print-night" if no_report else "full",
                          accession=src.filing.accession, report=report)

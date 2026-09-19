@@ -88,7 +88,9 @@ Section rules:
   never infer consensus expectations, and never call a favorable quarter a
   favorable investment.
 - **Your assumptions** — only from `assumptions`, in its numbering. A table:
-  # · assumption (verbatim) · verdict · evidence. Verdict
+  # · assumption (verbatim) · verdict · evidence. Copy each assumption
+  exactly as given: no rewording, no shortening, no added emphasis or
+  markdown escaping, and keep each table row on ONE line. Verdict
   is exactly one of `held` (a stated fact in the supplied files supports it
   this quarter), `challenged` (a stated fact contradicts it or management
   walked it back), `no news` (nothing in the files bears on it). The

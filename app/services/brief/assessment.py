@@ -12,6 +12,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.services.brief.text import fold_row, normalize, split_row, unwrap
+
 
 class AssessmentRead(str, Enum):
     FAVORABLE = "favorable"
@@ -53,6 +55,12 @@ class QuarterAssessment(BaseModel):
         return self
 
 
+def normalize_lines(section: str) -> str:
+    """Per-line normalization that keeps line structure (the two `**...:**`
+    lines are matched with `^...$`)."""
+    return "\n".join(normalize(line) for line in section.splitlines())
+
+
 def _section(markdown: str, title: str) -> str | None:
     match = re.search(
         rf"^## {re.escape(title)}\s*$\n(.*?)(?=^## |\Z)",
@@ -63,9 +71,9 @@ def _section(markdown: str, title: str) -> str | None:
 
 
 def _table_cells(line: str) -> list[str]:
-    body = line.strip().strip("|")
-    cells = re.split(r"(?<!\\)\|", body)
-    return [cell.strip().replace("\\|", "|") for cell in cells]
+    # Pivot on the `Read` cell: it is a closed vocabulary, so a stray pipe in
+    # the label or the evidence cannot be confused with an added column.
+    return fold_row(split_row(line), 3, {r.value for r in AssessmentRead}, pivot_at=1)
 
 
 def parse_quarter_assessment(markdown: str) -> QuarterAssessment:
@@ -85,15 +93,15 @@ def parse_quarter_assessment(markdown: str) -> QuarterAssessment:
         cells = _table_cells(line)
         if len(cells) != 3:
             continue
-        label, read_text, evidence = cells
+        label, read_text, evidence = (unwrap(c) for c in cells)
         if label.lower() == "dimension" or set("".join(cells)) <= {"-", ":", " "}:
             continue
-        key = _LABEL_TO_KEY.get(label.lower())
+        key = _LABEL_TO_KEY.get(label.lower().rstrip("."))
         if key is None:
             raise ValueError(f"unknown quarter-assessment dimension: {label!r}")
         try:
             read = AssessmentRead(read_text.lower())
-        except ValueError as e:
+        except ValueError as e:  # noqa: PERF203
             raise ValueError(f"invalid assessment read for {label}: {read_text!r}") from e
         if not evidence:
             raise ValueError(f"missing evidence for quarter-assessment dimension: {label}")
@@ -101,20 +109,25 @@ def parse_quarter_assessment(markdown: str) -> QuarterAssessment:
             AssessmentDimension(key=key, label=DIMENSIONS[key], read=read, evidence=evidence)
         )
 
+    section = normalize_lines(section)
     overall_match = re.search(
         r"^\*\*Overall earnings read:\*\*\s*([^\n]+)$", section, re.MULTILINE
     )
     if overall_match is None:
         raise ValueError("missing `**Overall earnings read:**` line")
     try:
-        overall = AssessmentRead(overall_match.group(1).strip().lower())
+        overall = AssessmentRead(unwrap(overall_match.group(1)).lower().rstrip("."))
     except ValueError as e:
         raise ValueError(
             f"invalid overall earnings read: {overall_match.group(1).strip()!r}"
         ) from e
 
     investment_line = re.search(r"^\*\*Investment context:\*\*\s*(.+)$", section, re.MULTILINE)
-    if investment_line is None or "not assessed" not in investment_line.group(1).lower():
+    # "not assessable" is accepted alongside "not assessed": the dimension
+    # reads directly above use that exact word up to six times, so a model
+    # autocompleting the same token here is writing the same meaning.
+    said = normalize(investment_line.group(1)).lower() if investment_line else ""
+    if not any(p in said for p in ("not assessed", "not assessable")):
         raise ValueError("investment context must be present and explicitly `not assessed`")
 
     return QuarterAssessment(overall=overall, dimensions=dimensions)
