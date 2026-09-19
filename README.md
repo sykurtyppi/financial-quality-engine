@@ -155,14 +155,19 @@ experiment — not a product surface.
 ```bash
 export EDGAR_IDENTITY="Your Name you@example.com"
 
-# CLI: lock your prior view, then generate the report (refused until a thesis exists)
-.venv/bin/python scripts/journal.py open NVDA --thesis "your prior view" --conviction 3
+# Preregister a case: the BEFORE block is hash-locked as it is written
+.venv/bin/python scripts/journal.py openv2 NVDA --thesis "your prior view" --conviction 3
 .venv/bin/python scripts/journal.py report NVDA
 .venv/bin/python scripts/journal.py tally
 
-# Or the web UI (pip install -e ".[web]"), same loop in a browser:
+# The web UI (pip install -e ".[web]") READS the journal; it no longer opens cases:
 .venv/bin/uvicorn app.web:app        # http://127.0.0.1:8000
 ```
+
+New cases are opened on the CLI only. The web form used to write the older
+(v1) format, which has no hash-locked BEFORE block and so can never be
+preregistered evidence; it was retired rather than extended. The dashboard
+lists preregistered (v2) cases read-only, with their lock status.
 
 ## LLM surfaces
 

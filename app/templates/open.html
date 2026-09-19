@@ -10,45 +10,21 @@
 
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 
-<form class="panel" method="post" action="/open">
-  <div class="field-grid">
-    <div>
-      <label for="ticker">Ticker</label>
-      <input id="ticker" name="ticker" required autocomplete="off" placeholder="NVDA" style="text-transform:uppercase">
-    </div>
-    <div>
-      <label for="conviction">Conviction (1–5)</label>
-      <select id="conviction" name="conviction">
-        <option value="1">1 — low</option><option value="2">2</option>
-        <option value="3" selected>3</option><option value="4">4</option>
-        <option value="5">5 — high</option>
-      </select>
-    </div>
-    <div>
-      <label for="action">Intended action</label>
-      <select id="action" name="action">
-        <option value="hold" selected>hold</option>
-        <option value="add">add</option>
-        <option value="trim">trim</option>
-        <option value="avoid">avoid</option>
-        <option value="no position">no position</option>
-      </select>
-    </div>
-    <div>
-      <label for="source">Case source</label>
-      <input id="source" disabled value="journal entry">
-    </div>
+<section class="panel">
+  <h3>Opening cases moved to the CLI</h3>
+  <p class="note">
+    A case is only evidence if its BEFORE block was locked before the report
+    existed. This form wrote the older format, which has no lock, so it has
+    been retired rather than extended.
+  </p>
+  <p>Open a preregistered case with:</p>
+  <pre><code>{{ openv2_hint }}</code></pre>
+  <p class="note">
+    Add <code>--assumption</code> once per named assumption. The block is
+    hash-locked as it is written; <code>scripts/journal.py verify</code>
+    reports tamper status, and the dashboard lists these read-only.
+  </p>
+  <a class="btn ghost" href="/">Back to dashboard</a>
+</section>
 
-    <div class="wide">
-      <label for="thesis">Thesis</label>
-      <textarea id="thesis" name="thesis" required placeholder="beat likely priced in; watching inventory build and margin quality"></textarea>
-    </div>
-  </div>
-
-  <div class="actions">
-    <button class="btn" type="submit">Create case</button>
-    <a class="btn ghost" href="/">Cancel</a>
-  </div>
-  <p class="note">The report action will lock this thesis once generation succeeds.</p>
-</form>
 {% endblock %}

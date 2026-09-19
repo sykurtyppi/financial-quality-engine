@@ -5,8 +5,44 @@
     <h2>Dashboard</h2>
     <p class="sub" style="margin:0">Log the prior view, read the report, record what changed, then close the outcome.</p>
   </div>
-  <a class="btn" href="/open">New case</a>
+  <a class="btn ghost" href="/open">New case</a>
 </div>
+
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+<section class="panel">
+  <div class="case-title">
+    <b>Preregistered cases (v2)</b>
+    <span class="note" style="margin:0">read-only here — the BEFORE block is hash-locked, so it is edited only through the CLI</span>
+  </div>
+  {% if v2 %}
+  <table>
+    <thead><tr><th>Case</th><th>Lock</th><th>Conviction</th><th>Assumptions</th><th>State</th></tr></thead>
+    <tbody>
+      {% for e in v2 %}
+      <tr>
+        {% if e.unreadable %}
+        <td><b>{{ e.ticker }}</b></td>
+        <td colspan="4"><span class="pill bad">unreadable</span> <span class="note">{{ e.unreadable }}</span></td>
+        {% else %}
+        <td><b>{{ e.ticker }}</b><br><span class="note">{{ e.day }}</span></td>
+        <td>
+          {% if e.lock_broken %}<span class="pill bad">lock broken</span>
+          {% elif e.locked %}<span class="pill ok">locked</span>
+          {% else %}<span class="pill wait">unlocked</span>{% endif %}
+        </td>
+        <td>{{ e.conviction }}</td>
+        <td>{{ e.assumptions }}{% if e.open_assumptions %} <span class="note">({{ e.open_assumptions }} open)</span>{% endif %}</td>
+        <td>{% if e.reported %}<span class="pill ok">reported</span>{% else %}<span class="pill wait">report pending</span>{% endif %}</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No preregistered cases yet — <code>{{ openv2_hint }}</code></p>
+  {% endif %}
+</section>
 
 <div class="summary">
   <div class="stat"><b>{{ t.total }}</b><span>cases</span></div>
@@ -41,6 +77,7 @@
 <div class="split">
   <section class="panel">
     <h3>Needs Attention</h3>
+    <p class="note">Legacy (v1) cases only. New cases are preregistered with <code>openv2</code>.</p>
     {% if t.entries %}
       <div class="queue">
         {% set queued = namespace(count=0) %}
@@ -113,7 +150,7 @@
       </tbody>
     </table>
     {% else %}
-    <p class="empty"><a href="/open">Open your first case</a>.</p>
+    <p class="empty">No legacy cases. New cases: <code>{{ openv2_hint }}</code></p>
     {% endif %}
   </section>
 </div>

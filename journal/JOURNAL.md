@@ -21,9 +21,11 @@ journal, run blind over a real earnings season, can answer it.
 
 - **CLI** — the loop below.
 - **Web UI** — `.venv/bin/uvicorn app.web:app`, then open http://127.0.0.1:8000.
-  Same four steps in a browser (dashboard → new case → view report → record
-  impact), writing the identical `journal/entries/*.md` files. It's a dogfooding
-  convenience, not a product; the thesis-before-report lock is enforced there too.
+  A READER over the same `journal/entries/*.md` files: it shows the legacy (v1)
+  queue and lists preregistered (v2) cases read-only with their lock status. It
+  no longer opens cases, and it refuses to write into a v2 entry — the hash lock
+  is verified by the CLI commands that own it (`openv2`, `report`, `after`,
+  `resolve`). A dogfooding convenience, not a product surface.
 
 ## Earnings-night automation (scripts/watch.py)
 

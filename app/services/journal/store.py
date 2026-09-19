@@ -388,7 +388,18 @@ def tally() -> dict:
     # v2 entries are counted separately by `v2_tally()`; the v1 markdown parser
     # can't read a JSON front-matter file (would yield an entry with all fields
     # None and quietly inflate v1 stats).
-    entries = [parse_entry(p) for p in list_entries() if not is_v2(p)]
+    # A file that cannot be read (permissions, a bad mount) used to take the
+    # whole tally — and with it the dashboard — down with an OSError. One
+    # broken file is not a reason to lose the count of every other case;
+    # `v2_tally` already works this way. They are counted, never silent.
+    entries, unreadable = [], []
+    for p in list_entries():
+        if is_v2(p):
+            continue
+        try:
+            entries.append(parse_entry(p))
+        except OSError:
+            unreadable.append(p.name)
     total = len(entries)
     scored = [e for e in entries if e["impact"]]
     impact_counts = {code: sum(1 for e in scored if code in (e["impact"] or "")) for code in IMPACT_CODES}
@@ -425,4 +436,5 @@ def tally() -> dict:
         "oldest_awaiting_days": awaiting_outcome[0]["days_since_reported"] if awaiting_outcome else None,
         "stale_outcome_days": STALE_OUTCOME_DAYS,
         "gate_ready": total >= 20 and sum(1 for e in entries if e["verdict"]) >= 15,
+        "unreadable": unreadable,
     }
