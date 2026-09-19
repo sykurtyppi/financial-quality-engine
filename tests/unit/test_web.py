@@ -89,6 +89,38 @@ def test_report_excerpts_render_as_text_not_markup(client):
     assert "<table>" in r.text and "R&amp;D" in r.text  # markdown still renders
 
 
+def test_report_links_only_to_safe_url_schemes(client):
+    # Escaping the input stops raw tags, but markdown builds anchors from
+    # `[text](url)` — and a filing can write `[click](javascript:...)`.
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    p = reporting.report_path("KO", store.today())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# KO report\n\n[a](javascript:alert(1)) [b](data:text/html,x) "
+                 "[c](VBscript:x) [ok](https://www.sec.gov/x) [rel](/reports/x.md)\n")
+    store.mark_reported(store.find_entry("KO"))
+    r = client.get("/report/KO")
+    assert r.status_code == 200
+    for scheme in ("javascript:", "data:text/html", "vbscript:", "VBscript:"):
+        assert scheme not in r.text
+    assert r.text.count("#blocked-url") == 3
+    assert 'href="https://www.sec.gov/x"' in r.text and 'href="/reports/x.md"' in r.text
+
+
+def test_url_scheme_allowlist_keeps_relative_targets(client):
+    # A scheme allowlist, not a prefix guess: an unschemed target is relative
+    # and stays, and control characters cannot smuggle a scheme past it
+    # (browsers strip them, so this must too).
+    from app import web
+
+    for keep in ("docs/report.md", "x.md?q=1", "./a", "../a", "/a", "#a",
+                 "https://sec.gov/x", "HTTP://sec.gov/x", "mailto:a@b.c"):
+        assert web._safe_url(keep) == keep, keep
+    for block in ("javascript:alert(1)", "JaVaScRiPt:x", "data:text/html,x",
+                  "vbscript:x", "file:///etc/passwd", "ftp://x/y",
+                  "java\nscript:alert(1)", "\tjavascript:x", " javascript:x"):
+        assert web._safe_url(block) == "#blocked-url", block
+
+
 def test_impact_refused_before_the_report_exists(client):
     client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
     r = client.post("/impact/KO", data={"verdict": "helped", "what_happened": "guided down"})

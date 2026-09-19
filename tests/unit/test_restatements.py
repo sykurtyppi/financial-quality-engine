@@ -3,6 +3,8 @@
 
 import pytest
 
+from datetime import date
+
 from app.services.ingestion.restatements import (
     detect_restatements,
     render_restatements_section,
@@ -273,3 +275,35 @@ class TestRender:
 
     def test_render_empty(self):
         assert "No prior-period revisions" in render_restatements_section([])
+
+
+class TestPointInTime:
+    """`as_of` must filter the FACTS. Filtering finished footprints erased an
+    amendment that WAS known at the report date whenever a later comparative
+    touched the same figure again."""
+
+    @staticmethod
+    def _facts(rows):
+        return {"facts": {"us-gaap": {"Assets": {"units": {"USD": [
+            {"end": e, "filed": f, "val": v, "form": fm, "accn": a, "fy": 2024, "fp": "Q1"}
+            for e, f, v, fm, a in rows]}}}}}
+
+    ROWS = [
+        ("2024-03-31", "2024-05-01", 1000.0, "10-Q", "acc-orig"),
+        ("2024-03-31", "2024-11-01", 1200.0, "10-Q/A", "acc-amend"),   # known by 2025
+        ("2024-03-31", "2026-02-01", 1210.0, "10-K", "acc-later"),     # a later comparative
+    ]
+
+    def test_amendment_survives_a_later_comparative(self):
+        fps = detect_restatements(self._facts(self.ROWS), period_since=date(2021, 1, 1),
+                                  as_of=date(2025, 1, 15))
+        assert len(fps) == 1
+        assert fps[0].current_filed == date(2024, 11, 1) and fps[0].current_value == 1200.0
+
+    def test_nothing_before_the_revision_was_filed(self):
+        assert detect_restatements(self._facts(self.ROWS), period_since=date(2021, 1, 1),
+                                   as_of=date(2024, 6, 1)) == []
+
+    def test_without_as_of_the_latest_filing_still_wins(self):
+        fps = detect_restatements(self._facts(self.ROWS), period_since=date(2021, 1, 1))
+        assert len(fps) == 1 and fps[0].current_filed == date(2026, 2, 1)

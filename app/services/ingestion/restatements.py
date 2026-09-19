@@ -139,6 +139,7 @@ def detect_restatements(
     facts_json: dict,
     materiality_pct: float = DEFAULT_MATERIALITY_PCT,
     period_since: date | None = None,
+    as_of: date | None = None,
 ) -> list[RestatementFootprint]:
     """Find same-period figures a later filing revised beyond `materiality_pct`.
 
@@ -151,6 +152,11 @@ def detect_restatements(
 
     `period_since` restricts to periods ending on/after that date — the live
     monitor cares about revisions to recent periods, not a 2010 reclassification.
+    `as_of` drops every fact FILED after that date, so a dated report sees the
+    trail exactly as it stood then. It must filter the facts, not the finished
+    footprints: a later comparative moves `current_filed` forward, and
+    discarding the footprint afterwards would erase an amendment that WAS
+    known at the report date.
     Split-adjusted share fields are excluded (see SPLIT_ADJUSTED_FIELDS).
     """
     footprints: list[RestatementFootprint] = []
@@ -178,6 +184,8 @@ def detect_restatements(
                     filed = _parse_date(e["filed"])
                     val = float(e["val"])
                 except (KeyError, ValueError, TypeError):
+                    continue
+                if as_of is not None and filed > as_of:
                     continue
                 by_key.setdefault((start, end), []).append(
                     (filed, val, e.get("form", ""), e.get("accn", ""))
