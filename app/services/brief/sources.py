@@ -33,6 +33,7 @@ from app.services.ingestion.edgar_documents import (
 )
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
+from app.services.brief.assumptions import load_assumptions, render_for_brief
 from app.services.watch.poller import Filing, recent_filings
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -89,7 +90,7 @@ class BriefSourceError(RuntimeError):
 
 @dataclass(frozen=True)
 class SourceFile:
-    role: str  # release | exhibit | prior_release | transcript | report | audit | prior_brief
+    role: str  # release | exhibit | prior_release | transcript | assumptions | report | audit | prior_brief
     path: Path
     label: str
 
@@ -179,6 +180,7 @@ def collect_sources(
     audit: Path | None = None,
     prior_brief: Path | None = None,
     out_root: Path | None = None,
+    assumptions_root: Path | None = None,
 ) -> BriefSources:
     ticker = safe_ticker(ticker)
     cik = client.resolve_cik(ticker)
@@ -262,6 +264,18 @@ def collect_sources(
             "no call transcript supplied — call section will be UNAVAILABLE "
             f"(drop one at {TRANSCRIPTS / ticker}/ or pass --transcript and re-run)"
         )
+
+    items = load_assumptions(ticker, assumptions_root)
+    if items:
+        out = workdir / "assumptions.txt"
+        out.write_text(render_for_brief(ticker, items))
+        src.files.append(SourceFile(
+            "assumptions", out, f"{len(items)} standing assumption(s), holder-authored — "
+            "report each as held / challenged / no news with the evidence"))
+    else:
+        src.diagnostics.append(
+            f"no standing assumptions on file for {ticker} — the assumptions section will say "
+            f"so (add some: `scripts/earnings_brief.py assume {ticker} \"...\"`)")
 
     for role, p in (("report", report), ("audit", audit), ("prior_brief", prior_brief)):
         if p is not None and p.is_file():
