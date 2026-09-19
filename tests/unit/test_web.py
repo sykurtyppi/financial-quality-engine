@@ -19,7 +19,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
     monkeypatch.setattr(reporting, "REPORTS", tmp_path / "reports")
 
-    def fake_build(ticker, with_docs=True, report_day=None):
+    def fake_build(ticker, with_docs=True, report_day=None, fresh=False):
         p = reporting.report_path(ticker, report_day)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"# {ticker} report\n\n| Block | Score |\n|---|---|\n| Earnings Quality | 29 |\n")
@@ -60,8 +60,45 @@ def test_report_requires_thesis(client):
     assert r.status_code == 303 and "/open" in r.headers["location"]
 
 
+def test_first_report_is_generated_fresh(client, monkeypatch):
+    seen = {}
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False):
+        seen["fresh"] = fresh
+        p = reporting.report_path(ticker, report_day)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# r")
+        return p, "ok"
+
+    monkeypatch.setattr(reporting, "build_report", build)
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    assert client.get("/report/KO").status_code == 200
+    assert seen["fresh"] is True  # the thesis locks against what was fetched
+
+
+def test_report_excerpts_render_as_text_not_markup(client):
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    p = reporting.report_path("KO", store.today())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# KO report\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+                 "Risk factor: <img src=x onerror=alert(1)> and R&D\n")
+    store.mark_reported(store.find_entry("KO"))  # view must render THIS file, not regenerate
+    r = client.get("/report/KO")
+    assert r.status_code == 200
+    assert "<img" not in r.text and "&lt;img src=x onerror=alert(1)&gt;" in r.text
+    assert "<table>" in r.text and "R&amp;D" in r.text  # markdown still renders
+
+
+def test_impact_refused_before_the_report_exists(client):
+    client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    r = client.post("/impact/KO", data={"verdict": "helped", "what_happened": "guided down"})
+    assert r.status_code == 303 and "Generate+the+report" in r.headers["location"]
+    e = store.parse_entry(store.find_entry("KO"))
+    assert not e.get("verdict") and not e.get("what_happened")
+
+
 def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):
-    def fail_build(ticker, with_docs=True, report_day=None):
+    def fail_build(ticker, with_docs=True, report_day=None, fresh=False):
         raise RuntimeError("missing EDGAR_IDENTITY")
 
     monkeypatch.setattr(reporting, "build_report", fail_build)
@@ -90,6 +127,7 @@ def test_report_for_dated_entry_reads_same_file_it_generates(client):
 
 def test_impact_saves_fields(client):
     client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    client.get("/report/KO")  # the AFTER block is only writable once the report exists
     r = client.post("/impact/KO", data={"impact": "changed_confidence", "conviction_after": "4",
                                         "verdict": "helped", "what_happened": "guided down"})
     assert r.status_code == 303
@@ -170,6 +208,7 @@ def test_impact_rejects_forged_conviction_after(client):
     # Codex review catch: the <select> only ever submits 1-5, but a forged POST
     # or curl call could send anything. The route must reject it at the boundary.
     client.post("/open", data={"ticker": "KO", "thesis": "steady staple", "conviction": 3, "action": "hold"})
+    client.get("/report/KO")  # AFTER fields are only writable once the report exists
     r = client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "99"})
     assert r.status_code == 303
     assert store.parse_entry(store.find_entry("KO"))["conviction_after"] is None

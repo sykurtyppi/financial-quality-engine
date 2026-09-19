@@ -70,10 +70,25 @@ class SecClient:
     def _cached_json(self, cache_name: str, url: str, max_age_s: float = 86400.0) -> dict:
         path = self.cache_dir / cache_name
         if not self.fresh and path.exists() and (time.time() - path.stat().st_mtime) < max_age_s:
-            return json.loads(path.read_text())
+            try:
+                return json.loads(path.read_text())
+            except ValueError:
+                # A poisoned entry (truncated write, partial download) must
+                # not fail every read for a day: drop it and refetch.
+                logger.warning("discarding unreadable cache entry %s", path)
+                path.unlink(missing_ok=True)
         data = self._get(url)
-        path.write_bytes(data)
-        return json.loads(data)
+        try:
+            parsed = json.loads(data)
+        except ValueError as e:
+            # Never cache what could not be parsed — the old order (write,
+            # then parse) left a truncated response on disk to be served
+            # as-is until it aged out.
+            raise SecClientError(f"SEC response for {url} is not valid JSON: {e}") from e
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)  # atomic: a reader sees the old entry or the new one, never half
+        return parsed
 
     def resolve_cik(self, ticker: str) -> int:
         table = self._cached_json("company_tickers.json", TICKERS_URL)

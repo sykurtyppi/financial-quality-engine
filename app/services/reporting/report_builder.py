@@ -142,7 +142,7 @@ def _collect_streams(
 
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
-        footprints = detect_restatements(facts, period_since=cutoff)
+        footprints = _pit_footprints(detect_restatements(facts, period_since=cutoff), report_date)
         body_sections.append(render_restatements_section(footprints))
         tier1_events += _restatement_tier1_lines(footprints)
     except Exception as e:  # noqa: BLE001
@@ -153,7 +153,7 @@ def _collect_streams(
 
         events = fetch_entity_events(client, ticker)
         cutoff = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
-        nr_dates = [d for d in sorted(events.non_reliance_8k_dates) if d >= cutoff]
+        nr_dates = _pit_dates(events.non_reliance_8k_dates, cutoff, report_date)
         tier1_events += [
             f"8-K Item 4.02 non-reliance (restatement announced) filed {d}" for d in nr_dates
         ]
@@ -306,3 +306,17 @@ def build_report(
         + body
     )
     return report, thermometer
+
+
+def _pit_dates(dates, since: date, report_date: date) -> list[date]:
+    """Event dates inside [since, report_date]. A report dated in the past
+    (backtest replay, a journal entry's day) must not carry events filed
+    after its own date — the lower cutoff alone let a January 2026 4.02
+    appear in a report dated January 2025."""
+    return [d for d in sorted(dates) if since <= d <= report_date]
+
+
+def _pit_footprints(footprints, report_date: date):
+    """Restatement footprints whose revising filing was on file by
+    report_date; a revision filed later is future knowledge."""
+    return [f for f in footprints if f.current_filed <= report_date]

@@ -50,6 +50,14 @@ def html_to_text(html: str) -> str:
     # heading patterns with ASCII apostrophes match.
     for ch, rep in _UNICODE_MAP.items():
         text = text.replace(ch, rep)
+    # Entity decoding can RESURRECT markup: `&lt;img onerror=...&gt;` in a
+    # filing becomes `<img onerror=...>` above, and that text later reaches a
+    # markdown renderer that passes raw HTML through. Strip again, until
+    # stable, so no decoding depth yields an angle-bracketed tag.
+    prev = None
+    while prev != text:
+        prev = text
+        text = _TAG_RE.sub(" ", _SCRIPT_RE.sub(" ", text))
     text = re.sub(r"&#?\w+;", " ", text)
     return re.sub(r"[ \t\r\f\v]+", " ", text)
 
