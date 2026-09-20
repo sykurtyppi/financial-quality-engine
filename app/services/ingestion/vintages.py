@@ -64,6 +64,7 @@ ROOT = Path(__file__).resolve().parents[3]
 VINTAGES = ROOT / "data" / "vintages"
 MANIFEST = "manifest.json"
 LOCK = ".lock"
+BUSY_PREFIX = ".busy-"
 LOCK_TIMEOUT_S = 30.0
 _NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([0-9a-f]{6,64}))?(?:-\d+)?\.json\.gz$")
 # The materiality floor is the within-snapshot detector's, imported rather
@@ -114,6 +115,31 @@ def _sweep_orphans(d: Path, older_than_s: float = 3600.0) -> None:
         try:
             if p.stat().st_mtime < cutoff:
                 p.unlink()
+        except OSError:
+            pass
+
+
+def _record_busy_day(cik: int, day: date, root: Path | None = None) -> None:
+    """Record a lock timeout without touching lock-protected state."""
+    try:
+        d = cik_dir(cik, root)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{BUSY_PREFIX}{day.isoformat()}").touch(exist_ok=True)
+    except OSError:
+        pass
+
+
+def _busy_problem_days(cik: int, root: Path | None = None) -> int:
+    try:
+        return sum(1 for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*") if path.is_file())
+    except OSError:
+        return 0
+
+
+def _clear_busy_days(cik: int, root: Path | None = None) -> None:
+    for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*"):
+        try:
+            path.unlink()
         except OSError:
             pass
 
@@ -210,11 +236,15 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
     except (OSError, ValueError):
         data = None
     if not isinstance(data, dict) or not isinstance(data.get("snapshots"), list):
-        return {"last_checked": None, "problem_days": 0, "observations": [],
+        return {"last_checked": None, "problem_days": _busy_problem_days(cik, root),
+                "observations": [],
                 "snapshots": reconcile_manifest(cik, root)}
     data.setdefault("last_checked", None)
     data.setdefault("problem_days", 0)
     data.setdefault("observations", [])
+    data["problem_days"] = max(
+        int(data.get("problem_days") or 0), _busy_problem_days(cik, root)
+    )
     # An entry with no digest is kept: it records a file we hold but cannot
     # read, which is exactly the thing an operator needs to see.
     data["snapshots"] = [s for s in data["snapshots"]
@@ -297,18 +327,20 @@ def capture(
     cik = client.resolve_cik(ticker)
     with _cik_lock(cik, root) as held:
         if not held:
-            man = read_manifest(cik, root)
-            man["problem_days"] = int(man.get("problem_days") or 0) + 1
-            try:
-                _write_json_atomic(_manifest_path(cik, root), man)
-            except OSError:
-                pass
+            # Never touch the manifest without its lock. The process holding
+            # the lock may be between its own read and atomic replace; even a
+            # well-formed write here can restore stale state over that update.
+            _record_busy_day(cik, today, root)
             return Capture(cik, today, None, "", "busy",
                            f"another capture holds the lock ({cik_dir(cik, root) / LOCK})")
         _sweep_orphans(cik_dir(cik, root))
         man = read_manifest(cik, root)
         if not force and man.get("last_checked") == today.isoformat():
             newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
+            if _busy_problem_days(cik, root):
+                man["problem_days"] = 0
+                _write_json_atomic(_manifest_path(cik, root), man)
+                _clear_busy_days(cik, root)
             return Capture(cik, today, None, newest, "already checked today")
 
         facts = client.company_facts_by_cik(cik)
@@ -320,6 +352,7 @@ def capture(
         if sha in known:
             man["problem_days"] = 0
             _write_json_atomic(_manifest_path(cik, root), man)
+            _clear_busy_days(cik, root)
             return Capture(cik, today, None, sha, "unchanged")
 
         # Record that today's fetch HAPPENED before attempting the larger,
@@ -361,6 +394,7 @@ def capture(
         man["snapshots"].sort(key=lambda s: (s.get("captured", ""), s.get("file", "")))
         man["problem_days"] = 0
         _write_json_atomic(_manifest_path(cik, root), man)
+        _clear_busy_days(cik, root)
         return Capture(cik, today, out, sha, "captured")
 
 
@@ -371,6 +405,71 @@ def list_vintages(cik: int, root: Path | None = None) -> list[Path]:
     if not d.is_dir():
         return []
     return sorted(p for p in d.glob("*.json.gz") if not p.name.startswith("."))
+
+
+@dataclass(frozen=True)
+class VintageObservation:
+    """One distinct content state in the order it was observed."""
+
+    captured: str
+    sha256: str
+    path: Path
+
+
+def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObservation]:
+    """Distinct content states in true observation order.
+
+    Filenames are content-addressed, so sorting two same-day files sorts by
+    hash, not capture time. The manifest's append-only observations are the
+    only durable ordering record. Consecutive unchanged observations collapse;
+    a later reversion (A -> B -> A) remains a third state even though it reuses
+    A's existing file.
+
+    Old stores without observations fall back to disk order. That preserves
+    compatibility, but same-day order from before observations existed cannot
+    be reconstructed.
+    """
+    paths = list_vintages(cik, root)
+    if not paths:
+        return []
+    man = read_manifest(cik, root)
+    by_sha: dict[str, Path] = {}
+    sha_by_name: dict[str, str] = {}
+    for entry in man.get("snapshots", []):
+        sha, name = entry.get("sha256"), entry.get("file")
+        if name:
+            sha_by_name[name] = sha or ""
+        if sha and name:
+            path = cik_dir(cik, root) / name
+            if path.is_file():
+                by_sha[sha] = path
+
+    out: list[VintageObservation] = []
+    for observation in man.get("observations", []):
+        sha = observation.get("sha256")
+        path = by_sha.get(sha)
+        captured = observation.get("date")
+        if not path or not captured or (out and out[-1].sha256 == sha):
+            continue
+        out.append(VintageObservation(captured, sha, path))
+
+    if not out:
+        return [
+            VintageObservation(snapshot_day(path), sha_by_name.get(path.name, ""), path)
+            for path in paths
+        ]
+
+    # A crash after the archive rename but before the final manifest replace
+    # can leave a valid file without an observation. Keep it visible, using
+    # the only ordering information still available.
+    represented = {item.path for item in out}
+    for path in paths:
+        if path not in represented:
+            out.append(VintageObservation(
+                snapshot_day(path), sha_by_name.get(path.name, ""), path
+            ))
+    out.sort(key=lambda item: item.captured)  # stable: observed same-day order is preserved
+    return out
 
 
 def load_vintage(path: Path) -> dict:

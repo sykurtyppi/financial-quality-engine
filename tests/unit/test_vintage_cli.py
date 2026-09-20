@@ -111,6 +111,16 @@ class TestListAndDiff:
         out = capsys.readouterr().out
         assert "total_assets" in out and "20.0%" in out and "Context, not an alarm" in out
 
+    def test_diff_uses_capture_order_when_same_day_hash_order_is_opposite(
+            self, monkeypatch, capsys):
+        client = _Client(_facts(1200.0), _facts(1000.0, "2026-11-01"))
+        monkeypatch.setattr(cli, "SecClient", lambda *a, **k: client)
+        _run(["capture", "NVDA"], monkeypatch)
+        _run(["capture", "NVDA", "--force"], monkeypatch)
+        assert _run(["diff", "NVDA"], monkeypatch) == 0
+        out = capsys.readouterr().out
+        assert "1,200" in out and "1,000" in out and "16.7%" in out
+
     def test_from_and_to_match_a_content_addressed_name(self, monkeypatch, capsys):
         # The filename is `<date>-<sha12>.json.gz`; a date lookup that split
         # on "." would never match one.
