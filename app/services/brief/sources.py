@@ -109,6 +109,8 @@ class BriefSources:
     workdir: Path
     files: list[SourceFile] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
+    # HOLDER or DERIVED — decides whether the brief must disclose provenance.
+    assumptions_origin: str = HOLDER
 
     @property
     def has_transcript(self) -> bool:
@@ -273,21 +275,25 @@ def collect_sources(
         )
 
     items = load_assumptions(ticker, assumptions_root)
-    origin, details = HOLDER, None
+    origin, details, failure = HOLDER, None, None
     if not items and derive:
         # The holder's own assumptions are the better input and always win. When
         # there are none, the filed history still supports continuity claims,
         # and testing those beats printing UNAVAILABLE every quarter forever.
+        failure = None
         try:
             found = derive_for_ticker(ticker, client=client)
         except Exception as e:  # noqa: BLE001 — derivation is a fallback, never a reason to fail
-            found = []
+            # Degrading to the pre-derivation behaviour costs nothing the brief
+            # had before; failing the print over a fallback would.
+            found, failure = [], f"{type(e).__name__}: {e}"
             src.diagnostics.append(
-                f"could not derive assumptions from filed history: {type(e).__name__}: {e}")
+                f"could not derive assumptions from filed history: {failure}")
         if found:
             items = [d.text for d in found]
             details = [d.detail for d in found]
             origin = DERIVED
+            src.assumptions_origin = DERIVED
     if items:
         out = workdir / "assumptions.txt"
         out.write_text(render_for_brief(ticker, items, origin=origin, details=details))
@@ -302,9 +308,19 @@ def collect_sources(
                 f"filed history instead (the brief marks them as derived; write your own with "
                 f"`scripts/earnings_brief.py assume {ticker} \"...\"` and they take over)")
     else:
+        # A derivation that RAN and found nothing is a quiet company; one that
+        # BROKE is a bug. Both leave the section empty, so the diagnostic is
+        # the only place they can be told apart — and the grep that finds one
+        # must not also find the other.
+        if not derive:
+            why = ""
+        elif failure is None:
+            why = ", and its filed history supports none — every rule declined"
+        else:
+            why = ", and derivation could not run (see the line above)"
         src.diagnostics.append(
-            f"no standing assumptions on file for {ticker}, and none could be derived from its "
-            f"filed history — the assumptions section will say so (add some: "
+            f"no standing assumptions on file for {ticker}{why} — the assumptions "
+            f"section will say so (add some: "
             f"`scripts/earnings_brief.py assume {ticker} \"...\"`)")
 
     for role, p in (("report", report), ("audit", audit), ("prior_brief", prior_brief)):

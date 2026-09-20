@@ -262,7 +262,8 @@ def cmd_build(args: argparse.Namespace) -> int:
             if assumptions_file is not None
             else []
         )
-        assessment = validate_brief(stdout, expected_assumptions=expected_assumptions)
+        assessment = validate_brief(stdout, expected_assumptions=expected_assumptions,
+                                    assumptions_origin=src.assumptions_origin)
     except (OSError, ValueError) as e:
         print(f"brief FAILED (invalid brief: {e}); sources kept in "
               f"{src.workdir}", file=sys.stderr)

@@ -45,3 +45,47 @@ def test_requires_unavailable_line_when_no_assumptions_exist():
     )
     with pytest.raises(ValueError, match="UNAVAILABLE"):
         validate_brief(brief, expected_assumptions=[])
+
+
+class TestDerivedProvenance:
+    """The heading says "Your assumptions". When the engine wrote them, the one
+    line saying so is what stops a machine's reading of the filings from
+    becoming something the holder believes they wrote — so it fails closed like
+    every other property of this section."""
+
+    NOTE = "_Derived from this company's filed history - not your own assumptions._"
+
+    def _with(self, opening: str) -> str:
+        brief = _valid_brief(assumptions=1)
+        return brief.replace("## Your assumptions\n", f"## Your assumptions\n{opening}\n")
+
+    def test_accepts_a_disclosed_derived_section(self):
+        validate_brief(self._with(self.NOTE), expected_assumptions=["DC revenue grows"],
+                       assumptions_origin="derived")
+
+    def test_rejects_a_derived_section_with_no_disclosure(self):
+        with pytest.raises(ValueError, match="derived from filed history"):
+            validate_brief(_valid_brief(assumptions=1),
+                           expected_assumptions=["DC revenue grows"],
+                           assumptions_origin="derived")
+
+    def test_rejects_a_disclosure_buried_below_the_table(self):
+        brief = _valid_brief(assumptions=1).replace(
+            "## Results vs", f"{self.NOTE}\n\n## Results vs")
+        with pytest.raises(ValueError, match="derived from filed history"):
+            validate_brief(brief, expected_assumptions=["DC revenue grows"],
+                           assumptions_origin="derived")
+
+    @pytest.mark.parametrize("written", [
+        "_Derived from this company's filed history — not your own assumptions._",
+        "*Derived from this company's filed history - not your own assumptions.*",
+        "**Derived from this company's filed history - not your own assumptions**",
+    ])
+    def test_tolerates_how_the_line_was_emphasised(self, written):
+        # A brief rejected over an em dash or a bold marker costs the print,
+        # and the reader sees the same sentence either way.
+        validate_brief(self._with(written), expected_assumptions=["DC revenue grows"],
+                       assumptions_origin="derived")
+
+    def test_holder_authored_sections_need_no_such_line(self):
+        validate_brief(_valid_brief(assumptions=1), expected_assumptions=["DC revenue grows"])

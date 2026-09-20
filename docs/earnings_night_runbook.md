@@ -382,9 +382,23 @@ pattern that had held — on AMKR's July print, row 4 above: total debt went
 from $1.4B at March 31 to $2.5B at June 30.
 
 Rules decline rather than guess. A series that is erratic, too short, missing
-from the filings, or restated by a stock split produces no claim at all, so a
-name may derive three assumptions where another derives five — and a
-dual-class filer that tags no single share count derives none for dilution.
+from the filings, or moved in one step produces no claim at all, so a name may
+derive three assumptions where another derives five — and a dual-class filer
+that tags no single share count derives none for dilution. The one-step test
+covers stock splits and large one-off raises alike, on the same ground: neither
+is a rate, so no "grows no more than X% a year" sentence describes it. That
+costs real coverage — Boeing's 2024 raise moved its share count 21% in a
+quarter, so BA derives no dilution claim at all — and a lost row is the cheaper
+error than a fabricated one.
+
+Two things to keep in mind when reading a season of them. A bound set by the
+quarter that just printed has never been tested, so those claims are phrased
+differently on purpose ("does not fall further — it just set a four-quarter
+low of 67.2%") rather than as a floor that has held. And a rule only fires when
+its trailing window is already clean, which tilts the *set of claims that exist
+at all* toward ones likely to keep holding: a season reading mostly `held` is
+partly an artifact of which claims were allowed to be made, not proof on its
+own that nothing moved.
 Your own assumptions always win: write one and the derived set stops being
 used for that holding. `--derive` never writes to your file, because once a
 derived claim lands in `journal/assumptions/` nothing downstream can tell it
