@@ -28,7 +28,7 @@ def valid_brief(headline: str = "ok", assumptions: int = 0) -> str:
 | Cash and earnings quality | not assessable | not in supplied sources |
 | Balance sheet and capital | not assessable | not in supplied sources |
 **Overall earnings read:** mixed
-**Investment context:** not assessed - valuation and expectations are separate.
+**Investment context:** not assessed - price, valuation, expectations, and the user's required return are separate from whether the quarter was good.
 ## Your assumptions
 {assumption_rows}## Results vs the company's own prior guidance
 Revenue was above the prior range.

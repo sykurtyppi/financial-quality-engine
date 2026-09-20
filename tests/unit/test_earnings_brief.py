@@ -157,8 +157,14 @@ class TestCollectSources:
                                                                     monkeypatch):
         from app.services.brief.derived import Derived
 
-        monkeypatch.setattr(bs, "derive_for_ticker", lambda t, client=None: [
-            Derived("revenue_growth", "Revenue keeps growing.", "Q2 +20.0% YoY")])
+        calls = []
+        monkeypatch.setattr(
+            bs,
+            "derive_for_ticker",
+            lambda t, *, as_of, client=None: calls.append((t, as_of)) or [
+                Derived("revenue_growth", "Revenue keeps growing.", "Q2 +20.0% YoY")
+            ],
+        )
         src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
                                  assumptions_root=tmp_path / "none")
         f = next(x for x in src.files if x.role == "assumptions")
@@ -169,6 +175,7 @@ class TestCollectSources:
         assert "ENGINE-DERIVED" in f.label
         assert "DERIVED BY THE ENGINE" in text
         assert any("derived 1 from its filed history" in d for d in src.diagnostics)
+        assert calls == [("NVDA", date(2026, 8, 25))]
 
     def test_the_holders_own_assumptions_win_over_derived_ones(self, archive, tmp_path,
                                                                monkeypatch):
@@ -176,8 +183,13 @@ class TestCollectSources:
         from app.services.brief.derived import Derived
 
         called = []
-        monkeypatch.setattr(bs, "derive_for_ticker", lambda t, client=None: called.append(t) or [
-            Derived("revenue_growth", "Revenue keeps growing.", "Q2 +20.0% YoY")])
+        monkeypatch.setattr(
+            bs,
+            "derive_for_ticker",
+            lambda t, *, as_of, client=None: called.append(t) or [
+                Derived("revenue_growth", "Revenue keeps growing.", "Q2 +20.0% YoY")
+            ],
+        )
         asm.add_assumption("NVDA", "DC revenue keeps growing >50% YoY", root=tmp_path / "asm")
         src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
                                  assumptions_root=tmp_path / "asm")
@@ -187,7 +199,7 @@ class TestCollectSources:
 
     def test_derive_false_keeps_the_unavailable_behaviour(self, archive, tmp_path, monkeypatch):
         monkeypatch.setattr(bs, "derive_for_ticker",
-                            lambda t, client=None: pytest.fail("must not derive"))
+                            lambda t, *, as_of, client=None: pytest.fail("must not derive"))
         src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
                                  assumptions_root=tmp_path / "none", derive=False)
         assert not any(x.role == "assumptions" for x in src.files)
@@ -197,7 +209,7 @@ class TestCollectSources:
                                                                   monkeypatch):
         # The release is the brief; a fallback that could not run is worth
         # saying out loud but must never cost the print.
-        def boom(ticker, client=None):
+        def boom(ticker, *, as_of, client=None):
             raise RuntimeError("companyfacts unreachable")
 
         monkeypatch.setattr(bs, "derive_for_ticker", boom)

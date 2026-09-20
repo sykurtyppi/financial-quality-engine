@@ -30,6 +30,10 @@ DIMENSIONS = {
     "balance_sheet_and_capital": "Balance sheet and capital",
 }
 _LABEL_TO_KEY = {label.lower(): key for key, label in DIMENSIONS.items()}
+INVESTMENT_CONTEXT = (
+    "not assessed - price, valuation, expectations, and the user's required return "
+    "are separate from whether the quarter was good"
+)
 
 
 class AssessmentDimension(BaseModel):
@@ -123,11 +127,10 @@ def parse_quarter_assessment(markdown: str) -> QuarterAssessment:
         ) from e
 
     investment_line = re.search(r"^\*\*Investment context:\*\*\s*(.+)$", section, re.MULTILINE)
-    # "not assessable" is accepted alongside "not assessed": the dimension
-    # reads directly above use that exact word up to six times, so a model
-    # autocompleting the same token here is writing the same meaning.
-    said = normalize(investment_line.group(1)).lower() if investment_line else ""
-    if not any(p in said for p in ("not assessed", "not assessable")):
-        raise ValueError("investment context must be present and explicitly `not assessed`")
+    said = normalize(investment_line.group(1)).lower().rstrip(".") if investment_line else ""
+    if said != INVESTMENT_CONTEXT:
+        raise ValueError(
+            "investment context must exactly state that the investment is `not assessed`"
+        )
 
     return QuarterAssessment(overall=overall, dimensions=dimensions)

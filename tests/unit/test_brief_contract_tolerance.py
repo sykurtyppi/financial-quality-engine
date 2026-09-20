@@ -22,8 +22,8 @@ class TestAcceptsTypographicVariation:
         assert validate_brief(brief, expected_assumptions=[]).overall.value == "mixed"
 
     def test_em_dash_and_nonbreaking_space(self):
-        brief = valid_brief().replace("not assessed - valuation",
-                                      "not assessed — valuation and price")
+        brief = valid_brief().replace("not assessed - price",
+                                      "not assessed — price")
         assert validate_brief(brief, expected_assumptions=[])
 
     def test_bolded_table_cells(self):
@@ -33,12 +33,11 @@ class TestAcceptsTypographicVariation:
                  .replace("| held |", "| **held** |"))
         assert validate_brief(brief, expected_assumptions=["DC revenue grows"])
 
-    def test_not_assessable_is_accepted_for_investment_context(self):
-        # The five reads directly above use that exact word; a model
-        # autocompleting it here means the same thing.
+    def test_not_assessable_is_rejected_for_investment_context(self):
         brief = valid_brief().replace("**Investment context:** not assessed -",
                                       "**Investment context:** not assessable -")
-        assert validate_brief(brief, expected_assumptions=[])
+        with pytest.raises(ValueError, match="not assessed"):
+            validate_brief(brief, expected_assumptions=[])
 
     def test_overall_read_with_a_trailing_period(self):
         brief = valid_brief().replace("**Overall earnings read:** mixed",

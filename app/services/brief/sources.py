@@ -282,7 +282,12 @@ def collect_sources(
         # and testing those beats printing UNAVAILABLE every quarter forever.
         failure = None
         try:
-            found = derive_for_ticker(ticker, client=client)
+            # The current print must not manufacture the baseline it is then
+            # assessed against. Company Facts provenance is date-only, so use
+            # the previous day rather than guessing same-day filing order.
+            found = derive_for_ticker(
+                ticker, as_of=filing.filing_date - timedelta(days=1), client=client
+            )
         except Exception as e:  # noqa: BLE001 — derivation is a fallback, never a reason to fail
             # Degrading to the pre-derivation behaviour costs nothing the brief
             # had before; failing the print over a fallback would.

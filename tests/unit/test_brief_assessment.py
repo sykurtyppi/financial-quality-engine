@@ -20,7 +20,7 @@ Revenue landed above the company's prior range.
 | Balance sheet and capital | favorable | report: net debt declined |
 
 **Overall earnings read:** mixed
-**Investment context:** not assessed - price and valuation are separate.
+**Investment context:** not assessed - price, valuation, expectations, and the user's required return are separate from whether the quarter was good.
 
 ## Guidance
 Raised.
@@ -61,3 +61,12 @@ def test_json_contract_contains_only_descriptive_reads():
     assert {row["read"] for row in payload["dimensions"]} <= {
         "favorable", "mixed", "unfavorable", "not assessable"
     }
+
+
+def test_rejects_recommendation_appended_to_required_disclaimer():
+    brief = VALID.replace(
+        "whether the quarter was good.",
+        "whether the quarter was good; this is a strong buy.",
+    )
+    with pytest.raises(ValueError, match="exactly state"):
+        parse_quarter_assessment(brief)

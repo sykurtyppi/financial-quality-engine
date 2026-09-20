@@ -111,12 +111,13 @@ class TestMarginFloor:
         assert d.text == ("Operating margin does not fall further — it just set a "
                           "four-quarter low of 17.0%.")
 
-    def test_a_tie_with_the_newest_quarter_counts_as_newly_set(self):
-        # An older twin at the same value does not make the bound survived —
-        # the latest quarter is sitting on it either way.
+    def test_a_tie_with_the_newest_quarter_is_not_newly_set(self):
+        # The earlier twin proves the bound was already observed. Calling it
+        # newly set would erase that history.
         d = only(series(revenue=[100.0] * 4, operating_income=[17.0, 19.0, 18.0, 17.0]),
                  "margin_floor")
-        assert d is not None and d.text.startswith("Operating margin does not fall further")
+        assert d is not None and d.text.startswith("Operating margin stays at or above")
+        assert "(Q0)" in d.text
 
     def test_names_an_older_quarter_plainly(self):
         d = only(series(revenue=[100.0] * 4, operating_income=[17.0, 18.0, 19.0, 20.0]),
@@ -158,6 +159,10 @@ class TestDilution:
         # A 4-for-1 split restates the whole series; reading +300% off it as
         # dilution would put a fiction in front of the holder every quarter.
         shares = [100.0] * 4 + [400.0] * 4
+        assert only(series(shares_diluted=shares), "dilution") is None
+
+    def test_declines_at_the_exact_split_suspect_boundary(self):
+        shares = [100.0] * 4 + [120.0] * 4
         assert only(series(shares_diluted=shares), "dilution") is None
 
     def test_falls_back_to_shares_outstanding_when_diluted_has_the_q4_hole(self):
@@ -283,17 +288,27 @@ class TestWindowAndCitation:
 
 
 class TestWiring:
-    def test_derive_for_ticker_calls_the_adapter_the_way_the_adapter_expects(self):
-        # Nothing else exercises this call: sources.py swallows every exception
-        # from it, so a signature drift would quietly return the whole feature
-        # to printing UNAVAILABLE on every holding, with no test failing.
-        import inspect
+    def test_derive_for_ticker_filters_facts_before_mapping(self, monkeypatch):
+        cutoff = date(2026, 8, 25)
+        raw = {"entityName": "Test", "facts": {}}
+        filtered = {"entityName": "Test", "facts": {}, "cutoff": cutoff.isoformat()}
+        dataset = series(revenue=growing(100.0, 0.20))
 
-        from app.services.ingestion.edgar_adapter import fetch_dataset_snapshot
+        class Snapshot:
+            company_facts = raw
 
-        bound = inspect.signature(fetch_dataset_snapshot).bind(
-            "NVDA", n_quarters=dv.DERIVE_QUARTERS, client=None)
-        assert bound.arguments["n_quarters"] == dv.DERIVE_QUARTERS
+        monkeypatch.setattr(dv, "fetch_dataset_snapshot", lambda *a, **k: Snapshot())
+        monkeypatch.setattr(
+            dv, "filter_as_of", lambda facts, as_of: filtered if (facts, as_of) == (raw, cutoff) else None
+        )
+
+        def build(facts, *, ticker, n_quarters):
+            assert facts is filtered
+            assert ticker == "NVDA" and n_quarters == dv.DERIVE_QUARTERS
+            return dataset, object()
+
+        monkeypatch.setattr(dv, "build_dataset", build)
+        assert dv.derive_for_ticker("NVDA", as_of=cutoff)
 
     def test_claims_too_long_to_round_trip_are_dropped_not_published(self, monkeypatch):
         from app.services.brief.assumptions import MAX_ASSUMPTION_CHARS

@@ -30,10 +30,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import date
+from math import isclose
 
 from app.schemas.financials import CompanyDataset, PeriodFinancials, PeriodType
+from app.services.backtesting.pit import filter_as_of
 from app.services.brief.assumptions import MAX_ASSUMPTION_CHARS
 from app.services.formulas.ttm import MAX_GAP_DAYS, MIN_GAP_DAYS
+from app.services.ingestion.companyfacts_mapper import build_dataset
 from app.services.ingestion.edgar_adapter import fetch_dataset_snapshot
 from app.services.ingestion.sec_client import SecClient
 
@@ -156,12 +160,14 @@ def _bound_quarter(
     not been tested at all, and "stays at or above X" would promise a durability
     that nothing in the history supports.
     """
-    # Searched from the newest end: when the latest quarter ties an earlier one
-    # at the bound, "the most recent quarter is already at it" is the fact that
-    # changes how the claim reads, and picking the older twin hides it.
     values = list(values)
-    i = len(values) - 1 - values[::-1].index(bound)
-    return window[i].fiscal_label, i == len(values) - 1
+    matches = [i for i, value in enumerate(values) if value == bound]
+    latest = len(values) - 1
+    fresh = matches == [latest]
+    # A latest-quarter tie is not a newly set bound: cite the most recent
+    # earlier occurrence that demonstrates the level has already been seen.
+    i = matches[-2] if matches[-1] == latest and len(matches) > 1 else matches[-1]
+    return window[i].fiscal_label, fresh
 
 
 def _trail(window: Sequence[PeriodFinancials], rendered: Sequence[str]) -> str:
@@ -221,7 +227,8 @@ def _has_split_step(counts: Sequence[float | None]) -> bool:
     for a, b in zip(counts, counts[1:]):
         if a is None or b is None or a <= 0:
             continue
-        if abs(b / a - 1.0) > SPLIT_SUSPECT_QOQ:
+        move = abs(b / a - 1.0)
+        if move > SPLIT_SUSPECT_QOQ or isclose(move, SPLIT_SUSPECT_QOQ):
             return True
     return False
 
@@ -412,12 +419,18 @@ def derive_assumptions(dataset: CompanyDataset) -> list[Derived]:
     return out[:MAX_DERIVED]
 
 
-def derive_for_ticker(ticker: str, *, client: SecClient | None = None) -> list[Derived]:
-    """Derive from `ticker`'s filed history, reusing the caller's SEC client.
+def derive_for_ticker(
+    ticker: str, *, as_of: date, client: SecClient | None = None
+) -> list[Derived]:
+    """Derive from history filed on or before ``as_of``.
 
     The client carries the run's cache policy: on a print night the brief runs
     `fresh`, and derivation must see the same EDGAR snapshot the rest of the
     brief does rather than quietly reading a day-old companyfacts document.
+    The cutoff is mandatory because deriving from the print being assessed
+    would turn the current result into its own standing assumption.
     """
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=DERIVE_QUARTERS, client=client)
-    return derive_assumptions(snapshot.dataset)
+    facts = filter_as_of(snapshot.company_facts, as_of)
+    dataset, _ = build_dataset(facts, ticker=ticker, n_quarters=DERIVE_QUARTERS)
+    return derive_assumptions(dataset)
