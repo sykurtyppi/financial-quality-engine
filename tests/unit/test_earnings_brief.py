@@ -153,6 +153,60 @@ class TestCollectSources:
         assert not any(x.role == "assumptions" for x in src.files)
         assert any("no standing assumptions on file for NVDA" in d for d in src.diagnostics)
 
+    def test_derived_assumptions_fill_in_when_the_holder_wrote_none(self, archive, tmp_path,
+                                                                    monkeypatch):
+        from app.services.brief.derived import Derived
+
+        monkeypatch.setattr(bs, "derive_for_ticker", lambda t, client=None: [
+            Derived("revenue_growth", "Revenue keeps growing.", "Q2 +20.0% YoY")])
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "none")
+        f = next(x for x in src.files if x.role == "assumptions")
+        text = f.path.read_text()
+        assert "1. Revenue keeps growing." in text
+        assert "basis: Q2 +20.0% YoY" in text
+        # The label and the file both have to say these are not the holder's.
+        assert "ENGINE-DERIVED" in f.label
+        assert "DERIVED BY THE ENGINE" in text
+        assert any("derived 1 from its filed history" in d for d in src.diagnostics)
+
+    def test_the_holders_own_assumptions_win_over_derived_ones(self, archive, tmp_path,
+                                                               monkeypatch):
+        from app.services.brief import assumptions as asm
+        from app.services.brief.derived import Derived
+
+        called = []
+        monkeypatch.setattr(bs, "derive_for_ticker", lambda t, client=None: called.append(t) or [
+            Derived("revenue_growth", "Revenue keeps growing.", "Q2 +20.0% YoY")])
+        asm.add_assumption("NVDA", "DC revenue keeps growing >50% YoY", root=tmp_path / "asm")
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "asm")
+        f = next(x for x in src.files if x.role == "assumptions")
+        assert "holder-authored" in f.label and "DERIVED" not in f.path.read_text()
+        assert called == [], "derivation must not even run when the holder wrote their own"
+
+    def test_derive_false_keeps_the_unavailable_behaviour(self, archive, tmp_path, monkeypatch):
+        monkeypatch.setattr(bs, "derive_for_ticker",
+                            lambda t, client=None: pytest.fail("must not derive"))
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "none", derive=False)
+        assert not any(x.role == "assumptions" for x in src.files)
+        assert any("no standing assumptions on file for NVDA" in d for d in src.diagnostics)
+
+    def test_a_failed_derivation_is_a_diagnostic_not_a_lost_brief(self, archive, tmp_path,
+                                                                  monkeypatch):
+        # The release is the brief; a fallback that could not run is worth
+        # saying out loud but must never cost the print.
+        def boom(ticker, client=None):
+            raise RuntimeError("companyfacts unreachable")
+
+        monkeypatch.setattr(bs, "derive_for_ticker", boom)
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "none")
+        assert any(x.role == "release" for x in src.files)
+        assert not any(x.role == "assumptions" for x in src.files)
+        assert any("companyfacts unreachable" in d for d in src.diagnostics)
+
     def test_report_and_audit_attached_when_present(self, archive, tmp_path):
         rep = tmp_path / "NVDA_2026-08-26.md"
         rep.write_text("# report")

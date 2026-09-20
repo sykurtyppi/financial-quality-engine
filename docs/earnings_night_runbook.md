@@ -356,6 +356,40 @@ thing on the page; the digest carries it too. A verdict is only ever
 `no news` — so a run of `no news` across a season is itself information:
 the assumption is not something the prints can test.
 
+### When you have written none
+
+An empty `journal/assumptions/` used to turn that section into one
+`UNAVAILABLE` line on every brief, for every holding, all season. It no
+longer does. With no file on hand the engine derives the assumptions from
+the company's own filed quarterly history instead — the continuity claims
+the last two years actually support, one per dimension it can speak to:
+
+```
+scripts/earnings_brief.py assume AMKR --derive    # preview; writes nothing
+```
+
+```
+1. Revenue keeps growing year over year — it has in each of the last four quarters, by 3.4% to 27.5%.
+2. Gross margin stays at or above 12.0% — its low over the last four quarters (FY2025Q2).
+3. Shares outstanding grow no more than 0.3% year over year — its fastest over the last four quarters (FY2026Q1, the most recent).
+4. Total debt stays at or below $1.98B — its high over the last four quarter ends (FY2025Q3).
+```
+
+These are the filings' recent past, not a thesis and not a forecast, and the
+brief says so above the table (`_Derived from this company's filed history —
+not your own assumptions._`). `challenged` then means this print broke a
+pattern that had held — on AMKR's July print, row 4 above: total debt went
+from $1.4B at March 31 to $2.5B at June 30.
+
+Rules decline rather than guess. A series that is erratic, too short, missing
+from the filings, or restated by a stock split produces no claim at all, so a
+name may derive three assumptions where another derives five — and a
+dual-class filer that tags no single share count derives none for dilution.
+Your own assumptions always win: write one and the derived set stops being
+used for that holding. `--derive` never writes to your file, because once a
+derived claim lands in `journal/assumptions/` nothing downstream can tell it
+from something you actually believe.
+
 ## The earnings brief
 
 `reports/briefs/<TICKER>_<print date>.md` — one page per print, written by

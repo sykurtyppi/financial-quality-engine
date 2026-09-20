@@ -16,6 +16,7 @@ are ignored. Hand-edit it, or `scripts/earnings_brief.py assume TICKER "..."`.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from app.services.journal.store import safe_ticker
@@ -82,9 +83,43 @@ def add_assumption(ticker: str, text: str, root: Path | None = None) -> Path:
     return p
 
 
-def render_for_brief(ticker: str, items: list[str]) -> str:
-    """The numbered list handed to the brief as a data file."""
-    lines = [f"Standing assumptions for {safe_ticker(ticker)} (holder-authored; numbered "
-             "for reference in the brief):", ""]
-    lines += [f"{i}. {a}" for i, a in enumerate(items, 1)]
+HOLDER, DERIVED = "holder", "derived"
+
+
+def render_for_brief(
+    ticker: str,
+    items: list[str],
+    *,
+    origin: str = HOLDER,
+    details: Sequence[str] | None = None,
+) -> str:
+    """The numbered list handed to the brief as a data file.
+
+    `origin` is DERIVED when `derived.py` supplied these instead of the holder.
+    The provenance is stated in the file itself, not only in the source label:
+    the brief's section is called "Your assumptions", and a reader must never
+    be left thinking they wrote a claim the engine read off the filings.
+    """
+    ticker = safe_ticker(ticker)
+    if origin == DERIVED:
+        lines = [
+            f"Standing assumptions for {ticker} — DERIVED BY THE ENGINE from the "
+            "company's own filed quarterly history.",
+            "",
+            "These are NOT holder-authored and NOT predictions. Each is a continuity "
+            "claim the filings supported through the last reported quarter, written so "
+            "that this print either holds it, challenges it, or says nothing about it.",
+            "",
+            "Reproduce the numbered assumption text verbatim in the brief's table. An "
+            "indented `basis:` line is the trailing history behind the claim — context "
+            "for the evidence cell, never part of the assumption text.",
+            "",
+        ]
+    else:
+        lines = [f"Standing assumptions for {ticker} (holder-authored; numbered "
+                 "for reference in the brief):", ""]
+    for i, a in enumerate(items, 1):
+        lines.append(f"{i}. {a}")
+        if details is not None and i <= len(details) and details[i - 1]:
+            lines.append(f"   basis: {details[i - 1]}")
     return "\n".join(lines) + "\n"

@@ -33,7 +33,13 @@ from app.services.ingestion.edgar_documents import (
 )
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
-from app.services.brief.assumptions import load_assumptions, render_for_brief
+from app.services.brief.assumptions import (
+    DERIVED,
+    HOLDER,
+    load_assumptions,
+    render_for_brief,
+)
+from app.services.brief.derived import derive_for_ticker
 from app.services.watch.poller import Filing, recent_filings
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -181,6 +187,7 @@ def collect_sources(
     prior_brief: Path | None = None,
     out_root: Path | None = None,
     assumptions_root: Path | None = None,
+    derive: bool = True,
 ) -> BriefSources:
     ticker = safe_ticker(ticker)
     cik = client.resolve_cik(ticker)
@@ -266,16 +273,39 @@ def collect_sources(
         )
 
     items = load_assumptions(ticker, assumptions_root)
+    origin, details = HOLDER, None
+    if not items and derive:
+        # The holder's own assumptions are the better input and always win. When
+        # there are none, the filed history still supports continuity claims,
+        # and testing those beats printing UNAVAILABLE every quarter forever.
+        try:
+            found = derive_for_ticker(ticker, client=client)
+        except Exception as e:  # noqa: BLE001 — derivation is a fallback, never a reason to fail
+            found = []
+            src.diagnostics.append(
+                f"could not derive assumptions from filed history: {type(e).__name__}: {e}")
+        if found:
+            items = [d.text for d in found]
+            details = [d.detail for d in found]
+            origin = DERIVED
     if items:
         out = workdir / "assumptions.txt"
-        out.write_text(render_for_brief(ticker, items))
+        out.write_text(render_for_brief(ticker, items, origin=origin, details=details))
+        whose = ("holder-authored" if origin == HOLDER
+                 else "ENGINE-DERIVED from filed history, not holder-authored")
         src.files.append(SourceFile(
-            "assumptions", out, f"{len(items)} standing assumption(s), holder-authored — "
+            "assumptions", out, f"{len(items)} standing assumption(s), {whose} — "
             "report each as held / challenged / no news with the evidence"))
+        if origin == DERIVED:
+            src.diagnostics.append(
+                f"no holder-authored assumptions for {ticker} — derived {len(items)} from its "
+                f"filed history instead (the brief marks them as derived; write your own with "
+                f"`scripts/earnings_brief.py assume {ticker} \"...\"` and they take over)")
     else:
         src.diagnostics.append(
-            f"no standing assumptions on file for {ticker} — the assumptions section will say "
-            f"so (add some: `scripts/earnings_brief.py assume {ticker} \"...\"`)")
+            f"no standing assumptions on file for {ticker}, and none could be derived from its "
+            f"filed history — the assumptions section will say so (add some: "
+            f"`scripts/earnings_brief.py assume {ticker} \"...\"`)")
 
     for role, p in (("report", report), ("audit", audit), ("prior_brief", prior_brief)):
         if p is not None and p.is_file():
