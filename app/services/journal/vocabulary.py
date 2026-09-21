@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import re
 
+from pydantic import BaseModel
+
 from app.schemas.financials import PeriodFinancials
 
 # Engine metric ids from `formulas.registry.compute_metrics` (bundle.history keys).
@@ -40,13 +42,58 @@ METRIC_IDS: frozenset[str] = frozenset({
     "sbc_to_revenue", "total_accruals", "working_capital_swing_to_income",
 })
 
-# Raw XBRL-mapped fields, minus the two that describe a period rather than
+# Raw XBRL-mapped fields, minus the three that describe a period rather than
 # measure one — `_lookup_metric_value` would happily return a date or a label
 # and then fail to compare it against a numeric threshold.
 _NON_MEASURES = {"fiscal_label", "period_end", "period_type"}
-FIELD_NAMES: frozenset[str] = frozenset(PeriodFinancials.model_fields) - _NON_MEASURES
 
-RESOLVABLE_METRICS: frozenset[str] = METRIC_IDS | FIELD_NAMES
+
+def _period_measures() -> frozenset[str]:
+    """Everything on `PeriodFinancials` the resolver can read as a number.
+
+    The resolver reaches fields with `hasattr`, which finds COMPUTED
+    PROPERTIES (`ebitda`, `fcf`, `gross_profit`) as readily as declared
+    fields. `model_fields` lists only the declared ones, so deriving the
+    vocabulary from it alone refused three names the resolver resolves
+    perfectly well — a validator stricter than the thing it guards, which
+    blocks legitimate commitments instead of impossible ones.
+    """
+    declared = set(PeriodFinancials.model_fields)
+    # Anything pydantic's own BaseModel defines (`model_extra`,
+    # `model_fields_set`, ...) is plumbing, not a measurement.
+    inherited = set(dir(BaseModel))
+    computed = {
+        name for name in dir(PeriodFinancials)
+        if not name.startswith("_")
+        and name not in inherited
+        and isinstance(getattr(PeriodFinancials, name, None), property)
+    }
+    return frozenset(declared | computed) - _NON_MEASURES
+
+
+FIELD_NAMES: frozenset[str] = _period_measures()
+
+# Registry metrics computed on a trailing-twelve-month basis. Their results
+# are labelled `TTM FY2025Q4`, while `resolver._find_period` matches a window
+# against the dataset's QUARTERLY `fiscal_label` (`FY2025Q4`). Neither spelling
+# reaches them: `FY2025Q4` finds the period but no TTM result carries that
+# label, and `TTM FY2025Q4` matches no period at all.
+#
+# So these lock cleanly and then never resolve — the same failure as a
+# branding-style window, and the reason this module exists. They are refused
+# at lock until the resolver can address a TTM basis; until then, refusing is
+# the honest answer rather than sealing a commitment that cannot terminate.
+# `test_ttm_metrics_are_exactly_the_unreachable_ones` derives this set from
+# the registry and the resolver, so it shrinks by itself once that is fixed.
+TTM_BASIS_METRICS: frozenset[str] = frozenset({
+    "accrual_trend", "beneish_aqi", "beneish_depi", "beneish_dsri",
+    "beneish_gmi", "beneish_lvgi", "beneish_m_score", "beneish_sgai",
+    "beneish_sgi", "beneish_tata", "cfo_to_net_income", "fcf_margin",
+    "fcf_margin_trend", "fcf_to_net_income", "net_debt_to_ebitda",
+    "total_accruals",
+})
+
+RESOLVABLE_METRICS: frozenset[str] = (METRIC_IDS - TTM_BASIS_METRICS) | FIELD_NAMES
 
 # `companyfacts_mapper._fiscal_label` emits exactly two shapes: the structural
 # fiscal label when the filer's fiscal year-end month is known, and a

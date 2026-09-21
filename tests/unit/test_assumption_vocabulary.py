@@ -46,19 +46,28 @@ def test_metric_ids_match_what_the_registry_emits():
 
 
 def test_field_names_track_the_period_schema():
-    assert FIELD_NAMES <= set(PeriodFinancials.model_fields)
+    declared = set(PeriodFinancials.model_fields)
+    computed = {n for n in dir(PeriodFinancials)
+                if isinstance(getattr(PeriodFinancials, n, None), property)}
+    assert FIELD_NAMES <= (declared | computed)
     # The three descriptors are excluded on purpose: they identify a period
     # rather than measure one, and cannot be compared to a numeric threshold.
     assert {"fiscal_label", "period_end", "period_type"}.isdisjoint(FIELD_NAMES)
 
 
-@pytest.mark.parametrize("name", ["revenue", "cfo", "total_accruals", "beneish_m_score"])
+@pytest.mark.parametrize("name", [
+    "revenue", "cfo", "dso", "leverage_change",
+    # Computed properties: reachable by the resolver's `hasattr` lookup, so
+    # they must be lockable too. Deriving the vocabulary from `model_fields`
+    # alone refused all three.
+    "ebitda", "fcf", "gross_profit",
+])
 def test_resolvable_names_lock(name):
     ok, why = can_lock(_before(metric=name))
     assert ok, why
 
 
-@pytest.mark.parametrize("name", ["revneu_typo", "ebitda", "", "free_cash_flow"])
+@pytest.mark.parametrize("name", ["revneu_typo", "ebbitda", "free_cash_flow", "netincome"])
 def test_unresolvable_names_are_refused_at_lock(name):
     assert not is_resolvable_metric(name)
     ok, why = can_lock(_before(metric=name or "x"))
@@ -116,3 +125,60 @@ def test_tightening_can_lock_does_not_invalidate_an_already_sealed_entry():
         locked_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
     )
     assert is_locked(sealed) and verify_lock(sealed)
+
+
+def test_every_admitted_name_actually_resolves():
+    """The vocabulary's whole job is to agree with the resolver. Derive the
+    claim from the resolver itself rather than trusting a hand-kept list:
+    a name `can_lock` admits must not come back `unresolvable`."""
+    from app.services.journal.resolver import _lookup_metric_value
+    from app.services.journal.vocabulary import RESOLVABLE_METRICS
+    from app.services.formulas.registry import compute_metrics
+
+    ds = stretch_dataset()
+    period = ds.periods[-1]
+    bundle = compute_metrics(ds)
+    unresolvable = []
+    for name in sorted(RESOLVABLE_METRICS):
+        _value, _note, structural = _lookup_metric_value(name, period, bundle)
+        if structural:
+            unresolvable.append(name)
+    assert not unresolvable, (
+        f"can_lock admits names the resolver calls unresolvable: {unresolvable}"
+    )
+
+
+def test_a_resolver_reachable_property_is_not_refused():
+    """Regression for the narrowing this file previously asserted as correct:
+    `ebitda` was rejected at lock while the resolver resolved it fine."""
+    from app.services.journal.resolver import _lookup_metric_value
+    period = stretch_dataset().periods[-1]
+    for name in ("ebitda", "fcf", "gross_profit"):
+        value, _note, structural = _lookup_metric_value(name, period, None)
+        assert not structural and value is not None
+        assert can_lock(_before(metric=name))[0]
+
+
+def test_ttm_metrics_are_exactly_the_unreachable_ones():
+    """Derive the exclusion rather than trusting the written list: a metric is
+    excluded iff no result it produces carries a label any dataset period has.
+    When the resolver learns to address a TTM basis, this fails and the list
+    shrinks — it cannot silently keep refusing names that became reachable."""
+    from app.services.formulas.registry import compute_metrics
+    from app.services.journal.vocabulary import TTM_BASIS_METRICS
+
+    ds = stretch_dataset()
+    period_labels = {p.fiscal_label for p in ds.periods}
+    unreachable = {
+        name for name, history in compute_metrics(ds).history.items()
+        if not ({m.fiscal_label for m in history} & period_labels)
+    }
+    assert unreachable == set(TTM_BASIS_METRICS), (
+        f"registry only: {sorted(unreachable - set(TTM_BASIS_METRICS))}\n"
+        f"vocabulary only: {sorted(set(TTM_BASIS_METRICS) - unreachable)}"
+    )
+
+
+def test_a_ttm_metric_is_refused_rather_than_sealed_unresolvable():
+    ok, why = can_lock(_before(metric="total_accruals"))
+    assert not ok and "not a resolvable name" in why
