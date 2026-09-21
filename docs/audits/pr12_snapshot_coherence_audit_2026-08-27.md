@@ -132,6 +132,24 @@ once. It also retires a latent alias — a ticker-named entry outlived the
 mapping that produced it, so a ticker reassigned to another filer kept
 serving the previous entity's index until the entry aged out.
 
+Operational note: every unpinned `fetch_entity_events` caller — all 74
+unpinned universe members and `wide_sweep.py` — now reads
+`submissions_CIK…json` where it previously read `submissions_{TICKER}.json`.
+Same URL, same content, so the effect is one refetch per name the first time
+a sweep runs after this lands, with no correctness impact. It is still a
+change to a backtesting data path and is named here rather than left for an
+operator to discover.
+
 Still out of scope: cross-process duplication (a sweep pass, the report
 subprocess and the brief subprocess each read the index), which the shared
 cache entry reduces but an in-memory snapshot cannot remove.
+
+A second review round found two ways the guarantee could lapse silently,
+both fixed before merge: the snapshot absorbed every exception (so a
+transient throttle that the per-stream retries survived left a
+complete-looking report that had quietly given up single-vintage reads, and
+an accessor rename would have disabled the snapshot with the suite green),
+and a supplied payload silently overrode an explicit `cik` pin. The first is
+now logged and disclosed in the data-quality appendix; the second is
+refused. That round also found the builder-level threading — the two streams
+that produced the two-file split — was pinned by no test at all.
