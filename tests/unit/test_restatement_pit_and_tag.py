@@ -409,3 +409,128 @@ def test_a_single_tag_field_is_unaffected_by_the_composite_path():
     assert _found(payload, selected_tags={"revenue": "us-gaap:Revenues"}) == [
         ("us-gaap:Revenues", "2024-03-31", 100.0, 130.0)
     ]
+
+
+# --- adversarial composite cases (round-13 review) ------------------------
+# Three defects that a green suite did not catch, because the cases were not
+# in it. All three suppress or misclassify EVIDENCE: the engine scores a
+# revised figure while the appendix reports nothing, or reports it as routine.
+
+def _debt(noncurrent, current=None):
+    facts = {"LongTermDebtNoncurrent": {"units": {"USD": noncurrent}}}
+    if current is not None:
+        facts["LongTermDebtCurrent"] = {"units": {"USD": current}}
+    return {"facts": {"us-gaap": facts}}
+
+
+def _instant(end, val, filed, accn, form="10-Q"):
+    return {"end": end, "val": val, "filed": filed, "accn": accn, "form": form}
+
+
+def test_total_debt_is_inspected_although_it_is_in_no_candidate_table():
+    """`total_debt` is assembled by `_total_debt_series` and recorded like any
+    other field, but lives in neither INSTANT_FIELDS nor FLOW_FIELDS. Iterating
+    those tables alone meant the engine could score a revised debt total while
+    the appendix said nothing — silence reading as "no revisions" for one of
+    the most consequential figures on the balance sheet."""
+    payload = _debt([
+        _instant("2024-03-31", 100.0, "2024-05-01", "d1"),
+        _instant("2024-03-31", 150.0, "2024-08-01", "d2", "10-Q/A"),
+    ])
+    found = detect_restatements(payload, selected_tags={"total_debt": "LongTermDebtNoncurrent"})
+    assert [(f.field_name, f.original_value, f.current_value) for f in found] == [
+        ("total_debt", 100.0, 150.0)
+    ]
+    assert found[0].is_amendment
+
+
+def test_a_composed_total_debt_is_compared_as_the_sum():
+    payload = _debt(
+        [_instant("2024-03-31", 1000.0, "2024-05-01", "a1"),
+         _instant("2024-03-31", 1000.0, "2024-08-01", "a2")],
+        [_instant("2024-03-31", 50.0, "2024-05-01", "b1"),
+         _instant("2024-03-31", 300.0, "2024-08-01", "bA", "10-Q/A")],
+    )
+    found = detect_restatements(
+        payload, selected_tags={"total_debt": "LongTermDebtNoncurrent+LongTermDebtCurrent+none"})
+    assert [(f.original_value, f.current_value) for f in found] == [(1050.0, 1300.0)]
+
+
+def test_a_field_with_no_mapper_selection_is_not_invented():
+    payload = _debt([_instant("2024-03-31", 100.0, "2024-05-01", "d1"),
+                     _instant("2024-03-31", 150.0, "2024-08-01", "d2")])
+    assert detect_restatements(payload, selected_tags={"total_debt": None}) == []
+    assert detect_restatements(payload, selected_tags={}) == []
+
+
+def test_an_amendment_after_a_component_is_adopted_is_not_suppressed():
+    """Refusing to compare across a composition change must not discard the
+    revisions that follow it. Adopt G&A (1000 -> 1500), then amend it by
+    10-Q/A (1500 -> 1700): the earliest and latest vintages have different
+    component sets, and dropping the period on that basis silently lost a
+    genuine 13% amendment. The comparison belongs inside the stable segment."""
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1")],
+        [_row("2024-01-01", "2024-03-31", 500.0, "2024-08-01", "g1"),
+         _row("2024-01-01", "2024-03-31", 700.0, "2024-11-01", "g2", "10-Q/A")],
+    )
+    found = detect_restatements(payload, selected_tags=SGA)
+    assert [(f.original_value, f.current_value) for f in found] == [(1500.0, 1700.0)]
+    assert found[0].is_amendment
+
+
+def test_adoption_alone_is_still_not_a_revision():
+    """The guard the segment logic must not undo."""
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1")],
+        [_row("2024-01-01", "2024-03-31", 500.0, "2024-08-01", "g1")],
+    )
+    assert _found(payload, selected_tags=SGA) == []
+
+
+def test_same_day_provenance_keeps_the_amendment_that_moved_the_figure():
+    """Several components can be refiled on one date through different
+    filings. Attributing the aggregate to whichever was iterated first
+    dropped the /A that actually moved it, downgrading a high-confidence
+    amendment to a routine comparative revision."""
+    # The amendment's accession sorts LAST on purpose. With accession-only
+    # ordering the ordinary 10-Q wins and the /A is lost, so only a rule that
+    # actually prefers the amendment passes — an earlier version of this test
+    # used "gA" and "s2", where a plain sort happened to pick the amendment
+    # by luck and the assertion proved nothing.
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
+         _row("2024-01-01", "2024-03-31", 1000.0, "2024-08-01", "aaa-ordinary", "10-Q")],
+        [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
+         _row("2024-01-01", "2024-03-31", 300.0, "2024-08-01", "zzz-amended", "10-Q/A")],
+    )
+    found = detect_restatements(payload, selected_tags=SGA)
+    assert len(found) == 1
+    assert found[0].amendment_form == "10-Q/A"
+    assert found[0].amendment_accession == "zzz-amended"
+    assert found[0].is_amendment
+
+
+def test_same_day_provenance_is_deterministic_without_an_amendment():
+    """No /A on the date: the choice still must not depend on dict order."""
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
+         _row("2024-01-01", "2024-03-31", 1400.0, "2024-08-01", "zzz")],
+        [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
+         _row("2024-01-01", "2024-03-31", 20.0, "2024-08-01", "aaa")],
+    )
+    accessions = {detect_restatements(payload, selected_tags=SGA)[0].current_accession
+                  for _ in range(5)}
+    assert accessions == {"aaa"}  # lowest accession among equals
+
+
+def test_several_moved_components_still_produce_one_footprint():
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
+         _row("2024-01-01", "2024-03-31", 1200.0, "2024-08-01", "s2")],
+        [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
+         _row("2024-01-01", "2024-03-31", 90.0, "2024-08-01", "g2")],
+    )
+    found = detect_restatements(payload, selected_tags=SGA)
+    assert len(found) == 1
+    assert (found[0].original_value, found[0].current_value) == (1010.0, 1290.0)
