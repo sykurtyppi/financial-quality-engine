@@ -206,7 +206,7 @@ class TestLinkAmbiguity:
         before = BeforeBlock(
             thesis="thesis for the event", conviction=3, intended_action="hold",
             assumptions=[Assumption(metric="revenue", comparator=">", threshold=1.0,
-                                    window="Q", source="10-Q",
+                                    window="FY2027Q3", source="10-Q",
                                     resolve_by=d(2026, 12, 31))],
         )
         return lock_entry(EntryV2(
