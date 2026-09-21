@@ -493,16 +493,19 @@ def test_same_day_provenance_keeps_the_amendment_that_moved_the_figure():
     filings. Attributing the aggregate to whichever was iterated first
     dropped the /A that actually moved it, downgrading a high-confidence
     amendment to a routine comparative revision."""
-    # The amendment's accession sorts LAST on purpose. With accession-only
-    # ordering the ordinary 10-Q wins and the /A is lost, so only a rule that
-    # actually prefers the amendment passes — an earlier version of this test
-    # used "gA" and "s2", where a plain sort happened to pick the amendment
-    # by luck and the assertion proved nothing.
+    # Everything about this fixture is arranged so that ONLY a rule which
+    # actually prefers the amendment can pass. The /A sits on
+    # SellingAndMarketingExpense, which sorts AFTER
+    # GeneralAndAdministrativeExpense, so component iteration order reaches
+    # the ordinary filing first; and its accession sorts last, so the
+    # accession tiebreak also picks the ordinary one. Two earlier versions of
+    # this test passed by luck — first on accession order, then on tag order
+    # after components began being iterated sorted — and proved nothing.
     payload = _sga(
         [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
-         _row("2024-01-01", "2024-03-31", 1000.0, "2024-08-01", "aaa-ordinary", "10-Q")],
+         _row("2024-01-01", "2024-03-31", 1300.0, "2024-08-01", "zzz-amended", "10-Q/A")],
         [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
-         _row("2024-01-01", "2024-03-31", 300.0, "2024-08-01", "zzz-amended", "10-Q/A")],
+         _row("2024-01-01", "2024-03-31", 10.0, "2024-08-01", "aaa-ordinary", "10-Q")],
     )
     found = detect_restatements(payload, selected_tags=SGA)
     assert len(found) == 1
