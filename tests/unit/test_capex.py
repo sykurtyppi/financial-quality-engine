@@ -73,11 +73,33 @@ class TestRegimeShift:
         assert m.status is MetricStatus.OK
         assert m.value == pytest.approx(0.05)
 
-    def test_skips_zero_revenue_periods(self):
+    def test_skips_zero_revenue_periods_in_the_baseline(self):
+        # An unusable period BEFORE the recent window only thins the baseline
+        # mean; the window it is compared against is still the real last 4.
+        series = [q(f"P{i}", revenue=1000.0, capex_v=50.0) for i in range(6)]
+        series.insert(1, q("BAD", revenue=0.0, capex_v=50.0))
+        m = capex.capex_intensity_regime_shift(series)
+        assert m.status is MetricStatus.OK
+        assert m.note is not None and "recent window P2–P5" in m.note
+
+    def test_a_gap_inside_the_recent_window_is_not_skipped(self):
+        """Changed deliberately (round-12). This used to assert OK: unusable
+        periods were compacted out of the list, so the `last 4` slid backwards
+        onto older quarters while the result kept the newest quarter's label.
+        Both halves of the comparison then described the wrong span, and the
+        scorer consumed it as a current-period regime shift."""
         series = [q(f"P{i}", revenue=1000.0, capex_v=50.0) for i in range(6)]
         series.insert(3, q("BAD", revenue=0.0, capex_v=50.0))
         m = capex.capex_intensity_regime_shift(series)
-        assert m.status is MetricStatus.OK
+        assert m.status is MetricStatus.MISSING_DATA
+        assert "gaps at BAD" in m.missing_fields[0]
+
+    def test_an_unusable_latest_period_is_not_reported_as_current(self):
+        series = [q(f"P{i}", revenue=1000.0, capex_v=50.0) for i in range(6)]
+        series.append(q("P6", revenue=1000.0, capex_v=None))
+        m = capex.capex_intensity_regime_shift(series)
+        assert m.status is MetricStatus.MISSING_DATA
+        assert m.fiscal_label == "P6"  # the period asked about, with no value
 
 
 class TestIncrementalRevenuePerCapex:

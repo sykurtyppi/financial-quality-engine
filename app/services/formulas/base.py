@@ -116,3 +116,76 @@ def growth(current: float, prior: float) -> float:
 
 def average(a: float, b: float) -> float:
     return (a + b) / 2.0
+
+
+def stale_current(
+    series: list[MetricResult], name: str, formula: str
+) -> MetricResult | None:
+    """Refuse a trend whose newest period contributed nothing to it.
+
+    Every trend here labels its result with `series[-1].fiscal_label` — the
+    period the caller asked about — but computes over only the OK
+    observations. When the newest observation is not OK, those two diverge: a
+    value derived entirely from older quarters is returned `OK`, stamped with
+    the current quarter, and scored as a current-period signal. Missingness
+    silently becomes an apparently valid measurement, the scorecard shows
+    false freshness, and a backtest's labelled period does not match the
+    information that produced it.
+
+    Returns MISSING_DATA for that case, or None when the newest observation is
+    usable and the trend may proceed. The label is kept — the caller did ask
+    about this period, and the honest answer is that this period has no value.
+    """
+    if not series:
+        return None
+    latest = series[-1]
+    if latest.status is MetricStatus.OK and latest.value is not None:
+        return None
+    return MetricResult(
+        name=name,
+        formula=formula,
+        fiscal_label=latest.fiscal_label,
+        status=MetricStatus.MISSING_DATA,
+        missing_fields=[
+            f"{latest.name} in {latest.fiscal_label} "
+            f"({latest.status.value}) — a trend cannot be reported for a "
+            f"period that supplied no observation"
+        ],
+    )
+
+
+def contributor_note(contributors: list[MetricResult]) -> str:
+    """Name the periods a trend was actually computed over. Without it the
+    reader cannot tell a full window from one with holes in the middle."""
+    labels = [m.fiscal_label for m in contributors]
+    if not labels:
+        return "no contributing periods"
+    span = labels[0] if len(labels) == 1 else f"{labels[0]}–{labels[-1]}"
+    return f"computed over {len(labels)} period(s): {span}"
+
+
+def non_finite(value: float, name: str, formula: str, fiscal_label: str) -> MetricResult | None:
+    """NOT_MEANINGFUL for a non-finite trend result, or None to proceed.
+
+    `build_metric` already refuses a non-finite value for every metric built
+    through it, and this module's contract says so at the top. The trend
+    functions construct their `MetricResult` directly and so skipped that
+    check — a NaN reaching `interpolate_concern` raises
+    `AssertionError("unreachable")` and takes the whole report down, and an
+    infinity silently clamps to the outermost anchor, scoring maximum concern
+    on a number that means nothing.
+
+    Not reachable from the current pipeline: every trend's inputs come from
+    `build_metric`, which filters non-finite values out first. This closes the
+    contract rather than a live failure — the trend functions are the only
+    place in the package that opted out of it.
+    """
+    if math.isfinite(value):
+        return None
+    return MetricResult(
+        name=name,
+        formula=formula,
+        fiscal_label=fiscal_label,
+        status=MetricStatus.NOT_MEANINGFUL,
+        note="Non-finite result",
+    )

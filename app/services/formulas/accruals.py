@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from app.schemas.financials import PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
-from app.services.formulas.base import average, build_metric
+from app.services.formulas.base import (
+    average, build_metric, contributor_note, non_finite, stale_current,
+)
 
 MIN_EARNINGS_BASE_NOTE = (
     "Net income is non-positive; ratio-to-earnings is not meaningful. "
@@ -86,23 +88,33 @@ def fcf_margin(cur: PeriodFinancials) -> MetricResult:
 def accrual_trend(series: list[MetricResult]) -> MetricResult:
     """Deterioration in total accruals over the series: latest value minus the
     mean of the prior OK observations. Positive = accruals rising vs history."""
+    formula = "latest total_accruals - mean(prior total_accruals)"
     label = series[-1].fiscal_label if series else "n/a"
+    # The newest period must be the one supplying `latest`, or the result
+    # would describe an older quarter while wearing this quarter's label.
+    stale = stale_current(series, "accrual_trend", formula)
+    if stale is not None:
+        return stale
     ok = [m for m in series if m.status is MetricStatus.OK and m.value is not None]
     if len(ok) < 3:
         return MetricResult(
             name="accrual_trend",
-            formula="latest total_accruals - mean(prior total_accruals)",
+            formula=formula,
             fiscal_label=label,
             status=MetricStatus.MISSING_DATA,
             missing_fields=["total_accruals history (need >= 3 OK periods)"],
         )
     latest = ok[-1].value
     prior_mean = sum(m.value for m in ok[:-1]) / len(ok[:-1])  # type: ignore[misc]
+    unusable = non_finite(latest - prior_mean, "accrual_trend", formula, label)  # type: ignore[operator]
+    if unusable is not None:
+        return unusable
     return MetricResult(
         name="accrual_trend",
-        formula="latest total_accruals - mean(prior total_accruals)",
+        formula=formula,
         fiscal_label=label,
         status=MetricStatus.OK,
         value=latest - prior_mean,  # type: ignore[operator]
         inputs={"latest": latest, "prior_mean": prior_mean, "n_prior": float(len(ok) - 1)},
+        note=contributor_note(ok),
     )
