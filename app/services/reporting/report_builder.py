@@ -151,14 +151,10 @@ def _collect_streams(
 
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
-        from app.services.ingestion.restatements import unchecked_composites
-
         footprints = detect_restatements(
             facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags
         )
-        body_sections.append(
-            render_restatements_section(footprints, unchecked_composites(field_tags))
-        )
+        body_sections.append(render_restatements_section(footprints))
         tier1_events += _restatement_tier1_lines(footprints)
     except Exception as e:  # noqa: BLE001
         errors["restatements"] = str(e)
