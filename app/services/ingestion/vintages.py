@@ -119,8 +119,16 @@ def _sweep_orphans(d: Path, older_than_s: float = 3600.0) -> None:
             pass
 
 
-def _record_busy_day(cik: int, day: date, root: Path | None = None) -> None:
-    """Record a lock timeout without touching lock-protected state."""
+def _record_problem_day(cik: int, day: date, root: Path | None = None) -> None:
+    """Record that this DAY archived nothing, without touching lock-protected
+    state.
+
+    One marker per calendar day, whatever went wrong. Counting distinct days
+    is the whole point: an hourly job meeting a wedged lock would otherwise
+    report twenty-four "problem days" before lunch, and two problem days of
+    different kinds — a failed write, then a lock timeout — would report as
+    one if each kind kept its own tally.
+    """
     try:
         d = cik_dir(cik, root)
         d.mkdir(parents=True, exist_ok=True)
@@ -129,14 +137,14 @@ def _record_busy_day(cik: int, day: date, root: Path | None = None) -> None:
         pass
 
 
-def _busy_problem_days(cik: int, root: Path | None = None) -> int:
+def _problem_days(cik: int, root: Path | None = None) -> int:
     try:
         return sum(1 for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*") if path.is_file())
     except OSError:
         return 0
 
 
-def _clear_busy_days(cik: int, root: Path | None = None) -> None:
+def _clear_problem_days(cik: int, root: Path | None = None) -> None:
     for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*"):
         try:
             path.unlink()
@@ -236,14 +244,17 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
     except (OSError, ValueError):
         data = None
     if not isinstance(data, dict) or not isinstance(data.get("snapshots"), list):
-        return {"last_checked": None, "problem_days": _busy_problem_days(cik, root),
+        return {"last_checked": None, "problem_days": _problem_days(cik, root),
                 "observations": [],
                 "snapshots": reconcile_manifest(cik, root)}
     data.setdefault("last_checked", None)
     data.setdefault("problem_days", 0)
     data.setdefault("observations", [])
+    # The markers are the source of truth — one per distinct bad day. `max`
+    # only honours a count stored before markers existed; both are cleared
+    # together by any success, so a legacy value cannot outlive its store.
     data["problem_days"] = max(
-        int(data.get("problem_days") or 0), _busy_problem_days(cik, root)
+        int(data.get("problem_days") or 0), _problem_days(cik, root)
     )
     # An entry with no digest is kept: it records a file we hold but cannot
     # read, which is exactly the thing an operator needs to see.
@@ -330,17 +341,17 @@ def capture(
             # Never touch the manifest without its lock. The process holding
             # the lock may be between its own read and atomic replace; even a
             # well-formed write here can restore stale state over that update.
-            _record_busy_day(cik, today, root)
+            _record_problem_day(cik, today, root)
             return Capture(cik, today, None, "", "busy",
                            f"another capture holds the lock ({cik_dir(cik, root) / LOCK})")
         _sweep_orphans(cik_dir(cik, root))
         man = read_manifest(cik, root)
         if not force and man.get("last_checked") == today.isoformat():
             newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
-            if _busy_problem_days(cik, root):
+            if _problem_days(cik, root):
                 man["problem_days"] = 0
                 _write_json_atomic(_manifest_path(cik, root), man)
-                _clear_busy_days(cik, root)
+                _clear_problem_days(cik, root)
             return Capture(cik, today, None, newest, "already checked today")
 
         facts = client.company_facts_by_cik(cik)
@@ -352,7 +363,7 @@ def capture(
         if sha in known:
             man["problem_days"] = 0
             _write_json_atomic(_manifest_path(cik, root), man)
-            _clear_busy_days(cik, root)
+            _clear_problem_days(cik, root)
             return Capture(cik, today, None, sha, "unchanged")
 
         # Record that today's fetch HAPPENED before attempting the larger,
@@ -378,7 +389,12 @@ def capture(
             os.replace(tmp, out)
         except OSError as e:
             tmp.unlink(missing_ok=True)
-            man["problem_days"] = int(man.get("problem_days") or 0) + 1
+            # A marker, not an increment: a failed write and a lock timeout
+            # are both "this day archived nothing", and counting them in two
+            # separate places made two bad days report as one — delaying the
+            # operator alert that fires at VINTAGE_STALE_DAYS.
+            _record_problem_day(cik, today, root)
+            man["problem_days"] = _problem_days(cik, root)
             try:
                 _write_json_atomic(_manifest_path(cik, root), man)
             except OSError:
@@ -394,7 +410,7 @@ def capture(
         man["snapshots"].sort(key=lambda s: (s.get("captured", ""), s.get("file", "")))
         man["problem_days"] = 0
         _write_json_atomic(_manifest_path(cik, root), man)
-        _clear_busy_days(cik, root)
+        _clear_problem_days(cik, root)
         return Capture(cik, today, out, sha, "captured")
 
 
