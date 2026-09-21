@@ -293,3 +293,72 @@ def test_both_entry_points_supply_the_selection():
     # and the parameter still exists to receive it
     from app.services.reporting.report_builder import build_report
     assert "field_tags" in inspect.signature(build_report).parameters
+
+
+# --- the as-of boundary itself -------------------------------------------
+# Mutation testing found both of these unpinned: the comparator could flip to
+# `<` and undated facts could be admitted, with the whole suite still green.
+# `pit.py` makes exactly these two choices for the backtest; the restatement
+# trail has to make them the same way or a dated report and a dated backtest
+# row disagree about what was knowable.
+
+def test_a_fact_filed_on_the_as_of_date_is_visible():
+    """`filed <= as_of`, not `<`. A report dated the day a filing lands must
+    see it — that filing is precisely the news of the day, and an off-by-one
+    here hides every same-day amendment from its own report."""
+    from app.services.ingestion.restatements import _eligible_rows
+
+    payload = _facts(Revenues=_revised_history())  # filed 2024-05-01 and 2024-08-01
+    on_the_day = _eligible_rows(payload, "us-gaap", "Revenues", "USD", date(2024, 8, 1))
+    assert [r["filed"] for r in on_the_day] == ["2024-05-01", "2024-08-01"]
+
+    day_before = _eligible_rows(payload, "us-gaap", "Revenues", "USD", date(2024, 7, 31))
+    assert [r["filed"] for r in day_before] == ["2024-05-01"]
+
+
+def test_the_boundary_reaches_the_footprints_not_just_the_rows():
+    payload = _facts(Revenues=_revised_history())
+    assert _found(payload, as_of=date(2024, 8, 1)) == [
+        ("us-gaap:Revenues", "2024-03-31", 100.0, 130.0)
+    ]
+    # One day earlier only the original exists, so there is no revision yet.
+    assert _found(payload, as_of=date(2024, 7, 31)) == []
+
+
+def test_a_fact_with_no_filed_date_is_dropped_in_pit_mode():
+    """A fact that cannot be dated cannot be shown to have been knowable.
+    `pit.py::filter_as_of` drops these for the same reason; admitting them
+    here would let an undatable value into a dated report."""
+    from app.services.ingestion.restatements import _eligible_rows
+
+    payload = _facts(Revenues={"units": {"USD": [
+        {"start": "2024-01-01", "end": "2024-03-31", "val": 1.0, "accn": "undated"},
+        _row("2024-01-01", "2024-03-31", 2.0, "2024-05-01", "dated"),
+    ]}})
+    dated = _eligible_rows(payload, "us-gaap", "Revenues", "USD", date(2024, 12, 31))
+    assert [r["accn"] for r in dated] == ["dated"]
+
+
+def test_undated_facts_are_kept_when_no_as_of_is_requested():
+    """A live report is not reconstructing a date, so an undated fact is just
+    a fact. Dropping it there would silently narrow live coverage."""
+    from app.services.ingestion.restatements import _eligible_rows
+
+    payload = _facts(Revenues={"units": {"USD": [
+        {"start": "2024-01-01", "end": "2024-03-31", "val": 1.0, "accn": "undated"},
+        _row("2024-01-01", "2024-03-31", 2.0, "2024-05-01", "dated"),
+    ]}})
+    live = _eligible_rows(payload, "us-gaap", "Revenues", "USD", None)
+    assert [r["accn"] for r in live] == ["undated", "dated"]
+
+
+def test_an_undated_fact_cannot_win_tag_selection_in_a_dated_report():
+    """The survivor that motivated this: undated facts inflating a candidate's
+    coverage would let an undatable series decide which tag a dated report
+    inspects — the leakage this branch exists to close, by another route."""
+    undated = {"units": {"USD": [
+        {"start": f"2025-0{i + 1}-01", "end": f"2025-0{i + 1}-28", "val": 1.0, "accn": f"u{i}"}
+        for i in range(8)
+    ]}}
+    payload = _facts(Revenues=_revised_history(), SalesRevenueNet=undated)
+    assert _active_tag(payload, REV, "USD", date(2024, 12, 31)) == ("us-gaap", "Revenues")
