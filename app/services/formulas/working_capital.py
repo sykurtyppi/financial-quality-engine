@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from app.schemas.financials import PeriodFinancials, PeriodType
 from app.schemas.metrics import MetricResult, MetricStatus
-from app.services.formulas.base import build_metric, growth
+from app.services.formulas.base import build_metric, contributor_note, growth, stale_current
 
 
 def _days(p: PeriodFinancials) -> float:
@@ -187,6 +187,12 @@ def trend_change(name: str, series: list[MetricResult], min_periods: int = 3) ->
     """Latest OK value minus mean of prior OK values, for any day-count metric.
     Used for DSO/DIO trend deterioration."""
     label = series[-1].fiscal_label if series else "n/a"
+    # Same requirement `seasonal_trend_change` below already enforces: the
+    # newest period must supply `latest`, or the result describes an older
+    # quarter under this quarter's label.
+    stale = stale_current(series, name, "latest - mean(prior)")
+    if stale is not None:
+        return stale
     ok = [m for m in series if m.status is MetricStatus.OK and m.value is not None]
     if len(ok) < min_periods:
         return MetricResult(
@@ -205,4 +211,5 @@ def trend_change(name: str, series: list[MetricResult], min_periods: int = 3) ->
         status=MetricStatus.OK,
         value=ok[-1].value - prior_mean,  # type: ignore[operator]
         inputs={"latest": ok[-1].value, "prior_mean": prior_mean},
+        note=contributor_note(ok),
     )
