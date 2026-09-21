@@ -22,7 +22,6 @@ regime-sign of a past quarter is robust to the non-PIT cache snapshot.
 from __future__ import annotations
 
 import csv
-import glob
 import json
 import sys
 from datetime import date
@@ -74,6 +73,45 @@ def cluster_base(row: dict) -> float | None:
     return max(means) if means else None
 
 
+CACHE = ROOT / "data" / "cache"
+
+
+def _ticker_to_cik() -> dict[str, int]:
+    """Ticker -> CIK from the cached registry, or empty if it is not there.
+
+    Read off disk rather than through SecClient so this stays offline: the
+    script reconstructs from whatever the cache already holds and must not
+    start fetching.
+    """
+    try:
+        table = json.loads((CACHE / "company_tickers.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, int] = {}
+    for entry in table.values():
+        try:
+            out[entry["ticker"].upper()] = int(entry["cik_str"])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _cache_files(tk: str, cik_by_ticker: dict[str, int]) -> list[str]:
+    """Cache entries that could hold this ticker's companyfacts.
+
+    Entries are CIK-keyed. The ticker-keyed name is the older layout and is
+    still read, so an existing cache keeps reconstructing instead of silently
+    dropping tickers — a dropped ticker withholds the regime-inclusive AUC
+    rather than failing loudly.
+    """
+    cik = cik_by_ticker.get(tk.upper())
+    names = []
+    if cik is not None:
+        names.append(f"companyfacts_CIK{cik:010d}.json")
+    names.append(f"companyfacts_{tk}.json")
+    return [str(CACHE / n) for n in names if (CACHE / n).exists()]
+
+
 def _load_raw_facts(tickers: set[str]) -> dict:
     """ticker -> raw companyfacts JSON, for per-row PIT reconstruction.
 
@@ -83,8 +121,9 @@ def _load_raw_facts(tickers: set[str]) -> dict:
     contribution. Such tickers are dropped so the completeness gate treats them
     as missing and withholds the regime-inclusive AUC."""
     raw: dict[str, dict] = {}
+    cik_by_ticker = _ticker_to_cik()
     for tk in tickers:
-        files = glob.glob(f"data/cache/companyfacts_{tk}.json")
+        files = _cache_files(tk, cik_by_ticker)
         if not files:
             continue
         try:
