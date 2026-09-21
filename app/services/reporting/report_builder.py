@@ -122,9 +122,24 @@ def _restatement_tier1_lines(footprints) -> list[str]:
 # of these will now break the report instead of degrading it — noisy, but
 # recoverable and visible, where the alternative is a wrong all-clear that
 # nobody investigates.
-_PROGRAMMING_ERRORS = (
-    NameError, AttributeError, TypeError, ImportError, AssertionError, IndexError,
-)
+# Deliberately narrow. The first version also listed AttributeError,
+# TypeError and IndexError, and those are exactly what MALFORMED SEC DATA
+# raises: a `filings.recent` that comes back null makes `.get` an
+# AttributeError, and the whole report then died on bad input from someone
+# else's server. That is the opposite of the intent — it traded a misleading
+# notice for an outage.
+#
+# What is left cannot be produced by data. A NameError means an undefined
+# name, an ImportError a missing module, an AssertionError an invariant this
+# code asserted and broke. No SEC payload can cause any of them, so
+# propagating them is unambiguous, and the defect that motivated this — a
+# misplaced `field_tags` — was a NameError.
+#
+# The complete fix is to translate parser and schema failures into an explicit
+# domain error (`SecPayloadError`) at each reader, so a malformed payload is
+# reported AS a malformed payload rather than inferred from its exception
+# type. That is a larger change across every parser and belongs on its own.
+_PROGRAMMING_ERRORS = (NameError, ImportError, AssertionError)
 
 
 def _stream_failure(exc: Exception) -> str:

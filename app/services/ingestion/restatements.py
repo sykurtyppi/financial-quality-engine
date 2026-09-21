@@ -246,6 +246,7 @@ def _composite_vintages(
             total = 0.0
             present: set[str] = set()
             form = accn = ""
+            filed_today: list[tuple[str, str]] = []
             for (taxonomy, tag), rows in per_component.items():
                 # Latest value filed on or before this vintage. Same tie rule
                 # as the mapper: max() keeps the FIRST fact at the latest date.
@@ -255,10 +256,20 @@ def _composite_vintages(
                 latest = max(eligible, key=lambda f: f[0])
                 total += latest[1]
                 present.add(f"{taxonomy}:{tag}")
-                # Provenance points at the filing that MOVED the figure — the
-                # component actually filed on this vintage date.
-                if latest[0] == vintage and not accn:
-                    form, accn = latest[2], latest[3]
+                if latest[0] == vintage:
+                    filed_today.append((latest[2], latest[3]))
+            # Provenance across EVERY component filed on this date, not the
+            # first one encountered. Several components can move a summed
+            # figure on the same day through different filings, and taking
+            # whichever happened to be iterated first would attribute the
+            # aggregate to an ordinary 10-Q while the /A that actually moved
+            # it was dropped — downgrading a high-confidence amendment event
+            # to a routine comparative revision. An amendment wins; ties among
+            # equals break on accession so the choice is deterministic.
+            if filed_today:
+                form, accn = min(
+                    filed_today, key=lambda fa: (not fa[0].endswith("/A"), fa[1])
+                )
             if present:
                 out.setdefault(key, []).append(
                     (vintage, total, form, accn, frozenset(present))
@@ -288,6 +299,31 @@ def _resolve_tags(
         return _parse_selection(selected) if selected else []
     active = _active_tag(facts_json, candidates, unit, as_of)
     return [active] if active is not None else []
+
+
+def _fields_to_inspect(
+    selected_tags: Mapping[str, str | None] | None,
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Every canonical field whose revision history should be checked.
+
+    The candidate tables are not the whole set the engine scores. `total_debt`
+    is assembled by `_total_debt_series` from the debt and finance-lease tag
+    groups and recorded like any other field, but it appears in neither
+    INSTANT_FIELDS nor FLOW_FIELDS — so iterating those tables alone meant the
+    engine could score a revised debt total while the restatement appendix
+    reported nothing for it. Silence there reads as "no revisions" for one of
+    the most consequential figures on the balance sheet.
+
+    Any field the mapper reports a selection for is therefore inspected, with
+    no candidate tags of its own: the mapper's choice is the only authority on
+    what a field outside the tables was built from, so there is nothing for
+    the coverage fallback to approximate.
+    """
+    fields: dict[str, tuple[tuple[str, str], ...]] = {**INSTANT_FIELDS, **FLOW_FIELDS}
+    for name, selected in (selected_tags or {}).items():
+        if selected and name not in fields:
+            fields[name] = ()
+    return fields
 
 
 def detect_restatements(
@@ -326,7 +362,7 @@ def detect_restatements(
     footprints: list[RestatementFootprint] = []
     seen: set[tuple[str, date | None, date]] = set()  # (tag, start, end) dedupe
 
-    for field_name, candidates in {**INSTANT_FIELDS, **FLOW_FIELDS}.items():
+    for field_name, candidates in _fields_to_inspect(selected_tags).items():
         if field_name in SPLIT_ADJUSTED_FIELDS:
             continue
         unit = _unit_for(field_name)
@@ -376,16 +412,27 @@ def detect_restatements(
                 # unsorted list reproduces exactly what the mapper scores
                 # (round-8 finding: sort()+filings[-1] picked the LAST same-day
                 # fact and diverged from scoring).
-                orig = min(filings, key=lambda f: f[0])  # earliest filed
                 current = max(filings, key=lambda f: f[0])  # latest filed = mapper's value
 
-                # For a composite, a vintage where some component did not yet
-                # exist describes a different figure, not a revised one.
-                # Comparing across that boundary would turn a filer adopting a
-                # new tag into a restatement — the same fabrication this
-                # module already refuses for single-tag switches.
-                if composite and orig[4] != current[4]:
-                    continue
+                if composite:
+                    # A vintage where some component did not yet exist
+                    # describes a differently COMPOSED figure, not a revised
+                    # one; comparing across that boundary would turn a filer
+                    # adopting a new tag into a restatement.
+                    #
+                    # But discarding the whole period on that basis threw away
+                    # every later revision too: adopt G&A (1000 -> 1500), then
+                    # amend it via 10-Q/A (1500 -> 1700), and the earliest and
+                    # latest vintages have different component sets, so a
+                    # genuine 13% amendment vanished. The comparison belongs
+                    # INSIDE the stable segment — the trailing run of vintages
+                    # that share the composition the mapper scores today.
+                    stable = [f for f in filings if f[4] == current[4]]
+                    if len(stable) < 2:
+                        continue
+                    filings = stable
+
+                orig = min(filings, key=lambda f: f[0])  # earliest filed
 
                 # Keep the CURRENT value and the amendment EVENT separate (round-7).
                 # `material` = every filing that materially deviates from the

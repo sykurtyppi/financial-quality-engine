@@ -48,11 +48,8 @@ class _Client:
 
 @pytest.mark.parametrize("exc", [
     NameError("name 'field_tags' is not defined"),
-    AttributeError("'NoneType' object has no attribute 'get'"),
-    TypeError("got an unexpected keyword argument"),
     ImportError("cannot import name 'gone'"),
     AssertionError("invariant broken"),
-    IndexError("list index out of range"),
 ])
 def test_a_defect_is_raised_not_described_as_a_data_gap(exc):
     with pytest.raises(type(exc)):
@@ -64,6 +61,13 @@ def test_a_defect_is_raised_not_described_as_a_data_gap(exc):
     ValueError("payload is not valid JSON"),
     KeyError("cik"),
     RuntimeError("SEC request failed: 403 fair-access throttle"),
+    # Narrowed after review: these three are what MALFORMED SEC DATA raises —
+    # a null `filings.recent` makes `.get` an AttributeError — so propagating
+    # them traded a misleading notice for an outage on someone else's bad
+    # input. Nothing left in _PROGRAMMING_ERRORS can be caused by a payload.
+    AttributeError("'NoneType' object has no attribute 'get'"),
+    TypeError("string indices must be integers"),
+    IndexError("list index out of range"),
 ])
 def test_an_acquisition_failure_is_still_recorded(exc):
     # These are genuinely about what came back from SEC (or did not), and a
@@ -97,3 +101,29 @@ def test_an_sec_outage_still_degrades_gracefully(monkeypatch):
         _Client(), "AAPL", date(2026, 9, 21), company_facts={"facts": {}}
     )
     assert errors["restatements"] == "SEC request failed: 503"
+
+
+def test_a_malformed_sec_payload_degrades_rather_than_breaking_the_report():
+    """The reliability case the first version regressed. SEC returning
+    `filings.recent = null` is bad input, not a bug in this code; the report
+    must still build and say which streams it could not read."""
+    class _Malformed(_Client):
+        def submissions(self, ticker):
+            return {"filings": {"recent": None}}
+
+        def submissions_by_cik(self, cik):
+            return {"filings": {"recent": None}}
+
+    _sections, _events, _tier1, errors, _takedowns = _collect_streams(
+        _Malformed(), "AAPL", date(2026, 9, 21), company_facts={"facts": {}}
+    )
+    assert errors["offerings"] and "NoneType" in errors["offerings"]
+    assert errors["events"] and "NoneType" in errors["events"]
+
+
+def test_the_propagating_set_cannot_be_raised_by_data():
+    """The rule, stated as a test: a payload cannot produce any of these.
+    Anything that a malformed SEC response CAN raise must degrade instead."""
+    from app.services.reporting.report_builder import _PROGRAMMING_ERRORS
+
+    assert set(_PROGRAMMING_ERRORS) == {NameError, ImportError, AssertionError}
