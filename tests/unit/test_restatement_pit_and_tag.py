@@ -142,58 +142,89 @@ def test_a_field_absent_from_the_selection_falls_back():
     ("us-gaap:Revenues", [("us-gaap", "Revenues")]),
     ("dei:EntityCommonStockSharesOutstanding",
      [("dei", "EntityCommonStockSharesOutstanding")]),
-    # Composites resolve to NOTHING — see the next test for why.
-    ("LongTermDebtNoncurrent+LongTermDebtCurrent+CommercialPaper", []),
-    ("SellingAndMarketingExpense+GeneralAndAdministrativeExpense", []),
+    # Composites expand to every component; `none` marks one the mapper could
+    # not fill. The components are then SUMMED, never reported individually.
+    ("LongTermDebtNoncurrent+LongTermDebtCurrent+CommercialPaper",
+     [("us-gaap", "LongTermDebtNoncurrent"), ("us-gaap", "LongTermDebtCurrent"),
+      ("us-gaap", "CommercialPaper")]),
+    ("LongTermDebtNoncurrent+LongTermDebtCurrent+none",
+     [("us-gaap", "LongTermDebtNoncurrent"), ("us-gaap", "LongTermDebtCurrent")]),
 ])
 def test_resolve_tags_reads_every_shape_the_mapper_records(selected, expected):
     assert _resolve_tags({}, "f", REV, "USD", None, {"f": selected}) == expected
 
 
-def test_a_composite_component_is_never_reported_as_the_derived_field():
-    """Changed deliberately after review. Expanding a composite into its
-    components and reporting each as a revision of the DERIVED field states a
-    number that was never scored.
+SGA = {"sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense"}
 
-    Here SG&A = S&M 1000 + G&A 10. G&A moves 10 -> 11: a 10% revision that
-    clears the 1% materiality bar. The sga_expense the engine actually scored
-    went 1010 -> 1011 — 0.099%, nowhere near it. Reporting
-    `sga_expense: 10 -> 11` is a plausible, wrong, material-looking finding in
-    a section whose entire value is that its numbers are checkable.
-    """
-    payload = _facts(
-        SellingAndMarketingExpense={"units": {"USD": [
-            _row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
-        ]}},
-        GeneralAndAdministrativeExpense={"units": {"USD": [
-            _row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
-            _row("2024-01-01", "2024-03-31", 11.0, "2024-08-01", "g2"),
-        ]}},
+
+def _sga(sm_rows, ga_rows) -> dict:
+    return _facts(SellingAndMarketingExpense={"units": {"USD": sm_rows}},
+                  GeneralAndAdministrativeExpense={"units": {"USD": ga_rows}})
+
+
+def test_materiality_applies_to_the_sum_not_a_component():
+    """The defect this replaces. SG&A = S&M 1000 + G&A 10; G&A moves 10 -> 11.
+    Reported per-component that is a 10% revision clearing the 1% bar. The
+    sga_expense the engine scored went 1010 -> 1011 — 0.099%, nowhere near
+    it, so there is nothing to report."""
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1")],
+        [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
+         _row("2024-01-01", "2024-03-31", 11.0, "2024-08-01", "g2")],
     )
-    composite = {"sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense"}
-    assert _found(payload, selected_tags=composite) == []
+    assert _found(payload, selected_tags=SGA) == []
 
 
-def test_an_unchecked_composite_is_disclosed_not_silently_omitted():
-    """A field that was never examined must not read as a field with no
-    revisions — that is the difference between a gap and an all-clear."""
-    from app.services.ingestion.restatements import (
-        render_restatements_section, unchecked_composites,
+def test_a_material_move_is_reported_as_the_summed_figure():
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
+         _row("2024-01-01", "2024-03-31", 1100.0, "2024-08-01", "s2", "10-Q/A")],
+        [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1")],
     )
-    tags = {"sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense",
-            "revenue": "us-gaap:Revenues"}
-    assert unchecked_composites(tags) == ["sga_expense"]
+    found = detect_restatements(payload, selected_tags=SGA)
+    assert len(found) == 1
+    fp = found[0]
+    # The SUM, not the component that moved — and one footprint, not one per tag.
+    assert (fp.field_name, fp.original_value, fp.current_value) == ("sga_expense", 1010.0, 1110.0)
+    assert "+" in fp.tag  # the composite is disclosed as such
 
-    section = render_restatements_section([], unchecked_composites(tags))
-    assert "NOT CHECKED: sga_expense" in section
-    assert "Silence here means unexamined, not unrevised." in section
+
+def test_a_component_not_re_reported_carries_forward():
+    """The amendment re-states G&A only. S&M's earlier value still stands, and
+    is what the mapper scores, so the aggregate must include it."""
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1")],
+        [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
+         _row("2024-01-01", "2024-03-31", 200.0, "2024-08-01", "g2")],
+    )
+    found = detect_restatements(payload, selected_tags=SGA)
+    assert (found[0].original_value, found[0].current_value) == (1010.0, 1200.0)
 
 
-def test_a_single_tag_field_is_not_called_unchecked():
-    from app.services.ingestion.restatements import unchecked_composites
-    assert unchecked_composites({"revenue": "us-gaap:Revenues"}) == []
-    assert unchecked_composites({"revenue": None}) == []
-    assert unchecked_composites(None) == []
+def test_two_sub_threshold_moves_that_sum_past_the_bar_are_caught():
+    """Only the aggregate view sees this: S&M +0.6% and G&A +60% of a tiny
+    base are individually the wrong measurement, but the figure that was
+    scored moved 1.19% — over the bar."""
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
+         _row("2024-01-01", "2024-03-31", 1006.0, "2024-08-01", "s2")],
+        [_row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
+         _row("2024-01-01", "2024-03-31", 16.0, "2024-08-01", "g2")],
+    )
+    found = detect_restatements(payload, selected_tags=SGA)
+    assert (found[0].original_value, found[0].current_value) == (1010.0, 1022.0)
+
+
+def test_a_component_appearing_later_is_composition_not_revision():
+    """A filer adopting a tag it had not used changes how the figure is
+    COMPOSED. Comparing across that boundary would manufacture a restatement
+    out of a taxonomy change — exactly what this module refuses to do for
+    single-tag switches."""
+    payload = _sga(
+        [_row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1")],
+        [_row("2024-01-01", "2024-03-31", 500.0, "2024-08-01", "g1")],
+    )
+    assert _found(payload, selected_tags=SGA) == []
 
 
 # --- the two halves agree on real mapper output ----------------------------
@@ -213,10 +244,6 @@ def test_selected_tags_round_trips_from_the_mapper():
         if qualified is None:
             continue
         resolved = _resolve_tags({}, field_name, (), "USD", None, tags)
-        if "+" in qualified:
-            # A composite is deliberately unresolvable, and disclosed instead.
-            assert resolved == []
-            continue
         assert resolved, f"{field_name}: mapper recorded {qualified!r}, resolver found no series"
         for taxonomy, tag in resolved:
             assert taxonomy and tag and ":" not in tag
@@ -362,3 +389,23 @@ def test_an_undated_fact_cannot_win_tag_selection_in_a_dated_report():
     ]}}
     payload = _facts(Revenues=_revised_history(), SalesRevenueNet=undated)
     assert _active_tag(payload, REV, "USD", date(2024, 12, 31)) == ("us-gaap", "Revenues")
+def test_composite_components_are_all_us_gaap():
+    """`_parse_selection` qualifies bare composite components as us-gaap,
+    because that is how the mapper records them. If it ever composes from
+    another taxonomy, that guess would inspect the wrong series (or none) —
+    fail here rather than silently going blind on a summed field."""
+    from app.services.ingestion.companyfacts_mapper import (
+        DA_COMPONENTS, DEBT_CURRENT, DEBT_NONCURRENT, DEBT_SHORT, DEBT_TOTAL,
+        FINANCE_LEASE_CURRENT, FINANCE_LEASE_NONCURRENT, SGA_COMPONENTS,
+    )
+    assert all(tax == "us-gaap" for tax, _ in SGA_COMPONENTS + DA_COMPONENTS)
+    for group in (DEBT_CURRENT, DEBT_NONCURRENT, DEBT_SHORT, DEBT_TOTAL,
+                  FINANCE_LEASE_CURRENT, FINANCE_LEASE_NONCURRENT):
+        assert all(isinstance(t, str) and ":" not in t for t in group)
+
+
+def test_a_single_tag_field_is_unaffected_by_the_composite_path():
+    payload = _facts(Revenues=_revised_history())
+    assert _found(payload, selected_tags={"revenue": "us-gaap:Revenues"}) == [
+        ("us-gaap:Revenues", "2024-03-31", 100.0, 130.0)
+    ]
