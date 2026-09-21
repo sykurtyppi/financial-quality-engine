@@ -37,7 +37,7 @@ class _NoRefetchClient:
 
 
 def _snapshot(company_facts: dict) -> SimpleNamespace:
-    diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[])
+    diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_tags=lambda: {})
     return SimpleNamespace(
         dataset=stretch_dataset(),
         diagnostics=diagnostics,

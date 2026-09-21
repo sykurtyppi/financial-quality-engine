@@ -313,7 +313,7 @@ class TestFreshPropagation:
 
         snapshot = SimpleNamespace(
             dataset=SimpleNamespace(documents=[]),
-            diagnostics=SimpleNamespace(coverage=lambda: 0.9, warnings=[]),
+            diagnostics=SimpleNamespace(coverage=lambda: 0.9, warnings=[], selected_tags=lambda: {}),
             company_facts={},
         )
         monkeypatch.setattr(reporting, "SecClient", _Client)
@@ -352,7 +352,7 @@ class TestFreshPropagation:
 
         snapshot = SimpleNamespace(
             dataset=SimpleNamespace(documents=[]),
-            diagnostics=SimpleNamespace(coverage=lambda: 0.9, warnings=[]),
+            diagnostics=SimpleNamespace(coverage=lambda: 0.9, warnings=[], selected_tags=lambda: {}),
             company_facts={},
         )
         monkeypatch.setattr(reporting, "SecClient", _Client)

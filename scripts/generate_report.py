@@ -73,6 +73,8 @@ def main() -> int:
         result, dataset,
         generated_on=generated_on,
         coverage=diag.coverage(),
+        # The evidence must name the same series the score came from.
+        field_tags=diag.selected_tags(),
         client=client,
         ticker=ticker,
         fetched_at=fetched_at,
