@@ -139,7 +139,7 @@ Places where management narrative and deterministic metrics point in different d
 | dso_trend | FY2025Q4 | 259.9 | latest - mean(same fiscal quarter, prior years) | latest=372, same_quarter_prior_mean=112, n_prior_years=1 |
 | dio_trend | FY2025Q4 | 10.92 | latest - mean(same fiscal quarter, prior years) | latest=73.7, same_quarter_prior_mean=62.8, n_prior_years=1 |
 | fcf_margin_trend | TTM FY2025Q4 | -0.0625 | latest - mean(prior) | latest=-0.0681, prior_mean=-0.00562 |
-| capex_intensity_regime_shift | FY2025Q4 | 0.04 | mean(capex/revenue, last 4) - mean(capex/revenue, prior) | recent_mean=0.095, prior_mean=0.055 |
+| capex_intensity_regime_shift | FY2025Q4 | 0.04 | mean(capex/revenue, last 4) - mean(capex/revenue, prior) | recent_mean=0.095, prior_mean=0.055, n_recent=4, n_prior=4 |
 | incremental_revenue_per_capex | FY2025Q4 | 0.2059 | (Rev_t - Rev_t-4) / sum(Capex over last 4 periods) | revenue_end=1.15e+03, revenue_start=1.06e+03, total_capex=425 |
 | adjustment_recurrence_ratio | FY2025Q4 | 1 | periods with adjustment language / periods analyzed | periods_analyzed=4 |
 | recurring_adjustment_terms | FY2025Q4 | 7 | count of terms appearing in >= 3 periods | restructuring=4, transformation=4, optimization=4, impairment=4, one-time=4, non-recurring=4, adjusted ebitda=4 |
@@ -214,11 +214,11 @@ Coverage: **48 computed**, 0 not meaningful, 2 with data unavailable (out of 50 
 | issuance_pressure | FY2025Q4 | 4.179 |  |
 | capex_to_revenue | FY2025Q4 | 0.11 |  |
 | capex_to_da | FY2025Q4 | 3.159 |  |
-| accrual_trend | TTM FY2025Q4 | 0.02725 |  |
+| accrual_trend | TTM FY2025Q4 | 0.02725 | computed over 4 period(s): TTM FY2025Q1–TTM FY2025Q4 |
 | dso_trend | FY2025Q4 | 259.9 |  |
 | dio_trend | FY2025Q4 | 10.92 |  |
-| fcf_margin_trend | TTM FY2025Q4 | -0.0625 |  |
-| capex_intensity_regime_shift | FY2025Q4 | 0.04 |  |
+| fcf_margin_trend | TTM FY2025Q4 | -0.0625 | computed over 5 period(s): TTM FY2024Q4–TTM FY2025Q4 |
+| capex_intensity_regime_shift | FY2025Q4 | 0.04 | recent window FY2025Q1–FY2025Q4; baseline FY2024Q1–FY2024Q4 |
 | incremental_revenue_per_capex | FY2025Q4 | 0.2059 | Capex-to-revenue conversion lags may exceed the window; low values prompt review, not verdicts. |
 | adjustment_recurrence_ratio | FY2025Q4 | 1 |  |
 | recurring_adjustment_terms | FY2025Q4 | 7 |  |

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.schemas.financials import PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
-from app.services.formulas.base import build_metric, growth
+from app.services.formulas.base import build_metric, growth, non_finite
 
 
 def capex_to_revenue(cur: PeriodFinancials) -> MetricResult:
@@ -70,29 +70,70 @@ def capex_intensity_regime_shift(series: list[PeriodFinancials], window: int = 4
     """Mean capex/revenue over the most recent `window` periods minus the mean
     over the preceding periods. Positive = capex intensity has stepped up."""
     label = series[-1].fiscal_label if series else "n/a"
-    ratios: list[float] = []
-    for p in series:
-        if p.capex is not None and p.revenue is not None and p.revenue > 0:
-            ratios.append(p.capex / p.revenue)
-    if len(ratios) < window + 2:
+    formula = f"mean(capex/revenue, last {window}) - mean(capex/revenue, prior)"
+
+    def usable(p: PeriodFinancials) -> bool:
+        return p.capex is not None and p.revenue is not None and p.revenue > 0
+
+    def unavailable(why: str) -> MetricResult:
         return MetricResult(
             name="capex_intensity_regime_shift",
-            formula=f"mean(capex/revenue, last {window}) - mean(capex/revenue, prior)",
+            formula=formula,
             fiscal_label=label,
             status=MetricStatus.MISSING_DATA,
-            missing_fields=[f"capex/revenue history (need >= {window + 2} usable periods)"],
+            missing_fields=[why],
         )
-    recent = ratios[-window:]
-    prior = ratios[:-window]
+
+    if not series:
+        return unavailable("capex/revenue history (no periods)")
+
+    # This metric compares a RECENT window against everything before it, so
+    # dropping unusable periods is not merely a labelling problem: compacting
+    # the list slides the window backwards. With Q7 unusable the "last 4"
+    # silently became Q3–Q6 while the result still claimed Q7. Both halves of
+    # the comparison then describe the wrong span.
+    if not usable(series[-1]):
+        return unavailable(
+            f"capex/revenue in {label} — the most recent period supplied no "
+            f"observation, so a 'last {window} quarters' window cannot end there"
+        )
+    recent_periods = series[-window:]
+    if len(recent_periods) < window or not all(usable(p) for p in recent_periods):
+        gaps = [p.fiscal_label for p in recent_periods if not usable(p)]
+        return unavailable(
+            f"capex/revenue for the last {window} periods "
+            f"({'gaps at ' + ', '.join(gaps) if gaps else 'insufficient history'}) "
+            f"— an incomplete recent window is not a regime"
+        )
+    prior_periods = [p for p in series[:-window] if usable(p)]
+    if len(prior_periods) < 2:
+        return unavailable(
+            f"capex/revenue history before {recent_periods[0].fiscal_label} "
+            f"(need >= 2 usable prior periods to establish a baseline)"
+        )
+
+    recent = [p.capex / p.revenue for p in recent_periods]  # type: ignore[operator]
+    prior = [p.capex / p.revenue for p in prior_periods]  # type: ignore[operator]
     recent_mean = sum(recent) / len(recent)
     prior_mean = sum(prior) / len(prior)
+    unusable = non_finite(recent_mean - prior_mean,
+                          "capex_intensity_regime_shift", formula, label)
+    if unusable is not None:
+        return unusable
     return MetricResult(
         name="capex_intensity_regime_shift",
-        formula=f"mean(capex/revenue, last {window}) - mean(capex/revenue, prior)",
+        formula=formula,
         fiscal_label=label,
         status=MetricStatus.OK,
         value=recent_mean - prior_mean,
-        inputs={"recent_mean": recent_mean, "prior_mean": prior_mean},
+        inputs={
+            "recent_mean": recent_mean,
+            "prior_mean": prior_mean,
+            "n_recent": float(len(recent)),
+            "n_prior": float(len(prior)),
+        },
+        note=(f"recent window {recent_periods[0].fiscal_label}–{recent_periods[-1].fiscal_label}; "
+              f"baseline {prior_periods[0].fiscal_label}–{prior_periods[-1].fiscal_label}"),
     )
 
 
