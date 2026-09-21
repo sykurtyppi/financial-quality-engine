@@ -10,7 +10,7 @@ from __future__ import annotations
 from app.config import scoring_config
 from app.schemas.metrics import MetricStatus
 from app.schemas.report import AnalysisResult
-from app.schemas.scoring import Direction
+
 
 DISCLAIMER = (
     "This report is an automated, formula-driven screening analysis of publicly "
@@ -49,17 +49,32 @@ FUNDING_CONTEXT_NOTE_FCF = (
     "AMKR 2026Q2)."
 )
 
-_DIRECTION_LABEL = {
-    Direction.POSITIVE: "Positive",
-    Direction.MIXED: "Mixed",
-    Direction.NEGATIVE: "Negative",
-}
-
-
 def _fmt(value: float | None, digits: int = 3) -> str:
     if value is None:
         return "—"
     return f"{value:.{digits}g}"
+
+
+_MAX_DRIVERS = 3
+
+
+def _top_drivers(bs) -> str:
+    """The metrics carrying this block's concern, worst first.
+
+    Ranked by weight x concern, so a heavily weighted middling metric can
+    outrank a lightly weighted extreme one — the block score is a weighted
+    mean, so that is the order in which they actually moved it. A block with
+    no usable metric says so rather than rendering an empty cell, because a
+    blank here and a genuinely clean block must not look alike.
+    """
+    scored = [
+        c for c in bs.components
+        if c.concern_score is not None and c.weight
+    ]
+    if not scored:
+        return "— insufficient coverage"
+    ranked = sorted(scored, key=lambda c: c.weight * c.concern_score, reverse=True)
+    return ", ".join(f"{c.metric_name} ({c.concern_score:.0f})" for c in ranked[:_MAX_DRIVERS])
 
 
 def render(result: AnalysisResult, generated_on: str) -> str:
@@ -110,13 +125,24 @@ def render(result: AnalysisResult, generated_on: str) -> str:
     add("")
     add("All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.")
     add("")
-    add("| Block | Score | Direction | Confidence | Coverage | Weight |")
+    add(
+        "No Direction word is shown per block. Its bands are percentiles of the "
+        "COMPOSITE distribution, and the blocks' anchor tables were never "
+        "calibrated to a shared meaning of \"concern\" — so the same word carries "
+        "a different prior in each row, and in at least one block the negative "
+        "cut sits above anything that block's anchors can produce. A label that "
+        "cannot be reached is not a lenient threshold, it is a dead one. The "
+        "drivers column says where the concern actually comes from, which is "
+        "what a screening prompt is for. See docs/scoring_methodology.md."
+    )
+    add("")
+    add("| Block | Score | Top drivers | Confidence | Coverage | Weight |")
     add("|---|---|---|---|---|---|")
     for bs in result.block_scores:
         weight = overall.block_weights.get(bs.name, 0.0) if overall else 0.0
-        score_txt = f"{bs.score:.0f}" if bs.score is not None else "n/a"
+        score_txt = f"{bs.score:.0f}" if bs.score is not None else "not scored"
         add(
-            f"| {bs.name} | {score_txt} | {_DIRECTION_LABEL[bs.direction]} | "
+            f"| {bs.name} | {score_txt} | {_top_drivers(bs)} | "
             f"{bs.confidence.value} | {bs.data_coverage:.0%} | {weight:.0%} |"
         )
     add("")

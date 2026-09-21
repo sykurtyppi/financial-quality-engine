@@ -14,16 +14,18 @@ The screen flagged 7 elevated-concern item(s) and 2 supportive item(s) for STRET
 
 All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
 
-| Block | Score | Direction | Confidence | Coverage | Weight |
+No Direction word is shown per block. Its bands are percentiles of the COMPOSITE distribution, and the blocks' anchor tables were never calibrated to a shared meaning of "concern" — so the same word carries a different prior in each row, and in at least one block the negative cut sits above anything that block's anchors can produce. A label that cannot be reached is not a lenient threshold, it is a dead one. The drivers column says where the concern actually comes from, which is what a screening prompt is for. See docs/scoring_methodology.md.
+
+| Block | Score | Top drivers | Confidence | Coverage | Weight |
 |---|---|---|---|---|---|
-| Earnings Quality | 70 | Negative | high | 100% | 20% |
-| Revenue Quality | 90 | Negative | medium | 100% | 10% |
-| Cash Conversion | 81 | Negative | high | 100% | 17% |
-| Working Capital Stress | 45 | Negative | medium | 100% | 7% |
-| Capital Integrity | 63 | Negative | medium | 100% | 7% |
-| Capex Discipline | 61 | Negative | high | 100% | 15% |
-| Balance Sheet Stress | 28 | Positive | high | 100% | 14% |
-| Narrative Drift | 40 | Mixed | medium | 75% | 10% |
+| Earnings Quality | 70 | beneish_m_score (85), total_accruals (64), accrual_trend (57) | high | 100% | 20% |
+| Revenue Quality | 90 | receivables_growth_spread (90), dso_trend (90) | medium | 100% | 10% |
+| Cash Conversion | 81 | cfo_to_net_income (88), fcf_margin_trend (76), fcf_margin (74) | high | 100% | 17% |
+| Working Capital Stress | 45 | dio_trend (60), inventory_growth_spread (36) | medium | 100% | 7% |
+| Capital Integrity | 63 | issuance_pressure (85), diluted_share_growth (28) | medium | 100% | 7% |
+| Capex Discipline | 61 | capex_growth_spread (66), capex_to_da (69), capex_intensity_regime_shift (50) | high | 100% | 15% |
+| Balance Sheet Stress | 28 | interest_coverage (35), net_debt_to_ebitda (27), leverage_change (31) | high | 100% | 14% |
+| Narrative Drift | 40 | kpi_removals (65), disclosure_volume_change (15) | medium | 75% | 10% |
 
 > Earnings Quality: Beneish M-score note: Computed on TTM flows compared year-over-year; cutoffs are the annual-model cutoffs. TTM basis: flows summed over the 4 quarters ending this period.
 

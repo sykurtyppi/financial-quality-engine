@@ -38,7 +38,27 @@ breaks the snapshot and must cite this protocol in the diff).
 Bug fixes that change *computation correctness* (not scoring judgment) are
 allowed but must be logged in the "Mid-window changes" section below.
 
-Mid-window changes (0.4.0 window): (none yet)
+Mid-window changes (0.4.0 window):
+
+1. **2026-09-21 — per-block Direction label retired from the report.** Rendering
+   only (`markdown_report.py`): the §2 Scorecard drops the per-block Direction
+   column and shows the metrics carrying each block's concern instead, ranked by
+   weight × concern. `DIRECTION_POSITIVE_BELOW` / `DIRECTION_NEGATIVE_ABOVE` are
+   **unchanged**, `_direction()` is unchanged, and `BlockScore.direction` remains
+   on the API. **No 0-100 score moved** — the regenerated golden report shows
+   every block score identical and only the column swapped, and
+   `calibration_snapshot.json` needed no regeneration (it records the composite
+   direction and the band values, neither of which changed).
+
+   Logged here rather than deferred to window close because it is a correctness
+   retraction, not tuning: the bands are percentiles of the composite
+   distribution, the block anchor tables share no common scale with it, and no
+   evaluation output reads the label (`backtest_results.csv` has no direction
+   column). It therefore cannot fit the eval. The two non-label consumers of the
+   constants — the Track-3 sweep flag gate (`wide_sweep.py`) and the Capital
+   Integrity takedown caveat (`report_builder.py`) — are deliberately untouched,
+   so Track 3's flag set is unaffected. Re-anchoring the composite bands remains
+   deferred to window close as `calibration_report.md` already states.
 
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
