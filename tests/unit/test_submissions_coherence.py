@@ -297,6 +297,24 @@ class TestASuppliedIndexCannotDefeatAPin:
         events = fetch_entity_events(_Unused(), TICKER, cik=CIK, submissions=_SUBMISSIONS)
         assert events.non_reliance_8k_dates == [date(2026, 5, 1)]
 
+    def test_offerings_refuse_a_payload_for_another_entity(self):
+        # fetch_offerings resolves the cik itself and uses it to build the
+        # prospectus archive URLs, so a payload for a different filer would
+        # pair its accessions with this filer's directory.
+        class _ResolvesElsewhere:
+            def resolve_cik(self, ticker):
+                return 34088  # not the payload's CIK
+
+        with pytest.raises(ValueError, match="not the pinned CIK"):
+            fetch_offerings(_ResolvesElsewhere(), "XOM", as_of=date(2026, 5, 15),
+                            parse_takedowns=False, submissions=_SUBMISSIONS)
+
+    def test_offerings_accept_a_payload_for_the_resolved_entity(self, tmp_path):
+        client, _ = _client(tmp_path)
+        timeline = fetch_offerings(client, TICKER, as_of=date(2026, 5, 15),
+                                   parse_takedowns=False, submissions=_SUBMISSIONS)
+        assert timeline.acquisition_error is None
+
     def test_documents_refuse_a_payload_for_another_entity(self):
         from app.services.ingestion.edgar_documents import fetch_documents
 
