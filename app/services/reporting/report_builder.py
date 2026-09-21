@@ -16,6 +16,7 @@ card + appendix render from the dataset alone.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import date
 
 from app.schemas.financials import CompanyDataset
@@ -108,6 +109,7 @@ def _collect_streams(
     report_date: date,
     company_facts: dict | None = None,
     submissions: dict | None = None,
+    field_tags: Mapping[str, str | None] | None = None,
 ):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
     (body_sections, event_lines, tier1_events, errors, takedowns). `takedowns`
@@ -149,7 +151,9 @@ def _collect_streams(
 
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
-        footprints = detect_restatements(facts, period_since=cutoff, as_of=report_date)
+        footprints = detect_restatements(
+            facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags
+        )
         body_sections.append(render_restatements_section(footprints))
         tier1_events += _restatement_tier1_lines(footprints)
     except Exception as e:  # noqa: BLE001
@@ -235,6 +239,7 @@ def build_report(
     company_facts: dict | None = None,
     submissions: dict | None = None,
     index_degraded: bool = False,
+    field_tags: Mapping[str, str | None] | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -265,7 +270,7 @@ def build_report(
 
     if client is not None and ticker is not None:
         sections, event_lines, tier1_events, errors, takedowns = _collect_streams(
-            client, ticker, report_date, company_facts, submissions
+            client, ticker, report_date, company_facts, submissions, field_tags
         )
         for section in sections:
             body += "\n\n" + section + "\n"

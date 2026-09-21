@@ -28,6 +28,7 @@ timeline rendered as a report section (matches ROADMAP_2026Q3 P1-F done-when).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -117,17 +118,32 @@ def _rows(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[dict]:
 
 
 def _active_tag(
-    facts_json: dict, candidates: tuple[tuple[str, str], ...], unit: str
+    facts_json: dict,
+    candidates: tuple[tuple[str, str], ...],
+    unit: str,
+    as_of: date | None = None,
 ) -> tuple[str, str] | None:
-    """The candidate tag the mapper would SCORE for this field: the one covering
-    the most distinct periods, ties broken by candidate order. This mirrors the
-    companyfacts mapper's `_best_series` coverage criterion so a reported
-    revision is always on the tag the engine actually uses. Returns (taxonomy,
-    tag) or None if no candidate has data."""
+    """Approximate the tag the mapper would SCORE: the candidate covering the
+    most distinct periods, ties broken by candidate order.
+
+    This is a FALLBACK, used only when the caller cannot supply the mapper's
+    real selection (see `selected_tags` on `detect_restatements`). It is a
+    genuine approximation and not equivalent to `_best_series`, which scores
+    coverage of the report's chosen quarter ends AFTER period reconstruction
+    and derivation. A legacy tag carrying many irrelevant old periods can win
+    here while losing there, which would report a revision on a tag the engine
+    never scored.
+
+    `as_of` must be honored HERE and not only when rows are later filtered:
+    counting coverage over the whole payload lets facts filed after `as_of`
+    decide which tag a dated report inspects, so adding a future taxonomy
+    series changes — or erases — a historical result that was already known at
+    the report date. Returns (taxonomy, tag) or None if no candidate has data.
+    """
     best: tuple[str, str] | None = None
     best_cov = 0
     for taxonomy, tag in candidates:  # candidates are in mapper priority order
-        rows = _rows(facts_json, taxonomy, tag, unit)
+        rows = _eligible_rows(facts_json, taxonomy, tag, unit, as_of)
         cov = len({(r.get("start"), r["end"]) for r in rows if "end" in r})
         if cov > best_cov:  # strict > => ties keep the earlier (higher-priority) tag
             best_cov = cov
@@ -135,11 +151,87 @@ def _active_tag(
     return best
 
 
+def _eligible_rows(
+    facts_json: dict, taxonomy: str, tag: str, unit: str, as_of: date | None
+) -> list[dict]:
+    """Rows a report dated `as_of` was entitled to see. One filter, applied
+    before anything reads the data — tag selection included."""
+    rows = _rows(facts_json, taxonomy, tag, unit)
+    if as_of is None:
+        return rows
+    out = []
+    for r in rows:
+        try:
+            filed = _parse_date(r["filed"])
+        except (KeyError, ValueError, TypeError):
+            continue  # a fact with no usable filed date cannot be dated; drop it
+        if filed <= as_of:
+            out.append(r)
+    return out
+
+
+def _parse_selection(selected: str) -> list[tuple[str, str]]:
+    """Expand `FieldDiagnostic.tag_used` into the series it names.
+
+    The mapper records a single choice as a qualified tag (`us-gaap:Revenues`)
+    and a COMPOSITE — a field summed from several tags, e.g. total_debt or an
+    SG&A rebuilt from separate S&M and G&A tags — as bare tag names joined by
+    `+`, with `none` standing in for a component it could not fill.
+
+    A composite's scored value is the sum of its parts, so a revision to ANY
+    part is a revision of the number the engine used. Inspecting only the
+    first would quietly drop the rest; inspecting none (the shape has no
+    colon, so it parses as no tag at all) would drop the whole field, and
+    total_debt is not a field to go blind on.
+    """
+    parts: list[tuple[str, str]] = []
+    for piece in selected.split("+"):
+        piece = piece.strip()
+        if not piece or piece == "none":
+            continue
+        taxonomy, sep, tag = piece.partition(":")
+        if sep:
+            if taxonomy and tag:
+                parts.append((taxonomy, tag))
+        else:
+            # Composite components are recorded unqualified; every tag the
+            # mapper composes from is us-gaap (SGA_COMPONENTS, DA_COMPONENTS,
+            # the debt tags), which `test_composite_components_are_us_gaap`
+            # pins so this assumption cannot rot silently.
+            parts.append(("us-gaap", piece))
+    return parts
+
+
+def _resolve_tags(
+    facts_json: dict,
+    field_name: str,
+    candidates: tuple[tuple[str, str], ...],
+    unit: str,
+    as_of: date | None,
+    selected_tags: Mapping[str, str | None] | None,
+) -> list[tuple[str, str]]:
+    """The series to inspect for `field_name`: the mapper's own selection when
+    the caller supplied one, else the coverage approximation.
+
+    A supplied selection is authoritative even when it is None — the mapper
+    found no usable series for that field, so there is nothing the engine
+    scored and nothing to report a revision against. Falling back to the
+    approximation there would resurrect precisely the mismatch this argument
+    exists to prevent.
+    """
+    if selected_tags is not None and field_name in selected_tags:
+        selected = selected_tags[field_name]
+        return _parse_selection(selected) if selected else []
+    active = _active_tag(facts_json, candidates, unit, as_of)
+    return [active] if active is not None else []
+
+
 def detect_restatements(
     facts_json: dict,
     materiality_pct: float = DEFAULT_MATERIALITY_PCT,
     period_since: date | None = None,
     as_of: date | None = None,
+    selected_tags: Mapping[str, str | None] | None = None,
 ) -> list[RestatementFootprint]:
     """Find same-period figures a later filing revised beyond `materiality_pct`.
 
@@ -156,7 +248,15 @@ def detect_restatements(
     trail exactly as it stood then. It must filter the facts, not the finished
     footprints: a later comparative moves `current_filed` forward, and
     discarding the footprint afterwards would erase an amendment that WAS
-    known at the report date.
+    known at the report date. The filter applies before TAG SELECTION too, or
+    a series filed years later decides which tag a historical report inspects.
+
+    `selected_tags` maps a canonical field name to the qualified tag the mapper
+    actually scored (`FieldDiagnostic.tag_used`). Supply it whenever the caller
+    has run the mapper: the evidence then names the same series as the score,
+    which is the contract this module claims. Without it, `_active_tag`
+    approximates the choice and can diverge — a legacy tag with a long history
+    of periods outside the report window beats the tag actually scored.
     Split-adjusted share fields are excluded (see SPLIT_ADJUSTED_FIELDS).
     """
     footprints: list[RestatementFootprint] = []
@@ -171,21 +271,18 @@ def detect_restatements(
         # non-scored candidate tag would show a current_value that disagrees with
         # the engine, and iterating every candidate would double-report a field
         # when two tags both carry a same-period revision.
-        active = _active_tag(facts_json, candidates, unit)
-        if active is None:
-            continue
-        for taxonomy, tag in (active,):
+        for taxonomy, tag in _resolve_tags(
+            facts_json, field_name, candidates, unit, as_of, selected_tags
+        ):
             qualified_tag = f"{taxonomy}:{tag}"
             by_key: dict[tuple[date | None, date], list[tuple[date, float, str, str]]] = {}
-            for e in _rows(facts_json, taxonomy, tag, unit):
+            for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
                 try:
                     start = _parse_date(e["start"]) if "start" in e else None
                     end = _parse_date(e["end"])
                     filed = _parse_date(e["filed"])
                     val = float(e["val"])
                 except (KeyError, ValueError, TypeError):
-                    continue
-                if as_of is not None and filed > as_of:
                     continue
                 by_key.setdefault((start, end), []).append(
                     (filed, val, e.get("form", ""), e.get("accn", ""))
