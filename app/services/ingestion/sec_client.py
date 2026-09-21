@@ -11,6 +11,7 @@ Endpoints used:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,70 @@ def _identity(explicit: str | None) -> str:
     return identity
 
 
+def _supersedes(published_ns: int | None, started_ns: int) -> bool:
+    """Whether what is already published should be kept instead of our write.
+
+    Both numbers are request-START times (see `_published_generation_ns`), so
+    this compares like with like. Equality means the two requests asked SEC at
+    the same instant and are equally fresh; keeping the incumbent avoids a
+    pointless rewrite and is why this is `>=` rather than `>`.
+    """
+    return published_ns is not None and published_ns >= started_ns
+
+
+def _is_readable_json(path: Path) -> bool:
+    """Whether `path` currently holds parseable JSON. Re-checked before any
+    corrective unlink so recovery never discards a replacement."""
+    try:
+        json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+@contextmanager
+def _publication_lock(path: Path):
+    """Serialize check-then-publish for one cache key.
+
+    Comparing generations and then replacing must be ONE critical section.
+    Without it two writers both read the same destination, both conclude they
+    may publish, and land in completion order — which is the very ordering
+    this code exists to stop.
+
+    The lock lives on a sidecar file, never on the entry itself: `os.replace`
+    swaps in a new inode, so a lock held on the old one guards nothing. Same
+    POSIX assumption `watch/watchlist.py` already documents — `fcntl.flock`
+    is not reliable over NFS, and there is no Windows implementation.
+    """
+    lock_path = path.with_name(f".{path.name}.lock")
+    with open(lock_path, "a+b") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _published_generation_ns(path: Path) -> int | None:
+    """The request-start time of whatever currently occupies `path`, or None
+    if nothing does.
+
+    Readable because the publisher stamps its TEMP INODE with its own start
+    time before renaming, so an entry's mtime is the generation that produced
+    it rather than the moment it happened to land. Comparing a rival's
+    COMPLETION time against our START time — which is what an unstamped mtime
+    gives you — answers a different question and gets the answer wrong
+    whenever a request that started earlier finishes later.
+
+    An unreadable entry reports None (treated as nothing published) so a stat
+    failure can never permanently stop the cache being written.
+    """
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 class SecClient:
     def __init__(
         self,
@@ -133,9 +199,21 @@ class SecClient:
                 return json.loads(path.read_text())
             except ValueError:
                 # A poisoned entry (truncated write, partial download) must
-                # not fail every read for a day: drop it and refetch.
-                logger.warning("discarding unreadable cache entry %s", path)
-                path.unlink(missing_ok=True)
+                # not fail every read for a day: drop it and refetch. Under
+                # the publication lock, and only after confirming the entry is
+                # STILL unreadable — between our failed parse and this unlink
+                # a concurrent writer may have published a perfectly good one
+                # at the same pathname, and deleting that would turn one bad
+                # response into a discarded good one.
+                with _publication_lock(path):
+                    if not _is_readable_json(path):
+                        logger.warning("discarding unreadable cache entry %s", path)
+                        path.unlink(missing_ok=True)
+        # Generation stamp, taken BEFORE the request goes out. A request that
+        # started later asked SEC later, so its answer is at least as recent;
+        # that is the only ordering available to us, since SEC responses carry
+        # no vintage we can compare.
+        started_ns = time.time_ns()
         data = self._get(url)
         try:
             parsed = json.loads(data)
@@ -151,7 +229,32 @@ class SecClient:
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
-            os.replace(tmp, path)  # atomic: a reader sees the old entry or the new one, never half
+            # Stamp the TEMP INODE with this request's generation before it
+            # becomes the entry, so the published file's mtime records WHEN
+            # THE DATA WAS ASKED FOR rather than when the write happened to
+            # land. Without this the comparison below reads a rival's
+            # completion time against our start time and gets it backwards
+            # whenever a request that started earlier finishes later.
+            os.utime(tmp, ns=(started_ns, started_ns))
+
+            # `os.replace` is atomic but not ORDERED: it guarantees no reader
+            # sees half a file, and nothing about which of two concurrent
+            # writers wins. A slow request that started first would land after
+            # a fast one that started later and overwrite it, so every
+            # subsequent read served the older SEC snapshot for up to the TTL
+            # — on filing day, that is a report built from a pre-filing index.
+            # The web UI and the watcher construct separate clients, so
+            # per-instance request pacing does not serialize this.
+            with _publication_lock(path):
+                published = _published_generation_ns(path)
+                if _supersedes(published, started_ns):
+                    logger.debug(
+                        "keeping cache entry %s: published by a request that "
+                        "started at or after this one", path.name,
+                    )
+                    Path(tmp).unlink(missing_ok=True)
+                    return parsed
+                os.replace(tmp, path)  # atomic: old entry or new one, never half
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
