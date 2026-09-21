@@ -33,9 +33,6 @@ class _FakeSec:
         self.calls.append(("subs_by_cik", cik))
         return {"filings": {"recent": {}}, "sic": "2911"}
 
-    def _cached_json(self, name, url):
-        self.calls.append(("json", name, url))
-        return {"filings": {"recent": {}}, "sic": "2911"}
 
 
 def test_xom_is_pinned_to_the_pre_reorg_entity():

@@ -10,7 +10,9 @@ from app.services.journal import reporting
 
 def test_fresh_reaches_the_report_builder(monkeypatch, tmp_path):
     seen = {}
-    monkeypatch.setattr(reporting, "SecClient", lambda fresh=False: SimpleNamespace(fresh=fresh))
+    monkeypatch.setattr(
+        reporting, "SecClient",
+        lambda fresh=False: SimpleNamespace(fresh=fresh, submissions=lambda ticker: {}))
     monkeypatch.setattr(
         reporting, "fetch_dataset_snapshot",
         lambda ticker, n_quarters, client: SimpleNamespace(

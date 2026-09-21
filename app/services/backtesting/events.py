@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from app.services.ingestion.sec_client import SecClient
+from app.services.ingestion.sec_client import SecClient, assert_submissions_match
 
 FINANCIAL_SIC_RANGE = (6000, 6999)
 
@@ -51,6 +51,7 @@ def fetch_entity_events(
     supplies a payload the caller already holds, so the events stream reads the
     same filing index as the rest of the report."""
     if submissions is not None:
+        assert_submissions_match(submissions, cik)
         data = submissions
     else:
         if cik is None:

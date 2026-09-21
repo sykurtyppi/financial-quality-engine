@@ -47,6 +47,27 @@ class SecClientError(RuntimeError):
     pass
 
 
+def assert_submissions_match(payload: dict, cik: int | None) -> None:
+    """Refuse a submissions payload that is not the pinned entity's.
+
+    A pin exists precisely because the registry has re-pointed a ticker at a
+    successor filer, so letting a supplied payload override it would quietly
+    undo the pin: the filing list would describe one entity while accession
+    URLs are built for another. Unpinned callers are unaffected.
+    """
+    if cik is None:
+        return
+    payload_cik = payload.get("cik")
+    try:
+        matches = payload_cik is not None and int(payload_cik) == cik
+    except (TypeError, ValueError):
+        matches = False
+    if not matches:
+        raise ValueError(
+            f"submissions payload is for CIK {payload_cik!r}, not the pinned CIK {cik}"
+        )
+
+
 def _identity(explicit: str | None) -> str:
     identity = explicit or os.environ.get("EDGAR_IDENTITY")
     if not identity:

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import (
+    SNAPSHOT_UNAVAILABLE,
     fetch_dataset_snapshot,
     fetch_submissions_snapshot,
 )
@@ -59,6 +60,9 @@ def build_report(
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
     submissions = fetch_submissions_snapshot(ticker, client)
+    warnings = list(diag.warnings)
+    if submissions is None:
+        warnings.append(SNAPSHOT_UNAVAILABLE)
     doc_diagnostics: list[str] = []
     if with_docs:
         docs = fetch_documents(
@@ -82,7 +86,7 @@ def build_report(
         client=client,
         ticker=ticker,
         fetched_at=fetched_at,
-        warnings=diag.warnings,
+        warnings=warnings,
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
         submissions=submissions,

@@ -308,6 +308,9 @@ class TestFreshPropagation:
             def __init__(self, *a, **k):
                 client_kwargs.update(k)
 
+            def submissions(self, ticker):
+                return {}
+
         snapshot = SimpleNamespace(
             dataset=SimpleNamespace(documents=[]),
             diagnostics=SimpleNamespace(coverage=lambda: 0.9, warnings=[]),
@@ -343,6 +346,9 @@ class TestFreshPropagation:
         class _Client:
             def __init__(self, *a, **k):
                 client_kwargs.update(k)
+
+            def submissions(self, ticker):
+                return {}
 
         snapshot = SimpleNamespace(
             dataset=SimpleNamespace(documents=[]),

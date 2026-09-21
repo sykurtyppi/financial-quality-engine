@@ -11,11 +11,14 @@ Requires EDGAR_IDENTITY (SEC fair-access User-Agent), e.g.:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.schemas.financials import CompanyDataset
 from app.services.ingestion.companyfacts_mapper import IngestionDiagnostics, build_dataset
-from app.services.ingestion.sec_client import SecClient
+from app.services.ingestion.sec_client import SecClient, SecClientError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,12 @@ class DatasetSnapshot:
     company_facts: dict
 
 
+SNAPSHOT_UNAVAILABLE = (
+    "filing index could not be read once for this run; each evidence stream "
+    "acquired it separately, so sections may reflect different moments"
+)
+
+
 def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
     """Read the filing index once for a whole report, or return None.
 
@@ -35,14 +44,19 @@ def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
     from two different moments, which on a filing day is the pre-filing view
     P0-D exists to prevent. Fetching once removes that.
 
-    Returns None rather than raising when the index cannot be read: each
-    stream then falls back to its own fetch and records its own acquisition
-    error, so an outage stays visible per stream instead of turning into one
-    failure that silently marks every stream clean.
+    Returns None rather than raising when the index cannot be acquired, so
+    each stream falls back to its own fetch and reports its own outage. But a
+    failure the per-stream retries then survive — a 403 fair-access throttle
+    is not retried at all (`_RETRY_STATUSES`) — leaves a report that looks
+    complete while silently having given up the single-vintage guarantee.
+    Callers must therefore record `SNAPSHOT_UNAVAILABLE` in the data-quality
+    appendix. Only acquisition failure is absorbed; a programming error still
+    raises rather than disabling the snapshot in silence.
     """
     try:
         return client.submissions(ticker)
-    except Exception:  # noqa: BLE001 - acquisition failure is reported per stream
+    except SecClientError as e:
+        logger.warning("filing index snapshot unavailable for %s: %s", ticker, e)
         return None
 
 

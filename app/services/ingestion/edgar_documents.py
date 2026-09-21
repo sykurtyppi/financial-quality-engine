@@ -26,7 +26,11 @@ from app.services.ingestion.companyfacts_mapper import (
     fiscal_year_end_month,
     select_quarter_ends,
 )
-from app.services.ingestion.sec_client import SecClient, SecClientError
+from app.services.ingestion.sec_client import (
+    SecClient,
+    SecClientError,
+    assert_submissions_match,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +352,10 @@ def fetch_documents(
     """
     result = ExtractionResult()
     if submissions is not None:
+        # A pin must survive a supplied payload: `cik` also builds the archive
+        # URLs, so an unchecked override would fetch one filer's accessions
+        # from another filer's directory.
+        assert_submissions_match(submissions, cik)
         subs = submissions
         if cik is None:
             cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)

@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import pytest
+
 from app.services.backtesting.events import fetch_entity_events
 from app.services.ingestion.edgar_adapter import fetch_submissions_snapshot
 from app.services.ingestion.offerings import fetch_offerings
@@ -114,6 +116,59 @@ class TestOneIndexPerReport:
         assert events.non_reliance_8k_dates == [date(2026, 5, 1)]
 
 
+class TestReportBuilderThreadsTheIndex:
+    """The builder is where the two streams that produced the two-file split
+    live, so the threading has to be pinned here and not only at the seams
+    either side of it."""
+
+    def _report(self, client, submissions):
+        from app.core.pipeline import analyze
+        from app.services.reporting.report_builder import build_report
+        from tests.fixtures.companies import stretch_dataset
+
+        ds = stretch_dataset()
+        report, _ = build_report(
+            analyze(ds), ds,
+            generated_on="2026-05-15",
+            coverage=1.0,
+            client=client,
+            ticker=TICKER,
+            fetched_at="2026-05-15 00:00 UTC",
+            company_facts={"facts": {}},
+            submissions=submissions,
+        )
+        return report
+
+    def test_offerings_and_events_read_the_supplied_index(self, tmp_path):
+        client, _ = _client(tmp_path)
+        submissions = fetch_submissions_snapshot(TICKER, client)
+
+        class _OutageExceptForTheIndex:
+            """Every fetch fails, so a stream that reads the supplied payload
+            renders and a stream that refetches reports unavailable."""
+
+            cache_dir = None
+
+            def resolve_cik(self, ticker):
+                return CIK
+
+            def submissions_by_cik(self, cik):
+                raise SecClientError("submissions 503")
+
+            def company_facts(self, ticker):
+                raise SecClientError("companyfacts 503")
+
+            def _cached_json(self, *a, **k):
+                raise SecClientError("submissions 503")
+
+            def _get(self, *a, **k):
+                raise SecClientError("archive 503")
+
+        report = self._report(_OutageExceptForTheIndex(), submissions)
+        assert "Capital-markets appendix UNAVAILABLE" not in report
+        assert "Event (8-K 4.02) appendix UNAVAILABLE" not in report
+
+
 class TestCacheKeyFollowsTheEntity:
     def test_ticker_accessor_stores_under_the_resolved_cik(self, tmp_path):
         client, _ = _client(tmp_path)
@@ -158,3 +213,68 @@ class TestAcquisitionFailureStaysVisible:
         timeline = fetch_offerings(client, TICKER, as_of=date(2026, 5, 15),
                                    parse_takedowns=False, submissions=submissions)
         assert timeline.acquisition_error is not None
+
+    def test_a_transient_failure_is_disclosed_not_absorbed(self, tmp_path):
+        # The streams' own retries can succeed where the shared read failed,
+        # leaving a report that looks complete while silently back on
+        # per-stream vintages. That has to be stated, not swallowed.
+        from app.services.ingestion.edgar_adapter import SNAPSHOT_UNAVAILABLE
+        from app.services.reporting.report_builder import data_quality_section
+
+        client, _ = _client(tmp_path)
+        calls = {"n": 0}
+        ok = json.dumps(_SUBMISSIONS).encode()
+
+        def once_then_recover(url: str) -> bytes:
+            if "company_tickers" in url:
+                return json.dumps(_TICKERS).encode()
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise SecClientError("SEC request failed: 403 fair-access throttle")
+            return ok
+
+        client._get = once_then_recover  # noqa: SLF001
+        assert fetch_submissions_snapshot(TICKER, client) is None
+
+        section = data_quality_section(
+            fetched_at="2026-05-15 00:00 UTC", fresh=True, coverage=1.0,
+            warnings=[SNAPSHOT_UNAVAILABLE], doc_diagnostics=[],
+        )
+        assert "read once for this run" in section
+
+    def test_a_programming_error_is_not_absorbed(self, tmp_path):
+        # Absorbing every exception would let a rename of the accessor
+        # silently disable the snapshot while the suite stayed green.
+        class _MissingAccessor:
+            pass
+
+        with pytest.raises(AttributeError):
+            fetch_submissions_snapshot(TICKER, _MissingAccessor())
+
+
+class TestASuppliedIndexCannotDefeatAPin:
+    """`cik` pins the entity AND builds archive URLs, so a payload for another
+    filer must be refused rather than quietly overriding the pin."""
+
+    def test_events_refuse_a_payload_for_another_entity(self):
+        class _Unused:
+            pass
+
+        with pytest.raises(ValueError, match="not the pinned CIK"):
+            fetch_entity_events(_Unused(), "XOM", cik=34088, submissions=_SUBMISSIONS)
+
+    def test_events_accept_a_payload_for_the_pinned_entity(self):
+        class _Unused:
+            pass
+
+        events = fetch_entity_events(_Unused(), TICKER, cik=CIK, submissions=_SUBMISSIONS)
+        assert events.non_reliance_8k_dates == [date(2026, 5, 1)]
+
+    def test_documents_refuse_a_payload_for_another_entity(self):
+        from app.services.ingestion.edgar_documents import fetch_documents
+
+        class _Unused:
+            pass
+
+        with pytest.raises(ValueError, match="not the pinned CIK"):
+            fetch_documents(_Unused(), "XOM", {}, cik=34088, submissions=_SUBMISSIONS)
