@@ -80,6 +80,17 @@ def _identity(explicit: str | None) -> str:
     return identity
 
 
+def _supersedes(published_ns: int | None, started_ns: int) -> bool:
+    """Whether what is already published should be kept instead of our write.
+
+    Both numbers are request-START times (see `_published_generation_ns`), so
+    this compares like with like. Equality means the two requests asked SEC at
+    the same instant and are equally fresh; keeping the incumbent avoids a
+    pointless rewrite and is why this is `>=` rather than `>`.
+    """
+    return published_ns is not None and published_ns >= started_ns
+
+
 def _is_readable_json(path: Path) -> bool:
     """Whether `path` currently holds parseable JSON. Re-checked before any
     corrective unlink so recovery never discards a replacement."""
@@ -236,7 +247,7 @@ class SecClient:
             # per-instance request pacing does not serialize this.
             with _publication_lock(path):
                 published = _published_generation_ns(path)
-                if published is not None and published >= started_ns:
+                if _supersedes(published, started_ns):
                     logger.debug(
                         "keeping cache entry %s: published by a request that "
                         "started at or after this one", path.name,

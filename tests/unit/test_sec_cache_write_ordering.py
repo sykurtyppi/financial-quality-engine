@@ -17,13 +17,15 @@ never truncated, which remains true throughout.
 from __future__ import annotations
 
 import json
+import os
 import threading
+from contextlib import contextmanager
 import time
 
 import pytest
 
 from app.services.ingestion.sec_client import (
-    SecClient, _is_readable_json, _published_generation_ns,
+    SecClient, _is_readable_json, _published_generation_ns, _supersedes,
 )
 
 URL = "https://data.sec.gov/x"
@@ -141,43 +143,79 @@ class TestCorruptEntryRecovery:
         target.write_text('{"version": "someone elses good entry"}')
         assert _is_readable_json(target) is True
 
-    def test_a_concurrent_valid_publication_survives_recovery(self, tmp_path):
+    def test_a_concurrent_valid_publication_survives_recovery(self, tmp_path, monkeypatch):
         """A reader that just failed to parse must not delete the replacement.
-        Simulated by a good entry appearing between the failed parse and the
-        unlink — the recheck under the lock is what saves it."""
+
+        The previous version of this test published the good entry from inside
+        `_get`, which runs AFTER recovery — so it never reached the recheck and
+        passed with the recheck removed. The race is between the failed parse
+        and the unlink, so the replacement has to appear while the lock is
+        being acquired.
+        """
+        import app.services.ingestion.sec_client as sec_client
+
         target = tmp_path / NAME
         target.write_text("{ truncated")
-
         good = {"version": "published by someone else"}
-        real_get = _PacedClient._get
 
-        def get_then_publish(self, url):
-            target.write_text(json.dumps(good))
-            return real_get(self, url)
+        real_lock = sec_client._publication_lock
+
+        # ONE-SHOT. `_publication_lock` is acquired twice per call — once for
+        # recovery, once to publish — and a stub that fires on both re-creates
+        # the entry after a bad unlink deleted it, hiding the very deletion
+        # under test. This masked the missing recheck in an earlier version.
+        published_once = []
+
+        @contextmanager
+        def publish_then_lock(path):
+            # Stands in for another writer landing a valid entry at this
+            # pathname while we were waiting for the lock.
+            if path == target and not published_once:
+                published_once.append(True)
+                path.write_text(json.dumps(good))
+                # A real publisher stamps its request generation. This one
+                # started later than ours, so ours must not displace it —
+                # an unstamped file would legitimately be superseded, which
+                # is a different (correct) behaviour and not what is under
+                # test here.
+                future = time.time_ns() + 10_000_000_000
+                os.utime(path, ns=(future, future))
+            with real_lock(path):
+                yield
+
+        monkeypatch.setattr(sec_client, "_publication_lock", publish_then_lock)
 
         client = _PacedClient(tmp_path, {"version": "mine"}, 0.0)
-        object.__setattr__(client, "_get", get_then_publish.__get__(client))
         client._cached_json(NAME, URL)
-        assert _cached(tmp_path) != {}
+        assert _cached(tmp_path) == good, "recovery deleted a concurrently published entry"
+
+    def test_recovery_still_clears_an_entry_that_stays_unreadable(self, tmp_path):
+        """The recheck must not turn recovery into a no-op: a genuinely
+        poisoned entry still has to go, or one bad response blocks the key for
+        the whole TTL."""
+        (tmp_path / NAME).write_text("{ truncated")
+        client = _PacedClient(tmp_path, {"version": "refetched"}, 0.0)
+        assert client._cached_json(NAME, URL) == {"version": "refetched"}
+        assert _cached(tmp_path) == {"version": "refetched"}
 
 
-@pytest.mark.parametrize("delay_first,delay_second", [(0.30, 0.02), (0.02, 0.30)])
-def test_the_cache_always_ends_holding_the_later_started_request(
-    tmp_path, delay_first, delay_second
-):
-    """Whichever finishes first, the entry that survives is the one from the
-    request that started later — the only ordering SEC responses give us."""
-    def run(payload, delay):
-        _PacedClient(tmp_path, payload, delay)._cached_json(NAME, URL, max_age_s=0)
+class TestSupersedes:
+    """The publish/stand-down rule, isolated so its boundary is testable."""
 
-    a = threading.Thread(target=run, args=({"version": "earlier"}, delay_first))
-    a.start()
-    time.sleep(0.05)
-    b = threading.Thread(target=run, args=({"version": "later"}, delay_second))
-    b.start()
-    a.join()
-    b.join()
-    assert _cached(tmp_path) == {"version": "later"}
+    def test_a_later_generation_wins(self):
+        assert _supersedes(published_ns=200, started_ns=100) is True
+
+    def test_an_earlier_generation_is_replaced(self):
+        assert _supersedes(published_ns=100, started_ns=200) is False
+
+    def test_an_identical_generation_keeps_the_incumbent(self):
+        # Equally fresh; rewriting buys nothing. This is why the comparison is
+        # `>=` and not `>`.
+        assert _supersedes(published_ns=100, started_ns=100) is True
+
+    def test_nothing_published_never_supersedes(self):
+        assert _supersedes(published_ns=None, started_ns=100) is False
+
 
 
 def test_the_publication_lock_serializes_check_and_replace(tmp_path):
