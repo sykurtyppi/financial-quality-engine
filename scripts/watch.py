@@ -42,6 +42,12 @@ Exit codes (for cron/alerting):
        watched name. Ranked below every code above it — a print that did not
        complete is more urgent — but non-zero, because an archive nobody is
        writing cannot be back-filled once the quarter passes.
+    7  the audit failed AUDIT_MAX_ATTEMPTS times and was ABANDONED: the
+       report and the brief exist, the brief carries the engine findings
+       uncorrected, and the row IS re-armed. Re-arming is the point — a
+       failed audit (4) blocks the re-arm, so without this the next hourly
+       pass would rebuild the report and spend another headless run on a
+       failure that has already proved deterministic, every hour, forever.
 
 Print night vs 10-Q: the engine report needs the quarter's XBRL, so the
 report/audit track fires on the 10-Q/10-K. The brief is a read of the
@@ -56,10 +62,12 @@ apart; for a small cap the 10-Q can be weeks later.
     until it is re-`add`ed — a scheduler must see that.
     `sweep` returns the worst per-name code — worst by severity, not by
     number: 1 (setup/EDGAR) > 4 (audit failed) > 2 (refused) > 5 (brief
-    queued) > 0 — except that 3 (waiting) is 0 and a sweep already running
-    elsewhere is 0 (it just yields). A name still
-    waiting more than OVERDUE_DAYS past its print hint is named on stderr on
-    every pass, --verbose or not: "waiting" must not hide a mis-armed row.
+    queued) > 7 (audit abandoned) > 6 (vintage stalled) > 0 — except that
+    3 (waiting) is 0 and a sweep already running elsewhere is 0 (it just
+    yields). A name still waiting more than OVERDUE_DAYS past its print hint
+    is named on stderr on every pass, --verbose or not, AND notified once a
+    day: "waiting" must not hide a mis-armed row, and stderr alone is a
+    channel nobody reads.
 """
 
 from __future__ import annotations
@@ -111,10 +119,20 @@ PRINT_BRIEF_WINDOW_DAYS = 14  # an earnings 8-K older than this is last quarter'
 # without spending anything: giving up retrying is not giving up telling you.
 PRINT_BRIEF_MAX_ATTEMPTS = 6
 BRIEF_MAX_ATTEMPTS = PRINT_BRIEF_MAX_ATTEMPTS
+# The same reasoning, applied to the audit — which had no cap at all. A failed
+# audit returns 4, `_completed` rejects 4, so the row never re-arms and the
+# next hourly pass rebuilds the report and spends another headless run. For a
+# deterministic failure that is every hour, forever, and because the audit runs
+# BEFORE the brief the print never lands either. After this many tries the
+# audit is abandoned: the brief is built without it (the engine findings go in
+# raw), the case completes, and the row re-arms — which is what actually stops
+# the loop.
+AUDIT_MAX_ATTEMPTS = 3
+AUDIT_ABANDONED_RC = 7
 # Sweep aggregate: the worst code across names, by what it means rather than
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
-SEVERITY_ORDER = (1, 4, 2, 5, 6, 0)
+SEVERITY_ORDER = (1, 4, 2, 5, 7, 6, 0)
 
 
 def _worst(codes) -> int:
@@ -251,6 +269,46 @@ def _run_audit(report: Path) -> int:
     cmd = [sys.executable, str(ROOT / "scripts" / "run_audit.py"), str(report)]
     print(f"  -> {' '.join(cmd[1:])}")
     return subprocess.run(cmd, cwd=ROOT).returncode
+
+
+def _audit_attempts_path(report: Path) -> Path:
+    return report.with_name(f"{report.stem}_audit.attempts")
+
+
+def _run_audit_capped(report: Path) -> tuple[int, bool]:
+    """(audit exit code, whether the audit is now abandoned).
+
+    Each retry is a paid headless run and a deterministic failure never gets
+    better by repeating it — the same rule the brief queue follows. The
+    counter lives beside the report, so a genuinely new report starts fresh
+    and a successful audit clears it.
+    """
+    marker = _audit_attempts_path(report)
+    try:
+        prior = int(marker.read_text().strip())
+    except (OSError, ValueError):
+        prior = 0
+    if prior >= AUDIT_MAX_ATTEMPTS:
+        # Already given up (a re-arm that failed can bring us back here).
+        # Spend nothing; the exit code 0 says only "no run was made".
+        return 0, True
+    arc = _run_audit(report)
+    if arc == 0:
+        marker.unlink(missing_ok=True)
+        return 0, False
+    attempts = prior + 1
+    try:
+        marker.write_text(f"{attempts}\n")
+    except OSError:
+        pass  # losing the count costs a retry, never correctness
+    return arc, attempts >= AUDIT_MAX_ATTEMPTS
+
+
+def _abandoned_note(ticker: str, report: Path, arc: int) -> None:
+    print(f"  {ticker}: audit FAILED (exit {arc}) {AUDIT_MAX_ATTEMPTS}x — abandoning it and "
+          f"continuing without it. The report is kept at {report}; the brief carries the "
+          f"engine findings uncorrected. Re-run `run_audit.py {report}` by hand to "
+          f"investigate.", file=sys.stderr)
 
 
 def _run_brief(ticker: str, report: Path | None) -> int:
@@ -462,8 +520,8 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
             print("  generated report not found under reports/ — cannot audit; "
                   "journal NOT marked reported.", file=sys.stderr)
             return 4
-        arc = _run_audit(report)
-        if arc != 0:
+        arc, abandoned = _run_audit_capped(report)
+        if arc != 0 and not abandoned:
             # The report stays on disk for diagnosis; the entry stays
             # unmarked so the case is retryable. A cron runner must see
             # this as a failure, not a success with a missing audit.
@@ -472,11 +530,17 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
                   f"`run_audit.py {report}` then "
                   f"`journal.py mark-reported {ticker}`.", file=sys.stderr)
             return 4
+        if abandoned and arc != 0:
+            _abandoned_note(ticker, report, arc)
         brief_rc = 0
         if not getattr(args, "no_brief", False):
             brief_rc = _run_brief(ticker, report)
         rc = _mark_reported(ticker, entry_day)
-        return rc if rc != 0 else (BRIEF_PENDING_RC if brief_rc != 0 else 0)
+        if rc != 0:
+            return rc
+        if brief_rc != 0:
+            return BRIEF_PENDING_RC
+        return AUDIT_ABANDONED_RC if abandoned else 0
     if decision.action == "skip":
         return 0
     if decision.action == "refuse":
@@ -492,13 +556,17 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
         if report is None:
             return 1
         if not args.no_audit:
-            arc = _run_audit(report)
-            if arc != 0:
+            arc, abandoned = _run_audit_capped(report)
+            if arc != 0 and not abandoned:
                 print(f"  audit FAILED (exit {arc}); auto-report kept at "
                       f"{report}.", file=sys.stderr)
                 return 4
+            if abandoned and arc != 0:
+                _abandoned_note(ticker, report, arc)
             if not getattr(args, "no_brief", False) and _run_brief(ticker, report) != 0:
                 return BRIEF_PENDING_RC
+            if abandoned:
+                return AUDIT_ABANDONED_RC
         return 0
     print(f"  unknown decision {decision.action!r}", file=sys.stderr)
     return 1
@@ -546,9 +614,13 @@ def _rearm_guarded(watch: wl.Watch, decision, submissions: dict) -> bool:
 def _completed(decision, rc: int) -> bool:
     """Did this event finish, so the row should be re-armed? A queued brief
     (5) is complete — the report and audit exist, the brief is retried on
-    its own — a failed audit (4) is not."""
+    its own — a failed audit (4) is not. An ABANDONED audit (7) is: the
+    report and brief exist, only the correction pass is missing, and
+    re-arming is precisely what stops the hourly retry from repeating a run
+    that has already failed AUDIT_MAX_ATTEMPTS times."""
     return decision.action == "skip" or (
-        decision.action in ("generate", "refuse") and rc in (0, BRIEF_PENDING_RC)
+        decision.action in ("generate", "refuse")
+        and rc in (0, BRIEF_PENDING_RC, AUDIT_ABANDONED_RC)
     )
 
 
@@ -650,7 +722,11 @@ def cmd_poll(args: argparse.Namespace) -> int:
                     rc = _act(ticker, watch, decision, args)
                     if not adhoc and _completed(decision, rc):
                         if not _rearm_guarded(watch, decision, submissions):
-                            return max(rc, 1)
+                            # _worst, not max: a queued brief is 5, and plain
+                            # numeric max would report a row that will NEVER
+                            # fire again as the routine, self-healing "brief
+                            # queued" — the docstring promises 1 here.
+                            return _worst([rc, 1])
                     return rc
 
         if args.once:
@@ -764,7 +840,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
         return 1
     if not args.dry_run and _completed(decision, rc):
         if not _rearm_guarded(watch, decision, submissions):
-            return max(rc, 1)
+            return _worst([rc, 1])  # severity, not arithmetic — see cmd_poll
     # Same pass as the 10-Q: the audit hook normally wrote the brief already,
     # in which case this is a no-op; if the audit failed (4) the print-night
     # brief still goes out — the release is news tonight, the audit can retry.
@@ -774,6 +850,45 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
 
 LOCK_RETRY_S = 0.5
 OVERDUE_DAYS = 21  # a print hint this stale with no filing is a mis-armed row, not patience
+# A row whose expected period drifted out of the match window is the one thing
+# that looks exactly like patience forever, and it returns 3 ("waiting") — which
+# `_sweep_locked` filters out before notifying. So the only safety net for a
+# name that has silently dropped out of the season reached stderr alone, in a
+# log that fills with routine passes. It notifies now, at most once a day per
+# name: an hourly reminder about a row that has been drifting for three weeks
+# is how an alert channel gets ignored.
+OVERDUE_ALERTS = ROOT / "journal" / ".overdue_alerted.json"
+
+
+def _overdue_names(watches, now: datetime) -> list[str]:
+    return [w.ticker for w in watches if (now - w.print_at).days > OVERDUE_DAYS]
+
+
+def _overdue_to_alert(tickers: list[str], today: date) -> list[str]:
+    """Those not already reported today, marking them as reported.
+
+    Best-effort: if the state cannot be read or written the alert simply
+    repeats, which is the harmless direction to fail in.
+    """
+    if not tickers:
+        return []
+    try:
+        seen = json.loads(OVERDUE_ALERTS.read_text())
+        seen = seen if isinstance(seen, dict) else {}
+    except (OSError, ValueError):
+        seen = {}
+    stamp = today.isoformat()
+    fresh = [t for t in tickers if seen.get(t) != stamp]
+    if not fresh:
+        return []
+    # Only names still overdue are carried forward, so the file cannot grow
+    # without bound as the watchlist changes.
+    try:
+        OVERDUE_ALERTS.parent.mkdir(parents=True, exist_ok=True)
+        OVERDUE_ALERTS.write_text(json.dumps({t: stamp for t in tickers}, indent=2) + "\n")
+    except OSError:
+        pass
+    return fresh
 # A capture can fail for a day without anyone caring. Failing for this many
 # days running means the archive is not being written and nobody has noticed
 # — which for a store that cannot be back-filled is worth an alert.
@@ -847,20 +962,26 @@ def _sweep_locked(args: argparse.Namespace) -> int:
     waiting = len(results) - len(acted)
     print(f"sweep: {len(results)} watched, {waiting} waiting"
           + (", " + ", ".join(f"{t} -> {rc}" for t, rc in acted.items()) if acted else ""))
-    _notify_problems(worst, acted, args)
+    now = _utcnow()
+    overdue = _overdue_names(watches, now)
+    _notify_problems(worst, acted, args,
+                     overdue=[] if args.dry_run else _overdue_to_alert(overdue, now.date()))
     return _worst([worst, *acted.values()])
 
 
 _RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED",
-             5: "brief queued", 6: "vintage capture stalled"}
+             5: "brief queued", 6: "vintage capture stalled",
+             7: "audit ABANDONED (brief built without it)"}
 
 
-def _notify_problems(sync_rc: int, acted: dict, args: argparse.Namespace) -> None:
+def _notify_problems(sync_rc: int, acted: dict, args: argparse.Namespace,
+                     *, overdue: list[str] | None = None) -> None:
     """One notification per pass that needs a human — never for a clean
     pass (a finished brief announces itself when it is written)."""
     if args.dry_run:
         return
     problems = [f"{t}: {_RC_WORDS.get(rc, rc)}" for t, rc in acted.items() if rc != 0]
+    problems += [f"{t}: overdue — check the row" for t in (overdue or [])]
     if sync_rc != 0:
         problems.insert(0, f"portfolio sync: {_RC_WORDS.get(sync_rc, sync_rc)}")
     if problems and not notify("FQE sweep needs attention", "; ".join(problems)):

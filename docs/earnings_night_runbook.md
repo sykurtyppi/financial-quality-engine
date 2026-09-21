@@ -103,6 +103,8 @@ Exit codes: `0` report generated, audited, and marked · `2` filing landed but
 no thesis (`--no-auto` only; act now) · `3` nothing yet (`--once` only) ·
 `4` report generated but the audit FAILED (journal not marked; retry) ·
 `5` case complete but the brief FAILED (queued; the next `sweep` retries it) ·
+`7` the audit failed three times and was ABANDONED — the brief was built
+without it and the row re-armed ·
 `1` gave up, EDGAR failed, the watch has no event identity (re-`add` it), or
 the row could not be re-armed after a completed case.
 
@@ -199,7 +201,13 @@ Per pass, in order:
    baseline accession (the filing just consumed), next expected period, next
    print hint, pin and label cleared, and a `note` recording the derivation.
    A failed audit (exit 4) is *not* re-armed, so the next pass retries the
-   same filing. A name therefore never has to be `add`ed twice. If the
+   same filing — but only three times. Each retry is a paid headless run and
+   a deterministic failure never improves by repeating, so after the third
+   the audit is ABANDONED: the brief is built without it (engine findings go
+   in uncorrected), the case completes, the row re-arms, and the pass exits
+   7 naming the company. Re-arming is the point — while the row is not
+   re-armed, every hourly pass rebuilds the report and spends another run.
+   A name therefore never has to be `add`ed twice. If the
    re-arm itself fails (the row could not be rewritten), the case is still
    complete but the name exits 1 and says `re-arm FAILED` — that row still
    names the consumed event and will never fire again until you `add` it.
@@ -320,6 +328,12 @@ Share counts are excluded unless you pass `--splits`: a stock split
 retroactively rewrites every prior share count, and on the first real capture
 NVDA's ten-for-one split was the only thing the diff found. `--no-vintage`
 turns capture off. A capture that fails for two days running makes the pass
+A row still waiting more than 21 days past its print hint is named on stderr
+on every pass **and notified once a day**: that is the only signal that a
+name has silently dropped out of the season (a drifted expected period looks
+exactly like patience, forever). It stays exit 3 — waiting is not an error —
+so the notification is the whole alert.
+
 exit 6 and names the company in the notification — ranked below every
 print-related code, because a print that did not complete is more urgent,
 but not silent, because this is the one thing that cannot be back-filled.

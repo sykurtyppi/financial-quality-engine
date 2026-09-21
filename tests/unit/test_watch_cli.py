@@ -1431,3 +1431,126 @@ class TestVintageEscalation:
                             lambda cik, root=None: {"problem_days": 9})
         assert watch_cli._vintage_rc("NVDA", C()) == watch_cli.VINTAGE_STALE_RC
         assert asked == ["NVDA"]
+
+
+class TestSeasonCriticalFixes:
+    """Three defects found auditing the merged season stack as one system.
+
+    Each could lose a print on a night nobody is watching, and each was
+    invisible to the per-PR reviews that passed the code they live in.
+    """
+
+    def _audit_env(self, poll_env, monkeypatch, tmp_path, codes):
+        """Route the report to tmp (the attempts marker lands beside it) and
+        make the audit return `codes` in turn, then its last value forever."""
+        report = tmp_path / "NVDA_2026-09-01.md"
+        report.write_text("# report")
+        monkeypatch.setattr(watch_cli, "_generate_auto", lambda t, nd: report)
+        monkeypatch.setattr(watch_cli, "_latest_report", lambda t, d: report)
+        seq = list(codes)
+        monkeypatch.setattr(
+            watch_cli, "_run_audit",
+            lambda p: poll_env.audit.append(p) or (seq.pop(0) if len(seq) > 1 else seq[0]),
+        )
+        return report
+
+    # --- a re-arm that failed must never read as the routine queued brief ---
+
+    def test_a_failed_rearm_outranks_a_queued_brief(self, poll_env, monkeypatch):
+        # Both fail together under the same resource pressure. Plain numeric
+        # max() reports 5 ("brief queued", self-healing); the row actually
+        # still names the consumed event and will never fire again.
+        _force_decision(monkeypatch, "refuse")
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 1)
+        monkeypatch.setattr(watch_cli, "_rearm", lambda w, d, s: False)
+        assert watch_cli.cmd_poll(_poll_args()) == 1
+
+    def test_severity_order_is_what_decides_it(self):
+        assert watch_cli._worst([watch_cli.BRIEF_PENDING_RC, 1]) == 1
+        assert max(watch_cli.BRIEF_PENDING_RC, 1) == 5, "the bug this pins is arithmetic"
+
+    # --- the audit cannot bill forever for a failure that never changes -----
+
+    def test_a_failing_audit_is_retryable_at_first(self, poll_env, monkeypatch, tmp_path):
+        _force_decision(monkeypatch, "refuse")
+        self._audit_env(poll_env, monkeypatch, tmp_path, [4])
+        assert watch_cli.cmd_poll(_poll_args()) == 4
+        assert poll_env.rearm == [], "a retryable audit failure must not consume the event"
+
+    def test_it_is_abandoned_after_the_cap_so_the_row_re_arms(
+            self, poll_env, monkeypatch, tmp_path):
+        _force_decision(monkeypatch, "refuse")
+        self._audit_env(poll_env, monkeypatch, tmp_path, [4])
+        for _ in range(watch_cli.AUDIT_MAX_ATTEMPTS - 1):
+            assert watch_cli.cmd_poll(_poll_args()) == 4
+        rc = watch_cli.cmd_poll(_poll_args())
+        assert rc == watch_cli.AUDIT_ABANDONED_RC
+        assert len(poll_env.audit) == watch_cli.AUDIT_MAX_ATTEMPTS
+        # Re-arming is what actually stops the hourly loop.
+        assert poll_env.rearm == [("NVDA", "refuse")]
+        # And the print still lands: the brief is built without the audit.
+        assert [t for t, _ in poll_env.brief] == ["NVDA"]
+
+    def test_an_abandoned_audit_never_spends_another_run(
+            self, poll_env, monkeypatch, tmp_path):
+        _force_decision(monkeypatch, "refuse")
+        self._audit_env(poll_env, monkeypatch, tmp_path, [4])
+        for _ in range(watch_cli.AUDIT_MAX_ATTEMPTS):
+            watch_cli.cmd_poll(_poll_args())
+        spent = len(poll_env.audit)
+        watch_cli.cmd_poll(_poll_args())
+        assert len(poll_env.audit) == spent, "paid a headless run after giving up"
+
+    def test_a_passing_audit_clears_the_count(self, poll_env, monkeypatch, tmp_path):
+        _force_decision(monkeypatch, "refuse")
+        report = self._audit_env(poll_env, monkeypatch, tmp_path, [4, 0])
+        assert watch_cli.cmd_poll(_poll_args()) == 4
+        assert watch_cli._audit_attempts_path(report).exists()
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert not watch_cli._audit_attempts_path(report).exists()
+
+    def test_an_abandoned_audit_completes_the_case(self):
+        ref = Decision("refuse", "")
+        assert watch_cli._completed(ref, watch_cli.AUDIT_ABANDONED_RC)
+        assert not watch_cli._completed(ref, 4)
+
+    # --- a row that has silently dropped out of the season must be said ------
+
+    def test_an_overdue_row_reaches_the_notification(self, sweep_env, monkeypatch, tmp_path):
+        # Overdue names return 3 ("waiting"), which _sweep_locked filters out
+        # before notifying — so the only safety net for a mis-armed row used
+        # to be a stderr line in a log full of routine passes.
+        monkeypatch.setattr(watch_cli, "OVERDUE_ALERTS", tmp_path / "alerted.json")
+        monkeypatch.setattr(
+            watch_cli.wl, "load",
+            lambda path=None: [_watch("AAPL", print_at=watch_cli._now("2026-01-01T00:00:00+00:00"))],
+        )
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0  # still "waiting", not an error
+        assert any("AAPL: overdue" in msg for _t, msg in sweep_env.notified)
+
+    def test_it_is_said_once_a_day_not_once_an_hour(self, sweep_env, monkeypatch, tmp_path):
+        # An hourly reminder about a row drifting for three weeks is exactly
+        # how an alert channel gets trained into noise.
+        monkeypatch.setattr(watch_cli, "OVERDUE_ALERTS", tmp_path / "alerted.json")
+        monkeypatch.setattr(
+            watch_cli.wl, "load",
+            lambda path=None: [_watch("AAPL", print_at=watch_cli._now("2026-01-01T00:00:00+00:00"))],
+        )
+        for _ in range(4):
+            watch_cli.cmd_sweep(_sweep_args())
+        assert sum("overdue" in msg for _t, msg in sweep_env.notified) == 1
+
+    def test_a_row_inside_its_window_says_nothing(self, sweep_env, monkeypatch, tmp_path):
+        monkeypatch.setattr(watch_cli, "OVERDUE_ALERTS", tmp_path / "alerted.json")
+        watch_cli.cmd_sweep(_sweep_args())
+        assert not any("overdue" in msg for _t, msg in sweep_env.notified)
+
+    def test_a_dry_run_never_writes_the_alert_state(self, sweep_env, monkeypatch, tmp_path):
+        state = tmp_path / "alerted.json"
+        monkeypatch.setattr(watch_cli, "OVERDUE_ALERTS", state)
+        monkeypatch.setattr(
+            watch_cli.wl, "load",
+            lambda path=None: [_watch("AAPL", print_at=watch_cli._now("2026-01-01T00:00:00+00:00"))],
+        )
+        watch_cli.cmd_sweep(_sweep_args(dry_run=True))
+        assert not state.exists()

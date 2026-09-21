@@ -16,6 +16,7 @@ import logging
 import os
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -24,6 +25,22 @@ logger = logging.getLogger(__name__)
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 _REQUEST_INTERVAL_S = 0.15  # stay far under SEC's 10 req/s limit
+
+# A single transport failure used to end a whole unattended sweep pass. Three
+# days of the hourly job logged 162 of them across 73 passes, and 154 were one
+# error: `[Errno 8] nodename nor servname provided` — the machine waking from
+# sleep and resolving DNS before the network was up, failing all eleven names
+# at once. Those recover in seconds, so one attempt is the wrong number: it
+# turns a transient into a lost hour and an alert the operator learns to
+# ignore.
+#
+# Retried ONLY for transport errors and the server-side statuses that mean
+# "ask again" (429, 5xx). A 403 or 404 is an answer, not a failure — document
+# fetches legitimately 404 — and retrying those would add seconds of sleep to
+# every missing exhibit.
+_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF_S = (2.0, 5.0)
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 class SecClientError(RuntimeError):
@@ -57,16 +74,34 @@ class SecClient:
         self._last_request = 0.0
 
     def _get(self, url: str) -> bytes:
-        wait = _REQUEST_INTERVAL_S - (time.monotonic() - self._last_request)
-        if wait > 0:
-            time.sleep(wait)
         req = urllib.request.Request(url, headers={"User-Agent": self.identity})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+        last: Exception | None = None
+        tried = 0
+        for attempt in range(_MAX_ATTEMPTS):
+            tried += 1
+            wait = _REQUEST_INTERVAL_S - (time.monotonic() - self._last_request)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return resp.read()
+            except urllib.error.HTTPError as e:
+                # The server answered. Only "ask again" statuses are retried.
+                last = e
+                if e.code not in _RETRY_STATUSES:
+                    break
+            except Exception as e:  # noqa: BLE001 - every transport failure is retryable
+                last = e
+            finally:
+                # Set even on failure: a refused request still cost the SEC a
+                # connection, and the pacing is a fair-access obligation.
                 self._last_request = time.monotonic()
-                return resp.read()
-        except Exception as e:  # noqa: BLE001 - surface every network failure loudly
-            raise SecClientError(f"SEC request failed for {url}: {e}") from e
+            if attempt + 1 < _MAX_ATTEMPTS:
+                time.sleep(_RETRY_BACKOFF_S[attempt])
+        # Says what actually happened: a 404 stops after one try, and a
+        # message claiming three would send the reader hunting a flaky network.
+        tries = "" if tried == 1 else f" after {tried} attempts"
+        raise SecClientError(f"SEC request failed for {url}{tries}: {last}") from last
 
     def _cached_json(self, cache_name: str, url: str, max_age_s: float = 86400.0,
                      *, honor_fresh: bool = True) -> dict:
