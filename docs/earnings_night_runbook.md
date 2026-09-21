@@ -67,10 +67,26 @@ Exit 1 means a watched name still needs a thesis. Exit 0 means you are ready.
 
 ```
 scripts/journal.py openv2 NVDA \
-  --thesis "..." --conviction 3 \
-  --assumption "..." --catalyst "FQ2-27 print 2026-08-26"
+  --thesis "..." --conviction 3 --action hold \
+  --assumption "revenue,>,57000000000,FQ3-27,,2026-11-25" \
+  --catalyst "FQ3-27 print 2026-11-18"
 scripts/watch.py link NVDA
 ```
+
+`--thesis`, `--conviction` and `--action` are required; the lock additionally
+refuses without at least one `--assumption` (the specificity floor). An
+assumption is six comma-separated fields:
+
+```
+metric , comparator , threshold , window , source , resolve_by
+```
+
+**Leave `source` empty** (the doubled comma above) unless you intend to
+resolve that row by hand. An assumption that names a source returns `pending`
+forever until per-value provenance (P1-A) ships, because nothing can yet
+attest the form and accession a value came from; a source-less row is a
+numeric-only commitment and auto-terminates. That is the difference between a
+row that scores itself and a row that sits open for a season.
 
 Do this *before* 20:20Z. Afterwards the tape exists and the prior is no longer
 blind — record it in `--contamination` if that happens.

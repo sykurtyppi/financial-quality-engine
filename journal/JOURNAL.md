@@ -39,21 +39,35 @@ lives in `watchlist.json` (timing only, never theses).
 ## The daily loop
 
 ```
-# 1. BEFORE reading anything — lock your prior view
-scripts/journal.py open NVDA --thesis "beat priced in; watching inventory" --conviction 3
+# 1. BEFORE reading anything — lock your prior view, then pin it to the event
+scripts/journal.py openv2 NVDA \
+  --thesis "beat priced in; watching inventory" --conviction 3 --action hold \
+  --assumption "revenue,>,57000000000,FQ3-27,,2026-11-25"
+scripts/watch.py link NVDA
 
-# 2. Generate the report (refused until your thesis is written)
+# 2. Generate the report (refused until a locked thesis exists)
 scripts/journal.py report NVDA           # EDGAR_IDENTITY must be set
 
-# 3. Read the report, then fill the AFTER block in journal/entries/NVDA_<date>.md
-#    impact:  one or more of  changed_thesis | changed_confidence | new_investigation | no_value
+# 3. Read the report, then record what it changed
+scripts/journal.py after NVDA --impact changed_confidence --conviction-after 4
 
 # 4. Weeks later — what actually happened
-scripts/journal.py outcome NVDA          # then edit the OUTCOME block
+scripts/journal.py outcome NVDA --outcome-date 2026-12-01 \
+  --what-happened "revenue printed at 59.1B" --verdict helped
 
 # 5. Any time — where do I stand
 scripts/journal.py tally
 ```
+
+`openv2`, not `open`. The v1 `open` path still exists for the one legacy
+entry, but a v1 entry cannot be hash-locked, `watch.py link` refuses to pin it
+to an event, and `tally` excludes it from every inferential metric — so a case
+opened that way produces no evidence. Steps 3 and 4 are CLI-only now; nothing
+in the loop requires editing an entry file by hand, and the BEFORE block must
+not be edited at all (rule 3 below is enforced by the hash, not by discipline).
+
+See [docs/earnings_night_runbook.md](../docs/earnings_night_runbook.md) for the
+assumption field format and why `source` is normally left empty.
 
 ## The four rules that make this real evidence (not a diary)
 
