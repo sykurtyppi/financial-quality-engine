@@ -42,7 +42,7 @@ lives in `watchlist.json` (timing only, never theses).
 # 1. BEFORE reading anything — lock your prior view, then pin it to the event
 scripts/journal.py openv2 NVDA \
   --thesis "beat priced in; watching inventory" --conviction 3 --action hold \
-  --assumption "revenue,>,57000000000,FQ3-27,,2026-11-25"
+  --assumption "revenue,>,57000000000,FY2027Q3,,2026-11-25"
 scripts/watch.py link NVDA
 
 # 2. Generate the report (refused until a locked thesis exists)

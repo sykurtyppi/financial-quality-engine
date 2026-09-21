@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import shlex
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import journal  # noqa: E402
+from app.services.watch.poller import Gate, GateResult  # noqa: E402
 from app.services.journal.schema_v2 import BeforeBlock, can_lock  # noqa: E402
 
 DOCS = [ROOT / "docs" / "earnings_night_runbook.md", ROOT / "journal" / "JOURNAL.md"]
@@ -81,3 +83,81 @@ def _strip_comment(argv: list[str]) -> list[str]:
 
 def _assumption_values(argv: list[str]) -> list[str]:
     return [argv[i + 1] for i, a in enumerate(argv) if a == "--assumption" and i + 1 < len(argv)]
+
+
+# ---------------------------------------------------------------------------
+# The CLI's own printed hints (round-12)
+# ---------------------------------------------------------------------------
+# The markdown above is not the surface the operator actually hits. `watch.py
+# due` prints a ready-to-copy `journal.py openv2 ...` line, and on print night
+# that line is what gets pasted — so it rots the same way the docs did, and
+# scanning only markdown let it keep rotting after the docs were fixed.
+#
+# Placeholders are substituted with concrete values so the hint is checked all
+# the way through `can_lock`, not merely through argparse: a hint that parses
+# but names an unresolvable window would still strand the operator.
+
+_PLACEHOLDERS = {
+    "...": "a thesis long enough to satisfy the validator",
+    "<metric>,>,<number>,FY<yyyy>Q<1-4>,,<resolve-by>": "revenue,>,1000000,FY2027Q3,,2026-11-25",
+}
+
+
+def _printed_hints(capsys, monkeypatch) -> list[str]:
+    """Drive the real `watch.py due` body down its needs-a-thesis branch and
+    harvest every journal invocation it offers the operator."""
+    import argparse
+    import importlib.util
+    from datetime import datetime, timedelta, timezone
+
+    spec = importlib.util.spec_from_file_location("watch_cli_hints", ROOT / "scripts" / "watch.py")
+    watch_cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(watch_cli)
+
+    now = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+    watch = watch_cli.wl.Watch(
+        ticker="NVDA",
+        print_at=now + timedelta(hours=8),
+        forms=["10-Q"],
+        label="FQ3-27",  # branding, deliberately NOT a valid window
+    )
+    # `wl` is the shared watchlist module; patch via monkeypatch so the stub
+    # is torn down rather than leaking into every later test in the session.
+    monkeypatch.setattr(watch_cli.wl, "load", lambda: [watch])
+    monkeypatch.setattr(watch_cli, "pinned_thesis_state",
+                        lambda w: GateResult(state=Gate.NO_PINNED, detail="no pinned thesis"))
+
+    capsys.readouterr()
+    watch_cli.cmd_due(argparse.Namespace(within_hours=36, now=now.isoformat()))
+    out = capsys.readouterr().out
+
+    text = out.replace("\\\n", " ")
+    return [" ".join(m.group(1).split()) for m in _INVOCATION.finditer(text)]
+
+
+def test_printed_hint_is_a_command_that_runs(capsys, monkeypatch):
+    hints = _printed_hints(capsys, monkeypatch)
+    assert hints, "watch.py due printed no journal invocation to check"
+    for cmd in hints:
+        argv = [_PLACEHOLDERS.get(a, a) for a in _strip_comment(shlex.split(cmd))]
+        try:
+            parsed = journal.build_parser().parse_args(argv)
+        except SystemExit as e:
+            pytest.fail(f"watch.py due printed a command that does not parse: "
+                        f"journal.py {cmd}\n(argparse exit {e.code})")
+        for spec in _assumption_values(argv):
+            before = BeforeBlock(
+                thesis="a thesis long enough to satisfy the validator",
+                conviction=3,
+                intended_action=getattr(parsed, "action", "hold"),
+                assumptions=[journal._parse_assumption(spec)],
+            )
+            ok, why = can_lock(before)
+            assert ok, f"watch.py due printed an assumption that cannot lock: {spec!r}: {why}"
+
+
+def test_printed_hint_does_not_offer_the_branding_label_as_a_window():
+    # The regression itself: `[FQ3-27]` is the company's fiscal branding and
+    # resolves against no period. It must never appear inside an --assumption.
+    from app.services.journal.vocabulary import is_wellformed_window
+    assert not is_wellformed_window("FQ3-27")

@@ -68,8 +68,8 @@ Exit 1 means a watched name still needs a thesis. Exit 0 means you are ready.
 ```
 scripts/journal.py openv2 NVDA \
   --thesis "..." --conviction 3 --action hold \
-  --assumption "revenue,>,57000000000,FQ3-27,,2026-11-25" \
-  --catalyst "FQ3-27 print 2026-11-18"
+  --assumption "revenue,>,57000000000,FY2027Q3,,2026-11-25" \
+  --catalyst "FY2027Q3 print 2026-11-18"
 scripts/watch.py link NVDA
 ```
 

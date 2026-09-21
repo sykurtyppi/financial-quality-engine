@@ -198,11 +198,20 @@ def cmd_due(args: argparse.Namespace) -> int:
 
     if needs_thesis:
         print("\nWrite the prior BEFORE the print (journal/JOURNAL.md rule 1):")
+        if any(w.label for w in needs_thesis):
+            # The bracketed label is the company's own fiscal branding. Typing
+            # it as the assumption window is the obvious mistake and a silent
+            # one: it matches no `fiscal_label`, so the row reads `pending`
+            # forever rather than failing. `can_lock` refuses it now; say why
+            # here, where the operator is about to copy the command.
+            print("  ([..] above is the company's fiscal branding, NOT an assumption")
+            print("   window — the window is the mapper's label, e.g. FY2027Q3)")
         for w in needs_thesis:
             if w.note:
                 print(f"    # {w.ticker}: {w.note}")
             print(f"    scripts/journal.py openv2 {w.ticker} --thesis \"...\" "
-                  f"--conviction 3 --assumption \"...\"")
+                  f"--conviction 3 --action hold \\")
+            print(f"      --assumption \"<metric>,>,<number>,FY<yyyy>Q<1-4>,,<resolve-by>\"")
             print(f"    scripts/watch.py link {w.ticker}   # pin the entry to the event")
         return 1
     return 0
