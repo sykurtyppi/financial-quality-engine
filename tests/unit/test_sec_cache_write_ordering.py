@@ -317,3 +317,30 @@ def test_a_reader_survives_recovery_deleting_the_entry_underneath_it(tmp_path, m
 
     client = _PacedClient(tmp_path, {"version": "refetched"}, 0.0)
     assert client._cached_json(NAME, URL) == {"version": "refetched"}
+
+
+def test_a_corrupt_entry_is_cleared_even_when_the_refetch_fails(tmp_path):
+    """Recovery must not depend on the refetch succeeding.
+
+    A poisoned entry is normally overwritten by the publish that follows, so
+    an implementation that merely skipped recovery still looked correct — the
+    file ended up right either way. It diverges when SEC is down: without the
+    unlink the corrupt entry survives the outage and every later read keeps
+    failing to parse it, instead of taking a clean miss.
+
+    Found by mutation: folding ValueError into the OSError handler (making the
+    recovery branch unreachable) left the whole suite green.
+    """
+    from app.services.ingestion.sec_client import SecClientError
+
+    target = tmp_path / NAME
+    target.write_text("{ truncated")
+
+    class _Outage(_PacedClient):
+        def _get(self, url):
+            raise SecClientError("SEC request failed: 503")
+
+    with pytest.raises(SecClientError):
+        _Outage(tmp_path, {}, 0.0)._cached_json(NAME, URL)
+
+    assert not target.exists(), "a corrupt entry outlived the outage that stopped its refetch"
