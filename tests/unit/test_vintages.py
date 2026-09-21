@@ -490,15 +490,51 @@ class TestFailuresAreNotSilent:
     def test_a_busy_lock_is_reported_not_swallowed(self, tmp_path, monkeypatch):
         import fcntl
 
-        d = v.cik_dir(1045810, tmp_path)
-        d.mkdir(parents=True)
-        monkeypatch.setattr(v, "LOCK_TIMEOUT_S", 0.2)
         payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path)
+        d = v.cik_dir(1045810, tmp_path)
+        before = (d / v.MANIFEST).read_bytes()
+        monkeypatch.setattr(v, "LOCK_TIMEOUT_S", 0.2)
         with (d / v.LOCK).open("w") as holder:
             fcntl.flock(holder, fcntl.LOCK_EX)
-            res = v.capture(_Client(payload), "NVDA", now=AT, root=tmp_path)
+            res = v.capture(_Client(payload), "NVDA", now=NEXT_DAY, root=tmp_path)
         assert res.reason == "busy" and res.problem and res.detail
+        assert (d / v.MANIFEST).read_bytes() == before
         assert v.read_manifest(1045810, tmp_path)["problem_days"] == 1
+
+    def test_a_successful_capture_clears_busy_day_markers(self, tmp_path):
+        payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        v._record_busy_day(1045810, AT.date(), tmp_path)
+        assert v.read_manifest(1045810, tmp_path)["problem_days"] == 1
+        assert v.capture(_Client(payload), "NVDA", now=NEXT_DAY, root=tmp_path).wrote
+        assert v.read_manifest(1045810, tmp_path)["problem_days"] == 0
+
+
+class TestObservedVintageOrder:
+    def test_same_day_order_comes_from_observations_not_hashes(self, tmp_path):
+        # The later payload's hash sorts before the earlier payload's hash.
+        # Filename order would reverse this transition.
+        earlier = _facts([("2026-06-30", "2026-08-01", 1200.0, "10-Q", "a")])
+        later = _facts([("2026-06-30", "2026-09-19", 1000.0, "10-Q", "b")])
+        client = _Client(earlier, later)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        second = v.capture(client, "NVDA", now=AT.replace(hour=17), root=tmp_path, force=True)
+        assert first.path.name > second.path.name
+        states = v.observed_vintages(1045810, tmp_path)
+        assert [state.path for state in states] == [first.path, second.path]
+
+    def test_a_revert_remains_a_later_state(self, tmp_path):
+        a = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        b = _facts([("2026-06-30", "2026-09-19", 1200.0, "10-K", "b")])
+        client = _Client(a, b, a)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        second = v.capture(client, "NVDA", now=NEXT_DAY, root=tmp_path)
+        v.capture(client, "NVDA", now=NEXT_DAY.replace(day=21), root=tmp_path)
+        states = v.observed_vintages(1045810, tmp_path)
+        assert [state.path for state in states] == [first.path, second.path, first.path]
+        assert [state.captured for state in states] == [
+            "2026-09-19", "2026-09-20", "2026-09-21"
+        ]
 
 
 class TestOrphanCleanup:

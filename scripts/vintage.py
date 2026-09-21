@@ -35,6 +35,7 @@ from app.services.ingestion.vintages import (  # noqa: E402
     diff_vintages,
     list_vintages,
     load_vintage,
+    observed_vintages,
     read_manifest,
     render_changes,
 )
@@ -91,26 +92,22 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_diff(args: argparse.Namespace) -> int:
     client = SecClient()
     cik = client.resolve_cik(safe_ticker(args.ticker))
-    paths = list_vintages(cik)
-    if len(paths) < 2:
-        print(f"{args.ticker}: {len(paths)} snapshot(s) — a diff needs two. "
+    states = observed_vintages(cik)
+    if len(states) < 2:
+        print(f"{args.ticker}: {len(states)} distinct snapshot state(s) — a diff needs two. "
               "The store fills as the sweep runs; nothing can be back-filled.",
               file=sys.stderr)
         return 2
-    # A name is `<date>-<sha12>.json.gz`: splitting on "." keeps the digest
-    # too, so a `--from 2026-09-19` would match nothing.
-    by_day: dict[str, Path] = {}
-    for p in paths:
-        by_day[snapshot_day(p)] = p  # a later snapshot the same day wins
-    older = by_day.get(args.from_day) if args.from_day else paths[-2]
-    newer = by_day.get(args.to_day) if args.to_day else paths[-1]
+    by_day = {state.captured: state for state in states}  # last observation that day wins
+    older = by_day.get(args.from_day) if args.from_day else states[-2]
+    newer = by_day.get(args.to_day) if args.to_day else states[-1]
     if older is None or newer is None:
         print(f"{args.ticker}: no snapshot for "
               f"{args.from_day if older is None else args.to_day}; have "
               f"{', '.join(sorted(by_day))}", file=sys.stderr)
         return 2
     try:
-        old_facts, new_facts = load_vintage(older), load_vintage(newer)
+        old_facts, new_facts = load_vintage(older.path), load_vintage(newer.path)
     except UNREADABLE as e:
         print(f"{args.ticker}: a snapshot could not be read ({e}). The file is kept — "
               "never delete it; capture again to add a readable one.", file=sys.stderr)
@@ -122,7 +119,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
         since=date.fromisoformat(args.since) if args.since else None,
         include_split_adjusted=args.splits,
     )
-    print(render_changes(changes, snapshot_day(older), snapshot_day(newer)))
+    print(render_changes(changes, older.captured, newer.captured))
     return 0
 
 
