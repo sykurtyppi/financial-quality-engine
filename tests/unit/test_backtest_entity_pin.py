@@ -29,6 +29,10 @@ class _FakeSec:
         self.calls.append(("facts_by_cik", cik))
         return {"entity": "pinned"}
 
+    def submissions_by_cik(self, cik):
+        self.calls.append(("subs_by_cik", cik))
+        return {"filings": {"recent": {}}, "sic": "2911"}
+
     def _cached_json(self, name, url):
         self.calls.append(("json", name, url))
         return {"filings": {"recent": {}}, "sic": "2911"}
@@ -52,20 +56,28 @@ def test_member_facts_default_to_ticker_lookup():
     assert sec.calls == [("facts_by_ticker", "AAPL")]
 
 
-def test_entity_events_pin_uses_cik_url_and_cik_cache_key():
+def test_entity_events_pin_uses_the_pinned_cik():
     sec = _FakeSec()
     ev = fetch_entity_events(sec, "XOM", cik=34088)
-    # No registry lookup, CIK-keyed cache (never aliasing the ticker's current
-    # entity), CIK in the URL.
+    # No registry lookup: the pinned entity is fetched directly, so its
+    # submissions never alias whatever the ticker now resolves to.
     assert ("resolve", "XOM") not in sec.calls
-    kind, name, url = sec.calls[0]
-    assert name == "submissions_CIK0000034088.json"
-    assert url.endswith("CIK0000034088.json")
+    assert sec.calls[0] == ("subs_by_cik", 34088)
     assert ev.sic == 2911
 
 
 def test_entity_events_without_pin_resolve_via_registry():
     sec = _FakeSec()
     fetch_entity_events(sec, "XOM")
-    assert sec.calls[0] == ("resolve", "XOM")
-    assert sec.calls[1][1] == "submissions_XOM.json"
+    # Both branches now go through the CIK accessor, so the cache entry is a
+    # function of the entity actually fetched rather than of the ticker that
+    # named it — a ticker reassigned to another filer cannot be served the
+    # previous entity's index out of a ticker-named entry.
+    assert sec.calls == [("resolve", "XOM"), ("subs_by_cik", 2115436)]
+
+
+def test_entity_events_reuse_a_supplied_index_without_fetching():
+    sec = _FakeSec()
+    ev = fetch_entity_events(sec, "XOM", submissions={"filings": {"recent": {}}, "sic": "2911"})
+    assert sec.calls == []
+    assert ev.sic == 2911

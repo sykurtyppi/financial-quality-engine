@@ -171,6 +171,18 @@ class SecClient:
             f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
         )
 
+    def submissions(self, ticker: str) -> dict:
+        """Submissions for a ticker, keyed in cache by the CIK it resolves to.
+
+        The cache is keyed by filename and never inspects the URL, so a second
+        name for one resource is a second copy of it. Ticker-keyed entries also
+        outlive the mapping that produced them: a ticker reassigned to another
+        filer keeps serving the old entity's submissions until the entry ages
+        out. Resolving first and storing under the CIK gives every consumer of
+        a report one entry, one vintage, one fetch.
+        """
+        return self.submissions_by_cik(self.resolve_cik(ticker))
+
     def submissions_page(self, name: str) -> dict:
         """Fetch an older submissions page (referenced in filings.files) for
         high-volume filers whose 'recent' block does not reach far enough back."""

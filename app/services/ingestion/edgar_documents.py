@@ -30,7 +30,6 @@ from app.services.ingestion.sec_client import SecClient, SecClientError
 
 logger = logging.getLogger(__name__)
 
-SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{doc}"
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -115,10 +114,7 @@ def extract_section(text: str, doc_type: DocumentType) -> str | None:
 
 
 def _get_submissions(client: SecClient, ticker: str) -> dict:
-    cik = client.resolve_cik(ticker)
-    return client._cached_json(  # noqa: SLF001
-        f"submissions_{ticker.upper()}.json", SUBMISSIONS_URL.format(cik=cik)
-    )
+    return client.submissions(ticker)
 
 
 _FILING_ARRAYS = ("form", "accessionNumber", "primaryDocument", "reportDate", "items", "filingDate")
@@ -338,6 +334,7 @@ def fetch_documents(
     include_earnings_releases: bool = True,
     cik: int | None = None,
     before: date | None = None,
+    submissions: dict | None = None,
 ) -> ExtractionResult:
     """Fetch the latest 10-K/10-Q MD&A + Risk Factors sections and 8-K
     (item 2.02) earnings releases, labeled with structural fiscal labels.
@@ -345,10 +342,16 @@ def fetch_documents(
     `cik` bypasses ticker resolution (required for delisted companies absent
     from the current registry). `before` restricts to filings filed on or
     before that date — point-in-time document discipline, so a pre-event view
-    cannot see filings that did not yet exist.
+    cannot see filings that did not yet exist. `submissions` supplies a payload
+    the caller already holds, so one report reads one filing index rather than
+    re-reading it per evidence stream.
     """
     result = ExtractionResult()
-    if cik is not None:
+    if submissions is not None:
+        subs = submissions
+        if cik is None:
+            cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
+    elif cik is not None:
         subs = client.submissions_by_cik(cik)
     else:
         subs = _get_submissions(client, ticker)

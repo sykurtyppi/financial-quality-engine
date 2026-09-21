@@ -27,6 +27,25 @@ class DatasetSnapshot:
     company_facts: dict
 
 
+def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
+    """Read the filing index once for a whole report, or return None.
+
+    Documents, capital-markets activity and 4.02 events each derive from the
+    submissions index. Reading it per stream lets one report describe filings
+    from two different moments, which on a filing day is the pre-filing view
+    P0-D exists to prevent. Fetching once removes that.
+
+    Returns None rather than raising when the index cannot be read: each
+    stream then falls back to its own fetch and records its own acquisition
+    error, so an outage stays visible per stream instead of turning into one
+    failure that silently marks every stream clean.
+    """
+    try:
+        return client.submissions(ticker)
+    except Exception:  # noqa: BLE001 - acquisition failure is reported per stream
+        return None
+
+
 def fetch_dataset_snapshot(
     ticker: str,
     n_quarters: int = 8,

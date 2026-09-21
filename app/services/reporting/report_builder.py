@@ -101,6 +101,7 @@ def _collect_streams(
     ticker: str,
     report_date: date,
     company_facts: dict | None = None,
+    submissions: dict | None = None,
 ):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
     (body_sections, event_lines, tier1_events, errors, takedowns). `takedowns`
@@ -118,7 +119,7 @@ def _collect_streams(
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
 
-        timeline = fetch_offerings(client, ticker, as_of=report_date)
+        timeline = fetch_offerings(client, ticker, as_of=report_date, submissions=submissions)
         body_sections.append(render_offerings_section(timeline))
         # Review finding 1 (round 5): fetch_offerings swallows a submissions
         # outage into a structured acquisition_error instead of raising, so check
@@ -151,7 +152,7 @@ def _collect_streams(
     try:
         from app.services.backtesting.events import fetch_entity_events
 
-        events = fetch_entity_events(client, ticker)
+        events = fetch_entity_events(client, ticker, submissions=submissions)
         cutoff = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
         nr_dates = _pit_dates(events.non_reliance_8k_dates, cutoff, report_date)
         tier1_events += [
@@ -226,6 +227,7 @@ def build_report(
     warnings: list[str] | None = None,
     doc_diagnostics: list[str] | None = None,
     company_facts: dict | None = None,
+    submissions: dict | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -249,7 +251,7 @@ def build_report(
 
     if client is not None and ticker is not None:
         sections, event_lines, tier1_events, errors, takedowns = _collect_streams(
-            client, ticker, report_date, company_facts
+            client, ticker, report_date, company_facts, submissions
         )
         for section in sections:
             body += "\n\n" + section + "\n"
