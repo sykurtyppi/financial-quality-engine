@@ -171,11 +171,17 @@ class SecClient:
         raise SecClientError(f"Ticker not found in SEC registry: {ticker}")
 
     def company_facts(self, ticker: str) -> dict:
-        cik = self.resolve_cik(ticker)
-        return self._cached_json(
-            f"companyfacts_{ticker.upper()}.json",
-            COMPANYFACTS_URL.format(cik=cik),
-        )
+        """Company Facts for a ticker, keyed in cache by the CIK it resolves to.
+
+        Same reasoning as `submissions`, and it matters more here: these are
+        the largest payloads this client caches and the ones the engine
+        actually scores. Keying by ticker stored the same URL a second time,
+        so the vintage store (which fetches by CIK and hashes the bytes to
+        detect restatements) and the report (which fetched by ticker) could
+        hold two copies taken at different moments — the snapshot hashed and
+        the facts scored need not have been the same data.
+        """
+        return self.company_facts_by_cik(self.resolve_cik(ticker))
 
     def company_facts_by_cik(self, cik: int) -> dict:
         """Fetch companyfacts by CIK directly — required for delisted companies,
