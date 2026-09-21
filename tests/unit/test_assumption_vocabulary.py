@@ -159,26 +159,55 @@ def test_a_resolver_reachable_property_is_not_refused():
         assert can_lock(_before(metric=name))[0]
 
 
-def test_ttm_metrics_are_exactly_the_unreachable_ones():
-    """Derive the exclusion rather than trusting the written list: a metric is
-    excluded iff no result it produces carries a label any dataset period has.
-    When the resolver learns to address a TTM basis, this fails and the list
-    shrinks — it cannot silently keep refusing names that became reachable."""
+def test_the_excluded_set_is_exactly_what_the_resolver_cannot_reach():
+    """Derive the exclusion by ASKING THE RESOLVER, not by comparing labels.
+
+    The first version of this test compared each metric's labels against the
+    dataset's period labels, which is a proxy for the resolver's behaviour and
+    not the thing itself. It kept passing after the resolver learned to read a
+    TTM basis, so the exclusion it guarded never shrank — a test that measured
+    the implementation it was written from instead of the contract.
+    """
     from app.services.formulas.registry import compute_metrics
-    from app.services.journal.vocabulary import TTM_BASIS_METRICS
+    from app.services.journal.resolver import _lookup_metric_value
+    from app.services.journal.vocabulary import METRIC_IDS, TTM_BASIS_METRICS
 
     ds = stretch_dataset()
-    period_labels = {p.fiscal_label for p in ds.periods}
+    period = ds.periods[-1]
+    bundle = compute_metrics(ds)
     unreachable = {
-        name for name, history in compute_metrics(ds).history.items()
-        if not ({m.fiscal_label for m in history} & period_labels)
+        name for name in METRIC_IDS
+        if _lookup_metric_value(name, period, bundle)[2]  # structural
     }
     assert unreachable == set(TTM_BASIS_METRICS), (
-        f"registry only: {sorted(unreachable - set(TTM_BASIS_METRICS))}\n"
-        f"vocabulary only: {sorted(set(TTM_BASIS_METRICS) - unreachable)}"
+        f"resolver cannot reach: {sorted(unreachable - set(TTM_BASIS_METRICS))}\n"
+        f"needlessly excluded:   {sorted(set(TTM_BASIS_METRICS) - unreachable)}"
     )
 
 
-def test_a_ttm_metric_is_refused_rather_than_sealed_unresolvable():
-    ok, why = can_lock(_before(metric="total_accruals"))
-    assert not ok and "not a resolvable name" in why
+def test_a_ttm_metric_can_now_be_preregistered():
+    """The constraint this branch removes: `total_accruals`, every Beneish
+    component and `cfo_to_net_income` are among the most natural things to
+    commit a thesis to, and none of them could be locked."""
+    for name in ("total_accruals", "beneish_m_score", "cfo_to_net_income", "fcf_margin"):
+        ok, why = can_lock(_before(metric=name))
+        assert ok, f"{name}: {why}"
+
+
+def test_a_ttm_resolution_discloses_the_basis():
+    """Twelve months of data answering a question asked about one quarter is
+    a different measurement, and the note has to say so."""
+    from app.services.formulas.registry import compute_metrics
+    from app.services.journal.resolver import _lookup_metric_value
+
+    ds = stretch_dataset()
+    period = ds.periods[-1]
+    bundle = compute_metrics(ds)
+
+    value, note, structural = _lookup_metric_value("total_accruals", period, bundle)
+    assert value is not None and not structural
+    assert f"TTM ending {period.fiscal_label}" in note
+
+    # A quarterly metric must not claim a TTM basis it does not have.
+    _v, quarterly_note, _s = _lookup_metric_value("dso", period, bundle)
+    assert "TTM" not in quarterly_note and period.fiscal_label in quarterly_note

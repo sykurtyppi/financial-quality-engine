@@ -31,6 +31,7 @@ from __future__ import annotations
 from app.schemas.financials import CompanyDataset, PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas.registry import MetricsBundle
+from app.services.formulas.ttm import TTM_LABEL_PREFIX
 from app.services.journal.schema_v2 import (
     _SYMBOLIC_THRESHOLDS,
     Assumption,
@@ -62,9 +63,22 @@ def _lookup_metric_value(
     # 1. Engine spec_id: consult the bundle's latest+history (latest ≡ this period
     #    when the assumption's window matches the bundle's latest period). We
     #    look up by period label to be safe if the bundle's latest is elsewhere.
+    #
+    #    A metric computed on a trailing-twelve-month basis labels its result
+    #    `TTM FY2025Q4` — the TTM window ENDING at that quarter. Matching the
+    #    quarterly label alone reached none of them: 16 of the 43 registry
+    #    metrics, including `total_accruals`, every Beneish component and
+    #    `cfo_to_net_income`, could be preregistered and then never resolved,
+    #    because no dataset period is labelled `TTM FY2025Q4` either. Both
+    #    spellings name the same commitment — "this metric, as of this
+    #    quarter" — so both are accepted, and the note says which basis
+    #    answered so the reader knows a twelve-month window was measured
+    #    rather than the quarter alone.
     if bundle is not None:
+        ttm_label = f"{TTM_LABEL_PREFIX}{period.fiscal_label}"
         for m in bundle.history.get(metric_name, []):
-            if m.fiscal_label == period.fiscal_label:
+            if m.fiscal_label in (period.fiscal_label, ttm_label):
+                basis = "TTM ending " if m.fiscal_label == ttm_label else ""
                 if m.status is not MetricStatus.OK or m.value is None:
                     # NOT_MEANINGFUL is a structural output (denominator=0 etc.)
                     # — it is deterministic for the current inputs. Anything
@@ -72,9 +86,13 @@ def _lookup_metric_value(
                     structural = m.status is MetricStatus.NOT_MEANINGFUL
                     return None, (
                         f"metric '{metric_name}' is {m.status.value} in "
-                        f"{period.fiscal_label}"
+                        f"{basis}{period.fiscal_label}"
                     ), structural
-                return float(m.value), f"engine metric '{metric_name}' ({period.fiscal_label})", False
+                return (
+                    float(m.value),
+                    f"engine metric '{metric_name}' ({basis}{period.fiscal_label})",
+                    False,
+                )
 
     # 2. Raw XBRL-mapped field on PeriodFinancials.
     if hasattr(period, metric_name):
