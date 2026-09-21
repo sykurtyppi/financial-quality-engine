@@ -52,9 +52,18 @@ CONFIG_VERSION = "0.4.0"
 # Retired metrics remain COMPUTED and REPORTED as evidence — they no longer
 # move any score or generate flags. Per-retirement rationale inline below.
 
-# Direction bands, set from the empirical backtest score distribution
-# (n=1141 point-in-time scores: p50=31.7, p90=45.1). The original 35/60 bands
-# assumed the full 0-100 range is used; in practice scores compress to ~17-67.
+# Direction bands for the COMPOSITE score only. Originally set from the 0.3.0
+# backtest distribution (n=1141: p50=31.7, p90=45.1), replacing 35/60 which
+# labelled almost nothing negative. Against the regenerated 0.4.0 artifact
+# those cuts sit nearer p66/p92 than the p50/p90 they were anchored to
+# (docs/calibration_report.md); re-anchoring is a config + snapshot change
+# still deferred to the evaluation-window close per docs/evaluation_protocol.md.
+#
+# These are NOT block-level bands. The per-block Direction label was retired
+# from the report because these cuts are percentiles of the composite and the
+# block anchor tables share no common scale with it. The constants remain live
+# for two non-label consumers: the Track-3 sweep flag gate (scripts/wide_sweep.py)
+# and the Capital Integrity takedown caveat (report_builder.py).
 DIRECTION_POSITIVE_BELOW = 32.0
 DIRECTION_NEGATIVE_ABOVE = 45.0
 

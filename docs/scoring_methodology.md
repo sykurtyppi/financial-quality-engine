@@ -22,10 +22,36 @@ All scores are **0–100 concern scores**: 0 = no concern, 100 = maximum
 concern. This uniform orientation makes aggregation trivial and prevents the
 classic mixed-direction scoring bug. Derived fields:
 
-- **Direction** (v0.3, from the empirical score distribution — p50 ≈ 32,
-  p90 ≈ 45, observed max ≈ 67): `< 32` positive · `32–45` mixed · `> 45`
-  negative. The original 35/60 bands assumed the full 0–100 range is used;
-  in practice scores compress to roughly 17–67.
+- **Direction** (COMPOSITE only, v0.3, from the empirical score distribution —
+  p50 ≈ 32, p90 ≈ 45, observed max ≈ 67): `< 32` positive · `32–45` mixed ·
+  `> 45` negative. The original 35/60 bands assumed the full 0–100 range is
+  used; in practice scores compress to roughly 17–67.
+
+  **These bands are not applied to block scores, and the per-block Direction
+  label has been retired from the report.** They are percentiles of the
+  composite distribution, and the block anchor tables were never calibrated to
+  a shared meaning of "concern" — so one band set transplanted onto eight
+  differently-distributed series makes the same word carry a different prior in
+  each row. In at least one block the negative cut sits above anything that
+  block's anchors produce in practice, making the label unreachable rather than
+  merely strict; and because low coverage suppresses a block score downward, a
+  block that could not be measured rendered as *positive* — laundering a data
+  gap into reassurance, the opposite of what the score is for.
+
+  The field does not do this. Rating and scoring systems either calibrate each
+  sub-factor to a common scale before sharing one band (Moody's), norm each
+  sub-scale against its own peer distribution (MSCI, Zacks), or attach no
+  sub-dimension label at all and rank the drivers instead (FICO reason codes;
+  Altman, Beneish and Piotroski label only the composite). The scorecard now
+  follows the third: per block it shows the score, the coverage, and the
+  metrics carrying the concern, ranked by weight × concern.
+
+  Re-deriving per-block bands from the backtest was considered and rejected: it
+  would fit 14 cut points to the same sample used to evaluate the engine, on a
+  clustered universe whose effective n is far below its row count, with the
+  least stable percentile (p90) as the cut — and it is undefinable for
+  Narrative Drift, which has no backtest observations at all. The composite
+  bands remain live for the sweep flag gate and the Capital Integrity caveat.
 - **Confidence** (per block): high if ≥ 70% of block weight computed with ≥ 3
   OK metrics; medium if ≥ 40% with ≥ 2; low otherwise.
 
