@@ -244,11 +244,25 @@ def test_build_report_hands_the_detector_the_mappers_selection(monkeypatch):
     monkeypatch.setattr(restatements_mod, "detect_restatements", spy)
 
     class _Client:
+        """Complete on purpose. A stub missing a method raises AttributeError
+        from inside an evidence stream, which reads as a stream failure rather
+        than as the test's own gap — and once defects stop being disguised as
+        data gaps, it fails the test outright instead."""
+
         def company_facts(self, ticker):
             return {"facts": {}}
 
+        def company_facts_by_cik(self, cik):
+            return {"facts": {}}
+
+        def resolve_cik(self, ticker):
+            return 320193
+
         def submissions(self, ticker):
-            raise RuntimeError("not under test")
+            return {"filings": {"recent": {}}}
+
+        def submissions_by_cik(self, cik):
+            return {"filings": {"recent": {}}}
 
     ds = stretch_dataset()
     tags = {"revenue": "us-gaap:Revenues"}
