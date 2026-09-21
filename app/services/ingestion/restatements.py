@@ -247,7 +247,13 @@ def _composite_vintages(
             present: set[str] = set()
             form = accn = ""
             filed_today: list[tuple[str, str]] = []
-            for (taxonomy, tag), rows in per_component.items():
+            # Summed in a fixed tag order, not the order the selection string
+            # happened to list the components. Float addition is not
+            # associative, so iteration order moved the aggregate by ~1e-13 —
+            # never enough to flip a materiality decision, but enough that the
+            # same report did not reproduce byte-identically, which is the one
+            # property a point-in-time artifact is supposed to have.
+            for (taxonomy, tag), rows in sorted(per_component.items()):
                 # Latest value filed on or before this vintage. Same tie rule
                 # as the mapper: max() keeps the FIRST fact at the latest date.
                 eligible = [f for f in rows.get(key, []) if f[0] <= vintage]
