@@ -18,6 +18,7 @@ import pytest
 
 from app.services.backtesting.events import fetch_entity_events
 from app.services.ingestion.edgar_adapter import fetch_submissions_snapshot
+from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.offerings import fetch_offerings
 from app.services.ingestion.sec_client import SecClient, SecClientError
 
@@ -30,12 +31,13 @@ _SUBMISSIONS = {
     "sicDescription": "Electronic Computers",
     "filings": {
         "recent": {
-            "form": ["8-K", "424B5"],
-            "items": ["4.02", ""],
-            "filingDate": ["2026-05-01", "2026-04-01"],
-            "accessionNumber": ["0000320193-26-000001", "0000320193-26-000002"],
-            "primaryDocument": ["a.htm", "b.htm"],
-            "reportDate": ["", ""],
+            "form": ["8-K", "424B5", "10-Q"],
+            "items": ["4.02", "", ""],
+            "filingDate": ["2026-05-01", "2026-04-01", "2026-03-15"],
+            "accessionNumber": ["0000320193-26-000001", "0000320193-26-000002",
+                                "0000320193-26-000003"],
+            "primaryDocument": ["a.htm", "b.htm", "q.htm"],
+            "reportDate": ["", "", "2026-02-28"],
         },
         "files": [],
     },
@@ -56,6 +58,8 @@ def _client(tmp_path, *, fresh: bool = False) -> tuple[SecClient, list[str]]:
             return json.dumps(_TICKERS).encode()
         if "/submissions/" in url:
             return json.dumps(_SUBMISSIONS).encode()
+        if "/Archives/" in url:
+            return b"<html><body>filing</body></html>"
         raise AssertionError(f"unexpected URL {url}")
 
     client._get = fake_get  # noqa: SLF001 - transport seam
@@ -67,7 +71,8 @@ def _submissions_gets(fetched: list[str]) -> list[str]:
 
 
 def _run_streams(client, submissions):
-    """The submissions-reading streams of one report run."""
+    """All three submissions-reading streams of one report run."""
+    fetch_documents(client, TICKER, {}, n_filings=2, submissions=submissions)
     fetch_offerings(client, TICKER, as_of=date(2026, 5, 15), parse_takedowns=False,
                     submissions=submissions)
     fetch_entity_events(client, TICKER, submissions=submissions)
@@ -114,6 +119,41 @@ class TestOneIndexPerReport:
 
         assert timeline.acquisition_error is None
         assert events.non_reliance_8k_dates == [date(2026, 5, 1)]
+
+
+class TestDocumentsUseTheSuppliedIndex:
+    """The document stream is one of the three the fix is named for, and the
+    only one whose `cik` also builds the archive URLs it fetches."""
+
+    def test_documents_read_the_payload_and_its_entity(self, tmp_path):
+        client, fetched = _client(tmp_path)
+        submissions = fetch_submissions_snapshot(TICKER, client)
+        before = len(_submissions_gets(fetched))
+
+        class _RefusesAnotherIndexRead:
+            cache_dir = tmp_path
+
+            def resolve_cik(self, ticker):
+                raise AssertionError("resolved a cik it was handed an index for")
+
+            def submissions(self, ticker):
+                raise AssertionError("refetched an index it was given")
+
+            def submissions_by_cik(self, cik):
+                raise AssertionError("refetched an index it was given")
+
+            def _get(self, url):
+                fetched.append(url)
+                return b"<html><body>filing</body></html>"
+
+        fetch_documents(_RefusesAnotherIndexRead(), TICKER, {}, n_filings=2,
+                        submissions=submissions)
+
+        assert len(_submissions_gets(fetched)) == before  # no second index read
+        archives = [u for u in fetched if "/Archives/" in u]
+        assert archives, "expected the document stream to fetch an archive"
+        # The entity comes from the payload, not from a re-resolved ticker.
+        assert all(f"/data/{CIK}/" in u for u in archives), archives
 
 
 class TestReportBuilderThreadsTheIndex:
@@ -268,6 +308,22 @@ class TestAcquisitionFailureStaysVisible:
             warnings=[SNAPSHOT_UNAVAILABLE], doc_diagnostics=[],
         )
         assert "read once for this run" in section
+
+    def test_a_broken_cache_volume_does_not_abort_the_run(self, tmp_path):
+        # This call sits ahead of the whole report, outside the per-stream
+        # handlers that used to contain an index failure, so an OSError from
+        # the cache's own file I/O must not end a run that previously
+        # completed — a `--no-docs` run reached the index only from inside
+        # those handlers.
+        client, _ = _client(tmp_path)
+
+        def unwritable(url: str) -> bytes:
+            if "/submissions/" in url:
+                raise OSError(28, "No space left on device")
+            return json.dumps(_TICKERS).encode()
+
+        client._get = unwritable  # noqa: SLF001
+        assert fetch_submissions_snapshot(TICKER, client) is None
 
     def test_a_programming_error_is_not_absorbed(self, tmp_path):
         # Absorbing every exception would let a rename of the accessor

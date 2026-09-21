@@ -44,13 +44,19 @@ def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
     is not retried at all (`_RETRY_STATUSES`) — leaves a report that looks
     complete while silently having given up the single-vintage guarantee.
     Callers must therefore pass `index_degraded=True` to `build_report`, which
-    states it on the card and in the data-quality appendix together. Only
-    acquisition failure is absorbed; a programming error still raises rather
-    than disabling the snapshot in silence.
+    states it on the card and in the data-quality appendix together.
+
+    OSError is absorbed alongside SecClientError because this call sits ahead
+    of the whole report, outside the per-stream handlers that used to contain
+    an index failure. The cache's own file I/O — stat, read, the atomic
+    replace — raises OSError bare, so a full or read-only cache volume would
+    otherwise abort a run that previously completed (a `--no-docs` run reached
+    the index only from inside those handlers). A programming error still
+    raises rather than disabling the snapshot in silence.
     """
     try:
         return client.submissions(ticker)
-    except SecClientError as e:
+    except (SecClientError, OSError) as e:
         logger.warning("filing index snapshot unavailable for %s: %s", ticker, e)
         return None
 
