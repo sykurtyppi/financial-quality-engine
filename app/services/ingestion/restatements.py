@@ -170,36 +170,48 @@ def _eligible_rows(
     return out
 
 
+def is_composite_selection(selected: str) -> bool:
+    """True when the mapper BUILT this field by summing several tags rather
+    than reading one. Recorded as bare tag names joined by `+`, e.g.
+    `SellingAndMarketingExpense+GeneralAndAdministrativeExpense`."""
+    return "+" in selected
+
+
 def _parse_selection(selected: str) -> list[tuple[str, str]]:
-    """Expand `FieldDiagnostic.tag_used` into the series it names.
+    """Expand `FieldDiagnostic.tag_used` into the single series it names.
 
-    The mapper records a single choice as a qualified tag (`us-gaap:Revenues`)
-    and a COMPOSITE — a field summed from several tags, e.g. total_debt or an
-    SG&A rebuilt from separate S&M and G&A tags — as bare tag names joined by
-    `+`, with `none` standing in for a component it could not fill.
+    A COMPOSITE returns nothing, and that is the point. Expanding one into its
+    components and reporting each as a revision OF THE DERIVED FIELD states a
+    number that was never scored: with SG&A = S&M 1000 + G&A 10, a G&A move of
+    10 -> 11 is reported as `sga_expense: 10 -> 11`, a 10% revision clearing
+    the 1% materiality bar, while the sga_expense the engine actually scored
+    went 1010 -> 1011 — 0.099%, well under it. Several moved components also
+    emit several footprints for one field, inflating any count of "figures
+    revised".
 
-    A composite's scored value is the sum of its parts, so a revision to ANY
-    part is a revision of the number the engine used. Inspecting only the
-    first would quietly drop the rest; inspecting none (the shape has no
-    colon, so it parses as no tag at all) would drop the whole field, and
-    total_debt is not a field to go blind on.
+    Honest evidence for a composite needs the AGGREGATE reconstructed at each
+    filing vintage, with materiality applied to that aggregate. Until then the
+    field is reported as unchecked (see `unchecked_composites`) rather than
+    described with a component's numbers. A disclosed gap is recoverable; a
+    plausible wrong number in an evidence section is not.
     """
-    parts: list[tuple[str, str]] = []
-    for piece in selected.split("+"):
-        piece = piece.strip()
-        if not piece or piece == "none":
-            continue
-        taxonomy, sep, tag = piece.partition(":")
-        if sep:
-            if taxonomy and tag:
-                parts.append((taxonomy, tag))
-        else:
-            # Composite components are recorded unqualified; every tag the
-            # mapper composes from is us-gaap (SGA_COMPONENTS, DA_COMPONENTS,
-            # the debt tags), which `test_composite_components_are_us_gaap`
-            # pins so this assumption cannot rot silently.
-            parts.append(("us-gaap", piece))
-    return parts
+    if is_composite_selection(selected):
+        return []
+    taxonomy, sep, tag = selected.partition(":")
+    return [(taxonomy, tag)] if sep and taxonomy and tag else []
+
+
+def unchecked_composites(selected_tags: Mapping[str, str | None] | None) -> list[str]:
+    """Canonical fields whose revision history cannot be checked because the
+    mapper composed them from several tags. Surfaced in the report so their
+    silence is not read as `no revisions`."""
+    if not selected_tags:
+        return []
+    return sorted(
+        name for name, selected in selected_tags.items()
+        if selected and is_composite_selection(selected)
+        and name in {**INSTANT_FIELDS, **FLOW_FIELDS}
+    )
 
 
 def _resolve_tags(
@@ -376,7 +388,9 @@ def _table(footprints: list[RestatementFootprint]) -> list[str]:
     return rows
 
 
-def render_restatements_section(footprints: list[RestatementFootprint]) -> str:
+def render_restatements_section(
+    footprints: list[RestatementFootprint], unchecked: list[str] | None = None
+) -> str:
     """Markdown section for the report. Evidence framing only — no scoring.
 
     Amended-filing (/A) revisions are surfaced as high-confidence restatements;
@@ -390,6 +404,19 @@ def render_restatements_section(footprints: list[RestatementFootprint]) -> str:
         "filing history (original vs latest-filed value for the same period). "
         "Share counts are excluded (stock-split noise)."
     )
+    if unchecked:
+        # Absence of evidence for these fields is not evidence of absence, and
+        # the difference has to be on the page — a reader scanning for "no
+        # revisions" would otherwise count a field that was never examined.
+        lines.append(
+            f"NOT CHECKED: {', '.join(unchecked)} — the engine builds "
+            f"{'these figures' if len(unchecked) > 1 else 'this figure'} by "
+            f"summing several XBRL tags, and a revision to one component is "
+            f"not a revision of the summed figure. Checking "
+            f"{'them' if len(unchecked) > 1 else 'it'} requires rebuilding the "
+            f"total at each filing vintage. Silence here means unexamined, not "
+            f"unrevised."
+        )
     lines.append("")
     if not footprints:
         lines.append("- No prior-period revisions detected above the materiality threshold.")

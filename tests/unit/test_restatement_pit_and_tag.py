@@ -142,47 +142,58 @@ def test_a_field_absent_from_the_selection_falls_back():
     ("us-gaap:Revenues", [("us-gaap", "Revenues")]),
     ("dei:EntityCommonStockSharesOutstanding",
      [("dei", "EntityCommonStockSharesOutstanding")]),
-    # Composites: bare tag names joined by `+`, `none` for an unfilled part.
-    ("LongTermDebtNoncurrent+LongTermDebtCurrent+CommercialPaper",
-     [("us-gaap", "LongTermDebtNoncurrent"), ("us-gaap", "LongTermDebtCurrent"),
-      ("us-gaap", "CommercialPaper")]),
-    ("LongTermDebtNoncurrent+LongTermDebtCurrent+none",
-     [("us-gaap", "LongTermDebtNoncurrent"), ("us-gaap", "LongTermDebtCurrent")]),
+    # Composites resolve to NOTHING — see the next test for why.
+    ("LongTermDebtNoncurrent+LongTermDebtCurrent+CommercialPaper", []),
+    ("SellingAndMarketingExpense+GeneralAndAdministrativeExpense", []),
 ])
 def test_resolve_tags_reads_every_shape_the_mapper_records(selected, expected):
     assert _resolve_tags({}, "f", REV, "USD", None, {"f": selected}) == expected
 
 
-def test_a_composite_reports_a_revision_in_any_component():
-    """A summed field's scored value moves when any part is revised, so all
-    parts are inspected — inspecting only the first would go blind on the
-    rest of total_debt."""
+def test_a_composite_component_is_never_reported_as_the_derived_field():
+    """Changed deliberately after review. Expanding a composite into its
+    components and reporting each as a revision of the DERIVED field states a
+    number that was never scored.
+
+    Here SG&A = S&M 1000 + G&A 10. G&A moves 10 -> 11: a 10% revision that
+    clears the 1% materiality bar. The sga_expense the engine actually scored
+    went 1010 -> 1011 — 0.099%, nowhere near it. Reporting
+    `sga_expense: 10 -> 11` is a plausible, wrong, material-looking finding in
+    a section whose entire value is that its numbers are checkable.
+    """
     payload = _facts(
         SellingAndMarketingExpense={"units": {"USD": [
-            _row("2024-01-01", "2024-03-31", 500.0, "2024-05-01", "s1"),
+            _row("2024-01-01", "2024-03-31", 1000.0, "2024-05-01", "s1"),
         ]}},
-        GeneralAndAdministrativeExpense=_revised_history(),
+        GeneralAndAdministrativeExpense={"units": {"USD": [
+            _row("2024-01-01", "2024-03-31", 10.0, "2024-05-01", "g1"),
+            _row("2024-01-01", "2024-03-31", 11.0, "2024-08-01", "g2"),
+        ]}},
     )
-    # The revision is in the SECOND component; inspecting only the first
-    # would report nothing at all.
-    found = _found(payload, selected_tags={
-        "sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense"})
-    assert found == [("us-gaap:GeneralAndAdministrativeExpense", "2024-03-31", 100.0, 130.0)]
+    composite = {"sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense"}
+    assert _found(payload, selected_tags=composite) == []
 
 
-def test_composite_components_are_us_gaap():
-    """`_parse_selection` qualifies bare composite components as us-gaap.
-    If the mapper ever composes from another taxonomy, that guess silently
-    inspects the wrong (or no) series — fail here instead."""
-    from app.services.ingestion.companyfacts_mapper import (
-        DA_COMPONENTS, DEBT_CURRENT, DEBT_NONCURRENT, DEBT_SHORT, DEBT_TOTAL,
-        FINANCE_LEASE_CURRENT, FINANCE_LEASE_NONCURRENT, SGA_COMPONENTS,
+def test_an_unchecked_composite_is_disclosed_not_silently_omitted():
+    """A field that was never examined must not read as a field with no
+    revisions — that is the difference between a gap and an all-clear."""
+    from app.services.ingestion.restatements import (
+        render_restatements_section, unchecked_composites,
     )
-    assert all(tax == "us-gaap" for tax, _ in SGA_COMPONENTS + DA_COMPONENTS)
-    # The debt tuples are bare tag names, composed under us-gaap by the mapper.
-    for group in (DEBT_CURRENT, DEBT_NONCURRENT, DEBT_SHORT, DEBT_TOTAL,
-                  FINANCE_LEASE_CURRENT, FINANCE_LEASE_NONCURRENT):
-        assert all(isinstance(t, str) and ":" not in t for t in group)
+    tags = {"sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense",
+            "revenue": "us-gaap:Revenues"}
+    assert unchecked_composites(tags) == ["sga_expense"]
+
+    section = render_restatements_section([], unchecked_composites(tags))
+    assert "NOT CHECKED: sga_expense" in section
+    assert "Silence here means unexamined, not unrevised." in section
+
+
+def test_a_single_tag_field_is_not_called_unchecked():
+    from app.services.ingestion.restatements import unchecked_composites
+    assert unchecked_composites({"revenue": "us-gaap:Revenues"}) == []
+    assert unchecked_composites({"revenue": None}) == []
+    assert unchecked_composites(None) == []
 
 
 # --- the two halves agree on real mapper output ----------------------------
@@ -202,6 +213,10 @@ def test_selected_tags_round_trips_from_the_mapper():
         if qualified is None:
             continue
         resolved = _resolve_tags({}, field_name, (), "USD", None, tags)
+        if "+" in qualified:
+            # A composite is deliberately unresolvable, and disclosed instead.
+            assert resolved == []
+            continue
         assert resolved, f"{field_name}: mapper recorded {qualified!r}, resolver found no series"
         for taxonomy, tag in resolved:
             assert taxonomy and tag and ":" not in tag
