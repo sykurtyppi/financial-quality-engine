@@ -73,25 +73,17 @@ def _period_measures() -> frozenset[str]:
 
 FIELD_NAMES: frozenset[str] = _period_measures()
 
-# Registry metrics computed on a trailing-twelve-month basis. Their results
-# are labelled `TTM FY2025Q4`, while `resolver._find_period` matches a window
-# against the dataset's QUARTERLY `fiscal_label` (`FY2025Q4`). Neither spelling
-# reaches them: `FY2025Q4` finds the period but no TTM result carries that
-# label, and `TTM FY2025Q4` matches no period at all.
-#
-# So these lock cleanly and then never resolve — the same failure as a
-# branding-style window, and the reason this module exists. They are refused
-# at lock until the resolver can address a TTM basis; until then, refusing is
-# the honest answer rather than sealing a commitment that cannot terminate.
-# `test_ttm_metrics_are_exactly_the_unreachable_ones` derives this set from
-# the registry and the resolver, so it shrinks by itself once that is fixed.
-TTM_BASIS_METRICS: frozenset[str] = frozenset({
-    "accrual_trend", "beneish_aqi", "beneish_depi", "beneish_dsri",
-    "beneish_gmi", "beneish_lvgi", "beneish_m_score", "beneish_sgai",
-    "beneish_sgi", "beneish_tata", "cfo_to_net_income", "fcf_margin",
-    "fcf_margin_trend", "fcf_to_net_income", "net_debt_to_ebitda",
-    "total_accruals",
-})
+# Nothing is excluded here any more. Sixteen TTM-basis metrics used to be:
+# their results are labelled `TTM FY2025Q4` and the resolver matched only a
+# dataset period's quarterly label, so `total_accruals`, every Beneish
+# component and `cfo_to_net_income` locked cleanly and then never resolved.
+# `resolver._lookup_metric_value` now accepts both spellings of the same
+# commitment and discloses which basis answered, so they are reachable and
+# must be lockable. `test_the_excluded_set_is_exactly_what_the_resolver_
+# cannot_reach` derives this from the resolver, so any future name it cannot
+# reach fails there rather than being sealed into an entry that cannot
+# terminate.
+TTM_BASIS_METRICS: frozenset[str] = frozenset()
 
 RESOLVABLE_METRICS: frozenset[str] = (METRIC_IDS - TTM_BASIS_METRICS) | FIELD_NAMES
 
