@@ -10,6 +10,7 @@ import re
 from collections.abc import Sequence
 
 from app.services.brief.assessment import QuarterAssessment, parse_quarter_assessment
+from app.services.brief.assumptions import DERIVED, HOLDER
 from app.services.brief.text import fold_row, normalize, split_row, unwrap
 
 
@@ -29,6 +30,13 @@ REQUIRED_HEADINGS = (
 )
 ASSUMPTION_VERDICTS = {"held", "challenged", "no news"}
 
+# Engine-derived assumptions sit under a heading that says "Your assumptions",
+# so the line disclaiming them is the one thing standing between a machine's
+# reading of the filings and a holder who thinks they wrote it. Every other
+# property of this section fails closed; this one has to as well. Kept in sync
+# with .claude/skills/earnings-brief/SKILL.md.
+DERIVED_NOTE = "_Derived from this company's filed history - not your own assumptions._"
+
 
 def _section(markdown: str, title: str) -> str | None:
     match = re.search(
@@ -39,6 +47,13 @@ def _section(markdown: str, title: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def _plain(line: str) -> str:
+    """Normalized, stripped of emphasis and terminal punctuation. Whether the
+    writer reached for `_x_`, `*x*` or `**x**` is not the point; the reader
+    seeing the disclosure is."""
+    return normalize(line).replace("_", "").replace("*", "").strip().rstrip(".").lower()
+
+
 def _cells(line: str) -> list[str]:
     # Pivot on the verdict cell (held / challenged / no news): a stray pipe in
     # the assumption text and an extra trailing column both produce a surplus,
@@ -46,10 +61,18 @@ def _cells(line: str) -> list[str]:
     return fold_row(split_row(line), 4, ASSUMPTION_VERDICTS, pivot_at=2)
 
 
-def _validate_assumptions(markdown: str, expected: Sequence[str]) -> None:
+def _validate_assumptions(markdown: str, expected: Sequence[str], origin: str) -> None:
     section = _section(markdown, "Your assumptions")
     if section is None:
         raise ValueError("missing `## Your assumptions` section")
+
+    if expected and origin == DERIVED:
+        opening = next((ln for ln in section.splitlines() if ln.strip()), "")
+        if _plain(opening) != _plain(DERIVED_NOTE):
+            raise ValueError(
+                "assumptions derived from filed history must be disclosed as such: the "
+                f"section has to open with `{DERIVED_NOTE}`"
+            )
 
     if not expected:
         lines = [normalize(line) for line in section.splitlines() if line.strip()]
@@ -101,7 +124,10 @@ def _validate_assumptions(markdown: str, expected: Sequence[str]) -> None:
 
 
 def validate_brief(
-    markdown: str, *, expected_assumptions: Sequence[str]
+    markdown: str,
+    *,
+    expected_assumptions: Sequence[str],
+    assumptions_origin: str = HOLDER,
 ) -> QuarterAssessment:
     """Validate the fixed brief shape and return its structured assessment."""
     # Compared normalized: a typographic apostrophe in "the company's own
@@ -115,5 +141,5 @@ def validate_brief(
             + (f" (missing or renamed: {', '.join(expected)})" if expected else "")
         )
     assessment = parse_quarter_assessment(markdown)
-    _validate_assumptions(markdown, expected_assumptions)
+    _validate_assumptions(markdown, expected_assumptions, assumptions_origin)
     return assessment

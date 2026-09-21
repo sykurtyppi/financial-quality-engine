@@ -39,6 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.services.brief.derived import derive_for_ticker
 from app.services.brief.assumptions import (
     add_assumption,
     assumptions_path,
@@ -261,7 +262,8 @@ def cmd_build(args: argparse.Namespace) -> int:
             if assumptions_file is not None
             else []
         )
-        assessment = validate_brief(stdout, expected_assumptions=expected_assumptions)
+        assessment = validate_brief(stdout, expected_assumptions=expected_assumptions,
+                                    assumptions_origin=src.assumptions_origin)
     except (OSError, ValueError) as e:
         print(f"brief FAILED (invalid brief: {e}); sources kept in "
               f"{src.workdir}", file=sys.stderr)
@@ -382,12 +384,29 @@ def cmd_digest(args: argparse.Namespace) -> int:
 
 def cmd_assume(args: argparse.Namespace) -> int:
     ticker = safe_ticker(args.ticker)
+    if args.derive:
+        # Preview only, never written to the holder's file: once these land in
+        # journal/assumptions/ nothing downstream can tell them from something
+        # the holder actually believes. Adopt one by passing it to `assume`.
+        found = derive_for_ticker(ticker)
+        if not found:
+            print(f"{ticker}: nothing derivable — too little contiguous quarterly history, "
+                  "or no series steady enough to carry a claim")
+            return 0
+        held = load_assumptions(ticker)
+        print(f"{ticker}: {len(found)} assumption(s) the engine would derive from its filed "
+              f"history{' (unused — your own are on file and win)' if held else ''}:")
+        for i, d in enumerate(found, 1):
+            print(f"  {i}. {d.text}")
+            print(f"     basis: {d.detail}")
+        return 0
     if args.text:
         p = add_assumption(ticker, " ".join(args.text))
         print(f"added to {p}")
     items = load_assumptions(ticker)
     if not items:
-        print(f"{ticker}: no standing assumptions yet ({assumptions_path(ticker)})")
+        print(f"{ticker}: no standing assumptions yet ({assumptions_path(ticker)}) — briefs will "
+              f"derive them from filed history (preview: `assume {ticker} --derive`)")
         return 0
     print(f"{ticker}: {len(items)} standing assumption(s) — {assumptions_path(ticker)}")
     for i, a in enumerate(items, 1):
@@ -444,6 +463,9 @@ def main() -> int:
     a.add_argument("ticker")
     a.add_argument("text", nargs="*", help='the assumption, e.g. "DC revenue keeps growing >50%% YoY" '
                                             "(omit to list)")
+    a.add_argument("--derive", action="store_true",
+                   help="preview what the engine would derive from filed history when you have "
+                        "written none (never written to your file)")
     a.set_defaults(fn=cmd_assume)
 
     args = p.parse_args()
