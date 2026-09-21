@@ -78,6 +78,21 @@ def _identity(explicit: str | None) -> str:
     return identity
 
 
+def _is_newer_than(path: Path, started_ns: int) -> bool:
+    """True when `path` was published after `started_ns` — i.e. by a request
+    that began later than ours and therefore asked SEC later.
+
+    Timestamps come from the same filesystem clock `os.replace` stamps, so
+    this compares like with like. A missing entry is not newer (nothing to
+    preserve); an unreadable one is treated as not newer so a stat failure
+    can never silently stop the cache from ever being written.
+    """
+    try:
+        return path.stat().st_mtime_ns > started_ns
+    except OSError:
+        return False
+
+
 class SecClient:
     def __init__(
         self,
@@ -136,6 +151,11 @@ class SecClient:
                 # not fail every read for a day: drop it and refetch.
                 logger.warning("discarding unreadable cache entry %s", path)
                 path.unlink(missing_ok=True)
+        # Generation stamp, taken BEFORE the request goes out. A request that
+        # started later asked SEC later, so its answer is at least as recent;
+        # that is the only ordering available to us, since SEC responses carry
+        # no vintage we can compare.
+        started_ns = time.time_ns()
         data = self._get(url)
         try:
             parsed = json.loads(data)
@@ -151,6 +171,21 @@ class SecClient:
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
+            # `os.replace` is atomic but not ORDERED: it guarantees no reader
+            # sees half a file, and nothing about which of two concurrent
+            # writers wins. A slow request that started first would land after
+            # a fast one that started later and overwrite it, so every
+            # subsequent read served the older SEC snapshot for up to the TTL
+            # — on filing day, that is a report built from a pre-filing index.
+            # The web UI and the watcher construct separate clients, so
+            # per-instance request pacing does not serialize this.
+            if _is_newer_than(path, started_ns):
+                logger.debug(
+                    "keeping cache entry %s: written by a request that started "
+                    "after this one", path.name,
+                )
+                Path(tmp).unlink(missing_ok=True)
+                return parsed
             os.replace(tmp, path)  # atomic: a reader sees the old entry or the new one, never half
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
