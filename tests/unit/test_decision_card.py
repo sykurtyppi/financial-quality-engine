@@ -126,3 +126,28 @@ class TestCard:
         assert "not checked this run" in t1
         assert "restatement footprints" in t1
         assert "8-K 4.02 events" in t1
+
+    def test_integrity_notes_render_without_disturbing_the_coverage_branch(self):
+        # The note is additive: it must not turn the coverage line into the
+        # dataset-only line, nor appear when nothing lapsed. (A first cut of
+        # this landed between the `if` and its `else`, which Python read as a
+        # for/else — every report then claimed to be a dataset-only run.)
+        with_note = render_decision_card(
+            _result(), _thermo(50.0), generated_on="2026-08-09", coverage=1.0,
+            integrity_notes=["filing index could not be read once for this run"],
+        )
+        dq = with_note.split("## Data quality")[1]
+        assert "XBRL field coverage" in dq
+        assert "filing index could not be read once" in dq
+        assert "Dataset-only run" not in dq
+
+        clean = render_decision_card(
+            _result(), _thermo(50.0), generated_on="2026-08-09", coverage=1.0
+        )
+        assert "⚠ filing index" not in clean
+        assert "Dataset-only run" not in clean
+
+        dataset_only = render_decision_card(
+            _result(), _thermo(50.0), generated_on="2026-08-09"
+        )
+        assert "Dataset-only run" in dataset_only

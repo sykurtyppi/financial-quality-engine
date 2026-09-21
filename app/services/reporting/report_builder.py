@@ -25,6 +25,12 @@ from app.services.reporting.markdown_report import render
 from app.services.scoring.thermometer import DistressThermometer, compute_thermometer
 
 
+SNAPSHOT_UNAVAILABLE = (
+    "filing index could not be read once for this run; each evidence stream "
+    "acquired it separately, so sections may reflect different moments"
+)
+
+
 ANALYSIS_SCOPE_NOTICE = (
     "## Scope limitation\n\n"
     "**Examples of material risks not analyzed by this engine include:** purchase "
@@ -228,6 +234,7 @@ def build_report(
     doc_diagnostics: list[str] | None = None,
     company_facts: dict | None = None,
     submissions: dict | None = None,
+    index_degraded: bool = False,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -243,6 +250,13 @@ def build_report(
         raise ValueError(
             f"generated_on must be an ISO date (YYYY-MM-DD); got {generated_on!r}"
         ) from e
+
+    # One flag, both surfaces. A caller that had to fall back to per-stream
+    # index reads records it here and the appendix warning and the card note
+    # follow together — setting one and forgetting the other is what let the
+    # first version of this disclosure render a degraded run as clean.
+    integrity_notes = [SNAPSHOT_UNAVAILABLE] if index_degraded else []
+    warnings = list(warnings or []) + integrity_notes
 
     body = render(result, generated_on=generated_on)
     event_lines: list[str] = []
@@ -299,6 +313,7 @@ def build_report(
         tier1_events=tier1_events or None,
         tier1_unavailable=tier1_unavailable or None,
         capital_markets_checked=capital_markets_checked,
+        integrity_notes=integrity_notes or None,
     )
     report = (
         card

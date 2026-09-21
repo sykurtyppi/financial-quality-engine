@@ -117,10 +117,6 @@ def extract_section(text: str, doc_type: DocumentType) -> str | None:
     return None
 
 
-def _get_submissions(client: SecClient, ticker: str) -> dict:
-    return client.submissions(ticker)
-
-
 _FILING_ARRAYS = ("form", "accessionNumber", "primaryDocument", "reportDate", "items", "filingDate")
 _HISTORY_LOOKBACK_YEARS = 4  # enough for >12 quarters of filings before a cutoff
 
@@ -362,7 +358,7 @@ def fetch_documents(
     elif cik is not None:
         subs = client.submissions_by_cik(cik)
     else:
-        subs = _get_submissions(client, ticker)
+        subs = client.submissions(ticker)
         cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
     fye_month = fiscal_year_end_month(facts_json)
     merged = _merged_filings(client, subs, before)

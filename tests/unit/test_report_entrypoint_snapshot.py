@@ -9,7 +9,6 @@ payload stops being passed through.
 from types import SimpleNamespace
 
 from app.core.pipeline import analyze as real_analyze
-from app.services.ingestion.edgar_adapter import SNAPSHOT_UNAVAILABLE
 from app.services.ingestion.sec_client import SecClientError
 from app.services.journal import reporting as journal_reporting
 from scripts import generate_report
@@ -112,7 +111,7 @@ def test_cli_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path):
                         lambda *a, **k: _documents())
 
     def fake_build_report(*args, **kwargs):
-        observed["warnings"] = kwargs["warnings"]
+        observed["degraded"] = kwargs["index_degraded"]
         observed["report_submissions"] = kwargs["submissions"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
 
@@ -123,7 +122,7 @@ def test_cli_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path):
     # The run still completes — each stream falls back — but the report must
     # not imply the single-vintage guarantee was in force.
     assert observed["report_submissions"] is None
-    assert SNAPSHOT_UNAVAILABLE in observed["warnings"]
+    assert observed["degraded"] is True
 
 
 def test_journal_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path):
@@ -139,7 +138,7 @@ def test_journal_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path
     monkeypatch.setattr(journal_reporting, "fetch_documents", lambda *a, **k: _documents())
 
     def fake_build_report(*args, **kwargs):
-        observed["warnings"] = kwargs["warnings"]
+        observed["degraded"] = kwargs["index_degraded"]
         observed["report_submissions"] = kwargs["submissions"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
 
@@ -148,7 +147,7 @@ def test_journal_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path
     journal_reporting.build_report("aapl")
 
     assert observed["report_submissions"] is None
-    assert SNAPSHOT_UNAVAILABLE in observed["warnings"]
+    assert observed["degraded"] is True
 
 
 def test_journal_reuses_snapshots_for_documents_and_report(monkeypatch, tmp_path):

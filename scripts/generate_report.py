@@ -23,7 +23,6 @@ sys.path.insert(0, str(ROOT))
 
 from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import (
-    SNAPSHOT_UNAVAILABLE,
     fetch_dataset_snapshot,
     fetch_submissions_snapshot,
 )
@@ -55,9 +54,6 @@ def main() -> int:
           + (f"; warnings: {'; '.join(diag.warnings)}" if diag.warnings else ""))
 
     submissions = fetch_submissions_snapshot(ticker, client)
-    warnings = list(diag.warnings)
-    if submissions is None:
-        warnings.append(SNAPSHOT_UNAVAILABLE)
 
     doc_diagnostics: list[str] = []
     if not args.no_docs:
@@ -81,10 +77,11 @@ def main() -> int:
         ticker=ticker,
         fetched_at=fetched_at,
         fresh=args.fresh,
-        warnings=warnings,
+        warnings=diag.warnings,
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
         submissions=submissions,
+        index_degraded=submissions is None,
     )
 
     out_dir = ROOT / "reports"

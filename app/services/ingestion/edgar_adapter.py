@@ -30,12 +30,6 @@ class DatasetSnapshot:
     company_facts: dict
 
 
-SNAPSHOT_UNAVAILABLE = (
-    "filing index could not be read once for this run; each evidence stream "
-    "acquired it separately, so sections may reflect different moments"
-)
-
-
 def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
     """Read the filing index once for a whole report, or return None.
 
@@ -49,9 +43,10 @@ def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
     failure the per-stream retries then survive — a 403 fair-access throttle
     is not retried at all (`_RETRY_STATUSES`) — leaves a report that looks
     complete while silently having given up the single-vintage guarantee.
-    Callers must therefore record `SNAPSHOT_UNAVAILABLE` in the data-quality
-    appendix. Only acquisition failure is absorbed; a programming error still
-    raises rather than disabling the snapshot in silence.
+    Callers must therefore pass `index_degraded=True` to `build_report`, which
+    states it on the card and in the data-quality appendix together. Only
+    acquisition failure is absorbed; a programming error still raises rather
+    than disabling the snapshot in silence.
     """
     try:
         return client.submissions(ticker)

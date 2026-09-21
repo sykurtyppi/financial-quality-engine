@@ -25,7 +25,7 @@ CIK = 320193
 TICKER = "AAPL"
 
 _SUBMISSIONS = {
-    "cik": CIK,
+    "cik": str(CIK),  # the real API returns an unpadded decimal string
     "sic": "3571",
     "sicDescription": "Electronic Computers",
     "filings": {
@@ -121,7 +121,7 @@ class TestReportBuilderThreadsTheIndex:
     live, so the threading has to be pinned here and not only at the seams
     either side of it."""
 
-    def _report(self, client, submissions):
+    def _report(self, client, submissions, index_degraded: bool = False):
         from app.core.pipeline import analyze
         from app.services.reporting.report_builder import build_report
         from tests.fixtures.companies import stretch_dataset
@@ -136,6 +136,7 @@ class TestReportBuilderThreadsTheIndex:
             fetched_at="2026-05-15 00:00 UTC",
             company_facts={"facts": {}},
             submissions=submissions,
+            index_degraded=index_degraded,
         )
         return report
 
@@ -167,6 +168,30 @@ class TestReportBuilderThreadsTheIndex:
         report = self._report(_OutageExceptForTheIndex(), submissions)
         assert "Capital-markets appendix UNAVAILABLE" not in report
         assert "Event (8-K 4.02) appendix UNAVAILABLE" not in report
+        # Positive: both streams actually produced their evidence from it.
+        card = report.split("Full report (appendix)")[0]
+        assert "8-K Item 4.02 non-reliance" in card
+        assert "securities takedown(s)" in card
+
+    def test_a_degraded_index_is_stated_on_the_card_not_just_the_appendix(self, tmp_path):
+        # The scenario the disclosure exists for: the shared read failed but the
+        # per-stream reads succeeded, so every section renders. The 90-second
+        # surface is the one a human reads, and it must not imply the run
+        # established more than it did.
+        from app.services.reporting.report_builder import SNAPSHOT_UNAVAILABLE
+
+        client, _ = _client(tmp_path)
+        report = self._report(client, None, index_degraded=True)
+        card = report.split("Full report (appendix)")[0]
+        assert SNAPSHOT_UNAVAILABLE in card
+        assert SNAPSHOT_UNAVAILABLE in report.split("Full report (appendix)")[1]
+
+    def test_an_undegraded_run_says_nothing(self, tmp_path):
+        from app.services.reporting.report_builder import SNAPSHOT_UNAVAILABLE
+
+        client, _ = _client(tmp_path)
+        submissions = fetch_submissions_snapshot(TICKER, client)
+        assert SNAPSHOT_UNAVAILABLE not in self._report(client, submissions)
 
 
 class TestCacheKeyFollowsTheEntity:
@@ -218,8 +243,10 @@ class TestAcquisitionFailureStaysVisible:
         # The streams' own retries can succeed where the shared read failed,
         # leaving a report that looks complete while silently back on
         # per-stream vintages. That has to be stated, not swallowed.
-        from app.services.ingestion.edgar_adapter import SNAPSHOT_UNAVAILABLE
-        from app.services.reporting.report_builder import data_quality_section
+        from app.services.reporting.report_builder import (
+            SNAPSHOT_UNAVAILABLE,
+            data_quality_section,
+        )
 
         client, _ = _client(tmp_path)
         calls = {"n": 0}

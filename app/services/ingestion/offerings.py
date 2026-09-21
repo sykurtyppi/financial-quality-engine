@@ -22,7 +22,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from app.services.ingestion.edgar_documents import html_to_text
-from app.services.ingestion.sec_client import SecClient, SecClientError
+from app.services.ingestion.sec_client import (
+    SecClient,
+    SecClientError,
+    assert_submissions_match,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +257,10 @@ def fetch_offerings(
     """
     reference = as_of or date.today()
     cik = client.resolve_cik(ticker)
+    # This cik builds the prospectus archive URLs below, so a payload for
+    # another filer would pair its accessions with this filer's directory.
+    if submissions is not None:
+        assert_submissions_match(submissions, cik)
     timeline = OfferingsTimeline(
         ticker=ticker.upper(),
         cik=cik,

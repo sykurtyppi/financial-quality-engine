@@ -140,9 +140,18 @@ a sweep runs after this lands, with no correctness impact. It is still a
 change to a backtesting data path and is named here rather than left for an
 operator to discover.
 
-Still out of scope: cross-process duplication (a sweep pass, the report
-subprocess and the brief subprocess each read the index), which the shared
-cache entry reduces but an in-memory snapshot cannot remove.
+Still out of scope, and worth stating precisely because the categories
+differ. The watch poller's repeated reads are deliberate — it is waiting for
+a filing to appear, so a shared payload there would defeat its purpose. The
+journal report and the brief run as separate subprocesses, which an
+in-memory snapshot cannot span. But `watch._generate_auto` calls
+`journal.reporting.build_report` **in-process**, seconds after the poller
+already read the index that produced the "a filing landed" decision, and
+reads it again because `fresh=True` bypasses the cache. That one is
+threadable and is the clearest remaining item; it needs a `submissions`
+parameter on `journal.reporting.build_report`. Nothing is stale in the
+meantime — the report reads the newer index — so it is a duplication, not a
+correctness gap.
 
 A second review round found two ways the guarantee could lapse silently,
 both fixed before merge: the snapshot absorbed every exception (so a
