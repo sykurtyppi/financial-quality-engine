@@ -103,6 +103,37 @@ def _restatement_tier1_lines(footprints) -> list[str]:
     return lines
 
 
+# Exception types that are almost always a defect in this code rather than a
+# problem with what SEC returned. A broad `except Exception` around each
+# evidence stream is deliberate — one failing stream must never cost the whole
+# report — but it was also labelling every failure a fetch/parse problem, so a
+# misplaced variable surfaced to the reader as:
+#
+#   Restatement appendix UNAVAILABLE (fetch/parse failed: name 'field_tags'
+#   is not defined). Absence of that section is a data gap, not evidence of
+#   no revisions.
+#
+# which blames SEC for a bug and invites the reader to discount a section that
+# was never computed. These re-raise instead: a defect should fail loudly in
+# CI and in an operator's run, where it gets fixed, rather than hide behind a
+# data-gap notice for as long as nobody reads the code.
+#
+# The trade-off is deliberate. An unforeseen SEC payload shape that raises one
+# of these will now break the report instead of degrading it — noisy, but
+# recoverable and visible, where the alternative is a wrong all-clear that
+# nobody investigates.
+_PROGRAMMING_ERRORS = (
+    NameError, AttributeError, TypeError, ImportError, AssertionError, IndexError,
+)
+
+
+def _stream_failure(exc: Exception) -> str:
+    """Record an acquisition failure, or re-raise a defect."""
+    if isinstance(exc, _PROGRAMMING_ERRORS):
+        raise exc
+    return str(exc)
+
+
 def _collect_streams(
     client,
     ticker: str,
@@ -141,7 +172,7 @@ def _collect_streams(
                 f"{timeline.lookback_months} months (see Capital Markets Activity)"
             )
     except Exception as e:  # noqa: BLE001 - a stream must never break the report
-        errors["offerings"] = str(e)
+        errors["offerings"] = _stream_failure(e)
 
     try:
         from app.services.ingestion.restatements import (
@@ -157,7 +188,7 @@ def _collect_streams(
         body_sections.append(render_restatements_section(footprints))
         tier1_events += _restatement_tier1_lines(footprints)
     except Exception as e:  # noqa: BLE001
-        errors["restatements"] = str(e)
+        errors["restatements"] = _stream_failure(e)
 
     try:
         from app.services.backtesting.events import fetch_entity_events
@@ -169,7 +200,7 @@ def _collect_streams(
             f"8-K Item 4.02 non-reliance (restatement announced) filed {d}" for d in nr_dates
         ]
     except Exception as e:  # noqa: BLE001
-        errors["events"] = str(e)
+        errors["events"] = _stream_failure(e)
 
     return body_sections, event_lines, tier1_events, errors, takedowns
 
