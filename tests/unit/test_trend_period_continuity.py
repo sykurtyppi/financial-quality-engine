@@ -131,6 +131,20 @@ def test_capex_reports_the_span_it_actually_used():
     assert result.inputs["n_recent"] == 4.0 and result.inputs["n_prior"] == 3.0
 
 
+def test_capex_names_the_latest_period_when_that_is_what_is_missing():
+    """Two guards can both refuse this input; they are not interchangeable.
+    The operator reading `gaps at Q7` looks for a hole in the middle of the
+    window, while `the most recent period supplied no observation` points at
+    a late filing. Mutation testing found the specific guard removable with
+    the suite still green, because only the status was pinned."""
+    series = [_period(f"Q{i}", 100.0 + 10 * i) for i in range(1, 7)] + [_period("Q7", None)]
+    result = capex_intensity_regime_shift(series)
+    assert result.status is MetricStatus.MISSING_DATA
+    why = result.missing_fields[0]
+    assert "the most recent period supplied no observation" in why
+    assert "Q7" in why
+
+
 def test_capex_needs_a_baseline_not_just_a_window():
     just_the_window = [_period(f"Q{i}", 100.0) for i in range(1, 6)]
     result = capex_intensity_regime_shift(just_the_window)
@@ -159,3 +173,70 @@ def test_a_stale_trend_could_suppress_a_genuinely_elevated_current_reading():
     assert component.concern_score is None
     # The block now reflects the one thing this quarter actually measured.
     assert scored.score is not None and scored.score > 80
+
+
+# --- the non-finite contract ----------------------------------------------
+# `build_metric` refuses a non-finite value for every metric built through it,
+# and this package's contract says so at the top of `base.py`. The trend
+# functions construct their MetricResult directly and had opted out. Found by
+# adversarial probing rather than mutation: no mutant expresses "forgot to
+# apply a rule the rest of the module applies".
+
+_NON_FINITE = [float("nan"), float("inf"), float("-inf")]
+
+
+@pytest.mark.parametrize("bad_value", _NON_FINITE)
+@pytest.mark.parametrize("fn", [
+    pytest.param(lambda s: accrual_trend(s), id="accrual_trend"),
+    pytest.param(lambda s: trend_change("fcf_margin_trend", s), id="fcf_margin_trend"),
+])
+def test_a_non_finite_result_is_not_meaningful(fn, bad_value):
+    result = fn([_ok("FY2026Q1", 1.0), _ok("FY2026Q2", 2.0),
+                 _ok("FY2026Q3", 3.0), _ok("FY2026Q4", bad_value)])
+    assert result.status is MetricStatus.NOT_MEANINGFUL
+    assert result.note == "Non-finite result"
+
+
+def test_a_nan_would_otherwise_crash_the_scorer():
+    """Severity, stated concretely. `interpolate_concern` has no branch for a
+    NaN and raises AssertionError('unreachable'), which is not caught anywhere
+    on the scoring path — one NaN takes the whole report down rather than
+    degrading one metric."""
+    from app.services.scoring.engine import interpolate_concern
+
+    anchors = [(-0.02, 15), (0.0, 30), (0.03, 60), (0.08, 85)]
+    with pytest.raises(AssertionError):
+        interpolate_concern(float("nan"), anchors)
+    # An infinity does not crash — it silently clamps to the outermost anchor,
+    # scoring maximum concern on a number that means nothing. Also refused.
+    assert interpolate_concern(float("inf"), anchors) == 85
+
+
+def test_the_guard_is_unreachable_from_the_real_pipeline_today():
+    """Honest scope: every trend's inputs come from `build_metric`, which
+    already filters non-finite values, so this closes a contract hole rather
+    than a live failure. If a future metric stops going through
+    `build_metric`, this stops being true — hence the guard."""
+    import inspect
+
+    from app.services.formulas import accruals, working_capital
+
+    for module, fname in [(accruals, "total_accruals"), (accruals, "fcf_margin"),
+                          (working_capital, "dso"), (working_capital, "dio")]:
+        src = inspect.getsource(getattr(module, fname))
+        assert "build_metric(" in src, (
+            f"{fname} no longer goes through build_metric; a non-finite value "
+            f"can now reach a trend, and the guard is load-bearing"
+        )
+
+
+@pytest.mark.parametrize("bad_capex", [float("inf"), float("nan")])
+def test_capex_refuses_a_non_finite_regime_shift(bad_capex):
+    """capex takes PeriodFinancials rather than MetricResult, so it needs its
+    own case — the parametrized pair above cannot reach it. Mutation testing
+    caught the omission: its guard was removable with the suite green."""
+    series = [_period(f"Q{i}", 100.0 + 10 * i) for i in range(1, 7)]
+    series.append(_period("Q7", bad_capex))
+    result = capex_intensity_regime_shift(series)
+    assert result.status is MetricStatus.NOT_MEANINGFUL
+    assert result.note == "Non-finite result"

@@ -162,3 +162,30 @@ def contributor_note(contributors: list[MetricResult]) -> str:
         return "no contributing periods"
     span = labels[0] if len(labels) == 1 else f"{labels[0]}–{labels[-1]}"
     return f"computed over {len(labels)} period(s): {span}"
+
+
+def non_finite(value: float, name: str, formula: str, fiscal_label: str) -> MetricResult | None:
+    """NOT_MEANINGFUL for a non-finite trend result, or None to proceed.
+
+    `build_metric` already refuses a non-finite value for every metric built
+    through it, and this module's contract says so at the top. The trend
+    functions construct their `MetricResult` directly and so skipped that
+    check — a NaN reaching `interpolate_concern` raises
+    `AssertionError("unreachable")` and takes the whole report down, and an
+    infinity silently clamps to the outermost anchor, scoring maximum concern
+    on a number that means nothing.
+
+    Not reachable from the current pipeline: every trend's inputs come from
+    `build_metric`, which filters non-finite values out first. This closes the
+    contract rather than a live failure — the trend functions are the only
+    place in the package that opted out of it.
+    """
+    if math.isfinite(value):
+        return None
+    return MetricResult(
+        name=name,
+        formula=formula,
+        fiscal_label=fiscal_label,
+        status=MetricStatus.NOT_MEANINGFUL,
+        note="Non-finite result",
+    )

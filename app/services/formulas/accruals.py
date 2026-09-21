@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from app.schemas.financials import PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
-from app.services.formulas.base import average, build_metric, contributor_note, stale_current
+from app.services.formulas.base import (
+    average, build_metric, contributor_note, non_finite, stale_current,
+)
 
 MIN_EARNINGS_BASE_NOTE = (
     "Net income is non-positive; ratio-to-earnings is not meaningful. "
@@ -104,6 +106,9 @@ def accrual_trend(series: list[MetricResult]) -> MetricResult:
         )
     latest = ok[-1].value
     prior_mean = sum(m.value for m in ok[:-1]) / len(ok[:-1])  # type: ignore[misc]
+    unusable = non_finite(latest - prior_mean, "accrual_trend", formula, label)  # type: ignore[operator]
+    if unusable is not None:
+        return unusable
     return MetricResult(
         name="accrual_trend",
         formula=formula,

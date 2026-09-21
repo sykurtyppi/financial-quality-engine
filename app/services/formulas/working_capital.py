@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from app.schemas.financials import PeriodFinancials, PeriodType
 from app.schemas.metrics import MetricResult, MetricStatus
-from app.services.formulas.base import build_metric, contributor_note, growth, stale_current
+from app.services.formulas.base import (
+    build_metric, contributor_note, growth, non_finite, stale_current,
+)
 
 
 def _days(p: PeriodFinancials) -> float:
@@ -169,6 +171,9 @@ def seasonal_trend_change(name: str, series: list[MetricResult]) -> MetricResult
             missing_fields=["same-quarter history (need >= 1 prior year)"],
         )
     prior_mean = sum(m.value for m in priors_ok) / len(priors_ok)  # type: ignore[misc]
+    unusable = non_finite(latest.value - prior_mean, name, formula, label)  # type: ignore[operator]
+    if unusable is not None:
+        return unusable
     return MetricResult(
         name=name,
         formula=formula,
@@ -204,6 +209,9 @@ def trend_change(name: str, series: list[MetricResult], min_periods: int = 3) ->
         )
     prior = ok[:-1]
     prior_mean = sum(m.value for m in prior) / len(prior)  # type: ignore[misc]
+    unusable = non_finite(ok[-1].value - prior_mean, name, "latest - mean(prior)", label)  # type: ignore[operator]
+    if unusable is not None:
+        return unusable
     return MetricResult(
         name=name,
         formula="latest - mean(prior)",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.schemas.financials import PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
-from app.services.formulas.base import build_metric, growth
+from app.services.formulas.base import build_metric, growth, non_finite
 
 
 def capex_to_revenue(cur: PeriodFinancials) -> MetricResult:
@@ -116,6 +116,10 @@ def capex_intensity_regime_shift(series: list[PeriodFinancials], window: int = 4
     prior = [p.capex / p.revenue for p in prior_periods]  # type: ignore[operator]
     recent_mean = sum(recent) / len(recent)
     prior_mean = sum(prior) / len(prior)
+    unusable = non_finite(recent_mean - prior_mean,
+                          "capex_intensity_regime_shift", formula, label)
+    if unusable is not None:
+        return unusable
     return MetricResult(
         name="capex_intensity_regime_shift",
         formula=formula,
