@@ -28,6 +28,7 @@ timeline rendered as a report section (matches ROADMAP_2026Q3 P1-F done-when).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -117,17 +118,32 @@ def _rows(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[dict]:
 
 
 def _active_tag(
-    facts_json: dict, candidates: tuple[tuple[str, str], ...], unit: str
+    facts_json: dict,
+    candidates: tuple[tuple[str, str], ...],
+    unit: str,
+    as_of: date | None = None,
 ) -> tuple[str, str] | None:
-    """The candidate tag the mapper would SCORE for this field: the one covering
-    the most distinct periods, ties broken by candidate order. This mirrors the
-    companyfacts mapper's `_best_series` coverage criterion so a reported
-    revision is always on the tag the engine actually uses. Returns (taxonomy,
-    tag) or None if no candidate has data."""
+    """Approximate the tag the mapper would SCORE: the candidate covering the
+    most distinct periods, ties broken by candidate order.
+
+    This is a FALLBACK, used only when the caller cannot supply the mapper's
+    real selection (see `selected_tags` on `detect_restatements`). It is a
+    genuine approximation and not equivalent to `_best_series`, which scores
+    coverage of the report's chosen quarter ends AFTER period reconstruction
+    and derivation. A legacy tag carrying many irrelevant old periods can win
+    here while losing there, which would report a revision on a tag the engine
+    never scored.
+
+    `as_of` must be honored HERE and not only when rows are later filtered:
+    counting coverage over the whole payload lets facts filed after `as_of`
+    decide which tag a dated report inspects, so adding a future taxonomy
+    series changes — or erases — a historical result that was already known at
+    the report date. Returns (taxonomy, tag) or None if no candidate has data.
+    """
     best: tuple[str, str] | None = None
     best_cov = 0
     for taxonomy, tag in candidates:  # candidates are in mapper priority order
-        rows = _rows(facts_json, taxonomy, tag, unit)
+        rows = _eligible_rows(facts_json, taxonomy, tag, unit, as_of)
         cov = len({(r.get("start"), r["end"]) for r in rows if "end" in r})
         if cov > best_cov:  # strict > => ties keep the earlier (higher-priority) tag
             best_cov = cov
@@ -135,11 +151,99 @@ def _active_tag(
     return best
 
 
+def _eligible_rows(
+    facts_json: dict, taxonomy: str, tag: str, unit: str, as_of: date | None
+) -> list[dict]:
+    """Rows a report dated `as_of` was entitled to see. One filter, applied
+    before anything reads the data — tag selection included."""
+    rows = _rows(facts_json, taxonomy, tag, unit)
+    if as_of is None:
+        return rows
+    out = []
+    for r in rows:
+        try:
+            filed = _parse_date(r["filed"])
+        except (KeyError, ValueError, TypeError):
+            continue  # a fact with no usable filed date cannot be dated; drop it
+        if filed <= as_of:
+            out.append(r)
+    return out
+
+
+def is_composite_selection(selected: str) -> bool:
+    """True when the mapper BUILT this field by summing several tags rather
+    than reading one. Recorded as bare tag names joined by `+`, e.g.
+    `SellingAndMarketingExpense+GeneralAndAdministrativeExpense`."""
+    return "+" in selected
+
+
+def _parse_selection(selected: str) -> list[tuple[str, str]]:
+    """Expand `FieldDiagnostic.tag_used` into the single series it names.
+
+    A COMPOSITE returns nothing, and that is the point. Expanding one into its
+    components and reporting each as a revision OF THE DERIVED FIELD states a
+    number that was never scored: with SG&A = S&M 1000 + G&A 10, a G&A move of
+    10 -> 11 is reported as `sga_expense: 10 -> 11`, a 10% revision clearing
+    the 1% materiality bar, while the sga_expense the engine actually scored
+    went 1010 -> 1011 — 0.099%, well under it. Several moved components also
+    emit several footprints for one field, inflating any count of "figures
+    revised".
+
+    Honest evidence for a composite needs the AGGREGATE reconstructed at each
+    filing vintage, with materiality applied to that aggregate. Until then the
+    field is reported as unchecked (see `unchecked_composites`) rather than
+    described with a component's numbers. A disclosed gap is recoverable; a
+    plausible wrong number in an evidence section is not.
+    """
+    if is_composite_selection(selected):
+        return []
+    taxonomy, sep, tag = selected.partition(":")
+    return [(taxonomy, tag)] if sep and taxonomy and tag else []
+
+
+def unchecked_composites(selected_tags: Mapping[str, str | None] | None) -> list[str]:
+    """Canonical fields whose revision history cannot be checked because the
+    mapper composed them from several tags. Surfaced in the report so their
+    silence is not read as `no revisions`."""
+    if not selected_tags:
+        return []
+    return sorted(
+        name for name, selected in selected_tags.items()
+        if selected and is_composite_selection(selected)
+        and name in {**INSTANT_FIELDS, **FLOW_FIELDS}
+    )
+
+
+def _resolve_tags(
+    facts_json: dict,
+    field_name: str,
+    candidates: tuple[tuple[str, str], ...],
+    unit: str,
+    as_of: date | None,
+    selected_tags: Mapping[str, str | None] | None,
+) -> list[tuple[str, str]]:
+    """The series to inspect for `field_name`: the mapper's own selection when
+    the caller supplied one, else the coverage approximation.
+
+    A supplied selection is authoritative even when it is None — the mapper
+    found no usable series for that field, so there is nothing the engine
+    scored and nothing to report a revision against. Falling back to the
+    approximation there would resurrect precisely the mismatch this argument
+    exists to prevent.
+    """
+    if selected_tags is not None and field_name in selected_tags:
+        selected = selected_tags[field_name]
+        return _parse_selection(selected) if selected else []
+    active = _active_tag(facts_json, candidates, unit, as_of)
+    return [active] if active is not None else []
+
+
 def detect_restatements(
     facts_json: dict,
     materiality_pct: float = DEFAULT_MATERIALITY_PCT,
     period_since: date | None = None,
     as_of: date | None = None,
+    selected_tags: Mapping[str, str | None] | None = None,
 ) -> list[RestatementFootprint]:
     """Find same-period figures a later filing revised beyond `materiality_pct`.
 
@@ -156,7 +260,15 @@ def detect_restatements(
     trail exactly as it stood then. It must filter the facts, not the finished
     footprints: a later comparative moves `current_filed` forward, and
     discarding the footprint afterwards would erase an amendment that WAS
-    known at the report date.
+    known at the report date. The filter applies before TAG SELECTION too, or
+    a series filed years later decides which tag a historical report inspects.
+
+    `selected_tags` maps a canonical field name to the qualified tag the mapper
+    actually scored (`FieldDiagnostic.tag_used`). Supply it whenever the caller
+    has run the mapper: the evidence then names the same series as the score,
+    which is the contract this module claims. Without it, `_active_tag`
+    approximates the choice and can diverge — a legacy tag with a long history
+    of periods outside the report window beats the tag actually scored.
     Split-adjusted share fields are excluded (see SPLIT_ADJUSTED_FIELDS).
     """
     footprints: list[RestatementFootprint] = []
@@ -171,21 +283,18 @@ def detect_restatements(
         # non-scored candidate tag would show a current_value that disagrees with
         # the engine, and iterating every candidate would double-report a field
         # when two tags both carry a same-period revision.
-        active = _active_tag(facts_json, candidates, unit)
-        if active is None:
-            continue
-        for taxonomy, tag in (active,):
+        for taxonomy, tag in _resolve_tags(
+            facts_json, field_name, candidates, unit, as_of, selected_tags
+        ):
             qualified_tag = f"{taxonomy}:{tag}"
             by_key: dict[tuple[date | None, date], list[tuple[date, float, str, str]]] = {}
-            for e in _rows(facts_json, taxonomy, tag, unit):
+            for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
                 try:
                     start = _parse_date(e["start"]) if "start" in e else None
                     end = _parse_date(e["end"])
                     filed = _parse_date(e["filed"])
                     val = float(e["val"])
                 except (KeyError, ValueError, TypeError):
-                    continue
-                if as_of is not None and filed > as_of:
                     continue
                 by_key.setdefault((start, end), []).append(
                     (filed, val, e.get("form", ""), e.get("accn", ""))
@@ -279,7 +388,9 @@ def _table(footprints: list[RestatementFootprint]) -> list[str]:
     return rows
 
 
-def render_restatements_section(footprints: list[RestatementFootprint]) -> str:
+def render_restatements_section(
+    footprints: list[RestatementFootprint], unchecked: list[str] | None = None
+) -> str:
     """Markdown section for the report. Evidence framing only — no scoring.
 
     Amended-filing (/A) revisions are surfaced as high-confidence restatements;
@@ -293,6 +404,19 @@ def render_restatements_section(footprints: list[RestatementFootprint]) -> str:
         "filing history (original vs latest-filed value for the same period). "
         "Share counts are excluded (stock-split noise)."
     )
+    if unchecked:
+        # Absence of evidence for these fields is not evidence of absence, and
+        # the difference has to be on the page — a reader scanning for "no
+        # revisions" would otherwise count a field that was never examined.
+        lines.append(
+            f"NOT CHECKED: {', '.join(unchecked)} — the engine builds "
+            f"{'these figures' if len(unchecked) > 1 else 'this figure'} by "
+            f"summing several XBRL tags, and a revision to one component is "
+            f"not a revision of the summed figure. Checking "
+            f"{'them' if len(unchecked) > 1 else 'it'} requires rebuilding the "
+            f"total at each filing vintage. Silence here means unexamined, not "
+            f"unrevised."
+        )
     lines.append("")
     if not footprints:
         lines.append("- No prior-period revisions detected above the materiality threshold.")

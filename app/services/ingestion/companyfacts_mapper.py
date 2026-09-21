@@ -221,6 +221,14 @@ class IngestionDiagnostics(BaseModel):
     def field_by_name(self, name: str) -> FieldDiagnostic:
         return next(f for f in self.fields if f.field_name == name)
 
+    def selected_tags(self) -> dict[str, str | None]:
+        """Which qualified XBRL tag actually backed each canonical field in
+        this run. The mapper's choice is the only authority on what the engine
+        scored; anything downstream that needs to name the same series (the
+        restatement detector does) must read it from here rather than
+        re-deriving it from the payload and hoping the two agree."""
+        return {f.field_name: f.tag_used for f in self.fields}
+
 
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
