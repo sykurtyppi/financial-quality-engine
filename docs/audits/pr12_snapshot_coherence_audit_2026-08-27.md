@@ -105,5 +105,33 @@ revision beyond the audited `38beca8`. Independently verified:
   identity assertions on a sentinel dict, refetch raises.
 - **Still open (accepted)**: gap 3 — notice placement/uniqueness unpinned
   (moving or duplicating it fails no test); F3 — notice renders on
-  dataset-only API paths. Both cosmetic. Submissions-snapshot coherence
-  remains the substantive follow-up, now candidly documented in the PR.
+  dataset-only API paths. Both cosmetic.
+
+## F1 resolved — submissions coherence (2026-09-21)
+
+F1's follow-up landed as "one filing index per report". Investigating it
+found the defect was wider than this audit recorded: the submissions index
+was not merely fetched per stream, it was cached under two names for one
+URL (`submissions_{TICKER}.json` from documents and events,
+`submissions_CIK##########.json` from offerings), and `_cached_json` keys on
+the filename without consulting the URL. So the incoherence was never
+confined to `--fresh` — an ordinary cached run fetched the same URL twice
+and could read two independently expiring vintages inside one report.
+
+Measured on the three consumers of one report run, before and after:
+
+| run mode | before | after |
+|---|---|---|
+| cached | 2 GETs, 2 cache files | 1 GET, 1 cache file |
+| `--fresh` (the default on every automated surface) | 3 GETs | 1 GET |
+
+The fix mirrors the Company Facts snapshot: one accessor that keys the entry
+by the resolved CIK, an optional `submissions` payload on the three
+consumers defaulting to their existing fetch, and both entry points fetching
+once. It also retires a latent alias — a ticker-named entry outlived the
+mapping that produced it, so a ticker reassigned to another filer kept
+serving the previous entity's index until the entry aged out.
+
+Still out of scope: cross-process duplication (a sweep pass, the report
+subprocess and the brief subprocess each read the index), which the shared
+cache entry reduces but an in-memory snapshot cannot remove.
