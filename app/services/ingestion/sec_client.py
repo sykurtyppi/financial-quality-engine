@@ -47,6 +47,27 @@ class SecClientError(RuntimeError):
     pass
 
 
+def assert_submissions_match(payload: dict, cik: int | None) -> None:
+    """Refuse a submissions payload that is not the pinned entity's.
+
+    A pin exists precisely because the registry has re-pointed a ticker at a
+    successor filer, so letting a supplied payload override it would quietly
+    undo the pin: the filing list would describe one entity while accession
+    URLs are built for another. Unpinned callers are unaffected.
+    """
+    if cik is None:
+        return
+    payload_cik = payload.get("cik")
+    try:
+        matches = payload_cik is not None and int(payload_cik) == cik
+    except (TypeError, ValueError):
+        matches = False
+    if not matches:
+        raise ValueError(
+            f"submissions payload is for CIK {payload_cik!r}, not the pinned CIK {cik}"
+        )
+
+
 def _identity(explicit: str | None) -> str:
     identity = explicit or os.environ.get("EDGAR_IDENTITY")
     if not identity:
@@ -170,6 +191,18 @@ class SecClient:
             f"submissions_CIK{cik:010d}.json",
             f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
         )
+
+    def submissions(self, ticker: str) -> dict:
+        """Submissions for a ticker, keyed in cache by the CIK it resolves to.
+
+        The cache is keyed by filename and never inspects the URL, so a second
+        name for one resource is a second copy of it. Ticker-keyed entries also
+        outlive the mapping that produced them: a ticker reassigned to another
+        filer keeps serving the old entity's submissions until the entry ages
+        out. Resolving first and storing under the CIK gives every consumer of
+        a report one entry, one vintage, one fetch.
+        """
+        return self.submissions_by_cik(self.resolve_cik(ticker))
 
     def submissions_page(self, name: str) -> dict:
         """Fetch an older submissions page (referenced in filings.files) for

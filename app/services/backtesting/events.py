@@ -15,9 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from app.services.ingestion.sec_client import SecClient
+from app.services.ingestion.sec_client import SecClient, assert_submissions_match
 
-SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 FINANCIAL_SIC_RANGE = (6000, 6999)
 
 
@@ -39,18 +38,25 @@ class EntityEvents:
         return any(start < d <= end for d in self.non_reliance_8k_dates)
 
 
-def fetch_entity_events(client: SecClient, ticker: str, cik: int | None = None) -> EntityEvents:
+def fetch_entity_events(
+    client: SecClient,
+    ticker: str,
+    cik: int | None = None,
+    submissions: dict | None = None,
+) -> EntityEvents:
     """`cik` pins the entity when the registry's ticker mapping has moved to a
     successor filer (see UniverseMember.cik); the cache key follows the CIK so
-    the pinned entity's submissions never alias the ticker's current ones."""
-    if cik is None:
-        cik = client.resolve_cik(ticker)
-        cache_name = f"submissions_{ticker.upper()}.json"
+    the pinned entity's submissions never alias the ticker's current ones — and
+    now so does the unpinned path, which a report always takes. `submissions`
+    supplies a payload the caller already holds, so the events stream reads the
+    same filing index as the rest of the report."""
+    if submissions is not None:
+        assert_submissions_match(submissions, cik)
+        data = submissions
     else:
-        cache_name = f"submissions_CIK{cik:010d}.json"
-    data = client._cached_json(  # noqa: SLF001 - same package family, reuses cache/rate limit
-        cache_name, SUBMISSIONS_URL.format(cik=cik)
-    )
+        if cik is None:
+            cik = client.resolve_cik(ticker)
+        data = client.submissions_by_cik(cik)
     recent = data.get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
     items = recent.get("items", [])

@@ -15,7 +15,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.core.pipeline import analyze
-from app.services.ingestion.edgar_adapter import fetch_dataset_snapshot
+from app.services.ingestion.edgar_adapter import (
+    fetch_dataset_snapshot,
+    fetch_submissions_snapshot,
+)
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
@@ -55,9 +58,12 @@ def build_report(
     client = SecClient(fresh=fresh)
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
+    submissions = fetch_submissions_snapshot(ticker, client)
     doc_diagnostics: list[str] = []
     if with_docs:
-        docs = fetch_documents(client, ticker, snapshot.company_facts, n_filings=8)
+        docs = fetch_documents(
+            client, ticker, snapshot.company_facts, n_filings=8, submissions=submissions
+        )
         dataset.documents = docs.documents
         doc_diagnostics = list(docs.diagnostics)
     result = analyze(dataset)
@@ -79,6 +85,8 @@ def build_report(
         warnings=diag.warnings,
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
+        submissions=submissions,
+        index_degraded=submissions is None,
         fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
     )
     if banner:

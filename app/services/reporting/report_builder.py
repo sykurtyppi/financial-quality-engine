@@ -25,6 +25,12 @@ from app.services.reporting.markdown_report import render
 from app.services.scoring.thermometer import DistressThermometer, compute_thermometer
 
 
+SNAPSHOT_UNAVAILABLE = (
+    "filing index could not be read once for this run; each evidence stream "
+    "acquired it separately, so sections may reflect different moments"
+)
+
+
 ANALYSIS_SCOPE_NOTICE = (
     "## Scope limitation\n\n"
     "**Examples of material risks not analyzed by this engine include:** purchase "
@@ -101,6 +107,7 @@ def _collect_streams(
     ticker: str,
     report_date: date,
     company_facts: dict | None = None,
+    submissions: dict | None = None,
 ):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
     (body_sections, event_lines, tier1_events, errors, takedowns). `takedowns`
@@ -118,7 +125,7 @@ def _collect_streams(
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
 
-        timeline = fetch_offerings(client, ticker, as_of=report_date)
+        timeline = fetch_offerings(client, ticker, as_of=report_date, submissions=submissions)
         body_sections.append(render_offerings_section(timeline))
         # Review finding 1 (round 5): fetch_offerings swallows a submissions
         # outage into a structured acquisition_error instead of raising, so check
@@ -151,7 +158,7 @@ def _collect_streams(
     try:
         from app.services.backtesting.events import fetch_entity_events
 
-        events = fetch_entity_events(client, ticker)
+        events = fetch_entity_events(client, ticker, submissions=submissions)
         cutoff = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
         nr_dates = _pit_dates(events.non_reliance_8k_dates, cutoff, report_date)
         tier1_events += [
@@ -226,6 +233,8 @@ def build_report(
     warnings: list[str] | None = None,
     doc_diagnostics: list[str] | None = None,
     company_facts: dict | None = None,
+    submissions: dict | None = None,
+    index_degraded: bool = False,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -242,6 +251,13 @@ def build_report(
             f"generated_on must be an ISO date (YYYY-MM-DD); got {generated_on!r}"
         ) from e
 
+    # One flag, both surfaces. A caller that had to fall back to per-stream
+    # index reads records it here and the appendix warning and the card note
+    # follow together — setting one and forgetting the other is what let the
+    # first version of this disclosure render a degraded run as clean.
+    integrity_notes = [SNAPSHOT_UNAVAILABLE] if index_degraded else []
+    warnings = list(warnings or []) + integrity_notes
+
     body = render(result, generated_on=generated_on)
     event_lines: list[str] = []
     tier1_events: list[str] = []
@@ -249,7 +265,7 @@ def build_report(
 
     if client is not None and ticker is not None:
         sections, event_lines, tier1_events, errors, takedowns = _collect_streams(
-            client, ticker, report_date, company_facts
+            client, ticker, report_date, company_facts, submissions
         )
         for section in sections:
             body += "\n\n" + section + "\n"
@@ -297,6 +313,7 @@ def build_report(
         tier1_events=tier1_events or None,
         tier1_unavailable=tier1_unavailable or None,
         capital_markets_checked=capital_markets_checked,
+        integrity_notes=integrity_notes or None,
     )
     report = (
         card

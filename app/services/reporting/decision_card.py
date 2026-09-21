@@ -88,6 +88,7 @@ def render_decision_card(
     tier1_events: list[str] | None = None,
     tier1_unavailable: list[str] | None = None,
     capital_markets_checked: bool = False,
+    integrity_notes: list[str] | None = None,
 ) -> str:
     """Render the 90-second card.
 
@@ -98,7 +99,10 @@ def render_decision_card(
     section. `tier1_unavailable` names any Tier-1 source that could NOT be
     checked this run (a failed fetch, or streams the API omits) so a
     not-checked source never reads as checked-and-clean (review findings 4 & the
-    round-2 Tier-1 availability finding).
+    round-2 Tier-1 availability finding). `integrity_notes` carries acquisition
+    guarantees that lapsed this run — the streams were checked, but not
+    necessarily against one moment — which belongs on the card for the same
+    reason: the 90-second surface must not imply more than the run established.
     """
     ticker = result.profile.ticker
     out: list[str] = [
@@ -177,4 +181,6 @@ def render_decision_card(
             f"- Dataset-only run (as of {generated_on}): coverage and EDGAR "
             "evidence streams not measured — run via generate_report.py for full detail."
         )
+    for note in integrity_notes or []:
+        out.append(f"- ⚠ {note}")
     return "\n".join(out)
