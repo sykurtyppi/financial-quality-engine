@@ -178,40 +178,92 @@ def is_composite_selection(selected: str) -> bool:
 
 
 def _parse_selection(selected: str) -> list[tuple[str, str]]:
-    """Expand `FieldDiagnostic.tag_used` into the single series it names.
+    """Expand `FieldDiagnostic.tag_used` into the series it names.
 
-    A COMPOSITE returns nothing, and that is the point. Expanding one into its
-    components and reporting each as a revision OF THE DERIVED FIELD states a
-    number that was never scored: with SG&A = S&M 1000 + G&A 10, a G&A move of
-    10 -> 11 is reported as `sga_expense: 10 -> 11`, a 10% revision clearing
-    the 1% materiality bar, while the sga_expense the engine actually scored
-    went 1010 -> 1011 — 0.099%, well under it. Several moved components also
-    emit several footprints for one field, inflating any count of "figures
-    revised".
-
-    Honest evidence for a composite needs the AGGREGATE reconstructed at each
-    filing vintage, with materiality applied to that aggregate. Until then the
-    field is reported as unchecked (see `unchecked_composites`) rather than
-    described with a component's numbers. A disclosed gap is recoverable; a
-    plausible wrong number in an evidence section is not.
+    A composite returns all of its components, which are then AGGREGATED (see
+    `_composite_vintages`) rather than reported individually. Reporting one
+    component as a revision of the derived field states a number that was
+    never scored: with SG&A = S&M 1000 + G&A 10, a G&A move of 10 -> 11 reads
+    as `sga_expense: 10 -> 11`, a 10% revision clearing the 1% materiality
+    bar, while the sga_expense the engine scored went 1010 -> 1011, 0.099%.
     """
-    if is_composite_selection(selected):
-        return []
-    taxonomy, sep, tag = selected.partition(":")
-    return [(taxonomy, tag)] if sep and taxonomy and tag else []
+    parts: list[tuple[str, str]] = []
+    for piece in selected.split("+"):
+        piece = piece.strip()
+        if not piece or piece == "none":
+            continue
+        taxonomy, sep, tag = piece.partition(":")
+        if sep:
+            if taxonomy and tag:
+                parts.append((taxonomy, tag))
+        else:
+            # Composite components are recorded unqualified; every tag the
+            # mapper composes from is us-gaap (SGA_COMPONENTS, DA_COMPONENTS,
+            # the debt tags), pinned by test so the assumption cannot rot.
+            parts.append(("us-gaap", piece))
+    return parts
 
 
-def unchecked_composites(selected_tags: Mapping[str, str | None] | None) -> list[str]:
-    """Canonical fields whose revision history cannot be checked because the
-    mapper composed them from several tags. Surfaced in the report so their
-    silence is not read as `no revisions`."""
-    if not selected_tags:
-        return []
-    return sorted(
-        name for name, selected in selected_tags.items()
-        if selected and is_composite_selection(selected)
-        and name in {**INSTANT_FIELDS, **FLOW_FIELDS}
-    )
+def _composite_vintages(
+    facts_json: dict,
+    components: list[tuple[str, str]],
+    unit: str,
+    as_of: date | None,
+) -> dict[tuple[date | None, date], list[tuple[date, float, str, str, frozenset[str]]]]:
+    """Rebuild a summed field's value as it stood at each filing vintage.
+
+    For every period, a vintage is any date on which some component was filed.
+    The aggregate at that vintage sums each component's latest value filed on
+    or before it — so a component the amendment did not re-report carries
+    forward, which is what the mapper does and therefore what was scored.
+
+    The contributing component set travels with each vintage. A vintage where
+    a component is simply ABSENT (a tag the filer had not started using) is a
+    change in how the figure is COMPOSED, not a revision of it, and comparing
+    across that boundary would manufacture a restatement out of a taxonomy
+    change — the failure this module's header already warns about for single
+    tags. The caller drops such pairs.
+    """
+    per_component: dict[tuple[str, str], dict[tuple[date | None, date], list]] = {}
+    for taxonomy, tag in components:
+        rows: dict[tuple[date | None, date], list] = {}
+        for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
+            try:
+                key = (_parse_date(e["start"]) if "start" in e else None, _parse_date(e["end"]))
+                rows.setdefault(key, []).append(
+                    (_parse_date(e["filed"]), float(e["val"]),
+                     e.get("form", ""), e.get("accn", ""))
+                )
+            except (KeyError, ValueError, TypeError):
+                continue
+        per_component[(taxonomy, tag)] = rows
+
+    out: dict[tuple[date | None, date], list] = {}
+    keys = {k for rows in per_component.values() for k in rows}
+    for key in keys:
+        vintages = sorted({f[0] for rows in per_component.values() for f in rows.get(key, [])})
+        for vintage in vintages:
+            total = 0.0
+            present: set[str] = set()
+            form = accn = ""
+            for (taxonomy, tag), rows in per_component.items():
+                # Latest value filed on or before this vintage. Same tie rule
+                # as the mapper: max() keeps the FIRST fact at the latest date.
+                eligible = [f for f in rows.get(key, []) if f[0] <= vintage]
+                if not eligible:
+                    continue
+                latest = max(eligible, key=lambda f: f[0])
+                total += latest[1]
+                present.add(f"{taxonomy}:{tag}")
+                # Provenance points at the filing that MOVED the figure — the
+                # component actually filed on this vintage date.
+                if latest[0] == vintage and not accn:
+                    form, accn = latest[2], latest[3]
+            if present:
+                out.setdefault(key, []).append(
+                    (vintage, total, form, accn, frozenset(present))
+                )
+    return out
 
 
 def _resolve_tags(
@@ -283,23 +335,34 @@ def detect_restatements(
         # non-scored candidate tag would show a current_value that disagrees with
         # the engine, and iterating every candidate would double-report a field
         # when two tags both carry a same-period revision.
-        for taxonomy, tag in _resolve_tags(
-            facts_json, field_name, candidates, unit, as_of, selected_tags
-        ):
-            qualified_tag = f"{taxonomy}:{tag}"
-            by_key: dict[tuple[date | None, date], list[tuple[date, float, str, str]]] = {}
-            for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
-                try:
-                    start = _parse_date(e["start"]) if "start" in e else None
-                    end = _parse_date(e["end"])
-                    filed = _parse_date(e["filed"])
-                    val = float(e["val"])
-                except (KeyError, ValueError, TypeError):
-                    continue
-                by_key.setdefault((start, end), []).append(
-                    (filed, val, e.get("form", ""), e.get("accn", ""))
-                )
+        series = _resolve_tags(facts_json, field_name, candidates, unit, as_of, selected_tags)
+        # A field the mapper SUMMED is compared as the sum. Its components are
+        # never reported individually: a 10% move in a small component is not
+        # a 10% revision of the figure the engine scored, and materiality
+        # applied to the part rather than the whole promotes rounding into a
+        # restatement. `_composite_vintages` rebuilds the total at each filing
+        # date; from here the comparison is identical to a single tag's.
+        composite = len(series) > 1
+        groups: list[tuple[str, dict]] = []
+        if composite:
+            qualified = "+".join(f"{tax}:{tag}" for tax, tag in series)
+            groups.append((qualified, _composite_vintages(facts_json, series, unit, as_of)))
+        else:
+            for taxonomy, tag in series:
+                by_key: dict[tuple[date | None, date], list] = {}
+                for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
+                    try:
+                        key = (_parse_date(e["start"]) if "start" in e else None,
+                               _parse_date(e["end"]))
+                        by_key.setdefault(key, []).append(
+                            (_parse_date(e["filed"]), float(e["val"]),
+                             e.get("form", ""), e.get("accn", ""))
+                        )
+                    except (KeyError, ValueError, TypeError):
+                        continue
+                groups.append((f"{taxonomy}:{tag}", by_key))
 
+        for qualified_tag, by_key in groups:
             for (start, end), filings in by_key.items():
                 if len(filings) < 2 or (qualified_tag, start, end) in seen:
                     continue
@@ -315,6 +378,14 @@ def detect_restatements(
                 # fact and diverged from scoring).
                 orig = min(filings, key=lambda f: f[0])  # earliest filed
                 current = max(filings, key=lambda f: f[0])  # latest filed = mapper's value
+
+                # For a composite, a vintage where some component did not yet
+                # exist describes a different figure, not a revised one.
+                # Comparing across that boundary would turn a filer adopting a
+                # new tag into a restatement — the same fabrication this
+                # module already refuses for single-tag switches.
+                if composite and orig[4] != current[4]:
+                    continue
 
                 # Keep the CURRENT value and the amendment EVENT separate (round-7).
                 # `material` = every filing that materially deviates from the
@@ -388,9 +459,7 @@ def _table(footprints: list[RestatementFootprint]) -> list[str]:
     return rows
 
 
-def render_restatements_section(
-    footprints: list[RestatementFootprint], unchecked: list[str] | None = None
-) -> str:
+def render_restatements_section(footprints: list[RestatementFootprint]) -> str:
     """Markdown section for the report. Evidence framing only — no scoring.
 
     Amended-filing (/A) revisions are surfaced as high-confidence restatements;
@@ -404,19 +473,6 @@ def render_restatements_section(
         "filing history (original vs latest-filed value for the same period). "
         "Share counts are excluded (stock-split noise)."
     )
-    if unchecked:
-        # Absence of evidence for these fields is not evidence of absence, and
-        # the difference has to be on the page — a reader scanning for "no
-        # revisions" would otherwise count a field that was never examined.
-        lines.append(
-            f"NOT CHECKED: {', '.join(unchecked)} — the engine builds "
-            f"{'these figures' if len(unchecked) > 1 else 'this figure'} by "
-            f"summing several XBRL tags, and a revision to one component is "
-            f"not a revision of the summed figure. Checking "
-            f"{'them' if len(unchecked) > 1 else 'it'} requires rebuilding the "
-            f"total at each filing vintage. Silence here means unexamined, not "
-            f"unrevised."
-        )
     lines.append("")
     if not footprints:
         lines.append("- No prior-period revisions detected above the materiality threshold.")
