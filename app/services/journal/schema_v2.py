@@ -33,6 +33,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.services.journal.vocabulary import is_resolvable_metric, is_wellformed_window
+
 SCHEMA_VERSION = 2
 
 Comparator = Literal[">", "<", ">=", "<=", "==", "within"]
@@ -296,6 +298,9 @@ def can_lock(before: BeforeBlock) -> tuple[bool, str | None]:
     """Anti-annoyance: only thesis + conviction + >=1 assumption row required.
     pydantic already enforces thesis non-empty (post-strip) and conviction in
     [1, 5]. Also refuses commitments the resolver can never evaluate:
+      - an unknown metric name, or a window in a shape no `fiscal_label`
+        takes (round-12): both are sealed into the hash and only surface
+        weeks later at `resolve`, when the case can no longer be fixed
       - `within` comparator (round-10 finding 6)
       - blank/unknown symbolic threshold (round-11 finding 3)
       - symbolic threshold paired with a mismatched comparator, e.g.
@@ -304,6 +309,19 @@ def can_lock(before: BeforeBlock) -> tuple[bool, str | None]:
     if not before.assumptions:
         return False, "at least one assumption row is required to lock (specificity floor)"
     for i, a in enumerate(before.assumptions):
+        if not is_resolvable_metric(a.metric):
+            return False, (
+                f"assumption[{i}] metric '{a.metric}' is not a resolvable name — "
+                f"it matches no engine metric and no XBRL field, so it would "
+                f"resolve 'unresolvable' long after the entry is sealed"
+            )
+        if not is_wellformed_window(a.window):
+            return False, (
+                f"assumption[{i}] window '{a.window}' is not a fiscal label the "
+                f"mapper emits (expected FY<year>Q<1-4>, e.g. FY2027Q3, or "
+                f"P<YYYY-MM-DD>) — an unmatched window resolves 'pending' "
+                f"forever, which reads exactly like a filing that never landed"
+            )
         if a.comparator not in _RESOLVABLE_COMPARATORS:
             return False, (
                 f"assumption[{i}] comparator '{a.comparator}' is not resolvable "
