@@ -537,3 +537,37 @@ def test_several_moved_components_still_produce_one_footprint():
     found = detect_restatements(payload, selected_tags=SGA)
     assert len(found) == 1
     assert (found[0].original_value, found[0].current_value) == (1010.0, 1290.0)
+
+
+def test_component_order_cannot_change_a_composite_result():
+    """Reproducibility, stated exactly rather than within a tolerance.
+
+    Float addition is not associative, so summing components in the order a
+    selection string happened to list them moved aggregates by ~1e-13 — never
+    enough to flip a materiality decision, but enough that the same
+    point-in-time report did not reproduce byte-identically, which is the one
+    property such an artifact is supposed to have.
+
+    The values matter. Arbitrary decimals mostly sum identically whatever the
+    order, so a test built on them passes regardless of the code; these are
+    chosen because (414.18 + 261.51) + 20.32 != (20.32 + 261.51) + 414.18.
+
+    This test was written during the audit that produced the fix, then lost in
+    a branch split — the fix reached main with nothing holding it there, and
+    the mutation sweep caught it on the merged result.
+    """
+    def fact(val, filed, accn):
+        return _row("2024-01-01", "2024-03-31", val, filed, accn)
+
+    parts = {
+        "A": [fact(414.18, "2024-05-01", "a1"), fact(900.00, "2024-08-01", "a2")],
+        "B": [fact(261.51, "2024-05-01", "b1")],
+        "C": [fact(20.32, "2024-05-01", "c1")],
+    }
+
+    def run(order):
+        payload = {"facts": {"us-gaap": {k: {"units": {"USD": parts[k]}} for k in order}}}
+        return [(f.original_value, f.current_value, f.is_amendment, f.current_accession)
+                for f in detect_restatements(payload, selected_tags={"f": "+".join(order)})]
+
+    assert run(["A", "B", "C"]) == run(["C", "B", "A"]) == run(["B", "A", "C"])
