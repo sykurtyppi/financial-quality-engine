@@ -10,6 +10,8 @@ honest.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from app.schemas.financials import PeriodFinancials
@@ -211,3 +213,59 @@ def test_a_ttm_resolution_discloses_the_basis():
     # A quarterly metric must not claim a TTM basis it does not have.
     _v, quarterly_note, _s = _lookup_metric_value("dso", period, bundle)
     assert "TTM" not in quarterly_note and period.fiscal_label in quarterly_note
+
+
+# --- shape is not validity (round-13 review) ------------------------------
+
+@pytest.mark.parametrize("window", ["P2026-02-30", "P2026-13-01", "P2026-00-10", "P2025-02-29"])
+def test_an_impossible_calendar_date_is_refused(window):
+    """`P2026-02-30` matches the pattern and is not a date. The mapper builds
+    that fallback label from a real `date`, so no `fiscal_label` can ever
+    equal it — it sealed cleanly and resolved `pending` forever, which is the
+    exact failure this validation exists to stop, arriving through the one
+    window shape that was never actually checked."""
+    assert not is_wellformed_window(window)
+    ok, why = can_lock(_before(window=window))
+    assert not ok and "not a fiscal label" in why
+
+
+@pytest.mark.parametrize("window", ["P2026-02-28", "P2024-02-29", "P2026-12-31"])
+def test_real_dates_including_leap_days_still_lock(window):
+    assert is_wellformed_window(window)
+    assert can_lock(_before(window=window))[0]
+
+
+def test_a_padded_metric_is_canonicalized_before_it_is_sealed():
+    """`can_lock` validated `metric.strip()` while the model stored the raw
+    string and the resolver looked up the raw string, so `' revenue '` passed
+    validation, sealed into the hash, and then resolved `unresolvable`.
+    Validation and resolution must read the same value."""
+    from app.services.journal.resolver import propose_resolution
+    from app.services.formulas.registry import compute_metrics
+
+    ds = stretch_dataset()
+    assumption = Assumption(metric="  revenue  ", comparator=">", threshold=1.0,
+                            window=f"  {ds.periods[-1].fiscal_label}  ",
+                            resolve_by=date(2026, 12, 31))
+    assert assumption.metric == "revenue"
+    assert assumption.window == ds.periods[-1].fiscal_label
+
+    before = BeforeBlock(thesis="a thesis long enough to satisfy the validator",
+                         conviction=3, intended_action="hold", assumptions=[assumption])
+    assert can_lock(before)[0]
+    # and the sealed value actually terminates
+    assert propose_resolution(assumption, ds, compute_metrics(ds)).state in {"met", "violated"}
+
+
+def test_everything_can_lock_accepts_could_be_emitted_by_the_mapper():
+    """The invariant behind both fixes: a window `can_lock` accepts must be a
+    label the mapper can actually produce. Structural labels come from
+    `_fiscal_label`; period-end labels come from a real date."""
+    from app.services.ingestion.companyfacts_mapper import _fiscal_label
+
+    for year in (2024, 2026, 2027):
+        for quarter in range(1, 5):
+            assert is_wellformed_window(f"FY{year}Q{quarter}")
+    # Every label _fiscal_label emits must be lockable, both shapes.
+    assert is_wellformed_window(_fiscal_label(date(2026, 10, 26), 1))
+    assert is_wellformed_window(_fiscal_label(date(2026, 10, 26), None))
