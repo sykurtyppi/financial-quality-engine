@@ -678,7 +678,14 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, separable from running it.
+
+    Exposed so the documented invocations can be parsed in a test: the
+    runbook's entry command is the one step of the whole protocol a human
+    types under time pressure, and it had drifted out of sync with the
+    parser without anything noticing.
+    """
     parser = argparse.ArgumentParser(description="Decision-impact journal for the earnings-quality engine")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -793,7 +800,11 @@ def main() -> int:
     p_aft.add_argument("--disagreed", help="what the report claimed that you rejected")
     p_aft.set_defaults(func=cmd_after)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
     return args.func(args)
 
 
