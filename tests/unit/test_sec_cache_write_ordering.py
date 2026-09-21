@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 from contextlib import contextmanager
 import time
 
@@ -143,14 +144,15 @@ class TestCorruptEntryRecovery:
         target.write_text('{"version": "someone elses good entry"}')
         assert _is_readable_json(target) is True
 
-    def test_a_concurrent_valid_publication_survives_recovery(self, tmp_path, monkeypatch):
+    def test_recovery_does_not_unlink_an_entry_that_became_readable(self, tmp_path, monkeypatch):
         """A reader that just failed to parse must not delete the replacement.
 
-        The previous version of this test published the good entry from inside
-        `_get`, which runs AFTER recovery — so it never reached the recheck and
-        passed with the recheck removed. The race is between the failed parse
-        and the unlink, so the replacement has to appear while the lock is
-        being acquired.
+        Asserted on the UNLINK itself rather than on what ends up cached. An
+        earlier version stamped the rival entry with a future generation to
+        make it win the publish comparison — but a future generation is now
+        correctly refused (no request has started yet), so that simulation
+        stopped meaning anything. What the recheck actually owes is narrower
+        and exact: do not remove a file that is readable.
         """
         import app.services.ingestion.sec_client as sec_client
 
@@ -158,36 +160,32 @@ class TestCorruptEntryRecovery:
         target.write_text("{ truncated")
         good = {"version": "published by someone else"}
 
-        real_lock = sec_client._publication_lock
+        unlinked: list[str] = []
+        real_unlink = Path.unlink
 
-        # ONE-SHOT. `_publication_lock` is acquired twice per call — once for
-        # recovery, once to publish — and a stub that fires on both re-creates
-        # the entry after a bad unlink deleted it, hiding the very deletion
-        # under test. This masked the missing recheck in an earlier version.
+        def recording_unlink(self, *a, **kw):
+            unlinked.append(str(self))
+            return real_unlink(self, *a, **kw)
+
+        real_lock = sec_client._publication_lock
         published_once = []
 
         @contextmanager
         def publish_then_lock(path):
-            # Stands in for another writer landing a valid entry at this
-            # pathname while we were waiting for the lock.
             if path == target and not published_once:
                 published_once.append(True)
                 path.write_text(json.dumps(good))
-                # A real publisher stamps its request generation. This one
-                # started later than ours, so ours must not displace it —
-                # an unstamped file would legitimately be superseded, which
-                # is a different (correct) behaviour and not what is under
-                # test here.
-                future = time.time_ns() + 10_000_000_000
-                os.utime(path, ns=(future, future))
             with real_lock(path):
                 yield
 
         monkeypatch.setattr(sec_client, "_publication_lock", publish_then_lock)
+        monkeypatch.setattr(Path, "unlink", recording_unlink)
 
-        client = _PacedClient(tmp_path, {"version": "mine"}, 0.0)
-        client._cached_json(NAME, URL)
-        assert _cached(tmp_path) == good, "recovery deleted a concurrently published entry"
+        _PacedClient(tmp_path, {"version": "mine"}, 0.0)._cached_json(NAME, URL)
+
+        assert str(target) not in unlinked, (
+            "recovery unlinked an entry that had become readable"
+        )
 
     def test_recovery_still_clears_an_entry_that_stays_unreadable(self, tmp_path):
         """The recheck must not turn recovery into a no-op: a genuinely
@@ -262,3 +260,60 @@ def test_the_later_started_request_always_wins(tmp_path, earlier_duration, later
     first.join()
     second.join()
     assert _cached(tmp_path) == {"version": "later"}
+
+
+class TestFreshness:
+    """An entry's mtime is its request-generation stamp, so a clock stepping
+    backwards or one corrupted timestamp otherwise made the entry IMMORTAL:
+    negative age passed every TTL, and `--fresh` fetched new data and then
+    declined to publish against a generation it could never beat. The entry
+    could never be updated again by any means."""
+
+    def test_a_normal_entry_is_fresh_within_its_ttl(self, tmp_path):
+        from app.services.ingestion.sec_client import _is_fresh
+        assert _is_fresh(time.time() - 10, 3600) is True
+
+    def test_an_expired_entry_is_not_fresh(self, tmp_path):
+        from app.services.ingestion.sec_client import _is_fresh
+        assert _is_fresh(time.time() - 7200, 3600) is False
+
+    def test_a_future_stamp_is_not_fresh(self):
+        from app.services.ingestion.sec_client import _is_fresh
+        assert _is_fresh(time.time() + 3600, 86400) is False
+
+    def test_a_future_generation_cannot_win_publication(self):
+        assert _supersedes(published_ns=time.time_ns() + 10**12, started_ns=time.time_ns()) is False
+
+    def test_a_poisoned_future_entry_heals_itself(self, tmp_path):
+        """End to end: a decade-ahead mtime must not make the key permanently
+        unwritable — the next ordinary read replaces it."""
+        target = tmp_path / NAME
+        target.write_text(json.dumps({"version": "stale"}))
+        ahead = time.time_ns() + 10 * 365 * 24 * 3600 * 10**9
+        os.utime(target, ns=(ahead, ahead))
+
+        client = _PacedClient(tmp_path, {"version": "recovered"}, 0.0)
+        assert client._cached_json(NAME, URL, max_age_s=1) == {"version": "recovered"}
+        assert _cached(tmp_path) == {"version": "recovered"}
+
+
+def test_a_reader_survives_recovery_deleting_the_entry_underneath_it(tmp_path, monkeypatch):
+    """The TOCTOU the `exists()` pre-check created: another process's
+    corrupt-entry recovery unlinks the path between our check and our read,
+    and the reader died with FileNotFoundError while the other process was
+    busy HEALING the cache. A disappearance is a miss, not a failure."""
+    target = tmp_path / NAME
+    target.write_text(json.dumps({"version": "about to vanish"}))
+
+    real_read = Path.read_text
+
+    def vanishing_read(self, *a, **kw):
+        if self == target:
+            real_unlink(self)          # the concurrent healer
+        return real_read(self, *a, **kw)
+
+    real_unlink = Path.unlink
+    monkeypatch.setattr(Path, "read_text", vanishing_read)
+
+    client = _PacedClient(tmp_path, {"version": "refetched"}, 0.0)
+    assert client._cached_json(NAME, URL) == {"version": "refetched"}

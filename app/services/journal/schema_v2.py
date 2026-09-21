@@ -88,6 +88,23 @@ class Assumption(BaseModel):
             "lands (P1-A). Unset -> numeric-only, resolver auto-terminates."
         ),
     )
+
+    @field_validator("metric", "window")
+    @classmethod
+    def _canonicalize(cls, v: str) -> str:
+        """Strip before anything else sees the value.
+
+        `can_lock` validated `metric.strip()` while the model stored the raw
+        string, and the resolver looks up the raw string — so `" revenue "`
+        passed validation, sealed into the hash, and then resolved
+        `unresolvable: unknown metric or field ' revenue '`. Validation and
+        resolution have to read the same value, and the only way to guarantee
+        that is to canonicalize at the boundary rather than in one of the two
+        consumers. The CLI happened to strip its comma-separated fields, which
+        is why ordinary use never hit it — the lower-level API had no such
+        protection.
+        """
+        return v.strip()
     resolve_by: date = Field(description="Date by which the resolving filing is expected")
 
     @field_validator("threshold")

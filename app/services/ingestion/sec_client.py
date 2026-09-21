@@ -87,8 +87,34 @@ def _supersedes(published_ns: int | None, started_ns: int) -> bool:
     this compares like with like. Equality means the two requests asked SEC at
     the same instant and are equally fresh; keeping the incumbent avoids a
     pointless rewrite and is why this is `>=` rather than `>`.
+
+    A generation in the FUTURE cannot be a real request-start time — no
+    request has started yet — so it is not allowed to win. Without that, a
+    clock stepping backwards or one corrupted timestamp made an entry
+    permanently unpublishable: it lost its freshness (see `_is_fresh`) so
+    every read refetched, and then every publish stood down against a
+    generation it could never beat. The entry could never be updated again by
+    any means, including `--fresh`.
     """
-    return published_ns is not None and published_ns >= started_ns
+    if published_ns is None:
+        return False
+    if published_ns > time.time_ns():
+        return False
+    return published_ns >= started_ns
+
+
+def _is_fresh(mtime_s: float, max_age_s: float) -> bool:
+    """Whether an entry stamped `mtime_s` may still be served.
+
+    The age must be NON-NEGATIVE as well as under the limit. An entry's mtime
+    is its request-generation stamp, so a clock stepping backwards — or any
+    corrupted future timestamp — otherwise makes the entry immortal: the age
+    reads negative, every TTL passes, and `--fresh` fetches new data and then
+    declines to publish it because the future generation looks newer. The
+    result is a cache that can never be updated again by any means.
+    """
+    age = time.time() - mtime_s
+    return 0 <= age < max_age_s
 
 
 def _is_readable_json(path: Path) -> bool:
@@ -194,9 +220,18 @@ class SecClient:
                      *, honor_fresh: bool = True) -> dict:
         path = self.cache_dir / cache_name
         use_cache = not (self.fresh and honor_fresh)
-        if use_cache and path.exists() and (time.time() - path.stat().st_mtime) < max_age_s:
+        if use_cache:
             try:
-                return json.loads(path.read_text())
+                # No `exists()` pre-check: the entry can be unlinked by another
+                # process's corrupt-entry recovery between the check and the
+                # read, and a reader that trusted `exists()` then died with
+                # FileNotFoundError while the other process was busy HEALING
+                # the cache. A disappearance is a miss, not a failure — the
+                # whole read is one attempt, and OSError means "not usable".
+                if _is_fresh(path.stat().st_mtime, max_age_s):
+                    return json.loads(path.read_text())
+            except OSError:
+                pass
             except ValueError:
                 # A poisoned entry (truncated write, partial download) must
                 # not fail every read for a day: drop it and refetch. Under

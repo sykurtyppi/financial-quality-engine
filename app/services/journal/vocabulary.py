@@ -21,6 +21,7 @@ instead of silently narrowing what an operator is allowed to commit to.
 from __future__ import annotations
 
 import re
+from datetime import date
 
 from pydantic import BaseModel
 
@@ -101,5 +102,20 @@ def is_wellformed_window(window: str) -> bool:
     """`resolver._find_period` matches `window` against `fiscal_label` by exact
     (case-insensitive) string equality. A window in any other shape does not
     raise — it simply matches no period and resolves `pending` forever, which
-    is indistinguishable from `the filing has not landed yet`."""
-    return bool(_WINDOW_RE.match(window.strip().upper()))
+    is indistinguishable from `the filing has not landed yet`.
+
+    Shape is not enough. `P2026-02-30` and `P2026-13-01` match the pattern and
+    are not dates, so no `_fiscal_label` can ever equal them — the mapper
+    builds that fallback label from a real `date`. They sealed cleanly and
+    then resolved `pending` forever: exactly the failure this function exists
+    to stop, arriving through the one window shape it did not actually check.
+    """
+    candidate = window.strip().upper()
+    if not _WINDOW_RE.match(candidate):
+        return False
+    if candidate.startswith("P"):
+        try:
+            date.fromisoformat(candidate[1:])
+        except ValueError:
+            return False
+    return True
