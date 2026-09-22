@@ -90,6 +90,7 @@ def main() -> int:
         fetched_at=fetched_at,
         fresh=args.fresh,
         warnings=diag.warnings,
+        field_notes=diag.field_notes(),
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
         submissions=submissions,

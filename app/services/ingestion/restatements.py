@@ -217,13 +217,6 @@ def _eligible_rows(
     return out
 
 
-def is_composite_selection(selected: str) -> bool:
-    """True when the mapper BUILT this field by summing several tags rather
-    than reading one. Recorded as bare tag names joined by `+`, e.g.
-    `SellingAndMarketingExpense+GeneralAndAdministrativeExpense`."""
-    return "+" in selected
-
-
 def _parse_selection(selected: str) -> list[tuple[str, str]]:
     """Expand `FieldDiagnostic.tag_used` into the series it names.
 

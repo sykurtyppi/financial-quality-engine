@@ -17,7 +17,7 @@ def test_fresh_reaches_the_report_builder(monkeypatch, tmp_path):
         reporting, "fetch_dataset_snapshot",
         lambda ticker, n_quarters, client: SimpleNamespace(
             dataset=SimpleNamespace(documents=None),
-            diagnostics=SimpleNamespace(coverage=lambda: {}, warnings=[], selected_tags=lambda: {}),
+            diagnostics=SimpleNamespace(coverage=lambda: {}, warnings=[], selected_tags=lambda: {}, field_notes=lambda: []),
             company_facts={}))
     monkeypatch.setattr(reporting, "analyze", lambda dataset: SimpleNamespace())
     monkeypatch.setattr(reporting, "describe", lambda t: "ok")

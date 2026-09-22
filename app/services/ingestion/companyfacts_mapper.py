@@ -229,6 +229,14 @@ class IngestionDiagnostics(BaseModel):
         re-deriving it from the payload and hoping the two agree."""
         return {f.field_name: f.tag_used for f in self.fields}
 
+    def field_notes(self) -> list[str]:
+        """Every per-field mapping note, prefixed with its field, in mapper
+        order. These record how a figure was BUILT — "total debt may
+        understate", "only a depreciation tag was available" — and until now
+        reached only `scripts/validate_real_data.py`; a report that scored the
+        figure never said so. Rendered verbatim in the data-quality appendix."""
+        return [f"{f.field_name}: {note}" for f in self.fields for note in f.notes]
+
 
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()

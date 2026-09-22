@@ -54,6 +54,7 @@ def data_quality_section(
     vintage: str | None = None,
     restatement_scan: str | None = None,
     archives: str | None = None,
+    field_notes: list[str] | None = None,
 ) -> str:
     """A fetch failure must be distinguishable from 'the filer didn't disclose'
     (P0-D), for every stream including events (review finding 4).
@@ -85,6 +86,9 @@ def data_quality_section(
     if restatement_scan is not None:
         lines.append(f"- Restatement scan: {restatement_scan}")
     lines += [f"- Ingestion warning: {w}" for w in warnings]
+    # How a scored figure was built (mapper notes): a reader who sees
+    # "total debt may understate" can weigh the leverage block accordingly.
+    lines += [f"- Field note: {n}" for n in field_notes or []]
     lines += [f"- Document acquisition: {d}" for d in doc_diagnostics]
     for label, err, gap in (
         ("Capital-markets", offerings_error, "no activity"),
@@ -319,6 +323,7 @@ def build_report(
     index_degraded: bool = False,
     field_tags: Mapping[str, str | None] | None = None,
     vintage_note: str | None = None,
+    field_notes: list[str] | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -373,6 +378,7 @@ def build_report(
             # The client counted its own archive traffic; a client that does
             # not count (a stub) yields no line rather than a guessed one.
             archives=_archive_summary(client),
+            field_notes=field_notes,
         ) + "\n"
 
     # Tier-1 sources that could NOT be checked this run — restatement footprints
