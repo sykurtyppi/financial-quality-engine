@@ -60,6 +60,33 @@ Mid-window changes (0.4.0 window):
    so Track 3's flag set is unaffected. Re-anchoring the composite bands remains
    deferred to window close as `calibration_report.md` already states.
 
+2. **2026-09-22 — distress-scored components reach the flag list.** Flag
+   generation only (`app/core/pipeline.py::_generate_flags`). P0-9 has the scorer
+   keep a metric that is NOT_MEANINGFUL *because its denominator signals
+   distress* (net loss with cash burn; non-positive EBITDA with net debt) at
+   its maximum concern with full weight — but the flag generator dropped every
+   component whose metric had no value, which is exactly those. "Non-positive
+   EBITDA with net debt" scored 90 and could never appear on the card. A
+   `distress_signal` component is now flagged like any other red-threshold
+   component, with a title naming the reason and a detail saying the ratio is
+   undefined. Zero-weight exclusion (P0-13) and benign not-meaningful guards
+   are unchanged.
+
+   **No anchor, weight, block score or composite moved**: the scorer already
+   counted these components; only their presence in `red_flags` changed. The
+   calibration snapshot pins scores, not flags, and needed no regeneration;
+   the golden StretchCo report has no distress-scored component and is
+   byte-identical. Proof test: `tests/unit/test_distress_flags.py`
+   (invariant: weight>0 ∧ concern≥red ⇒ exactly one red flag, value or not).
+
+   Evaluation outputs that DO read flags: `wide_sweep.py` writes `n_red_flags`
+   / `red_flag_metrics` into `data/sweep/sweep_results.csv` and the
+   adjudication worksheet, and the distressed-control / survivorship pilots
+   record `n_red_flags`. Track 3's flag *gate* is the composite direction band
+   (`FLAG_THRESHOLD`), so the 29-name flag set is unaffected; but those
+   count columns are not comparable before/after for any name with a
+   distress-scored component, and a rerun of the sweep or pilots must say so.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

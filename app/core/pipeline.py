@@ -63,10 +63,30 @@ _FLAG_PHRASES: dict[str, tuple[str, str]] = {
 
 def _flag_detail(m: MetricResult, concern: float, severity: str) -> str:
     closing = "Requires analyst review." if severity == "red" else "Supportive indicator."
+    if m.value is None:
+        # A distress-scored component (P0-9): the ratio is undefined BECAUSE
+        # its denominator signals distress, and the engine scored it at the
+        # metric's maximum concern. The flag must say that rather than print
+        # a number it does not have.
+        return (
+            f"{m.name} undefined — {m.note} (formula: {m.formula}; period "
+            f"{m.fiscal_label}; concern {concern:.0f}/100, scored at this metric's "
+            "maximum because the denominator itself signals distress). "
+            f"{closing}"
+        )
     return (
         f"{m.name} = {m.value:.3g} (formula: {m.formula}; period {m.fiscal_label}; "
         f"concern {concern:.0f}/100). {closing}"
     )
+
+
+def _distress_title(phrase: str, m: MetricResult) -> str:
+    """Card-length title for a distress-scored component: the usual phrase plus
+    the reason the ratio is undefined ("Non-positive EBITDA with net debt"),
+    because on the 90-second card the title is all the reader sees and
+    "Elevated leverage" understates a denominator that has crossed zero."""
+    reason = (m.note or "denominator in distress").split(":", 1)[0].strip()
+    return f"{phrase} — {reason[:1].lower()}{reason[1:]}"
 
 
 def _generate_flags(block_components, metrics_by_name: dict[str, MetricResult]) -> tuple[list[Flag], list[Flag]]:
@@ -82,12 +102,22 @@ def _generate_flags(block_components, metrics_by_name: dict[str, MetricResult]) 
             if comp.weight == 0:
                 continue
             m = metrics_by_name.get(comp.metric_name)
-            if m is None or m.value is None:
+            if m is None:
+                continue
+            # A component with no value is normally one the engine did not
+            # score (missing data, or a benign not-meaningful guard) and must
+            # not flag. The exception is the distress-scored component (P0-9):
+            # it carried its full weight at maximum concern precisely because
+            # the state is alarming, so dropping it here made the most damning
+            # components the only ones that could never reach the card.
+            if m.value is None and not m.distress_signal:
                 continue
             seen.add(comp.metric_name)
             titles = _FLAG_PHRASES.get(comp.metric_name)
             if comp.concern_score >= RED_FLAG_CONCERN:
                 title = titles[0] if titles else f"Elevated concern: {comp.metric_name}"
+                if m.value is None:
+                    title = _distress_title(title, m)
                 red.append(
                     (
                         comp.concern_score,
