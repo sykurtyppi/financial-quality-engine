@@ -223,6 +223,9 @@ class LlmAdjudicator:
 
         # Number grounding via the existing validator: numbers in the explanation
         # must appear in the definitions.
+        # Validation-only (the KPI-definition signal is shelved, P0-C): this
+        # transient row exists for the grounding check, has no documents in
+        # scope to attribute to, and never reaches a report.
         evidence = NarrativeEvidence(
             evidence_id=pair.evidence_id, detector="kpi_definition_change",
             fiscal_label=pair.current_period, comparison="qoq", source="period documents",
