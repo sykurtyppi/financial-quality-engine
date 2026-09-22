@@ -25,6 +25,7 @@ from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import (
     fetch_dataset_snapshot,
     fetch_submissions_snapshot,
+    store_vintage_snapshot,
 )
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
@@ -42,6 +43,10 @@ def main() -> int:
         "--fresh", action="store_true",
         help="bypass EDGAR caches (use on filing days; a <24h cache can serve pre-filing data)",
     )
+    parser.add_argument(
+        "--no-vintage", action="store_true",
+        help="do not archive the scored companyfacts payload to data/vintages/",
+    )
     args = parser.parse_args()
     ticker = args.ticker.upper()
 
@@ -50,6 +55,11 @@ def main() -> int:
 
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
+    # Archive exactly the payload that is about to be scored: the baseline a
+    # later silent revision would otherwise erase. Failure is a report line.
+    vintage_note = store_vintage_snapshot(
+        client, ticker, snapshot.company_facts, enabled=not args.no_vintage
+    )
     print(f"{ticker}: field coverage {diag.coverage():.0%}"
           + (f"; warnings: {'; '.join(diag.warnings)}" if diag.warnings else ""))
 
@@ -84,6 +94,7 @@ def main() -> int:
         company_facts=snapshot.company_facts,
         submissions=submissions,
         index_degraded=submissions is None,
+        vintage_note=vintage_note,
     )
 
     out_dir = ROOT / "reports"

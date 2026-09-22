@@ -51,9 +51,14 @@ def data_quality_section(
     offerings_error: str | None = None,
     restatements_error: str | None = None,
     events_error: str | None = None,
+    vintage: str | None = None,
 ) -> str:
     """A fetch failure must be distinguishable from 'the filer didn't disclose'
-    (P0-D), for every stream including events (review finding 4)."""
+    (P0-D), for every stream including events (review finding 4).
+
+    `vintage` is what happened to the companyfacts snapshot this run — the
+    baseline the silent-revision check diffs against. None means capture was
+    not attempted (API path, --no-vintage); a failure is rendered, not hidden."""
     lines = [
         "## Appendix: Data Acquisition Quality",
         "",
@@ -61,6 +66,8 @@ def data_quality_section(
         + ("(caches bypassed)" if fresh else "(EDGAR JSON caches up to 24h old; use --fresh on filing days)"),
         f"- XBRL field coverage: {coverage:.0%}",
     ]
+    if vintage is not None:
+        lines.append(f"- Vintage snapshot: {vintage}")
     lines += [f"- Ingestion warning: {w}" for w in warnings]
     lines += [f"- Document acquisition: {d}" for d in doc_diagnostics]
     for label, err, gap in (
@@ -286,6 +293,7 @@ def build_report(
     submissions: dict | None = None,
     index_degraded: bool = False,
     field_tags: Mapping[str, str | None] | None = None,
+    vintage_note: str | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -334,6 +342,7 @@ def build_report(
             offerings_error=errors["offerings"],
             restatements_error=errors["restatements"],
             events_error=errors["events"],
+            vintage=vintage_note,
         ) + "\n"
 
     # Tier-1 sources that could NOT be checked this run — restatement footprints

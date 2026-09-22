@@ -106,3 +106,25 @@ def fetch_dataset(
         client=client,
     )
     return snapshot.dataset, snapshot.diagnostics
+
+
+def store_vintage_snapshot(client, ticker: str, facts: dict, *, enabled: bool = True) -> str | None:
+    """Archive the companyfacts payload a report just scored; return the
+    data-quality line, or None when capture is switched off.
+
+    Never raises. The vintage store is the baseline the silent-revision check
+    diffs against, and its value compounds with time — but a report must not
+    fail because the archive could not be written. Like
+    `fetch_submissions_snapshot`, a failure here is something the report SAYS,
+    not something that stops it.
+    """
+    if not enabled:
+        return None
+    from app.services.ingestion.vintages import store_snapshot
+
+    try:
+        cik = client.resolve_cik(ticker)
+        return store_snapshot(cik, facts).describe()
+    except Exception as e:  # noqa: BLE001 - the archive must never break the report
+        logger.warning("vintage snapshot for %s not stored: %s: %s", ticker, type(e).__name__, e)
+        return f"NOT captured (failed): {type(e).__name__}: {e}"
