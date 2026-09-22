@@ -87,6 +87,30 @@ Mid-window changes (0.4.0 window):
    count columns are not comparable before/after for any name with a
    distress-scored component, and a rerun of the sweep or pilots must say so.
 
+3. **2026-09-22 — field registry; `pit.py` touched at import level only.**
+   The field ontology (which XBRL tags back each field, the SG&A/D&A
+   composites, the total-debt roles, units, additivity, split adjustment)
+   moved from literal tables in `companyfacts_mapper.py` into one data module,
+   `app/services/ingestion/fields.py`. Every old table is now a view of it
+   under its old name, in its old order. `pit.mapped_tags()` — the tag set
+   every backtest trims to — delegates to `fields.all_tags()` instead of
+   re-walking the tables by hand; it is the only change in a flag-only file.
+
+   **No mapped value, score or flag moved.** Proof test:
+   `tests/unit/test_field_registry.py` holds verbatim copies of the replaced
+   tables and asserts every view equal to them *including order* (candidate
+   order breaks coverage ties), and asserts `mapped_tags()` equal to the old
+   hand-built set concept for concept. Before/after, `build_dataset` output
+   (dataset and diagnostics) on the three real fixtures, on PIT cuts of them,
+   and on synthetic debt/composite payloads was byte-identical;
+   `calibration_snapshot.json` and the golden report were not regenerated.
+
+   `scripts/make_real_fixtures.py` now trims to the same registry set, which
+   adds the finance-lease tags it had never kept. The committed fixtures are
+   **not** regenerated in this window: doing so would move `total_debt` for
+   filers that report finance leases, and the calibration snapshot is
+   computed from those files. Regeneration is a window-close item.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

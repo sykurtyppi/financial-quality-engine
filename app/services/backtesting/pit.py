@@ -14,29 +14,15 @@ from __future__ import annotations
 from datetime import date
 
 from app.schemas.financials import CompanyDataset
-from app.services.ingestion import companyfacts_mapper as m
 from app.services.ingestion.companyfacts_mapper import IngestionDiagnostics, build_dataset
+from app.services.ingestion.fields import all_tags
 
 
 def mapped_tags() -> set[tuple[str, str]]:
-    tags: set[tuple[str, str]] = set()
-    for cands in list(m.INSTANT_FIELDS.values()) + list(m.FLOW_FIELDS.values()):
-        tags.update(cands)
-    tags.update(m.SGA_COMPONENTS)
-    tags.update(m.DA_COMPONENTS)
-    # Debt + finance-lease tags the mapper composes into total_debt (review
-    # finding 2: omitting the finance-lease tags made PIT debt diverge from live).
-    debt_tags = (
-        m.DEBT_NONCURRENT
-        + m.DEBT_CURRENT
-        + m.DEBT_TOTAL
-        + m.DEBT_SHORT
-        + m.FINANCE_LEASE_NONCURRENT
-        + m.FINANCE_LEASE_CURRENT
-    )
-    for tag in debt_tags:
-        tags.add(("us-gaap", tag))
-    return tags
+    """Every concept the mapper may read, from the field registry — including
+    the debt and finance-lease tags composed into total_debt (review finding
+    2: omitting the finance-lease tags made PIT debt diverge from live)."""
+    return set(all_tags())
 
 
 def trim_to_mapped_tags(facts_json: dict) -> dict:

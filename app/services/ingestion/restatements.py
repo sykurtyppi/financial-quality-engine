@@ -38,6 +38,7 @@ from app.services.ingestion.companyfacts_mapper import (
     _parse_date,
     _unit_for,
 )
+from app.services.ingestion.fields import FIELDS
 
 # Relative change below which a same-period revision is treated as rounding or
 # an immaterial reclassification rather than a restatement. The XBRL survey
@@ -49,7 +50,8 @@ DEFAULT_MATERIALITY_PCT = 0.01
 # neutral corporate action, not an accounting restatement. Excluded to avoid a
 # flood of split-adjustment false positives (Apple's 2014 7-for-1 split makes
 # every prior share count appear "revised" +600%).
-SPLIT_ADJUSTED_FIELDS = frozenset({"shares_diluted", "shares_outstanding"})
+# The registry flags them (`FieldSpec.split_adjusted`).
+SPLIT_ADJUSTED_FIELDS = frozenset(f.name for f in FIELDS if f.split_adjusted)
 
 
 @dataclass(frozen=True)

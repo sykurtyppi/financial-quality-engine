@@ -5,6 +5,11 @@ SEC filing data is public domain, so real (trimmed) companyfacts are committed
 directly: only the tags the mapper reads, entries ending 2023-06-01 or later.
 Keeps fixtures small while exercising every derivation path on real data.
 
+Regenerating is a window-close action (docs/evaluation_protocol.md): the
+trimmed tag set now includes the finance-lease liabilities, which moves
+total_debt — and so block scores — for any filer that reports them; the
+calibration snapshot and the real-fixture tests are computed from these files.
+
     EDGAR_IDENTITY="Name email" .venv/bin/python scripts/make_real_fixtures.py
 """
 
@@ -17,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.ingestion import companyfacts_mapper as m
+from app.services.ingestion.fields import all_tags
 from app.services.ingestion.sec_client import SecClient
 
 FIXTURE_TICKERS = ["AAPL", "KO", "CRM"]  # Sep-FYE + calendar-FYE + Jan-FYE (52/53-week)
@@ -26,14 +31,10 @@ OUT_DIR = ROOT / "tests" / "fixtures" / "real"
 
 
 def wanted_tags() -> set[tuple[str, str]]:
-    tags: set[tuple[str, str]] = set()
-    for cands in list(m.INSTANT_FIELDS.values()) + list(m.FLOW_FIELDS.values()):
-        tags.update(cands)
-    tags.update(m.SGA_COMPONENTS)
-    tags.update(m.DA_COMPONENTS)
-    for tag in m.DEBT_NONCURRENT + m.DEBT_CURRENT + m.DEBT_TOTAL + m.DEBT_SHORT:
-        tags.add(("us-gaap", tag))
-    return tags
+    # The field registry's full tag set — the same one PIT trims to. This used
+    # to be a hand-kept copy that never learned the finance-lease tags, so the
+    # committed fixtures cannot exercise that total_debt branch.
+    return set(all_tags())
 
 
 def trim(facts_json: dict) -> dict:
