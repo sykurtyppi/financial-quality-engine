@@ -199,3 +199,22 @@ def mutated(draw, payload: dict):
         else:
             parent[key] = draw(JUNK)
     return doc
+
+
+@st.composite
+def mutated_column_element(draw, submissions: dict):
+    """A copy of a submissions payload with ONE element of one
+    `filings.recent` column replaced by junk. Whole-tree mutation rarely
+    lands on the one element a parser path reads (the filingDate of an
+    offering-form row, say) with a value of the one kind that path mishandles
+    (an invalid date STRING); this aims every example there."""
+    doc = copy.deepcopy(submissions)
+    recent = doc["filings"]["recent"]
+    column = draw(st.sampled_from(sorted(recent)))
+    if not recent[column]:
+        return doc
+    index = draw(st.integers(0, len(recent[column]) - 1))
+    recent[column][index] = draw(
+        st.sampled_from(["", "x", "2024-13-45", "2024-02-30", "20240101", "8-K"]) | JUNK
+    )
+    return doc
