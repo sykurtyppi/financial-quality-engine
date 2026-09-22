@@ -16,6 +16,7 @@ appendix, not an exception.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -75,13 +76,24 @@ def test_storing_a_payload_in_hand_matches_fetching_it(tmp_path):
     assert man_a["observations"] == man_b["observations"]
 
 
-def test_store_snapshot_honors_the_daily_gate_and_dedupe(tmp_path):
+def test_store_snapshot_dedupes_by_content_and_is_not_day_gated(tmp_path):
     first = store_snapshot(CIK, PAYLOAD, now=NOW, root=tmp_path)
     assert first.reason == "captured"
     again = store_snapshot(CIK, PAYLOAD, now=NOW, root=tmp_path)
-    assert again.reason == "already checked today" and again.path is None
-    forced = store_snapshot(CIK, PAYLOAD, now=NOW, root=tmp_path, force=True)
-    assert forced.reason == "unchanged" and forced.path is None
+    assert again.reason == "unchanged" and again.path is None
+
+
+def test_a_filing_night_report_archives_what_it_scored_after_a_morning_capture(tmp_path):
+    """The daily gate saves a FETCH. A report already holds its payload, and
+    it is the one carrying the filing: gating it behind the morning sweep's
+    capture dropped exactly that payload, and the silent-revision diff then
+    compared two older snapshots and reported no change."""
+    capture(_FakeClient(PAYLOAD), "AAPL", now=NOW, root=tmp_path)
+    evening = json.loads(json.dumps(PAYLOAD))
+    evening["facts"]["us-gaap"]["Assets"]["units"]["USD"][0]["val"] = 777.0
+    res = store_snapshot(CIK, evening, now=NOW, root=tmp_path)
+    assert res.reason == "captured" and res.path is not None
+    assert len(read_manifest(CIK, tmp_path)["snapshots"]) == 2
 
 
 def test_capture_still_does_not_fetch_when_already_checked_today(tmp_path):

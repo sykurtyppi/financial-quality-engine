@@ -4,7 +4,7 @@
 revising a number without re-presenting the original) were surfaced nowhere
 but scripts/vintage.py. Now every client-backed report diffs the newest
 snapshot taken at or before its date against the previous one — and, on the
-journal track, against the snapshot at or before the pinned thesis day — and
+journal track, against the last snapshot before the pinned thesis day — and
 promotes a revised scored figure of >=5% to the card's Tier 1. What could
 not be compared is named; "no baseline yet" never reads as clean.
 """
@@ -115,7 +115,7 @@ def test_an_observation_after_the_report_date_is_invisible(tmp_path):
 def test_a_baseline_equal_to_previous_is_not_compared_twice(tmp_path):
     _store(tmp_path, _assets(1000.0), D19)
     _store(tmp_path, _assets(1100.0), D20)
-    rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 19), root=tmp_path)
+    rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 20), root=tmp_path)
     assert rep.changes_since_baseline is None
     assert rep.baseline.captured == "2026-09-19"
     assert "is the previous snapshot" in rep.baseline_note
@@ -141,7 +141,7 @@ def test_a_baseline_older_than_previous_gets_its_own_block(tmp_path):
     _store(tmp_path, _assets(1000.0), D19)
     _store(tmp_path, _assets(1100.0), D20)
     _store(tmp_path, _assets(1100.0, accn="c"), D21)
-    rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 19), root=tmp_path)
+    rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 20), root=tmp_path)
     assert rep.changes_since_previous == []
     assert [c.new_value for c in rep.changes_since_baseline] == [1100.0]
     assert rep.status_line() == (
@@ -155,7 +155,7 @@ def test_a_baseline_older_than_previous_gets_its_own_block(tmp_path):
     # Through the stream: the promoted line names the lock window, not previous->newest.
     _s, _e, tier1, errors, _t, _scan, diff = _collect_streams(
         _Client(_assets(1100.0)), "AAPL", AS_OF, company_facts=_assets(1100.0),
-        baseline_day=date(2026, 9, 19), vintage_root=tmp_path,
+        baseline_day=date(2026, 9, 20), vintage_root=tmp_path,
     )
     assert errors["vintage"] is None
     assert [line for line in tier1 if line.startswith("Silent revision:")] == [
@@ -170,7 +170,7 @@ def test_a_thesis_day_before_the_first_capture_is_named(tmp_path):
     rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 1), root=tmp_path)
     assert rep.baseline is None and rep.changes_since_baseline is None
     assert rep.baseline_note == (
-        "no snapshot at or before the pinned thesis day 2026-09-01; earliest is 2026-09-19"
+        "no snapshot before the pinned thesis day 2026-09-01; earliest is 2026-09-19"
     )
     assert [c.new_value for c in rep.changes_since_previous] == [1100.0]
 
@@ -185,7 +185,7 @@ def test_no_baseline_wording(tmp_path, snapshots):
     rep = report_diff(CIK, as_of=AS_OF, root=tmp_path)
     assert not rep.compared and rep.changes_since_previous == []
     expected = (
-        "no baseline yet (first capture this run)" if snapshots
+        "only one snapshot observed at or before 2026-09-22; nothing earlier to diff against yet" if snapshots
         else "no snapshot at or before 2026-09-22 (capture disabled or failed — see the Vintage snapshot line)"
     )
     assert rep.no_baseline_reason == expected and rep.status_line() == expected
@@ -253,18 +253,22 @@ def _change(kind="revised", field="total_assets", tag="Assets", end=date(2026, 6
     (_change(end=date(2024, 9, 22)), True),
     (_change(field="us-gaap:MadeUpTag", tag="MadeUpTag"), False),
     (_change(field="shares_diluted", tag="WeightedAverageNumberOfDilutedSharesOutstanding"), False),
-    (_change(old=0.0, new=5.0, pct=None), False),
+    (_change(old=0.0, new=5.0, pct=None), True),
     (_change(new=900.0, pct=0.10), True),
 ], ids=["at-threshold", "below-threshold", "withdrawn", "tag-move", "old-period",
-        "at-floor", "unscored-field", "split-field", "no-ratio", "down-10pct"])
+        "at-floor", "unscored-field", "split-field", "from-zero", "down-10pct"])
 def test_tier1_rule_each_conjunct(change, promoted):
     assert SILENT_REVISION_TIER1_PCT == 0.05
     lines = silent_revision_tier1_lines([change], "2026-09-19", "2026-09-20", period_since=FLOOR)
     assert bool(lines) is promoted
     if promoted:
-        signed = "+5.0%" if change.new_value > change.old_value else "-10.0%"
+        signed = (
+            "from zero" if change.old_value == 0
+            else "+5.0%" if change.new_value > change.old_value else "-10.0%"
+        )
         assert lines == [
-            f"Silent revision: total_assets for {change.key.end} 1,000 → {change.new_value:,.0f} "
+            f"Silent revision: total_assets for {change.key.end} {change.old_value:,.0f} → "
+            f"{change.new_value:,.0f} "
             f"({signed}) between snapshots 2026-09-19 and 2026-09-20 "
             "(detail in appendix; threshold hand-set, uncalibrated)"
         ]
@@ -370,3 +374,83 @@ def test_journal_threads_the_entry_day_and_the_cli_passes_nothing(monkeypatch, t
     monkeypatch.setattr(sys, "argv", ["generate_report.py", "CLI", "--no-docs", "--no-vintage"])
     assert cli.main() == 0
     assert seen["CLI"] == "absent"
+
+
+# --- audit regressions (2026-09-22) ----------------------------------------------
+
+def _tier1(root, lock):
+    _s, _e, tier1, errors, _t, _scan, diff = _collect_streams(
+        _Client(_assets(1.0)), "AAPL", AS_OF, company_facts=_assets(1.0),
+        baseline_day=lock, vintage_root=root,
+    )
+    assert errors["vintage"] is None
+    return [line for line in tier1 if line.startswith("Silent revision:")], diff
+
+
+def test_a_post_lock_revision_to_a_period_added_after_the_lock_is_promoted(tmp_path):
+    """Lock snapshot has Q1 only; the 10-Q adds Q2; Q2 is then quietly
+    revised -20%. The lock-to-now diff walks only facts the lock snapshot
+    had, so it cannot see Q2 — the previous -> newest window must still be
+    promoted."""
+    q1 = ("2026-03-31", "2026-05-01", 1000.0, "10-Q", "a")
+    _store(tmp_path, _facts([q1]), datetime(2026, 9, 10, 12, tzinfo=UTC))
+    _store(tmp_path, _facts([q1, ("2026-06-30", "2026-08-01", 1000.0, "10-Q", "b")]),
+           datetime(2026, 9, 15, 12, tzinfo=UTC))
+    _store(tmp_path, _facts([q1, ("2026-06-30", "2026-08-01", 800.0, "10-Q", "c")]),
+           datetime(2026, 9, 20, 12, tzinfo=UTC))
+    lines, _diff = _tier1(tmp_path, date(2026, 9, 12))
+    assert lines == [
+        "Silent revision: total_assets for 2026-06-30 1,000 → 800 (-20.0%) between snapshots "
+        "2026-09-15 and 2026-09-20 (detail in appendix; threshold hand-set, uncalibrated)"
+    ]
+
+
+def test_a_revision_in_both_windows_is_promoted_once(tmp_path):
+    _store(tmp_path, _assets(1000.0), D19)
+    _store(tmp_path, _assets(1050.0, accn="b"), D20)
+    _store(tmp_path, _assets(1200.0, accn="c"), D21)
+    lines, diff = _tier1(tmp_path, date(2026, 9, 20))  # baseline 9/19, previous 9/20
+    assert diff.changes_since_baseline and diff.changes_since_previous
+    assert len(lines) == 1 and "between snapshots 2026-09-19 and 2026-09-21" in lines[0]
+
+
+def test_a_revision_captured_on_the_lock_day_is_not_absorbed_into_the_baseline(tmp_path):
+    """Snapshots are dated by day, so the lock-day snapshot may postdate the
+    lock. The baseline is the last snapshot BEFORE the lock day."""
+    _store(tmp_path, _assets(1000.0), D19)
+    _store(tmp_path, _assets(1100.0, accn="b"), D20)   # lock day, after the lock
+    _store(tmp_path, _assets(1100.0, accn="c"), D21)
+    rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 20), root=tmp_path)
+    assert rep.baseline.captured == "2026-09-19"
+    assert [c.new_value for c in rep.changes_since_baseline] == [1100.0]
+
+
+def test_an_evening_capture_is_visible_to_that_evenings_report(tmp_path, monkeypatch):
+    """Reports date themselves by the local day; snapshots were stamped in
+    UTC, so an 8pm-EDT capture landed on tomorrow and the report that made
+    it could not see it."""
+    import time
+
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        evening = datetime(2026, 9, 23, 1, 30, tzinfo=UTC)   # 21:30 EDT on 9/22
+        cap = store_snapshot(CIK, _assets(1000.0), now=evening, root=tmp_path)
+        assert cap.path.name.startswith("2026-09-22-")
+        store_snapshot(CIK, _assets(1100.0, accn="b"), now=evening, root=tmp_path)
+        assert report_diff(CIK, as_of=date(2026, 9, 22), root=tmp_path).compared
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+
+
+def test_a_revert_is_named_not_called_unchanged(tmp_path):
+    from app.services.ingestion.vintages import store_snapshot as store
+
+    store(CIK, _assets(1000.0), now=D19, root=tmp_path)
+    store(CIK, _assets(1100.0, accn="b"), now=D20, root=tmp_path)
+    back = store(CIK, _assets(1000.0), now=D21, root=tmp_path)
+    assert back.reason == "reverted" and not back.wrote
+    assert back.describe().startswith("reverted back to an earlier snapshot")
+    same = store(CIK, _assets(1000.0), now=D21, root=tmp_path)
+    assert same.reason == "unchanged"

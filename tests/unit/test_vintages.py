@@ -484,8 +484,14 @@ class TestFailuresAreNotSilent:
         man = v.read_manifest(1045810, tmp_path)
         assert man["problem_days"] == 1 and man["last_checked"] == "2026-09-19"
         monkeypatch.undo()
+        fetched = client.fetches
         again = v.capture(client, "NVDA", now=AT, root=tmp_path)
-        assert again.reason == "already checked today"   # no hourly refetch loop
+        assert client.fetches == fetched                 # no hourly refetch loop
+        # ...but the failure is not forgotten: a later same-day call used to
+        # clear the marker and report an ordinary "already checked today",
+        # delaying the VINTAGE_STALE_DAYS alert and telling reports all was well.
+        assert again.reason == "failed" and again.problem and "not retried" in again.detail
+        assert v.read_manifest(1045810, tmp_path)["problem_days"] == 1
 
     def test_a_busy_lock_is_reported_not_swallowed(self, tmp_path, monkeypatch):
         import fcntl

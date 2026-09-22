@@ -44,7 +44,7 @@ import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.services.ingestion.companyfacts_mapper import (
@@ -329,6 +329,8 @@ class Capture:
             return f"captured {self.path.name}{size}"
         if self.reason == "unchanged":
             return f"unchanged since the last snapshot (sha {self.sha256[:12]})"
+        if self.reason == "reverted":
+            return f"reverted {self.detail}"
         if self.reason == "already checked today":
             return "already checked today; no new snapshot"
         return f"NOT captured ({self.reason}): {self.detail}"
@@ -373,8 +375,17 @@ def store_snapshot(
     rather than a second fetch that may straddle a filing. Same gate, same
     manifest, same content addressing as `capture` — a payload that
     `capture` would have fetched produces the identical file and digest.
+
+    NOT gated by the once-a-day check. That gate exists to save a fetch;
+    this payload is already in hand, and it is the one the report scored.
+    Gating it meant a morning `capture` (the watch sweep, the daily
+    portfolio run) made that evening's filing-night report drop the payload
+    that carried the filing — and the silent-revision section then compared
+    two older snapshots and said nothing had changed. Content addressing
+    still stores an identical payload only once. (`force` is kept for API
+    compatibility; it has nothing left to override.)
     """
-    return _store(cik, lambda: facts, now=now, root=root, force=force)
+    return _store(cik, lambda: facts, now=now, root=root, force=True)
 
 
 def _store(
@@ -388,8 +399,13 @@ def _store(
     """The lock / daily-gate / dedupe / atomic-write core shared by `capture`
     and `store_snapshot`. `load` is invoked only once the gate has decided a
     document is actually needed."""
-    now = now or datetime.now(UTC)
-    today = now.date()
+    # The LOCAL calendar day, however the instant is expressed. Reports date
+    # themselves with the local `date.today()` and read the store "as of"
+    # that day; stamping snapshots in UTC put an evening (US) capture on
+    # tomorrow's date, invisible to the report that made it. An aware
+    # instant (the watch sweep passes UTC) is converted; a naive one is
+    # taken as local.
+    today = (now or datetime.now(UTC)).astimezone().date()
     with _cik_lock(cik, root) as held:
         if not held:
             # Never touch the manifest without its lock. The process holding
@@ -403,9 +419,15 @@ def _store(
         if not force and man.get("last_checked") == today.isoformat():
             newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
             if _problem_days(cik, root):
-                man["problem_days"] = 0
-                _write_json_atomic(_manifest_path(cik, root), man)
-                _clear_problem_days(cik, root)
+                # Today's attempt archived nothing (any success today would
+                # have cleared the marker). The gate stays closed — a broken
+                # disk must not turn one fetch a day into one an hour — but
+                # it must not erase the marker either: that delayed the
+                # VINTAGE_STALE_DAYS operator alert and told the report the
+                # day was fine.
+                return Capture(cik, today, None, newest, "failed",
+                               "an earlier attempt today archived nothing; "
+                               "not retried until tomorrow")
             return Capture(cik, today, None, newest, "already checked today")
 
         facts = load()
@@ -413,11 +435,20 @@ def _store(
         sha = hashlib.sha256(raw).hexdigest()
         man["last_checked"] = today.isoformat()
         known = {s.get("sha256") for s in man["snapshots"]}
+        observed = man.get("observations") or []
+        last_seen = observed[-1].get("sha256") if observed else None
         _observe(man, today, sha)
         if sha in known:
             man["problem_days"] = 0
             _write_json_atomic(_manifest_path(cik, root), man)
             _clear_problem_days(cik, root)
+            if last_seen is not None and last_seen != sha:
+                # Stored before, but NOT what was live last time: the filer
+                # went back to an earlier state. That is a change, and the
+                # one a silent-revision baseline most needs to name.
+                return Capture(cik, today, None, sha, "reverted",
+                               f"back to an earlier snapshot (sha {sha[:12]}); "
+                               f"the last one observed was {last_seen[:12]}")
             return Capture(cik, today, None, sha, "unchanged")
 
         # Record that today's fetch HAPPENED before attempting the larger,
@@ -842,8 +873,11 @@ def report_diff(
     a past date and gets the trail as it stood. The newest visible state is
     diffed against the previous one; with a `baseline_day` (the pinned
     thesis day on the journal track) the newest is also diffed against the
-    observation at or before that day, unless that is already one of the
-    two. An unreadable snapshot raises `ExternalPayloadError`: that is a
+    last observation captured BEFORE that day, unless that is already one of
+    the two. Strictly before: snapshots are dated by day, so one captured on
+    the lock day may postdate the lock, and a revision it carried would be
+    absorbed into the baseline and never reported. Erring the other way
+    re-reports at most one day of pre-lock changes. An unreadable snapshot raises `ExternalPayloadError`: that is a
     data failure for the caller's stream containment, not a "no baseline"
     state.
     """
@@ -861,7 +895,10 @@ def report_diff(
     if len(visible) == 1:
         return VintageDiffReport(
             as_of, visible[-1], None, [],
-            no_baseline_reason="no baseline yet (first capture this run)",
+            no_baseline_reason=(
+                f"only one snapshot observed at or before {as_of}; nothing earlier "
+                "to diff against yet"
+            ),
         )
     newest, previous = visible[-1], visible[-2]
     new_facts = _load_for_diff(newest)
@@ -869,12 +906,12 @@ def report_diff(
     if baseline_day is None:
         return VintageDiffReport(as_of, newest, previous, changes)
 
-    baseline = observation_at_or_before(visible, baseline_day)
+    baseline = observation_at_or_before(visible, baseline_day - timedelta(days=1))
     if baseline is None:
         return VintageDiffReport(
             as_of, newest, previous, changes,
             baseline_note=(
-                f"no snapshot at or before the pinned thesis day {baseline_day}; "
+                f"no snapshot before the pinned thesis day {baseline_day}; "
                 f"earliest is {visible[0].captured}"
             ),
         )
@@ -903,10 +940,12 @@ def silent_revision_tier1_lines(
 
     Promoted: a `revised` scored, non-split field, for a period ending on or
     after `period_since`, moved by at least SILENT_REVISION_TIER1_PCT, and
-    not a tag migration. Withdrawn facts and tag moves stay in the appendix
-    section: a withdrawal has no ratio to threshold, and a move is a filer
-    re-tagging the same number until proven otherwise. Order is the diff's
-    (period descending)."""
+    not a tag migration. A figure revised away from zero (an impairment of 0
+    restated to 500M) has no percentage and is promoted too: it cannot be
+    immaterial. Withdrawn facts and tag moves stay in the appendix section: a
+    withdrawal has no ratio to threshold, and a move is a filer re-tagging
+    the same number until proven otherwise. Order is the diff's (period
+    descending)."""
     scored = {**INSTANT_FIELDS, **FLOW_FIELDS}
     out: list[str] = []
     for c in changes:
@@ -916,14 +955,18 @@ def silent_revision_tier1_lines(
             continue
         if c.key.end < period_since:
             continue
-        if c.pct_change is None or c.pct_change < SILENT_REVISION_TIER1_PCT:
+        from_zero = c.old_value == 0 and c.new_value != 0
+        if not from_zero and (c.pct_change is None or c.pct_change < SILENT_REVISION_TIER1_PCT):
             continue
         if c.moved_tag:
             continue
-        signed = (c.new_value - c.old_value) / abs(c.old_value)
+        move = (
+            "from zero" if from_zero
+            else f"{(c.new_value - c.old_value) / abs(c.old_value):+.1%}"
+        )
         out.append(
             f"Silent revision: {c.field_name} for {c.key.period} "
-            f"{c.old_value:,.0f} → {c.new_value:,.0f} ({signed:+.1%}) between snapshots "
+            f"{c.old_value:,.0f} → {c.new_value:,.0f} ({move}) between snapshots "
             f"{older} and {newer} (detail in appendix; threshold hand-set, uncalibrated)"
         )
     return out
