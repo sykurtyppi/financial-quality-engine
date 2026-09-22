@@ -153,7 +153,7 @@ def detect_mismatches(
             detector=f"mismatch:{spec.kind}",
             fiscal_label=label,
             comparison="point",
-            source="period documents",
+            source=ledger.attribute(excerpt, label),
             excerpt=excerpt,
             detail=detail,
             confidence=confidence,

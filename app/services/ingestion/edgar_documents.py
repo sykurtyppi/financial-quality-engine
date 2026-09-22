@@ -323,6 +323,15 @@ def _find_ex99(client: SecClient, cik: int, accession: str) -> list[str]:
     return sorted(candidates, key=_ex99_sort_key)
 
 
+def _filed(filing_dates: list[str], i: int) -> date | None:
+    """The filing date as provenance. Unreadable is None, never a reason to
+    drop an otherwise good document."""
+    try:
+        return date.fromisoformat(filing_dates[i])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
 def fetch_documents(
     client: SecClient,
     ticker: str,
@@ -435,6 +444,9 @@ def fetch_documents(
                                 doc_type=doc_type,
                                 text=section,
                                 source=f"{form} {accessions[i]}",
+                                accession=accessions[i],
+                                form=form,
+                                filed=_filed(filing_dates, i),
                             )
                         )
                     else:
@@ -478,6 +490,9 @@ def fetch_documents(
                         doc_type=DocumentType.EARNINGS_RELEASE,
                         text=text,
                         source=f"8-K {accessions[i]} {ex99}",
+                        accession=accessions[i],
+                        form=form,
+                        filed=_filed(filing_dates, i),
                     )
                 )
                 releases_done += 1

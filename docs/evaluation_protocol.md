@@ -131,6 +131,24 @@ Mid-window changes (0.4.0 window):
    actually trigger — by scoring it or triggering on its raw value — would be
    a signal addition and is a window-close item.
 
+5. **2026-09-22 — narrative evidence rows name their filing
+   (`narrative/evidence.py`, `narrative_metrics.py`, `mismatch.py`).** Every
+   narrative ledger row claimed `source="period documents"` although each
+   document already carried its form and accession. The ledger now locates
+   each quoted window in the documents of its own period and names them
+   ("10-Q 0000…; 8-K 0000… ex99_1.htm"); computed rows (KPI added/removed,
+   disclosure-volume reduction) name the period documents they were derived
+   from; a window it cannot place, or documents with no recorded source, say
+   so explicitly. `DocumentRecord` gains optional `accession`/`form`/`filed`.
+
+   **No detector, term list, metric, finding, flag or score changed** — only
+   the `source` string of ledger rows, which the markdown report does not
+   render (it reaches the API's evidence JSON). Proof tests:
+   `tests/unit/test_evidence_attribution.py` (every quoted row names only
+   documents of its period containing its windows, over generated filings);
+   the golden report and `calibration_snapshot.json` are byte-identical, and
+   the AAPL/KO/CRM reports are byte-identical to the previous main.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

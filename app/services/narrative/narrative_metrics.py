@@ -76,7 +76,7 @@ def compute_narrative_layer(
         result.metrics = [_missing(name, "no documents provided") for name in _MISSING_SPECS]
         return result
 
-    ledger = EvidenceLedger()
+    ledger = EvidenceLedger(documents)
     periods = group_documents(documents)
     cmp = build_comparison(periods)
     label = periods[-1].fiscal_label
@@ -102,7 +102,10 @@ def compute_narrative_layer(
             detector="adjustment_recurrence",
             fiscal_label=f.fiscal_label,
             comparison="trailing8",
-            source="period documents",
+            source=(
+                ledger.attribute(" | ".join(f.evidence_snippets[:2]))
+                if f.evidence_snippets else ledger.derived_from(f.fiscal_label)
+            ),
             excerpt=" | ".join(f.evidence_snippets[:2]) or f.detail,
             detail=f.detail,
             confidence="high" if adj.periods_analyzed >= 6 else "medium",
@@ -123,7 +126,7 @@ def compute_narrative_layer(
             detector=f.kind,
             fiscal_label=f.fiscal_label,
             comparison="qoq",
-            source="period documents",
+            source=ledger.derived_from(f.fiscal_label),
             excerpt=f.detail,
             detail=f.detail,
             confidence="medium",
@@ -157,7 +160,8 @@ def compute_narrative_layer(
                 )
                 ledger.add(
                     detector="disclosure_reduction", fiscal_label=label, comparison="trailing8",
-                    source="period documents", excerpt=detail, detail=detail, confidence="medium",
+                    source=ledger.derived_from(label), excerpt=detail, detail=detail,
+                    confidence="medium",
                 )
         else:
             result.metrics.append(_missing("disclosure_volume_change", "non-empty prior documents"))
@@ -182,7 +186,8 @@ def compute_narrative_layer(
             )
             ledger.add(
                 detector="defensive_tone_increase", fiscal_label=label, comparison="trailing8",
-                source="period documents", excerpt=tone.excerpts[0], detail=detail, confidence="medium",
+                source=ledger.attribute(tone.excerpts[0], label), excerpt=tone.excerpts[0],
+                detail=detail, confidence="medium",
             )
     else:
         result.metrics.append(_missing("defensive_tone_change"))
@@ -205,7 +210,8 @@ def compute_narrative_layer(
             )
             ledger.add(
                 detector="guidance_shift", fiscal_label=label, comparison="qoq",
-                source="period documents", excerpt=guid.excerpts[0], detail=detail, confidence="medium",
+                source=ledger.attribute(guid.excerpts[0], label), excerpt=guid.excerpts[0],
+                detail=detail, confidence="medium",
             )
     else:
         result.metrics.append(_missing("guidance_shift"))
@@ -231,7 +237,8 @@ def compute_narrative_layer(
             )
             ledger.add(
                 detector="high_severity_disclosure", fiscal_label=label, comparison="trailing8",
-                source="period documents", excerpt=excerpt, detail=detail, confidence="high",
+                source=ledger.attribute(excerpt, label), excerpt=excerpt, detail=detail,
+                confidence="high",
             )
 
     # --- metric-narrative mismatches --------------------------------------------

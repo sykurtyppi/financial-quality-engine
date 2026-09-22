@@ -114,6 +114,12 @@ class DocumentRecord(BaseModel):
     doc_type: DocumentType
     text: str
     source: str | None = Field(default=None, description="URL or filing accession number")
+    # Structured provenance of the same filing, where the ingester knows it.
+    # `source` keeps its human-readable "{form} {accession}[ {exhibit}]" form
+    # (backtests parse it); these carry the parts without parsing.
+    accession: str | None = None
+    form: str | None = None
+    filed: date | None = None
 
 
 class CompanyDataset(BaseModel):
