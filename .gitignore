@@ -15,3 +15,6 @@ data/kpi_judgments.json
 build/
 dist/
 *.egg-info/
+
+# hypothesis caches constants mined from the source here (property tests)
+.hypothesis/
