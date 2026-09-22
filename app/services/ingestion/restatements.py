@@ -39,6 +39,7 @@ from app.services.ingestion.companyfacts_mapper import (
     _unit_for,
 )
 from app.services.ingestion.fields import FIELDS
+from app.services.ingestion.payloads import concept_rows
 
 # Relative change below which a same-period revision is treated as rounding or
 # an immaterial reclassification rather than a restatement. The XBRL survey
@@ -156,14 +157,10 @@ class RestatementScan:
 
 
 def _rows(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[dict]:
-    concept = facts_json.get("facts", {}).get(taxonomy, {}).get(tag)
-    if not concept:
-        return []
-    units = concept.get("units", {})
-    rows = units.get(unit)
-    if rows is None and unit == "shares":
-        rows = units.get("USD")  # some filers mis-file share counts under USD
-    return rows or []
+    # Shape-checked: a malformed payload raises ExternalPayloadError here
+    # instead of an AttributeError somewhere downstream. Includes the
+    # shares-filed-under-USD fallback.
+    return concept_rows(facts_json, taxonomy, tag, unit)
 
 
 def _active_tag(

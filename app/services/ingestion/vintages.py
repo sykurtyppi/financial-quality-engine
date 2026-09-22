@@ -53,6 +53,7 @@ from app.services.ingestion.companyfacts_mapper import (
     _parse_date,
     _unit_for,
 )
+from app.services.ingestion.payloads import ExternalPayloadError
 from app.services.ingestion.restatements import (
     DEFAULT_MATERIALITY_PCT,
     SPLIT_ADJUSTED_FIELDS,
@@ -814,6 +815,18 @@ class VintageDiffReport:
         return line
 
 
+def _load_for_diff(obs: VintageObservation) -> dict:
+    """A stored snapshot for the report's diff. An unreadable file is a data
+    failure — the stored SEC payload cannot be read — and is reported as one
+    (`ExternalPayloadError`), never mistaken for a defect in this code."""
+    try:
+        return load_vintage(obs.path)
+    except UNREADABLE as e:
+        raise ExternalPayloadError(
+            f"vintage snapshot {obs.path.name} unreadable: {type(e).__name__}: {e}"
+        ) from e
+
+
 def report_diff(
     cik: int,
     *,
@@ -830,8 +843,9 @@ def report_diff(
     diffed against the previous one; with a `baseline_day` (the pinned
     thesis day on the journal track) the newest is also diffed against the
     observation at or before that day, unless that is already one of the
-    two. An unreadable snapshot raises (`UNREADABLE`): that is a data
-    failure for the caller's stream containment, not a "no baseline" state.
+    two. An unreadable snapshot raises `ExternalPayloadError`: that is a
+    data failure for the caller's stream containment, not a "no baseline"
+    state.
     """
     visible = [
         s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of
@@ -850,8 +864,8 @@ def report_diff(
             no_baseline_reason="no baseline yet (first capture this run)",
         )
     newest, previous = visible[-1], visible[-2]
-    new_facts = load_vintage(newest.path)
-    changes = diff_vintages(load_vintage(previous.path), new_facts, since=since)
+    new_facts = _load_for_diff(newest)
+    changes = diff_vintages(_load_for_diff(previous), new_facts, since=since)
     if baseline_day is None:
         return VintageDiffReport(as_of, newest, previous, changes)
 
@@ -878,7 +892,7 @@ def report_diff(
             "snapshot; one comparison covers both"
         )
         return VintageDiffReport(as_of, newest, previous, changes, baseline, baseline_note=note)
-    since_lock = diff_vintages(load_vintage(baseline.path), new_facts, since=since)
+    since_lock = diff_vintages(_load_for_diff(baseline), new_facts, since=since)
     return VintageDiffReport(as_of, newest, previous, changes, baseline, since_lock)
 
 

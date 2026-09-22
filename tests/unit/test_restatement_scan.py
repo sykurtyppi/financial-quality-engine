@@ -279,11 +279,12 @@ def test_a_failed_scan_leaves_the_header_plain_and_the_tier1_notice_speaking(mon
     """When the stream itself fails the card already says 'not checked this
     run'; the header must not ALSO claim a gap count it does not have."""
     from app.core.pipeline import analyze
+    from app.services.ingestion.sec_client import SecClientError
     from app.services.reporting.report_builder import build_report
     from tests.fixtures.companies import stretch_dataset
 
     def outage(*a, **k):
-        raise RuntimeError("SEC request failed: 503")
+        raise SecClientError("SEC request failed: 503")
 
     monkeypatch.setattr(mod, "scan_restatements", outage)
     ds = stretch_dataset()

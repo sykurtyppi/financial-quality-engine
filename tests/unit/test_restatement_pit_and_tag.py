@@ -263,10 +263,14 @@ def test_build_report_hands_the_detector_the_mappers_selection(monkeypatch):
     from tests.fixtures.companies import stretch_dataset
 
     seen: dict = {}
+    # Bound before patching: calling the module attribute from inside the spy
+    # recursed forever, and the old catch-all filed the RecursionError as a
+    # restatement data gap, so this test passed on a stream that never ran.
+    real_scan = restatements_mod.scan_restatements
 
     def spy(facts_json, **kw):
         seen.update(kw)
-        return restatements_mod.scan_restatements({"facts": {}}, **kw)
+        return real_scan({"facts": {}}, **kw)
 
     monkeypatch.setattr(restatements_mod, "scan_restatements", spy)
 
