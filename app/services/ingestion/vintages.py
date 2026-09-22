@@ -738,3 +738,178 @@ def render_changes(changes: list[VintageChange], older: str, newer: str) -> str:
         lines.append(
             f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} | {filed} |")
     return "\n".join(lines) + "\n"
+
+
+# Tier-1 promotion threshold for a silent revision: hand-set and UNCALIBRATED.
+# Five times the diff's own 1% materiality floor. The report section lists
+# every >=1% move as context; the decision card promotes only the ones large
+# enough that "a reclassification" is not the obvious first explanation.
+# P1-F kill criterion applies from 2026-09-22: two quarters of live coverage
+# producing only noise diffs demotes the Tier-1 line to appendix-only.
+SILENT_REVISION_TIER1_PCT = 0.05
+
+
+def observation_at_or_before(
+    states: list[VintageObservation], day: date
+) -> VintageObservation | None:
+    """Newest observation captured on or before `day`, or None.
+
+    `states` is `observed_vintages` order (oldest first, same-day order as
+    the manifest recorded it), so the last hit is the answer. Not sorted
+    here: two same-day states sort by hash if sorted by name, and the
+    manifest's order is the only record of which came second."""
+    hit: VintageObservation | None = None
+    for state in states:
+        if date.fromisoformat(state.captured) <= day:
+            hit = state
+    return hit
+
+
+@dataclass(frozen=True)
+class VintageDiffReport:
+    """What the silent-revision check compared for one report, and found.
+
+    Two senses of "baseline" meet here, so both are named. `baseline` is the
+    observation at or before the pinned thesis day — "what moved since you
+    locked". `no_baseline_reason` is the older sense from the data-quality
+    line: there was nothing earlier to diff the newest snapshot against, so
+    NOTHING was compared and the section must say so rather than read as
+    clean.
+
+    `changes_since_baseline` is None when no thesis day was given or when the
+    thesis-day observation is the previous or the newest one (a second
+    comparison would repeat the first, or compare a snapshot with itself);
+    `baseline_note` then says which.
+    """
+
+    as_of: date
+    newest: VintageObservation | None
+    previous: VintageObservation | None
+    changes_since_previous: list[VintageChange]
+    baseline: VintageObservation | None = None
+    changes_since_baseline: list[VintageChange] | None = None
+    no_baseline_reason: str | None = None
+    baseline_note: str | None = None
+
+    @property
+    def compared(self) -> bool:
+        return self.no_baseline_reason is None
+
+    def status_line(self) -> str:
+        """One line for the data-quality section: exactly what was compared."""
+        if not self.compared:
+            return self.no_baseline_reason or "not compared"
+        assert self.newest is not None and self.previous is not None
+        line = (
+            f"compared {self.previous.captured} → {self.newest.captured}: "
+            f"{len(self.changes_since_previous)} change(s)"
+        )
+        if self.changes_since_baseline is not None and self.baseline is not None:
+            line += (
+                f"; since pinned thesis {self.baseline.captured}: "
+                f"{len(self.changes_since_baseline)} change(s)"
+            )
+        if self.baseline_note:
+            line += f"; {self.baseline_note}"
+        return line
+
+
+def report_diff(
+    cik: int,
+    *,
+    as_of: date,
+    baseline_day: date | None = None,
+    since: date | None = None,
+    root: Path | None = None,
+) -> VintageDiffReport:
+    """The silent-revision check for a report dated `as_of`.
+
+    Only observations captured on or before `as_of` are visible — the one
+    place the report's date bounds this store, so a historical replay passes
+    a past date and gets the trail as it stood. The newest visible state is
+    diffed against the previous one; with a `baseline_day` (the pinned
+    thesis day on the journal track) the newest is also diffed against the
+    observation at or before that day, unless that is already one of the
+    two. An unreadable snapshot raises (`UNREADABLE`): that is a data
+    failure for the caller's stream containment, not a "no baseline" state.
+    """
+    visible = [
+        s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of
+    ]
+    if not visible:
+        return VintageDiffReport(
+            as_of, None, None, [],
+            no_baseline_reason=(
+                f"no snapshot at or before {as_of} (capture disabled or failed — "
+                "see the Vintage snapshot line)"
+            ),
+        )
+    if len(visible) == 1:
+        return VintageDiffReport(
+            as_of, visible[-1], None, [],
+            no_baseline_reason="no baseline yet (first capture this run)",
+        )
+    newest, previous = visible[-1], visible[-2]
+    new_facts = load_vintage(newest.path)
+    changes = diff_vintages(load_vintage(previous.path), new_facts, since=since)
+    if baseline_day is None:
+        return VintageDiffReport(as_of, newest, previous, changes)
+
+    baseline = observation_at_or_before(visible, baseline_day)
+    if baseline is None:
+        return VintageDiffReport(
+            as_of, newest, previous, changes,
+            baseline_note=(
+                f"no snapshot at or before the pinned thesis day {baseline_day}; "
+                f"earliest is {visible[0].captured}"
+            ),
+        )
+    # By content, not identity: a revert (A -> B -> A) is a third observation
+    # that reuses A's bytes, and diffing it against the newest A finds nothing.
+    if baseline.sha256 == newest.sha256:
+        note = (
+            f"the pinned thesis snapshot ({baseline.captured}) is the newest "
+            "snapshot; nothing to compare since the lock"
+        )
+        return VintageDiffReport(as_of, newest, previous, changes, baseline, baseline_note=note)
+    if baseline.sha256 == previous.sha256:
+        note = (
+            f"the pinned thesis snapshot ({baseline.captured}) is the previous "
+            "snapshot; one comparison covers both"
+        )
+        return VintageDiffReport(as_of, newest, previous, changes, baseline, baseline_note=note)
+    since_lock = diff_vintages(load_vintage(baseline.path), new_facts, since=since)
+    return VintageDiffReport(as_of, newest, previous, changes, baseline, since_lock)
+
+
+def silent_revision_tier1_lines(
+    changes: list[VintageChange], older: str, newer: str, *, period_since: date
+) -> list[str]:
+    """Tier-1 lines for the decision card, one per promoted change.
+
+    Promoted: a `revised` scored, non-split field, for a period ending on or
+    after `period_since`, moved by at least SILENT_REVISION_TIER1_PCT, and
+    not a tag migration. Withdrawn facts and tag moves stay in the appendix
+    section: a withdrawal has no ratio to threshold, and a move is a filer
+    re-tagging the same number until proven otherwise. Order is the diff's
+    (period descending)."""
+    scored = {**INSTANT_FIELDS, **FLOW_FIELDS}
+    out: list[str] = []
+    for c in changes:
+        if c.kind != "revised" or c.new_value is None:
+            continue
+        if c.field_name not in scored or c.field_name in SPLIT_ADJUSTED_FIELDS:
+            continue
+        if c.key.end < period_since:
+            continue
+        if c.pct_change is None or c.pct_change < SILENT_REVISION_TIER1_PCT:
+            continue
+        if c.moved_tag:
+            continue
+        signed = (c.new_value - c.old_value) / abs(c.old_value)
+        out.append(
+            f"Silent revision: {c.field_name} for {c.key.period} "
+            f"{c.old_value:,.0f} → {c.new_value:,.0f} ({signed:+.1%}) between snapshots "
+            f"{older} and {newer} (detail in appendix; threshold hand-set, uncalibrated)"
+        )
+    return out

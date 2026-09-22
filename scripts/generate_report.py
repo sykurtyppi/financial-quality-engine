@@ -96,6 +96,8 @@ def main() -> int:
         submissions=submissions,
         index_degraded=submissions is None,
         vintage_note=vintage_note,
+        # No baseline_day: the CLI has no pinned thesis; the silent-revision
+        # section compares the newest snapshot with the previous one only.
     )
 
     out_dir = ROOT / "reports"
