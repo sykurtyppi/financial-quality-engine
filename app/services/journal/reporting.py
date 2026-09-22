@@ -90,6 +90,7 @@ def build_report(
         ticker=ticker,
         fetched_at=fetched_at,
         warnings=diag.warnings,
+        field_notes=diag.field_notes(),
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
         submissions=submissions,
