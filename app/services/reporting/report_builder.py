@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import date
+from pathlib import Path
 
 from app.schemas.financials import CompanyDataset
 from app.schemas.report import AnalysisResult
@@ -55,6 +56,8 @@ def data_quality_section(
     restatement_scan: str | None = None,
     archives: str | None = None,
     field_notes: list[str] | None = None,
+    vintage_error: str | None = None,
+    vintage_diff: str | None = None,
 ) -> str:
     """A fetch failure must be distinguishable from 'the filer didn't disclose'
     (P0-D), for every stream including events (review finding 4).
@@ -83,6 +86,10 @@ def data_quality_section(
         lines.append(f"- Filing documents: {archives}")
     if vintage is not None:
         lines.append(f"- Vintage snapshot: {vintage}")
+    # What the silent-revision check compared (or why it compared nothing):
+    # "no baseline yet" must never read as "no silent revisions".
+    if vintage_diff is not None:
+        lines.append(f"- Silent-revision check: {vintage_diff}")
     if restatement_scan is not None:
         lines.append(f"- Restatement scan: {restatement_scan}")
     lines += [f"- Ingestion warning: {w}" for w in warnings]
@@ -94,6 +101,7 @@ def data_quality_section(
         ("Capital-markets", offerings_error, "no activity"),
         ("Restatement", restatements_error, "no revisions"),
         ("Event (8-K 4.02)", events_error, "no events"),
+        ("Silent-revision", vintage_error, "no silent revisions"),
     ):
         if err is not None:
             lines.append(
@@ -188,22 +196,29 @@ def _collect_streams(
     company_facts: dict | None = None,
     submissions: dict | None = None,
     field_tags: Mapping[str, str | None] | None = None,
+    baseline_day: date | None = None,
+    vintage_root: Path | None = None,
 ):
-    """Fetch offerings, restatements, and 8-K 4.02 events. Returns
-    (body_sections, event_lines, tier1_events, errors, takedowns, scan).
+    """Fetch offerings, restatements, 8-K 4.02 events and the silent-revision
+    diff. Returns (body_sections, event_lines, tier1_events, errors,
+    takedowns, scan, vintage_diff).
     `takedowns` is the CLASSIFIED OfferingFiling list (not a count): the
     Capital Integrity caveat must attribute only what the parsed records
     establish — a debt 424B5 or an issuer-primary deal is not a sponsor sale.
     `scan` is the RestatementScan (None when that stream failed): the card
     and the data-quality section need what it did NOT inspect, which the
     section body alone cannot tell them. Stream availability is derived from
-    `errors` by the caller — there is no separate list."""
+    `errors` by the caller — there is no separate list. `vintage_diff` is the
+    VintageDiffReport (None when that stream failed); `baseline_day` is the
+    pinned thesis day whose snapshot the newest one is also diffed against,
+    and `vintage_root` overrides the store location (tests)."""
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
-    errors = {"offerings": None, "restatements": None, "events": None}
+    errors = {"offerings": None, "restatements": None, "events": None, "vintage": None}
     takedowns: list = []
     scan = None
+    vintage_diff = None
 
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
@@ -253,7 +268,70 @@ def _collect_streams(
     except Exception as e:  # noqa: BLE001
         errors["events"] = _stream_failure(e)
 
-    return body_sections, event_lines, tier1_events, errors, takedowns, scan
+    try:
+        from app.services.ingestion.vintages import report_diff, silent_revision_tier1_lines
+
+        cik = client.resolve_cik(ticker)
+        # Same period window as the restatement section; the Tier-1 floor is
+        # the 4.02 window's formula (~8 quarter-ends), so the card promotes
+        # only revisions to periods a reader still holds in mind.
+        since = date(report_date.year - 3, 1, 1)
+        floor = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
+        vintage_diff = report_diff(
+            cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root
+        )
+        body_sections.append(_silent_revisions_section(vintage_diff))
+        # Promote from the lock-to-now window when there is one: a revision
+        # that landed in an intermediate state between the thesis lock and
+        # today is invisible to previous -> newest.
+        if vintage_diff.changes_since_baseline is not None and vintage_diff.baseline is not None:
+            tier1_events += silent_revision_tier1_lines(
+                vintage_diff.changes_since_baseline,
+                vintage_diff.baseline.captured, vintage_diff.newest.captured,
+                period_since=floor,
+            )
+        elif vintage_diff.compared:
+            tier1_events += silent_revision_tier1_lines(
+                vintage_diff.changes_since_previous,
+                vintage_diff.previous.captured, vintage_diff.newest.captured,
+                period_since=floor,
+            )
+    except Exception as e:  # noqa: BLE001
+        errors["vintage"] = _stream_failure(e)
+        vintage_diff = None
+
+    return body_sections, event_lines, tier1_events, errors, takedowns, scan, vintage_diff
+
+
+def _silent_revisions_section(rep) -> str:
+    """Markdown for the Tier-2 (between-snapshot) revision check. Evidence
+    framing only — no scoring. Says what was compared before saying what
+    moved, and says plainly when nothing could be compared."""
+    from app.services.ingestion.vintages import render_changes
+
+    lines = ["## Silent Revisions Between Snapshots (evidence — not scored)", ""]
+    if not rep.compared:
+        lines.append(
+            f"Not checked: {rep.no_baseline_reason}. Two distinct companyfacts "
+            f"snapshots taken at or before {rep.as_of} are needed to diff; the store "
+            "fills as reports and the watch sweep run, and nothing can be back-filled."
+        )
+        return "\n".join(lines)
+    lines.append(
+        "_Prior-period figures that changed or disappeared between the two most "
+        f"recent distinct companyfacts snapshots taken at or before {rep.as_of}. "
+        "Facts added for new periods are not listed. Nothing here has an amended "
+        "filing behind it — read the filing before calling any of it a restatement._"
+    )
+    lines.append("")
+    lines.append(render_changes(rep.changes_since_previous, rep.previous.captured, rep.newest.captured))
+    if rep.changes_since_baseline is not None and rep.baseline is not None:
+        lines.append(f"**Since the pinned thesis was locked** ({rep.baseline.captured}):")
+        lines.append("")
+        lines.append(render_changes(rep.changes_since_baseline, rep.baseline.captured, rep.newest.captured))
+    elif rep.baseline_note:
+        lines.append(f"_{rep.baseline_note}._")
+    return "\n".join(lines)
 
 
 def _selling_stockholder_takedowns(takedowns: list) -> list:
@@ -324,6 +402,8 @@ def build_report(
     field_tags: Mapping[str, str | None] | None = None,
     vintage_note: str | None = None,
     field_notes: list[str] | None = None,
+    baseline_day: date | None = None,
+    vintage_root: Path | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -332,6 +412,8 @@ def build_report(
     `generated_on` must be an ISO date (YYYY-MM-DD): it anchors both the card's
     displayed date and the evidence-stream as-of window, so a malformed value is
     rejected up front rather than silently diverging (review finding P3).
+    `baseline_day` is the pinned thesis day (journal track): the silent-revision
+    check also diffs the newest snapshot against the one at or before it.
     """
     try:
         report_date = date.fromisoformat(generated_on)
@@ -350,12 +432,16 @@ def build_report(
     body = render(result, generated_on=generated_on)
     event_lines: list[str] = []
     tier1_events: list[str] = []
-    errors = {"offerings": None, "restatements": None, "events": None}
+    errors = {"offerings": None, "restatements": None, "events": None, "vintage": None}
     scan = None
+    vintage_diff = None
 
     if client is not None and ticker is not None:
-        sections, event_lines, tier1_events, errors, takedowns, scan = _collect_streams(
-            client, ticker, report_date, company_facts, submissions, field_tags
+        sections, event_lines, tier1_events, errors, takedowns, scan, vintage_diff = (
+            _collect_streams(
+                client, ticker, report_date, company_facts, submissions, field_tags,
+                baseline_day=baseline_day, vintage_root=vintage_root,
+            )
         )
         for section in sections:
             body += "\n\n" + section + "\n"
@@ -379,6 +465,8 @@ def build_report(
             # not count (a stub) yields no line rather than a guessed one.
             archives=_archive_summary(client),
             field_notes=field_notes,
+            vintage_error=errors["vintage"],
+            vintage_diff=vintage_diff.status_line() if vintage_diff is not None else None,
         ) + "\n"
 
     # Tier-1 sources that could NOT be checked this run — restatement footprints
@@ -387,12 +475,19 @@ def build_report(
     # client (API path) none of the evidence streams are checked at all.
     tier1_unavailable: list[str] = []
     if client is None or ticker is None:
-        tier1_unavailable = ["restatement footprints", "8-K 4.02 events"]
+        tier1_unavailable = [
+            "restatement footprints", "8-K 4.02 events", "silent revisions (vintage diff)",
+        ]
     else:
         if errors["restatements"] is not None:
             tier1_unavailable.append("restatement footprints")
         if errors["events"] is not None:
             tier1_unavailable.append("8-K 4.02 events")
+        if errors["vintage"] is not None:
+            tier1_unavailable.append("silent revisions (vintage diff)")
+        elif vintage_diff is not None and not vintage_diff.compared:
+            # Two snapshots did not exist yet: not a failure, still not checked.
+            tier1_unavailable.append("silent revisions (no vintage baseline yet)")
 
     # Capital-markets was actually checked iff a client ran offerings without error.
     capital_markets_checked = (

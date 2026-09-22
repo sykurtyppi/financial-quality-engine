@@ -49,6 +49,7 @@ Problem: free-text schema can't resolve assumptions, no falsifiers/probabilities
 
 **P1-F. Restatement-footprint detector (vintage store + diff).**
 Problem: latest-filed-wins silently accepts restated history (P0-5) — blindness where the survey says the leading indicator lives (little-r revisions). Solution: L1 vintage store (start capturing NOW — value compounds with time) + L4 vintage diff. Evidence: survey 5 (Choudhary et al.; measured base rates 3.4–6.7% Big-R). Complexity: M. Validation: Kraft Heinz fixture; base-rate sanity check. Kill: if 2 quarters of live coverage produce only noise diffs (immaterial reclassifications), demote to appendix. Done: any silent prior-period change ≥ threshold surfaces as a provenance-linked item.
+*Status 2026-09-22:* done-when met — every client-backed report carries a "Silent Revisions Between Snapshots" section diffing the newest snapshot against the previous one (and against the pinned-thesis-day snapshot on the journal track), naming what it could not compare. Tier-1 promotion rule (hand-set, uncalibrated): a `revised` scored non-split field, period within ~8 quarter-ends, |Δ| ≥ 5% (`vintages.SILENT_REVISION_TIER1_PCT`), not a tag move; withdrawn facts and tag moves stay in the appendix. The kill-criterion clock starts 2026-09-22: two quarters of noise-only diffs demote the Tier-1 line to appendix-only.
 
 ## P2 — Validation and calibration
 

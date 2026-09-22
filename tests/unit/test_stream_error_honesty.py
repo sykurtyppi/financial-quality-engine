@@ -97,7 +97,7 @@ def test_an_sec_outage_still_degrades_gracefully(monkeypatch):
         raise RuntimeError("SEC request failed: 503")
 
     monkeypatch.setattr(restatements_mod, "scan_restatements", outage)
-    _sections, _events, _tier1, errors, _takedowns, _scan = _collect_streams(
+    _sections, _events, _tier1, errors, _takedowns, _scan, _vintage = _collect_streams(
         _Client(), "AAPL", date(2026, 9, 21), company_facts={"facts": {}}
     )
     assert errors["restatements"] == "SEC request failed: 503"
@@ -114,7 +114,7 @@ def test_a_malformed_sec_payload_degrades_rather_than_breaking_the_report():
         def submissions_by_cik(self, cik):
             return {"filings": {"recent": None}}
 
-    _sections, _events, _tier1, errors, _takedowns, _scan = _collect_streams(
+    _sections, _events, _tier1, errors, _takedowns, _scan, _vintage = _collect_streams(
         _Malformed(), "AAPL", date(2026, 9, 21), company_facts={"facts": {}}
     )
     assert errors["offerings"] and "NoneType" in errors["offerings"]

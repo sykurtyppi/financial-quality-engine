@@ -57,6 +57,11 @@ def build_report(
     mistaken for a blind journal case. ``vintage`` archives the scored
     companyfacts payload to the vintage store (the silent-revision baseline);
     a failure there is a data-quality line, never an aborted report.
+
+    ``report_day`` also pins the silent-revision baseline: on the journal track
+    it IS the locked entry's day (watch.py hands it to ``journal.py report
+    --date``), so the report diffs the newest snapshot against the one taken
+    at or before the lock. It still never sets ``generated_on`` (below).
     """
     ticker = ticker.upper()
     client = SecClient(fresh=fresh)
@@ -97,6 +102,7 @@ def build_report(
         index_degraded=submissions is None,
         fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
         vintage_note=vintage_note,
+        baseline_day=date.fromisoformat(report_day) if report_day else None,
     )
     if banner:
         report = f"{banner}\n\n{report}"
