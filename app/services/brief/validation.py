@@ -13,7 +13,6 @@ from app.services.brief.assessment import QuarterAssessment, parse_quarter_asses
 from app.services.brief.assumptions import DERIVED, HOLDER
 from app.services.brief.text import fold_row, normalize, split_row, unwrap
 
-
 REQUIRED_HEADINGS = (
     "Headline",
     "Quarter assessment",

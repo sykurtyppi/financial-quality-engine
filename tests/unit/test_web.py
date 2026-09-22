@@ -7,6 +7,8 @@ impact form writes the AFTER/OUTCOME fields back to the same markdown file.
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -279,16 +281,19 @@ def test_impact_rejects_forged_conviction_after(client):
 
 def _seed_v2(locked: bool = True, ticker: str = "MXL", day: str = "2026-07-27"):
     """A preregistered (v2) case, written the way `openv2` writes one."""
-    from datetime import date, datetime, timezone
+    from datetime import date, datetime
 
     from app.services.journal.schema_v2 import (
-        Assumption, BeforeBlock, EntryV2, lock_entry,
+        Assumption,
+        BeforeBlock,
+        EntryV2,
+        lock_entry,
     )
 
     entry = EntryV2(
         ticker=ticker,
         day=date.fromisoformat(day),
-        opened=datetime(2026, 7, 27, 9, 41, tzinfo=timezone.utc),
+        opened=datetime(2026, 7, 27, 9, 41, tzinfo=UTC),
         before=BeforeBlock(
             thesis="One of three optical DSP suppliers.",
             conviction=4,

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 Tag = tuple[str, str]  # (taxonomy, concept), e.g. ("us-gaap", "Assets")
 
@@ -88,11 +89,11 @@ def _single(*tags: Tag) -> SeriesStrategy:
     return SeriesStrategy(Composition.SINGLE, Criterion.BEST_COVERAGE, tags=tags)
 
 
-def _instant(name: str, *tags: Tag, **kw) -> FieldSpec:
+def _instant(name: str, *tags: Tag, **kw: Any) -> FieldSpec:
     return FieldSpec(name, Kind.INSTANT, (_single(*tags),), **kw)
 
 
-def _flow(name: str, *strategies: SeriesStrategy, **kw) -> FieldSpec:
+def _flow(name: str, *strategies: SeriesStrategy, **kw: Any) -> FieldSpec:
     return FieldSpec(name, Kind.FLOW, strategies, **kw)
 
 

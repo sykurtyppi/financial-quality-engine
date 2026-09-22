@@ -49,3 +49,73 @@ filterwarnings = [
     # the suppression tightly to that one message so real deprecations still surface.
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:UserWarning",
 ]
+
+# Lint (CI, `ruff check app scripts tests`). No reformatting and no
+# line-length rule during the 0.4.0 evaluation window: the aim is catching
+# defects and dead code, not restyling files whose diffs reviewers must read.
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",   # line length: not enforced (no reformat during the window)
+    "B905",   # zip() without strict=: parsers deliberately truncate to the shortest column
+    "UP042",  # StrEnum: changes str()/format() of members that rendered text depends on
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts put the repo root on sys.path before importing app.
+"scripts/*.py" = ["E402"]
+# AGENTS.md §4 flag-only files: frozen until the 0.4.0 window closes, so they
+# are not restyled here. Only import ordering is outstanding in them.
+"app/config/scoring_config.py" = ["I001"]
+"app/services/scoring/engine.py" = ["I001"]
+"app/services/formulas/*.py" = ["I001"]
+"app/services/narrative/*.py" = ["I001"]
+"app/services/backtesting/{pit,outcomes,runner}.py" = ["I001"]
+
+# Type check (CI, `mypy`). The new provenance-layer modules are checked
+# strictly; everything else at mypy's defaults, with the modules that do not
+# yet pass listed below as known debt — a new module, or a listed one fixed
+# and removed, is held to the check from then on.
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "app.services.ingestion.fields",
+    "app.services.ingestion.payloads",
+    "app.services.metrics_registry",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+disallow_untyped_calls = true
+check_untyped_defs = true
+warn_return_any = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+# Known debt at 2026-09-22: mostly Optional narrowing mypy cannot see (the
+# values are guarded at runtime). Flag-only modules among them stay here
+# until the window closes.
+module = [
+    "app.services.backtesting.analysis",
+    "app.services.backtesting.distressed_controls",
+    "app.services.backtesting.kpi_validation",
+    "app.services.backtesting.pit",
+    "app.services.backtesting.survivorship",
+    "app.services.brief.derived",
+    "app.services.formulas.beneish",
+    "app.services.formulas.capex",
+    "app.services.ingestion.companyfacts_mapper",
+    "app.services.ingestion.offerings",
+    "app.services.journal.store",
+    "app.services.narrative.narrative_metrics",
+    "app.services.watch.poller",
+    "app.services.watch.rearm",
+]
+ignore_errors = true

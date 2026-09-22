@@ -33,19 +33,19 @@ import json
 import re
 import subprocess
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.brief.derived import derive_for_ticker
 from app.services.brief.assumptions import (
     add_assumption,
     assumptions_path,
     load_assumptions,
     parse_assumptions,
 )
+from app.services.brief.derived import derive_for_ticker
 from app.services.brief.sources import (
     BRIEFS,
     BriefSourceError,
@@ -127,7 +127,7 @@ def write_built_meta(ticker: str, event_day: str, *, kind: str, accession: str,
     p.write_text(json.dumps({
         "kind": kind, "accession": accession,
         "report": str(report) if report else None,
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
     }, indent=2) + "\n")
 
 

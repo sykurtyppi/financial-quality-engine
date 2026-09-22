@@ -531,8 +531,8 @@ def scan_restatements(
                 # originally reported value; the amendment event is the latest
                 # material /A filing in the trail, independent of which form
                 # carries the current value.
-                def _pct(v: float) -> float | None:
-                    return None if orig[1] == 0 else abs(v - orig[1]) / abs(orig[1])
+                def _pct(v: float, base: float = orig[1]) -> float | None:
+                    return None if base == 0 else abs(v - base) / abs(base)
 
                 material = [
                     f

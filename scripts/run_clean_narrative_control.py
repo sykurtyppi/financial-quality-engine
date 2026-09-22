@@ -15,7 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.backtesting.clean_narrative_control import RESTATEMENT_RATES, run_clean_control
+from app.services.backtesting.clean_narrative_control import (
+    RESTATEMENT_RATES,
+    run_clean_control,
+)
 
 
 def main() -> int:
@@ -25,9 +28,11 @@ def main() -> int:
 
     for r in results:
         if r.error:
-            print(f"  {r.company.name:18s} ERROR — {r.error}"); continue
+            print(f"  {r.company.name:18s} ERROR — {r.error}")
+            continue
         if r.has_402:
-            print(f"  {r.company.name:18s} EXCLUDED — had a 4.02 (not clean)"); continue
+            print(f"  {r.company.name:18s} EXCLUDED — had a 4.02 (not clean)")
+            continue
         kinds = ", ".join(sorted(r.independent_kinds)) or "(none)"
         print(f"  {r.company.name:18s} [{r.company.sector:15s}] docs={r.n_documents:2d} | {kinds}")
 

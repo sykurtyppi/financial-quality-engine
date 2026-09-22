@@ -28,7 +28,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -200,7 +200,7 @@ class BeforeBlock(BaseModel):
         return s or None
 
     @model_validator(mode="after")
-    def _p_outcome_pairs_with_definition(self) -> "BeforeBlock":
+    def _p_outcome_pairs_with_definition(self) -> BeforeBlock:
         # Round-11 finding 1: `p_outcome` is meaningless without the event it
         # scores. Because the BEFORE block is hash-locked, users cannot add
         # `outcome_definition` later without breaking the lock — so the pairing
@@ -280,7 +280,7 @@ class EntryV2(BaseModel):
         return v.strip().upper()
 
     @model_validator(mode="after")
-    def _timestamps_and_lock_coherent(self) -> "EntryV2":
+    def _timestamps_and_lock_coherent(self) -> EntryV2:
         # Round-12 finding 4: the CLI cannot produce these states, but nothing
         # in the model prevented a programmatic caller from constructing a
         # semantically impossible entry (e.g. `reported` before `locked_at`,
@@ -390,7 +390,7 @@ def lock_entry(entry: EntryV2, now: datetime | None = None) -> EntryV2:
     ok, reason = can_lock(entry.before)
     if not ok:
         raise ValueError(f"cannot lock: {reason}")
-    ts = now or datetime.now(timezone.utc)
+    ts = now or datetime.now(UTC)
     return entry.model_copy(update={
         "before_sha256": hash_before(entry.before),
         "locked_at": ts,

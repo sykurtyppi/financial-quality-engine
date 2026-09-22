@@ -1,7 +1,6 @@
 """Phase 3: LLM adjudicator — grounding, substring check, cache, fallback.
 Uses a stub completion function; no network."""
 
-import pytest
 
 from app.services.narrative.kpi_adjudicator import (
     LlmAdjudicator,

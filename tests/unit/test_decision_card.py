@@ -4,7 +4,11 @@ tiered flags and carries NO composite grade (§7)."""
 from app.schemas.financials import CompanyProfile
 from app.schemas.report import AnalysisResult, Flag, NarrativeFinding
 from app.services.reporting.decision_card import render_decision_card
-from app.services.scoring.thermometer import ClusterReadout, DistressThermometer, RegimeFlag
+from app.services.scoring.thermometer import (
+    ClusterReadout,
+    DistressThermometer,
+    RegimeFlag,
+)
 
 
 def _flag(title: str, metrics: list[str], severity: str = "red") -> Flag:

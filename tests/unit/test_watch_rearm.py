@@ -9,7 +9,7 @@ would regenerate the same report on every sweep.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -23,7 +23,7 @@ from app.services.watch.rearm import (
     next_arming,
 )
 
-NOW = datetime(2026, 11, 18, 21, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 18, 21, 0, tzinfo=UTC)
 
 
 def _submissions(rows) -> dict:

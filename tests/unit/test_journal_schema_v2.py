@@ -2,7 +2,7 @@
 rule, tamper detection via BEFORE-block hash, roundtrip serialization, and that
 v1 entries are cleanly rejected (parsed by a separate path)."""
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -50,7 +50,7 @@ def _min_entry(**before_overrides) -> EntryV2:
     return EntryV2(
         ticker="MXL",
         day=date(2026, 7, 27),
-        opened=datetime(2026, 7, 27, 9, 41, 11, tzinfo=timezone.utc),
+        opened=datetime(2026, 7, 27, 9, 41, 11, tzinfo=UTC),
         before=_min_before(**before_overrides),
     )
 
@@ -199,10 +199,10 @@ class TestLockAndTamperDetection:
     def test_lock_stamps_hash_and_timestamps(self):
         e = _min_entry()
         assert not is_locked(e)
-        locked = lock_entry(e, now=datetime(2026, 7, 27, 10, 0, 0, tzinfo=timezone.utc))
+        locked = lock_entry(e, now=datetime(2026, 7, 27, 10, 0, 0, tzinfo=UTC))
         assert is_locked(locked)
         assert locked.before_sha256 is not None and len(locked.before_sha256) == 64
-        assert locked.locked_at == datetime(2026, 7, 27, 10, 0, 0, tzinfo=timezone.utc)
+        assert locked.locked_at == datetime(2026, 7, 27, 10, 0, 0, tzinfo=UTC)
         # Round-10 finding 1: lock does NOT stamp `reported`. That belongs to
         # the report step (`cmd_report`), which happens after the engine runs.
         assert locked.reported is None
@@ -239,7 +239,7 @@ class TestLockAndTamperDetection:
     def test_cannot_lock_without_assumption(self):
         e = EntryV2(
             ticker="X", day=date(2026, 1, 1),
-            opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            opened=datetime(2026, 1, 1, tzinfo=UTC),
             before=BeforeBlock(thesis="x", conviction=3, intended_action="hold", assumptions=[]),
         )
         with pytest.raises(ValueError, match="assumption"):
@@ -390,7 +390,11 @@ class TestResolutionHelpers:
     def test_terminal_resolution_supersedes_earlier_pending(self):
         # A pending row followed by a met row for the same index resolves the
         # assumption terminally. add_resolution replaces same-index rows.
-        from app.services.journal.schema_v2 import Resolution, add_resolution, open_assumption_indices
+        from app.services.journal.schema_v2 import (
+            Resolution,
+            add_resolution,
+            open_assumption_indices,
+        )
 
         entry = lock_entry(_min_entry())
         entry = add_resolution(entry, Resolution(assumption_index=0, state="pending"))
@@ -503,7 +507,11 @@ class TestV2Tally:
         path = store.save_v2(entry)
 
         # Add a resolution + outcome.y, then tamper the thesis under the old hash.
-        from app.services.journal.schema_v2 import Resolution, add_resolution, render_entry
+        from app.services.journal.schema_v2 import (
+            Resolution,
+            add_resolution,
+            render_entry,
+        )
         with_res = add_resolution(entry, Resolution(assumption_index=0, state="met", observed=170.0))
         with_res = with_res.model_copy(update={
             "outcome": with_res.outcome.model_copy(update={"y": True}),
@@ -562,8 +570,8 @@ class TestEntryTimestampInvariants:
         with pytest.raises(ValidationError, match="together"):
             EntryV2(
                 ticker="X", day=date(2026, 1, 1),
-                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                locked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                opened=datetime(2026, 1, 1, tzinfo=UTC),
+                locked_at=datetime(2026, 1, 1, tzinfo=UTC),
                 before_sha256=None,
                 before=_min_before(),
             )
@@ -572,7 +580,7 @@ class TestEntryTimestampInvariants:
         with pytest.raises(ValidationError, match="together"):
             EntryV2(
                 ticker="X", day=date(2026, 1, 1),
-                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                opened=datetime(2026, 1, 1, tzinfo=UTC),
                 locked_at=None,
                 before_sha256="a" * 64,
                 before=_min_before(),
@@ -582,10 +590,10 @@ class TestEntryTimestampInvariants:
         with pytest.raises(ValidationError, match="precedes"):
             EntryV2(
                 ticker="X", day=date(2026, 1, 1),
-                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                locked_at=datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
+                opened=datetime(2026, 1, 1, tzinfo=UTC),
+                locked_at=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
                 before_sha256="a" * 64,
-                reported=datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc),
+                reported=datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
                 before=_min_before(),
             )
 
@@ -593,8 +601,8 @@ class TestEntryTimestampInvariants:
         with pytest.raises(ValidationError, match="not locked"):
             EntryV2(
                 ticker="X", day=date(2026, 1, 1),
-                opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                reported=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                opened=datetime(2026, 1, 1, tzinfo=UTC),
+                reported=datetime(2026, 1, 1, tzinfo=UTC),
                 before=_min_before(),
             )
 
@@ -606,7 +614,7 @@ class TestSchemaSurface:
 
     def test_ticker_uppercased(self):
         e = EntryV2(ticker="mxl", day=date(2026, 1, 1),
-                    opened=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    opened=datetime(2026, 1, 1, tzinfo=UTC),
                     before=_min_before())
         assert e.ticker == "MXL"
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+from datetime import UTC
 from pathlib import Path
 
 from app.services.journal import store
@@ -210,6 +211,7 @@ def test_awaiting_outcome_excludes_reported_but_after_not_filled(tmp_path, monke
 
 # --- audit-finding regressions ---------------------------------------------
 
+
 import pytest  # noqa: E402
 
 
@@ -359,7 +361,7 @@ def _seed_v2(tmp_path, monkeypatch, *, reported: bool = True, **before_kwargs) -
     where `after`/`outcome` may legitimately run (round-13 findings 1 & 2).
     Pass `reported=False` when a test wants the pre-report state.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     monkeypatch.setattr(store, "ENTRIES", tmp_path)
     ns = _openv2_ns(**before_kwargs)
@@ -367,7 +369,7 @@ def _seed_v2(tmp_path, monkeypatch, *, reported: bool = True, **before_kwargs) -
     p = list(tmp_path.glob("*.md"))[0]
     entry = store.load_v2(p)
     if reported:
-        stamped = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
+        stamped = entry.model_copy(update={"reported": datetime.now(UTC)})
         store.save_v2(stamped, p, allow_update=True)
         entry = store.load_v2(p)
     return entry
@@ -638,10 +640,14 @@ def test_mark_reported_stamps_deferred_v1_entry(tmp_path, monkeypatch):
 
 
 def test_defer_mark_v2_entry_stays_retryable_then_marks(tmp_path, monkeypatch):
-    from datetime import date as _date, datetime as _dt, timezone as _tz
+    from datetime import date as _date
+    from datetime import datetime as _dt
 
     from app.services.journal.schema_v2 import (
-        Assumption, BeforeBlock, EntryV2, lock_entry,
+        Assumption,
+        BeforeBlock,
+        EntryV2,
+        lock_entry,
     )
 
     monkeypatch.setattr(store, "ENTRIES", tmp_path)
@@ -653,7 +659,7 @@ def test_defer_mark_v2_entry_stays_retryable_then_marks(tmp_path, monkeypatch):
                                 resolve_by=_date(2026, 12, 31))],
     )
     entry = lock_entry(EntryV2(ticker="NVDA", day=_date.today(),
-                               opened=_dt.now(_tz.utc), before=before))
+                               opened=_dt.now(UTC), before=before))
     path = store.save_v2(entry)
 
     ns = argparse.Namespace(ticker="NVDA", date=None, no_docs=True, defer_mark=True)

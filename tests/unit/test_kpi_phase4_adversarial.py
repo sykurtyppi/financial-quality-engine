@@ -50,7 +50,7 @@ MATERIAL = [
 
 def _completion_table():
     table = {}
-    for kpi, prior, cur, _, j in COSMETIC + MATERIAL:
+    for kpi, _prior, cur, _, j in COSMETIC + MATERIAL:
         table[(kpi, cur)] = j
     def complete(system, user):  # noqa: ARG001
         import re

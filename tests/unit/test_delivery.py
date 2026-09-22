@@ -4,7 +4,6 @@ Neither may raise, and neither may touch the real drop folder from a test."""
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
 from app.services import delivery

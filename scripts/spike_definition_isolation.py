@@ -30,7 +30,6 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -137,7 +136,6 @@ def isolate_definition(text: str, kpi: str) -> set[str] | None:
                 return comps
 
     # Pass 2: reconciliation window (GAAP anchor -> KPI total).
-    low_all = text.lower()
     for m in re.finditer("|".join(kpi_pats), text, re.IGNORECASE):
         end = m.start()
         # find the nearest GAAP anchor within 1200 chars before the KPI total
@@ -209,7 +207,6 @@ def main() -> int:
         print(f"\n{a.label}  [{a.kind}]  cutoff={cutoff}  docs={len(docs)}  periods={len(periods)}")
         print(f"  ({a.note})")
         anchor_changed = False
-        anchor_manufactured = False
         for kpi in a.kpis:
             series = isolate_per_period(docs, kpi)
             defined = [(p, c) for p, c in series if c is not None]

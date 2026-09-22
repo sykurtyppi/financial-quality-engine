@@ -17,12 +17,18 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from app.services.backtesting.clean_narrative_control import ANCHOR, CLEAN, CleanCompany
-from app.services.backtesting.restatement_control import CASES, RestatementCase, first_402_date
-from app.services.narrative.kpi_adjudicator import Adjudicator, DeterministicAdjudicator
-from app.services.narrative.kpi_extraction import pair_definition_changes
-from app.services.ingestion.companyfacts_mapper import fiscal_year_end_month  # noqa: F401 (kept for parity)
+from app.services.backtesting.restatement_control import (
+    CASES,
+    RestatementCase,
+    first_402_date,
+)
+from app.services.ingestion.companyfacts_mapper import (
+    fiscal_year_end_month,  # noqa: F401 (kept for parity)
+)
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
+from app.services.narrative.kpi_adjudicator import Adjudicator, DeterministicAdjudicator
+from app.services.narrative.kpi_extraction import pair_definition_changes
 
 
 @dataclass

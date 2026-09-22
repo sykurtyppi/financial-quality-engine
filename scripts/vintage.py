@@ -31,13 +31,13 @@ from app.services.ingestion.sec_client import SecClient, SecClientError  # noqa:
 from app.services.ingestion.vintages import (  # noqa: E402
     UNREADABLE,
     capture,
-    snapshot_day,
     diff_vintages,
     list_vintages,
     load_vintage,
     observed_vintages,
     read_manifest,
     render_changes,
+    snapshot_day,
 )
 from app.services.journal.store import safe_ticker  # noqa: E402
 from app.services.watch.watchlist import WatchlistError, read_portfolio  # noqa: E402

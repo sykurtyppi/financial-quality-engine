@@ -16,7 +16,11 @@ from app.config import scoring_config as cfg
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.schemas.scoring import BlockScore, Confidence, Direction
 from app.services.scoring import engine
-from app.services.scoring.engine import MIN_COVERAGE_FOR_SCORE, score_block, score_overall
+from app.services.scoring.engine import (
+    MIN_COVERAGE_FOR_SCORE,
+    score_block,
+    score_overall,
+)
 
 ANCHORS = [(0.0, 10.0), (1.0, 50.0), (2.0, 90.0)]
 

@@ -16,8 +16,7 @@ appendix, not an exception.
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -38,7 +37,7 @@ from scripts import generate_report
 from tests.fixtures.companies import stretch_dataset
 
 CIK = 320193
-NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
 PAYLOAD = {"entityName": "Apple Inc.", "facts": {"us-gaap": {"Assets": {"units": {"USD": [
     {"end": "2026-03-28", "val": 1.0, "filed": "2026-05-01", "accn": "0000320193-26-000001", "form": "10-Q"},
 ]}}}}}

@@ -32,6 +32,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from datetime import UTC
+
 from app.services.journal import store
 from app.services.journal.reporting import build_report
 from app.services.journal.schema_v2 import (
@@ -66,7 +68,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     fail on `has_thesis(text)`. Now: verify the lock is intact, generate the
     report, THEN stamp `reported`. A tampered BEFORE block refuses to report
     (the entry no longer represents the preregistered claim)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     entry = store.load_v2(path)
     if not verify_lock(entry):
@@ -102,7 +104,7 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
               f"`journal.py mark-reported {entry.ticker} --date {entry.day.isoformat()}` "
               "once the audit succeeds.")
         return 0
-    updated = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
+    updated = entry.model_copy(update={"reported": datetime.now(UTC)})
     # allow_update=True: `reported` stamp is a legitimate in-place update.
     # save_v2 verifies the BEFORE hash is unchanged, so nothing else can slip in.
     store.save_v2(updated, path, allow_update=True)
@@ -400,7 +402,7 @@ def _parse_assumption(spec: str) -> Assumption:
 def cmd_openv2(args: argparse.Namespace) -> int:
     """P1-E: open + lock a v2 entry in one step. The anti-annoyance rule is that
     thesis + conviction + one assumption row is all you need."""
-    from datetime import date, datetime, timezone
+    from datetime import date, datetime
 
     try:
         ticker = store.safe_ticker(args.ticker)
@@ -445,7 +447,7 @@ def cmd_openv2(args: argparse.Namespace) -> int:
         day = date.today() if not args.date else date.fromisoformat(args.date)
         entry = EntryV2(
             ticker=ticker, day=day,
-            opened=datetime.now(timezone.utc),
+            opened=datetime.now(UTC),
             before=before,
         )
     except Exception as e:  # pydantic ValidationError or bad --date
@@ -524,8 +526,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         return 0
 
     # Import lazily so the resolver + pipeline aren't loaded for openv2/verify.
-    from app.services.ingestion.edgar_adapter import fetch_dataset
     from app.services.formulas.registry import compute_metrics
+    from app.services.ingestion.edgar_adapter import fetch_dataset
     from app.services.journal.resolver import propose_resolution
 
     try:
@@ -645,7 +647,7 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
     """Stamp `reported` on an entry whose report was generated with
     --defer-mark. Kept separate so the watch flow can order it strictly AFTER
     a successful audit — report-then-mark, never mark-then-hope."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
         path = store.find_entry(args.ticker, args.date)
@@ -665,7 +667,7 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
         if entry.reported is not None:
             print(f"{path.name}: already reported.", file=sys.stderr)
             return 1
-        updated = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
+        updated = entry.model_copy(update={"reported": datetime.now(UTC)})
         store.save_v2(updated, path, allow_update=True)
         print(f"Report stamped at {updated.reported.isoformat()}.")
         return 0

@@ -10,7 +10,7 @@ stamped ``reported`` so it cannot be regenerated (no peek-then-edit).
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -56,11 +56,11 @@ def safe_day(day: str) -> str:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def entry_path(ticker: str, day: str | None = None) -> Path:
@@ -112,10 +112,10 @@ def days_since(iso_ts: str | None, now: datetime | None = None) -> int | None:
     if not iso_ts:
         return None
     try:
-        dt = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        dt = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     except ValueError:
         return None
-    return ((now or datetime.now(timezone.utc)) - dt).days
+    return ((now or datetime.now(UTC)) - dt).days
 
 
 def open_entry(
@@ -237,7 +237,9 @@ def save_v2(entry, path: Path | None = None, *, allow_update: bool = False) -> P
     the incoming entry's `before_sha256` MUST equal the on-disk entry's.
     Anything else is refused.
     """
-    from app.services.journal.schema_v2 import render_entry  # avoid import cycle at load
+    from app.services.journal.schema_v2 import (
+        render_entry,  # avoid import cycle at load
+    )
 
     target = path or entry_path(entry.ticker, entry.day.isoformat())
     if target.exists():
@@ -308,6 +310,7 @@ def v2_tally(today_iso: str | None = None) -> dict:
       open_assumptions, overdue_assumptions (past resolve_by, unresolved),
       resolved_with_p_outcome, brier (None below the Murphy floor or without y).
     """
+    import sys as _sys  # local import — do not couple module load to stderr
     from datetime import date as _date
 
     from app.services.journal.schema_v2 import (
@@ -315,8 +318,6 @@ def v2_tally(today_iso: str | None = None) -> dict:
         open_assumption_indices,
         verify_lock,
     )
-
-    import sys as _sys  # local import — do not couple module load to stderr
 
     today = _date.fromisoformat(today_iso) if today_iso else _date.today()
     v2_paths = [p for p in list_entries() if is_v2(p)]

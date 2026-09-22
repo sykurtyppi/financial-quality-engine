@@ -3,11 +3,9 @@ twice, and what it can see that a single fetch cannot."""
 
 from __future__ import annotations
 
-import gzip
 import json
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -35,10 +33,10 @@ class _Client:
         return self._payloads[min(self.fetches - 1, len(self._payloads) - 1)]
 
 
-AT = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
-DAY1 = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
-DAY2 = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
-NEXT_DAY = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+AT = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+DAY1 = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+DAY2 = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+NEXT_DAY = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 
 
 class TestCapture:
@@ -541,12 +539,14 @@ class TestObservedVintageOrder:
 
 class TestOrphanCleanup:
     def test_a_stale_temp_file_is_removed_and_a_fresh_one_is_left_alone(self, tmp_path):
-        import os, time as _t
+        import os
+        import time as _t
 
         d = v.cik_dir(1045810, tmp_path)
         d.mkdir(parents=True)
         stale, fresh = d / ".x.json.gz.1.tmp", d / ".y.json.gz.2.tmp"
-        stale.write_bytes(b"x"); fresh.write_bytes(b"y")
+        stale.write_bytes(b"x")
+        fresh.write_bytes(b"y")
         old = _t.time() - 7200
         os.utime(stale, (old, old))
         v._sweep_orphans(d)

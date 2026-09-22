@@ -21,7 +21,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.backtesting.kpi_validation import run_validation, summarize
-from app.services.narrative.kpi_adjudicator import DeterministicAdjudicator, LlmAdjudicator
+from app.services.narrative.kpi_adjudicator import (
+    DeterministicAdjudicator,
+    LlmAdjudicator,
+)
 
 MODEL_ID = "agent-blind-rubric-v1"
 JUDGMENTS = ROOT / "data" / "kpi_judgments.json"

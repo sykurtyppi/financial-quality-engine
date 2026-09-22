@@ -3,6 +3,7 @@
 from datetime import date
 
 from app.core.pipeline import analyze
+from app.schemas.scoring import BlockScore, Confidence, Direction
 from app.services.ingestion.restatements import RestatementFootprint
 from app.services.ingestion.sec_client import SecClientError
 from app.services.reporting.report_builder import (
@@ -147,9 +148,7 @@ class TestReportScopeAndSnapshot:
         # the exact snapshot used for fundamentals instead of making a new call.
         assert "Restatement appendix UNAVAILABLE" not in report
 
-def _block(name: str, score: float | None) -> "BlockScore":
-    from app.schemas.scoring import BlockScore, Confidence, Direction
-
+def _block(name: str, score: float | None) -> BlockScore:
     return BlockScore(
         name=name, score=score, direction=Direction.MIXED,
         confidence=Confidence.HIGH, rationale="fixture", components=[],

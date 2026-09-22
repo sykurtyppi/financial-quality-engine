@@ -10,7 +10,7 @@ honest.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date
 
 import pytest
 
@@ -105,9 +105,14 @@ def test_tightening_can_lock_does_not_invalidate_an_already_sealed_entry():
     and `can_lock` is consulted only at the moment of locking. Anything else
     would destroy exactly the blind cases the journal exists to accumulate."""
     from datetime import date as d
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    from app.services.journal.schema_v2 import EntryV2, hash_before, is_locked, verify_lock
+    from app.services.journal.schema_v2 import (
+        EntryV2,
+        hash_before,
+        is_locked,
+        verify_lock,
+    )
 
     stale = BeforeBlock(
         thesis="a thesis long enough to satisfy the validator",
@@ -121,10 +126,10 @@ def test_tightening_can_lock_does_not_invalidate_an_already_sealed_entry():
 
     sealed = EntryV2(
         ticker="NVDA", day=d(2026, 8, 1),
-        opened=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        opened=datetime(2026, 8, 1, tzinfo=UTC),
         before=stale,
         before_sha256=hash_before(stale),
-        locked_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        locked_at=datetime(2026, 8, 1, tzinfo=UTC),
     )
     assert is_locked(sealed) and verify_lock(sealed)
 
@@ -133,9 +138,9 @@ def test_every_admitted_name_actually_resolves():
     """The vocabulary's whole job is to agree with the resolver. Derive the
     claim from the resolver itself rather than trusting a hand-kept list:
     a name `can_lock` admits must not come back `unresolvable`."""
+    from app.services.formulas.registry import compute_metrics
     from app.services.journal.resolver import _lookup_metric_value
     from app.services.journal.vocabulary import RESOLVABLE_METRICS
-    from app.services.formulas.registry import compute_metrics
 
     ds = stretch_dataset()
     period = ds.periods[-1]
@@ -240,8 +245,8 @@ def test_a_padded_metric_is_canonicalized_before_it_is_sealed():
     string and the resolver looked up the raw string, so `' revenue '` passed
     validation, sealed into the hash, and then resolved `unresolvable`.
     Validation and resolution must read the same value."""
-    from app.services.journal.resolver import propose_resolution
     from app.services.formulas.registry import compute_metrics
+    from app.services.journal.resolver import propose_resolution
 
     ds = stretch_dataset()
     assumption = Assumption(metric="  revenue  ", comparator=">", threshold=1.0,

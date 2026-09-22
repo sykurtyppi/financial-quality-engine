@@ -1,9 +1,9 @@
 """Restatement-footprint detector tests (P0-5). The AAPL numbers are the real
 2008-09-27 Assets restatement (10-K -> 10-K/A) observed in cached companyfacts."""
 
-import pytest
-
 from datetime import date
+
+import pytest
 
 from app.services.ingestion.restatements import (
     detect_restatements,
@@ -190,7 +190,6 @@ class TestFilingTrail:
         # scores it — a revision on the low-coverage NetIncomeLoss must NOT be
         # reported (its current_value would disagree with scoring), and the field
         # must not be double-reported across both tags.
-        from app.services.ingestion.companyfacts_mapper import _collect, _dedupe_latest_filed
 
         ends = ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
                 "2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31"]
@@ -215,7 +214,10 @@ class TestFilingTrail:
         # date (`>` not `>=`); current must resolve the tie the same way.
         from datetime import date as _date
 
-        from app.services.ingestion.companyfacts_mapper import _collect, _dedupe_latest_filed
+        from app.services.ingestion.companyfacts_mapper import (
+            _collect,
+            _dedupe_latest_filed,
+        )
 
         entries = [
             _fact("2024-12-31", 90.0, "2025-02-01", "10-K", accn="A"),
