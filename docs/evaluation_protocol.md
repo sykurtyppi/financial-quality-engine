@@ -149,6 +149,21 @@ Mid-window changes (0.4.0 window):
    the golden report and `calibration_snapshot.json` are byte-identical, and
    the AAPL/KO/CRM reports are byte-identical to the previous main.
 
+6. **2026-09-22 — evidence attribution corrections (post-merge audit of #5).**
+   Same files as entry 5, same scope (the `source` string only). A deep
+   audit found three attribution defects, each reproduced and now pinned:
+   adjustment snippets were joined with " | " and re-split, so a filing's
+   own " | " produced an untagged piece matched in every period (snippets
+   are now attributed as a list); a window straddling two concatenated
+   documents was "not located" although its centred term sat in one (now
+   attributed by centre-anchored slices of at least 30 characters); a
+   dropped KPI named only the current period's filings (it now also names
+   the periods it was compared with — `kpi_drift`'s window is passed
+   explicitly from one constant). A "[1]" footnote is no longer read as a
+   period tag. **No detector, metric, finding, flag or score changed**;
+   golden and calibration snapshot byte-identical. Proof tests:
+   `tests/unit/test_evidence_attribution.py`.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.
