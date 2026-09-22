@@ -8,6 +8,7 @@ from datetime import date
 from app.services.ingestion.restatements import (
     detect_restatements,
     render_restatements_section,
+    scan_restatements,
 )
 
 
@@ -249,7 +250,7 @@ class TestRender:
             _fact("2008-09-27", 39_572_000_000, "2009-10-27", "10-K", accn="A"),
             _fact("2008-09-27", 36_171_000_000, "2010-01-25", "10-K/A", accn="B"),
         ]})
-        md = render_restatements_section(detect_restatements(fj))
+        md = render_restatements_section(scan_restatements(fj))
         assert "Restatement" in md
         assert "total_assets" in md
         assert "10-K/A" in md
@@ -268,13 +269,17 @@ class TestRender:
                 _fact("2024-03-31", 300.0, "2025-05-01", "10-Q", start="2024-01-01", accn="D"),
             ],
         })
-        md = render_restatements_section(detect_restatements(fj))
+        md = render_restatements_section(scan_restatements(fj))
         assert "Amended-filing restatements" in md
         assert "Other prior-period revisions" in md
         assert "discontinued-operations or spinoff re-presentation" in md
 
     def test_render_empty(self):
-        assert "No prior-period revisions" in render_restatements_section([])
+        md = render_restatements_section(scan_restatements(_facts({"Assets": [
+            _fact("2024-12-31", 1000.0, "2025-01-15", "10-K", accn="A"),
+        ]})))
+        assert "No revisions detected" in md
+        assert "among the 1 inspected field" in md
 
 
 class TestPointInTime:

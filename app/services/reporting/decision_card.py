@@ -89,6 +89,8 @@ def render_decision_card(
     tier1_unavailable: list[str] | None = None,
     capital_markets_checked: bool = False,
     integrity_notes: list[str] | None = None,
+    restatement_scan: str | None = None,
+    restatement_gaps: int = 0,
 ) -> str:
     """Render the 90-second card.
 
@@ -103,6 +105,11 @@ def render_decision_card(
     guarantees that lapsed this run — the streams were checked, but not
     necessarily against one moment — which belongs on the card for the same
     reason: the 90-second surface must not imply more than the run established.
+    `restatement_scan` is the revision check's coverage line and
+    `restatement_gaps` the number of fields it could NOT inspect: the
+    checked-and-clean header is qualified `(incomplete: ...)` whenever that is
+    non-zero, because "clean" over a partial inspection is the false clean
+    bill the scan exists to prevent.
     """
     ticker = result.profile.ticker
     out: list[str] = [
@@ -162,8 +169,14 @@ def render_decision_card(
         out.append("- Capital-markets stream not checked this run (see data quality).")
     out.append("")
 
-    # 5. Checked and clean
-    out += ["## Checked and clean", ""]
+    # 5. Checked and clean — qualified whenever the revision check had holes.
+    header = "## Checked and clean"
+    if restatement_gaps:
+        header += (
+            f" (incomplete: {restatement_gaps} field(s) not inspectable for "
+            "revisions — see data quality)"
+        )
+    out += [header, ""]
     if result.green_flags:
         out += [f"- {f.title} ({f.fiscal_label})" for f in result.green_flags]
     else:
@@ -183,4 +196,6 @@ def render_decision_card(
         )
     for note in integrity_notes or []:
         out.append(f"- ⚠ {note}")
+    if restatement_scan is not None:
+        out.append(f"- Restatement scan: {restatement_scan}.")
     return "\n".join(out)

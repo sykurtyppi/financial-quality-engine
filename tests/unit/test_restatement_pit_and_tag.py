@@ -266,9 +266,9 @@ def test_build_report_hands_the_detector_the_mappers_selection(monkeypatch):
 
     def spy(facts_json, **kw):
         seen.update(kw)
-        return []
+        return restatements_mod.scan_restatements({"facts": {}}, **kw)
 
-    monkeypatch.setattr(restatements_mod, "detect_restatements", spy)
+    monkeypatch.setattr(restatements_mod, "scan_restatements", spy)
 
     class _Client:
         """Complete on purpose. A stub missing a method raises AttributeError

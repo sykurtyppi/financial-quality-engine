@@ -52,13 +52,16 @@ def data_quality_section(
     restatements_error: str | None = None,
     events_error: str | None = None,
     vintage: str | None = None,
+    restatement_scan: str | None = None,
 ) -> str:
     """A fetch failure must be distinguishable from 'the filer didn't disclose'
     (P0-D), for every stream including events (review finding 4).
 
     `vintage` is what happened to the companyfacts snapshot this run — the
     baseline the silent-revision check diffs against. None means capture was
-    not attempted (API path, --no-vintage); a failure is rendered, not hidden."""
+    not attempted (API path, --no-vintage); a failure is rendered, not hidden.
+    `restatement_scan` is the scan's coverage line (which fields were and were
+    not inspected for revisions); None means the stream did not run."""
     lines = [
         "## Appendix: Data Acquisition Quality",
         "",
@@ -68,6 +71,8 @@ def data_quality_section(
     ]
     if vintage is not None:
         lines.append(f"- Vintage snapshot: {vintage}")
+    if restatement_scan is not None:
+        lines.append(f"- Restatement scan: {restatement_scan}")
     lines += [f"- Ingestion warning: {w}" for w in warnings]
     lines += [f"- Document acquisition: {d}" for d in doc_diagnostics]
     for label, err, gap in (
@@ -165,17 +170,20 @@ def _collect_streams(
     field_tags: Mapping[str, str | None] | None = None,
 ):
     """Fetch offerings, restatements, and 8-K 4.02 events. Returns
-    (body_sections, event_lines, tier1_events, errors, takedowns). `takedowns`
-    is the CLASSIFIED OfferingFiling list (not a count): the Capital Integrity
-    caveat must attribute only what the parsed records establish — a debt
-    424B5 or an issuer-primary deal is not a sponsor sale. Stream
-    availability is derived from `errors` by the caller — there is no separate
-    list."""
+    (body_sections, event_lines, tier1_events, errors, takedowns, scan).
+    `takedowns` is the CLASSIFIED OfferingFiling list (not a count): the
+    Capital Integrity caveat must attribute only what the parsed records
+    establish — a debt 424B5 or an issuer-primary deal is not a sponsor sale.
+    `scan` is the RestatementScan (None when that stream failed): the card
+    and the data-quality section need what it did NOT inspect, which the
+    section body alone cannot tell them. Stream availability is derived from
+    `errors` by the caller — there is no separate list."""
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors = {"offerings": None, "restatements": None, "events": None}
     takedowns: list = []
+    scan = None
 
     try:
         from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
@@ -198,19 +206,20 @@ def _collect_streams(
 
     try:
         from app.services.ingestion.restatements import (
-            detect_restatements,
             render_restatements_section,
+            scan_restatements,
         )
 
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
-        footprints = detect_restatements(
+        scan = scan_restatements(
             facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags
         )
-        body_sections.append(render_restatements_section(footprints))
-        tier1_events += _restatement_tier1_lines(footprints)
+        body_sections.append(render_restatements_section(scan))
+        tier1_events += _restatement_tier1_lines(scan.footprints)
     except Exception as e:  # noqa: BLE001
         errors["restatements"] = _stream_failure(e)
+        scan = None
 
     try:
         from app.services.backtesting.events import fetch_entity_events
@@ -224,7 +233,7 @@ def _collect_streams(
     except Exception as e:  # noqa: BLE001
         errors["events"] = _stream_failure(e)
 
-    return body_sections, event_lines, tier1_events, errors, takedowns
+    return body_sections, event_lines, tier1_events, errors, takedowns, scan
 
 
 def _selling_stockholder_takedowns(takedowns: list) -> list:
@@ -321,9 +330,10 @@ def build_report(
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors = {"offerings": None, "restatements": None, "events": None}
+    scan = None
 
     if client is not None and ticker is not None:
-        sections, event_lines, tier1_events, errors, takedowns = _collect_streams(
+        sections, event_lines, tier1_events, errors, takedowns, scan = _collect_streams(
             client, ticker, report_date, company_facts, submissions, field_tags
         )
         for section in sections:
@@ -343,6 +353,7 @@ def build_report(
             restatements_error=errors["restatements"],
             events_error=errors["events"],
             vintage=vintage_note,
+            restatement_scan=scan.coverage_line() if scan is not None else None,
         ) + "\n"
 
     # Tier-1 sources that could NOT be checked this run — restatement footprints
@@ -374,6 +385,10 @@ def build_report(
         tier1_unavailable=tier1_unavailable or None,
         capital_markets_checked=capital_markets_checked,
         integrity_notes=integrity_notes or None,
+        # The card must carry what the revision check did not cover: "checked
+        # and clean" over a partial inspection is the false clean bill.
+        restatement_scan=scan.coverage_line() if scan is not None else None,
+        restatement_gaps=len(scan.uninspected) if scan is not None else 0,
     )
     report = (
         card

@@ -106,6 +106,53 @@ class RestatementFootprint:
         return self.amendment_accession is not None
 
 
+@dataclass(frozen=True)
+class RestatementScan:
+    """What one restatement check actually covered, alongside what it found.
+
+    A list of footprints cannot say why it is empty. "No revisions detected"
+    over the seven fields the payload happened to map reads identically to the
+    same sentence over all twenty-eight — and the first is not a clean bill for
+    the other twenty-one. Every field the check knows about is therefore
+    accounted for in exactly one of three places:
+
+    - `inspected`: a series was resolved and its filing history compared;
+    - `uninspected`: the field COULD NOT be checked (no series mapped this
+      run, no candidate tag with facts, or a resolved series with no eligible
+      facts) — its silence is a data gap, never evidence;
+    - `excluded`: skipped by design (split-adjusted share counts).
+
+    Only `uninspected` makes the scan `incomplete`; a by-design exclusion is
+    disclosed but is not a hole.
+    """
+
+    footprints: list[RestatementFootprint]
+    inspected: tuple[str, ...]
+    uninspected: dict[str, str]  # field -> reason
+    excluded: dict[str, str]  # field -> reason
+    as_of: date | None
+    period_since: date | None
+    materiality_pct: float
+
+    @property
+    def total(self) -> int:
+        return len(self.inspected) + len(self.uninspected) + len(self.excluded)
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.uninspected)
+
+    def coverage_line(self) -> str:
+        """One sentence naming the coverage, for the card and the appendix."""
+        line = f"inspected {len(self.inspected)} of {self.total} fields for revisions"
+        if self.uninspected:
+            gaps = "; ".join(f"{f} ({why})" for f, why in sorted(self.uninspected.items()))
+            line += f"; NOT inspected: {gaps}"
+        if self.excluded:
+            line += "; excluded by design: " + ", ".join(sorted(self.excluded))
+        return line
+
+
 def _rows(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[dict]:
     concept = facts_json.get("facts", {}).get(taxonomy, {}).get(tag)
     if not concept:
@@ -323,11 +370,14 @@ def _fields_to_inspect(
     Any field the mapper reports a selection for is therefore inspected, with
     no candidate tags of its own: the mapper's choice is the only authority on
     what a field outside the tables was built from, so there is nothing for
-    the coverage fallback to approximate.
+    the coverage fallback to approximate. A field the mapper recorded but
+    mapped NOTHING for is listed too — `_resolve_tags` yields no series for
+    it, so it produces no footprint, but the scan must name it as a gap
+    rather than let its absence read as "checked".
     """
     fields: dict[str, tuple[tuple[str, str], ...]] = {**INSTANT_FIELDS, **FLOW_FIELDS}
-    for name, selected in (selected_tags or {}).items():
-        if selected and name not in fields:
+    for name in selected_tags or {}:
+        if name not in fields:
             fields[name] = ()
     return fields
 
@@ -339,7 +389,24 @@ def detect_restatements(
     as_of: date | None = None,
     selected_tags: Mapping[str, str | None] | None = None,
 ) -> list[RestatementFootprint]:
-    """Find same-period figures a later filing revised beyond `materiality_pct`.
+    """The footprints of `scan_restatements` alone, for callers that only
+    consume revisions (the vintage store, tests). Anything that RENDERS a
+    result must take the scan: the footprint list cannot say what it did not
+    cover, and an empty list is not a clean bill."""
+    return scan_restatements(
+        facts_json, materiality_pct, period_since, as_of=as_of, selected_tags=selected_tags
+    ).footprints
+
+
+def scan_restatements(
+    facts_json: dict,
+    materiality_pct: float = DEFAULT_MATERIALITY_PCT,
+    period_since: date | None = None,
+    as_of: date | None = None,
+    selected_tags: Mapping[str, str | None] | None = None,
+) -> RestatementScan:
+    """Find same-period figures a later filing revised beyond `materiality_pct`,
+    and account for every field the check could or could not cover.
 
     For each canonical field's candidate tags, group facts by (start, end) and
     compare the earliest-filed value (as originally reported) with the
@@ -367,9 +434,13 @@ def detect_restatements(
     """
     footprints: list[RestatementFootprint] = []
     seen: set[tuple[str, date | None, date]] = set()  # (tag, start, end) dedupe
+    inspected: list[str] = []
+    uninspected: dict[str, str] = {}
+    excluded: dict[str, str] = {}
 
     for field_name, candidates in _fields_to_inspect(selected_tags).items():
         if field_name in SPLIT_ADJUSTED_FIELDS:
+            excluded[field_name] = "split-adjusted share count"
             continue
         unit = _unit_for(field_name)
         # Only inspect the tag the mapper actually SCORES for this field — the
@@ -378,6 +449,19 @@ def detect_restatements(
         # the engine, and iterating every candidate would double-report a field
         # when two tags both carry a same-period revision.
         series = _resolve_tags(facts_json, field_name, candidates, unit, as_of, selected_tags)
+        if not series:
+            # Nothing was compared, so nothing can be said. Which kind of
+            # nothing matters to the reader: the mapper scored without this
+            # field (a coverage gap upstream) vs. the approximation found no
+            # tag with facts (the engine may still have scored it).
+            if selected_tags is not None and field_name in selected_tags:
+                uninspected[field_name] = "no series mapped this run"
+            else:
+                uninspected[field_name] = (
+                    "no candidate tag with facts"
+                    + (f" filed by {as_of}" if as_of is not None else "")
+                )
+            continue
         # A field the mapper SUMMED is compared as the sum. Its components are
         # never reported individually: a 10% move in a small component is not
         # a 10% revision of the figure the engine scored, and materiality
@@ -403,6 +487,16 @@ def detect_restatements(
                     except (KeyError, ValueError, TypeError):
                         continue
                 groups.append((f"{taxonomy}:{tag}", by_key))
+
+        if not any(by_key for _tag, by_key in groups):
+            # A resolved series with no eligible fact at all (unit mismatch,
+            # or every fact filed after `as_of`) compared nothing.
+            uninspected[field_name] = (
+                "selected series has no eligible facts"
+                + (f" filed by {as_of}" if as_of is not None else "")
+            )
+            continue
+        inspected.append(field_name)
 
         for qualified_tag, by_key in groups:
             for (start, end), filings in by_key.items():
@@ -486,7 +580,15 @@ def detect_restatements(
                 )
 
     footprints.sort(key=lambda f: (f.period_end, f.field_name), reverse=True)
-    return footprints
+    return RestatementScan(
+        footprints=footprints,
+        inspected=tuple(inspected),
+        uninspected=uninspected,
+        excluded=excluded,
+        as_of=as_of,
+        period_since=period_since,
+        materiality_pct=materiality_pct,
+    )
 
 
 _MAX_ROWS = 20  # spinoff/discontinued-ops re-presentation can produce many rows
@@ -512,14 +614,21 @@ def _table(footprints: list[RestatementFootprint]) -> list[str]:
     return rows
 
 
-def render_restatements_section(footprints: list[RestatementFootprint]) -> str:
+def render_restatements_section(scan: RestatementScan) -> str:
     """Markdown section for the report. Evidence framing only — no scoring.
+
+    Takes the SCAN, not its footprints: the section must say which fields were
+    compared before it can say none of them moved. An unqualified "no revisions
+    detected" over a partial inspection is the false clean bill this module
+    exists to prevent, so the empty case is always scoped to the inspected set
+    and the uninspected fields are named on every run, findings or not.
 
     Amended-filing (/A) revisions are surfaced as high-confidence restatements;
     other same-period revisions are surfaced separately with a caveat, because a
     large non-amendment swing on a flow item is often a discontinued-operations
     or spinoff re-presentation rather than an accounting-error correction.
     """
+    footprints = scan.footprints
     lines = ["## Prior-Period Restatements (evidence — not scored)", ""]
     lines.append(
         "Revisions to previously reported figures, recovered from the companyfacts "
@@ -527,8 +636,18 @@ def render_restatements_section(footprints: list[RestatementFootprint]) -> str:
         "Share counts are excluded (stock-split noise)."
     )
     lines.append("")
+    lines.append(f"- Coverage: {scan.coverage_line()}.")
+    if scan.incomplete:
+        lines.append(
+            f"- ⚠ Incomplete: {len(scan.uninspected)} field(s) could not be inspected. "
+            "Their absence below is a data gap, not evidence of no revision."
+        )
+    lines.append("")
     if not footprints:
-        lines.append("- No prior-period revisions detected above the materiality threshold.")
+        lines.append(
+            f"- No revisions detected above the {scan.materiality_pct:.0%} materiality "
+            f"threshold among the {len(scan.inspected)} inspected field(s)."
+        )
         return "\n".join(lines)
 
     amended = [f for f in footprints if f.is_amendment]
