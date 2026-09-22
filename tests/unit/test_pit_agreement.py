@@ -6,20 +6,24 @@ detector's `_eligible_rows` (the report's evidence) and the vintage store's
 entitled to see and which same-day duplicate is "the" value. The detector's
 rule was pinned in PR #37; `filter_as_of`'s was not — flipping `<=` to `<`
 passed the suite. These tests pin the boundary and the pairwise agreement
-on seeded random filing trails, including undated facts.
+on generated filing trails (hypothesis), including undated facts.
 """
 
 from __future__ import annotations
 
-import random
 from datetime import date, timedelta
 
-import pytest
+from hypothesis import given
 
 from app.services.backtesting.pit import filter_as_of
 from app.services.ingestion import restatements as rs
 from app.services.ingestion import vintages as vs
-from app.services.ingestion.companyfacts_mapper import RawFact, _collect, _dedupe_latest_filed
+from app.services.ingestion.companyfacts_mapper import (
+    RawFact,
+    _collect,
+    _dedupe_latest_filed,
+)
+from tests.strategies import fact_rows, same_day_trails
 
 AS_OF = date(2025, 8, 15)
 
@@ -62,20 +66,8 @@ def _eligible(rows):
     return rs._eligible_rows(_facts(rows), "us-gaap", "Assets", "USD", AS_OF)
 
 
-def _random_trail(rng: random.Random, n: int) -> list[dict]:
-    rows = []
-    for i in range(n):
-        end = date(2024, 3, 31) + timedelta(days=91 * rng.randint(0, 5))
-        filed = None if rng.random() < 0.15 else AS_OF + timedelta(days=rng.randint(-400, 60))
-        rows.append(_fact(end, float(rng.randint(1, 999)), filed, accn=f"acc{i}",
-                          form=rng.choice(["10-Q", "10-K", "10-Q/A"])))
-    return rows
-
-
-@pytest.mark.parametrize("seed", range(40))
-def test_filter_as_of_and_the_detector_keep_the_same_facts(seed):
-    rng = random.Random(f"pit-agreement-{seed}")
-    rows = _random_trail(rng, rng.randint(1, 12))
+@given(rows=fact_rows(flow=False, as_of=AS_OF, max_rows=12))
+def test_filter_as_of_and_the_detector_keep_the_same_facts(rows):
     pit = filter_as_of(_facts(rows), AS_OF)["facts"]
     kept_pit = pit.get("us-gaap", {}).get("Assets", {}).get("units", {}).get("USD", [])
     kept_det = _eligible(rows)
@@ -117,12 +109,9 @@ class TestSameDayTieRule:
         (k, v), = [(k, v) for k, v in series.items() if k[0] == "total_assets"]
         assert v["val"] == 111.0 and v["accn"] == "first-same-day"
 
-    @pytest.mark.parametrize("seed", range(25))
-    def test_agreement_on_random_same_day_trails(self, seed):
-        rng = random.Random(f"tie-{seed}")
+    @given(rows=same_day_trails())
+    def test_agreement_on_random_same_day_trails(self, rows):
         end = date(2025, 6, 30)
-        days = [date(2025, 8, 1) + timedelta(days=rng.randint(0, 3)) for _ in range(rng.randint(2, 6))]
-        rows = [_fact(end, float(10 * i + 1), d, accn=f"a{i}") for i, d in enumerate(days)]
         mapper = _dedupe_latest_filed(_collect(_facts(rows), "us-gaap", "Assets", "USD"))[(None, end)]
         store = [v for k, v in vs._series(_facts(rows), scored_only=True).items() if k[0] == "total_assets"][0]
         assert store["val"] == mapper.val
