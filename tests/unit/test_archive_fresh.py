@@ -163,3 +163,22 @@ def test_build_report_prints_what_the_client_counted(tmp_path):
     )
     assert "- Filing documents: 3 fetched from EDGAR, 5 served from the immutable archive cache" in report
     assert "(EDGAR JSON caches bypassed)" in report
+
+
+def test_a_failure_after_the_temp_file_exists_removes_it(tmp_path, monkeypatch):
+    """The post-merge mutation sweep found the failure path between mkstemp
+    and os.replace unpinned: dropping the cleanup left a `.tmp` beside the
+    cache entry on every failed publication. A disk-full or permission error
+    at publication must propagate AND leave the cache directory as it was."""
+    import os
+
+    c = _client(tmp_path, fresh=False, bodies=[b"body"])
+
+    def refuse(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    with pytest.raises(OSError):
+        c.archive_text(CIK, ACCN, DOC)
+    assert list(tmp_path.iterdir()) == [], "temp file left behind after a failed publication"
+    assert (c.archives_fetched, c.archives_from_cache) == (0, 0)
