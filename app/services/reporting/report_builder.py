@@ -314,24 +314,25 @@ def _collect_streams(
             cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root
         )
         body_sections.append(_silent_revisions_section(vintage_diff))
-        # Promote from the lock-to-now window when there is one: a revision
-        # that landed in an intermediate state between the thesis lock and
-        # today is invisible to previous -> newest.
+        # Promote from BOTH windows, each fact once. The lock-to-now window
+        # catches a revision that landed in an intermediate state (invisible
+        # to previous -> newest); previous -> newest catches a revision to a
+        # period the lock snapshot did not yet contain (a quarter added after
+        # the lock, then quietly revised), which the lock-to-now diff cannot
+        # see because it only walks facts present in the older snapshot.
         # `compared` (and a lock window) imply both snapshots exist; the
         # explicit None checks only let the type checker see it.
         newest, previous, baseline = vintage_diff.newest, vintage_diff.previous, vintage_diff.baseline
+        windows = []
         if vintage_diff.changes_since_baseline is not None and baseline is not None and newest is not None:
-            tier1_events += silent_revision_tier1_lines(
-                vintage_diff.changes_since_baseline,
-                baseline.captured, newest.captured,
-                period_since=floor,
-            )
-        elif vintage_diff.compared and previous is not None and newest is not None:
-            tier1_events += silent_revision_tier1_lines(
-                vintage_diff.changes_since_previous,
-                previous.captured, newest.captured,
-                period_since=floor,
-            )
+            windows.append((vintage_diff.changes_since_baseline, baseline.captured, newest.captured))
+        if vintage_diff.compared and previous is not None and newest is not None:
+            windows.append((vintage_diff.changes_since_previous, previous.captured, newest.captured))
+        promoted: set[tuple] = set()
+        for changes, older, newer in windows:
+            fresh = [c for c in changes if (c.field_name, c.key.start, c.key.end) not in promoted]
+            tier1_events += silent_revision_tier1_lines(fresh, older, newer, period_since=floor)
+            promoted |= {(c.field_name, c.key.start, c.key.end) for c in changes}
     except Exception as e:  # noqa: BLE001
         errors["vintage"] = _stream_failure("vintage", e)
         vintage_diff = None
