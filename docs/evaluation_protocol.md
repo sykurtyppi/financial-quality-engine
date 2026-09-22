@@ -111,6 +111,26 @@ Mid-window changes (0.4.0 window):
    filers that report finance leases, and the calibration snapshot is
    computed from those files. Regeneration is a window-close item.
 
+4. **2026-09-22 — a dead mismatch trigger removed (`narrative/mismatch.py`).**
+   The profitability-vs-cash-conversion spec listed `fcf_to_net_income` among
+   its trigger metrics. Concern-triggered specs read `concern_by_name`, which
+   `pipeline._financial_concerns` fills only for metrics placed in a scoring
+   block, and `fcf_to_net_income` is not one — so it could never trigger,
+   whatever its value. It is removed from the spec; the spec still fires on
+   `cfo_to_net_income` and `fcf_margin_trend` exactly as before. Two
+   unreachable flag phrases (`sbc_to_revenue`, `adjustment_recurrence_ratio`:
+   flags come from scored components only) were deleted from
+   `app/core/pipeline.py` in the same change, which is not a flag-only file.
+
+   **No mismatch, flag, score or rendered line changed.** Proof tests:
+   `tests/unit/test_metrics_registry.py::test_mismatch_triggers_can_fire`
+   (every concern trigger is a scored metric) and
+   `::test_the_concern_map_carries_scored_metrics_only` (an extreme
+   `fcf_to_net_income` gets no concern entry); the golden report and
+   `calibration_snapshot.json` are byte-identical. Making `fcf_to_net_income`
+   actually trigger — by scoring it or triggering on its raw value — would be
+   a signal addition and is a window-close item.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

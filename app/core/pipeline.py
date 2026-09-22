@@ -32,7 +32,10 @@ RED_FLAG_CONCERN = 70.0
 GREEN_FLAG_CONCERN = 20.0
 
 _FLAG_PHRASES: dict[str, tuple[str, str]] = {
-    # metric -> (red flag title, green flag title)
+    # metric -> (red flag title, green flag title). Flags are drawn only from
+    # scored components, so a key here must be a scored metric with weight
+    # (tests/unit/test_metrics_registry.py); a phrase for anything else is
+    # unreachable text.
     "receivables_growth_spread": (
         "Receivables outpacing revenue",
         "Receivables growing in line with revenue",
@@ -46,17 +49,12 @@ _FLAG_PHRASES: dict[str, tuple[str, str]] = {
         "Beneish screen in the elevated-attention zone",
         "Beneish screen in the low-attention zone",
     ),
-    "sbc_to_revenue": ("Heavy stock-based compensation burden", "Modest stock-based compensation"),
     "diluted_share_growth": ("Accelerating dilution", "Stable or shrinking share count"),
     "capex_growth_spread": ("Capex growing well ahead of revenue", "Capex disciplined relative to revenue"),
     "inventory_growth_spread": ("Inventory building ahead of demand", "Inventory in line with revenue"),
     "net_debt_to_ebitda": ("Elevated leverage", "Conservative leverage"),
     "interest_coverage": ("Thin interest coverage", "Comfortable interest coverage"),
     "fcf_margin": ("Weak free-cash-flow generation", "Strong free-cash-flow generation"),
-    "adjustment_recurrence_ratio": (
-        "Recurring 'non-recurring' adjustment language",
-        "Little adjustment-heavy language",
-    ),
     "kpi_removals": ("Previously highlighted KPIs no longer disclosed", "Consistent KPI disclosure"),
 }
 
