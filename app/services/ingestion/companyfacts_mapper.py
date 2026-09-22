@@ -48,136 +48,50 @@ from app.schemas.financials import (
     PeriodFinancials,
     PeriodType,
 )
+from app.services.ingestion.fields import (
+    COVER_DATE_TOLERANCE_DAYS,
+    CRITICAL_FIELDS,
+    FIELDS,
+    Kind,
+    candidate_table,
+    composite_components,
+    role_tags,
+    unit_for,
+)
+from app.services.ingestion.fields import field as field_spec
 
 QTD_DAYS = (70, 100)
 ANNUAL_DAYS = (330, 380)
 WINDOW_BUFFER_QUARTERS = 4  # extra history fetched so edge quarters can derive
-COVER_DATE_TOLERANCE_DAYS = 60  # dei share counts are stamped with cover dates
 
-INSTANT_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
-    "total_assets": (("us-gaap", "Assets"),),
-    "current_assets": (("us-gaap", "AssetsCurrent"),),
-    "cash_and_equivalents": (
-        ("us-gaap", "CashAndCashEquivalentsAtCarryingValue"),
-        ("us-gaap", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"),
-    ),
-    "receivables": (
-        ("us-gaap", "AccountsReceivableNetCurrent"),
-        ("us-gaap", "ReceivablesNetCurrent"),
-        ("us-gaap", "AccountsAndOtherReceivablesNetCurrent"),
-        ("us-gaap", "AccountsNotesAndLoansReceivableNetCurrent"),
-    ),
-    "inventory": (("us-gaap", "InventoryNet"), ("us-gaap", "InventoryGross")),
-    "ppe_net": (
-        ("us-gaap", "PropertyPlantAndEquipmentNet"),
-        (
-            "us-gaap",
-            "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
-        ),
-    ),
-    "intangible_assets": (
-        ("us-gaap", "FiniteLivedIntangibleAssetsNet"),
-        ("us-gaap", "IntangibleAssetsNetExcludingGoodwill"),
-    ),
-    "goodwill": (("us-gaap", "Goodwill"),),
-    "current_liabilities": (("us-gaap", "LiabilitiesCurrent"),),
-    "accounts_payable": (
-        ("us-gaap", "AccountsPayableCurrent"),
-        ("us-gaap", "AccountsPayableAndAccruedLiabilitiesCurrent"),
-        ("us-gaap", "AccountsPayableTradeCurrent"),
-    ),
-    "deferred_revenue": (
-        ("us-gaap", "ContractWithCustomerLiabilityCurrent"),
-        ("us-gaap", "DeferredRevenueCurrent"),
-    ),
-    "shares_outstanding": (
-        ("dei", "EntityCommonStockSharesOutstanding"),
-        ("us-gaap", "CommonStockSharesOutstanding"),
-    ),
-}
+# The field ontology lives in `fields.FIELDS`; everything below is a view of
+# it under the name (and in the order) the mapper and its importers have
+# always used. Add or reorder tags there, never here.
+INSTANT_FIELDS: dict[str, tuple[tuple[str, str], ...]] = candidate_table(Kind.INSTANT)
+FLOW_FIELDS: dict[str, tuple[tuple[str, str], ...]] = candidate_table(Kind.FLOW)
 
-FLOW_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
-    "revenue": (
-        ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
-        ("us-gaap", "Revenues"),
-        ("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"),
-        ("us-gaap", "SalesRevenueNet"),
-    ),
-    "cost_of_revenue": (
-        ("us-gaap", "CostOfRevenue"),
-        ("us-gaap", "CostOfGoodsAndServicesSold"),
-        ("us-gaap", "CostOfGoodsSold"),
-        ("us-gaap", "CostOfSales"),
-    ),
-    "sga_expense": (("us-gaap", "SellingGeneralAndAdministrativeExpense"),),
-    "operating_income": (("us-gaap", "OperatingIncomeLoss"),),
-    "ebit": (("us-gaap", "OperatingIncomeLoss"),),
-    "depreciation_amortization": (
-        ("us-gaap", "DepreciationDepletionAndAmortization"),
-        ("us-gaap", "DepreciationAmortizationAndAccretionNet"),
-        ("us-gaap", "DepreciationAndAmortization"),
-        ("us-gaap", "Depreciation"),
-    ),
-    "interest_expense": (
-        ("us-gaap", "InterestExpense"),
-        ("us-gaap", "InterestExpenseNonoperating"),
-        ("us-gaap", "InterestExpenseDebt"),
-    ),
-    "net_income": (("us-gaap", "NetIncomeLoss"), ("us-gaap", "ProfitLoss")),
-    "stock_based_compensation": (
-        ("us-gaap", "ShareBasedCompensation"),
-        ("us-gaap", "AllocatedShareBasedCompensationExpense"),
-    ),
-    "cfo": (
-        ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
-        ("us-gaap", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"),
-    ),
-    "capex": (
-        ("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment"),
-        ("us-gaap", "PaymentsToAcquireProductiveAssets"),
-        ("us-gaap", "PaymentsForCapitalImprovements"),
-    ),
-    "buybacks": (("us-gaap", "PaymentsForRepurchaseOfCommonStock"),),
-    "share_issuance_proceeds": (
-        ("us-gaap", "ProceedsFromIssuanceOfCommonStock"),
-        ("us-gaap", "ProceedsFromIssuanceOrSaleOfEquity"),
-    ),
-    "shares_diluted": (
-        ("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding"),
-        ("us-gaap", "WeightedAverageNumberOfShareOutstandingBasicAndDiluted"),
-    ),
-}
-
-SGA_COMPONENTS = (
-    ("us-gaap", "SellingAndMarketingExpense"),
-    ("us-gaap", "GeneralAndAdministrativeExpense"),
-)
-DA_COMPONENTS = (
-    ("us-gaap", "Depreciation"),
-    ("us-gaap", "AmortizationOfIntangibleAssets"),
-)
+SGA_COMPONENTS = composite_components("sga_expense")
+DA_COMPONENTS = composite_components("depreciation_amortization")
 
 # LongTermDebt is a TOTAL (current + noncurrent): used only when the split is
 # unavailable, never alongside it (double counting).
-DEBT_NONCURRENT = ("LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations")
-DEBT_CURRENT = ("LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent")
-DEBT_TOTAL = ("LongTermDebt",)
-DEBT_SHORT = ("ShortTermBorrowings", "CommercialPaper", "DebtCurrent")
+DEBT_NONCURRENT = role_tags("total_debt", "noncurrent")
+DEBT_CURRENT = role_tags("total_debt", "current")
+DEBT_TOTAL = role_tags("total_debt", "total")
+DEBT_SHORT = role_tags("total_debt", "short")
 
 # Finance (capital) lease liabilities are a financing obligation and belong in
 # total debt (P0-10). Operating-lease liabilities are deliberately EXCLUDED —
 # a different economic commitment that credit leverage conventions keep apart.
-FINANCE_LEASE_NONCURRENT = ("FinanceLeaseLiabilityNoncurrent",)
-FINANCE_LEASE_CURRENT = ("FinanceLeaseLiabilityCurrent",)
+FINANCE_LEASE_NONCURRENT = role_tags("total_debt", "finance_lease_nc")
+FINANCE_LEASE_CURRENT = role_tags("total_debt", "finance_lease_c")
 # Debt tags that already embed capital/finance-lease obligations: adding the
 # separately reported finance-lease liability on top would double-count.
-LEASE_INCLUSIVE_DEBT_TAGS = frozenset(
-    {"LongTermDebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligationsCurrent"}
-)
+LEASE_INCLUSIVE_DEBT_TAGS = field_spec("total_debt").lease_inclusive_tags
 
 # Weighted-average share counts are not additive across quarters: no Q4
 # derivation, direct facts only.
-NON_ADDITIVE_FLOWS = {"shares_diluted"}
+NON_ADDITIVE_FLOWS = {f.name for f in FIELDS if f.kind is Kind.FLOW and not f.additive}
 
 
 @dataclass(frozen=True)
@@ -281,7 +195,7 @@ def _dedupe_latest_filed(facts: list[RawFact]) -> dict[tuple[date | None, date],
 
 
 def _unit_for(field_name: str) -> str:
-    return "shares" if field_name in ("shares_outstanding", "shares_diluted") else "USD"
+    return unit_for(field_name)
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +566,7 @@ def build_dataset(
     record("total_debt", debt_values, {q: "composite" for q in debt_values}, debt_tag, debt_notes)
 
     coverage_by_field = {d.field_name: d.periods_filled for d in diagnostics}
-    for critical in ("revenue", "net_income", "cfo", "total_assets"):
+    for critical in CRITICAL_FIELDS:
         missing_n = len(window_ends) - coverage_by_field.get(critical, 0)
         if missing_n:
             warnings.append(
