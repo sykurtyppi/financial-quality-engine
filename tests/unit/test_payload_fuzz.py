@@ -25,7 +25,7 @@ from app.services.ingestion import vintages
 from app.services.ingestion.offerings import fetch_offerings
 from app.services.ingestion.payloads import ExternalPayloadError
 from app.services.ingestion.restatements import scan_restatements
-from tests.strategies import mutated
+from tests.strategies import mutated, mutated_column_element
 
 CIK = 320193
 
@@ -124,6 +124,22 @@ def test_the_base_payloads_parse_cleanly():
 def test_offerings_reject_malformed_submissions_only_as_payload_errors(payload):
     _check("fetch_offerings", lambda: fetch_offerings(
         _Client(), "T", as_of=date(2026, 9, 21), submissions=payload))
+
+
+@settings(max_examples=150)
+@given(payload=mutated_column_element(_submissions()))
+def test_offerings_reject_a_malformed_filing_row_only_as_a_payload_error(payload):
+    """Targeted: every example corrupts one filing-row element, so the date
+    and form paths of offering rows are exercised on every run rather than
+    by chance (PR 1.6's whole-tree mutation stopped reaching them)."""
+    _check("fetch_offerings", lambda: fetch_offerings(
+        _Client(), "T", as_of=date(2026, 9, 21), submissions=payload))
+
+
+@settings(max_examples=150)
+@given(payload=mutated_column_element(_submissions()))
+def test_events_reject_a_malformed_filing_row_only_as_a_payload_error(payload):
+    _check("fetch_entity_events", lambda: fetch_entity_events(_Client(), "T", submissions=payload))
 
 
 @settings(max_examples=150)
