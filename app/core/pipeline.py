@@ -241,14 +241,30 @@ def _analyst_questions(red_flags: list[Flag], narrative_findings, mismatches=())
             "Why were previously disclosed KPIs dropped from this period's materials?"
         ),
     }
+    # By title, and by metric for the same template: a distress-scored flag's
+    # title carries a suffix naming why its ratio is undefined, and an exact
+    # title match lost its question.
+    by_metric = {
+        metric: templates[red_title]
+        for metric, (red_title, _green) in _FLAG_PHRASES.items()
+        if red_title in templates
+    }
     for flag in red_flags:
         q = templates.get(flag.title)
+        if q is None and flag.evidence_metrics:
+            q = by_metric.get(flag.evidence_metrics[0])
         if q and q not in questions:
             questions.append(q)
     for finding in narrative_findings:
         if finding.kind == "kpi_removed" and len(questions) < 10:
             questions.append(f"Regarding {finding.fiscal_label}: {finding.detail}")
-    if not questions:
+    if not questions and red_flags:
+        # Flags exist but none has a standard question: never say otherwise.
+        questions.append(
+            "The red flags above have no standard follow-up question; review each "
+            "against the filing before concluding."
+        )
+    elif not questions:
         questions.append(
             "No elevated-concern items were flagged; confirm data completeness before "
             "concluding the period is clean."

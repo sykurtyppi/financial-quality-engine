@@ -104,6 +104,9 @@ class _Client:
     def _get(self, url):
         return _PROSPECTUS
 
+    def archive_text(self, cik, accession, doc, *, honor_fresh=True):
+        return _PROSPECTUS.decode()
+
 
 # --- the valid baselines are valid ---------------------------------------------------
 

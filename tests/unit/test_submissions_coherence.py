@@ -206,6 +206,9 @@ class TestReportBuilderThreadsTheIndex:
             def _get(self, *a, **k):
                 raise SecClientError("archive 503")
 
+            def archive_text(self, *a, **k):
+                raise SecClientError("archive 503")
+
         report = self._report(_OutageExceptForTheIndex(), submissions)
         assert "Capital-markets appendix UNAVAILABLE" not in report
         assert "Event (8-K 4.02) appendix UNAVAILABLE" not in report

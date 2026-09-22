@@ -310,13 +310,12 @@ def fetch_offerings(
                     f"{filing.form} {filing.filing_date}: no parseable primary doc"
                 )
                 continue
-            url = ARCHIVES_URL.format(
-                cik=cik,
-                accession=filing.accession.replace("-", ""),
-                doc=filing.primary_doc,
-            )
             try:
-                html = client._get(url).decode("utf-8", errors="replace")
+                # Through the client's archive reader like every other filing
+                # document: counted in the report's "Filing documents" line
+                # (a direct fetch went uncounted) and cached — a filed
+                # prospectus never changes.
+                html = client.archive_text(cik, filing.accession, filing.primary_doc)
             except SecClientError as e:
                 timeline.diagnostics.append(f"{filing.form} {filing.filing_date}: fetch failed ({e})")
                 continue
