@@ -18,6 +18,7 @@ from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import (
     fetch_dataset_snapshot,
     fetch_submissions_snapshot,
+    store_vintage_snapshot,
 )
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
@@ -41,6 +42,7 @@ def build_report(
     fresh: bool = False,
     out_dir: Path | None = None,
     banner: str | None = None,
+    vintage: bool = True,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -52,12 +54,15 @@ def build_report(
     <24h cached answer can silently predate the filing being waited on.
     ``out_dir``/``banner`` exist for the automatic (non-journal) track: the
     banner is prepended verbatim so an auto-generated artifact can never be
-    mistaken for a blind journal case.
+    mistaken for a blind journal case. ``vintage`` archives the scored
+    companyfacts payload to the vintage store (the silent-revision baseline);
+    a failure there is a data-quality line, never an aborted report.
     """
     ticker = ticker.upper()
     client = SecClient(fresh=fresh)
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
+    vintage_note = store_vintage_snapshot(client, ticker, snapshot.company_facts, enabled=vintage)
     submissions = fetch_submissions_snapshot(ticker, client)
     doc_diagnostics: list[str] = []
     if with_docs:
@@ -90,6 +95,7 @@ def build_report(
         submissions=submissions,
         index_degraded=submissions is None,
         fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
+        vintage_note=vintage_note,
     )
     if banner:
         report = f"{banner}\n\n{report}"

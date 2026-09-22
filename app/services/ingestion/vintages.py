@@ -316,6 +316,22 @@ class Capture:
         "nothing changed"."""
         return self.reason in ("busy", "failed")
 
+    def describe(self) -> str:
+        """One line for a report's data-quality appendix. Says what happened
+        to the baseline the silent-revision check depends on — never silent
+        about a failure, never alarming about an ordinary no-op."""
+        if self.reason == "captured" and self.path is not None:
+            try:
+                size = f" ({self.path.stat().st_size / 1024:.0f} KB)"
+            except OSError:
+                size = ""
+            return f"captured {self.path.name}{size}"
+        if self.reason == "unchanged":
+            return f"unchanged since the last snapshot (sha {self.sha256[:12]})"
+        if self.reason == "already checked today":
+            return "already checked today; no new snapshot"
+        return f"NOT captured ({self.reason}): {self.detail}"
+
 
 def capture(
     client,
@@ -332,10 +348,47 @@ def capture(
     never stored twice, and DIFFERENT content is never stored over — a second
     capture on a day a filing landed is a second file, because the earlier one
     is precisely what the revision would otherwise erase.
+
+    The fetch stays BEHIND the daily gate: a name already checked today costs
+    no request. Callers that already hold the payload use `store_snapshot`.
     """
+    cik = client.resolve_cik(ticker)
+    return _store(cik, lambda: client.company_facts_by_cik(cik), now=now, root=root, force=force)
+
+
+def store_snapshot(
+    cik: int,
+    facts: dict,
+    *,
+    now: datetime | None = None,
+    root: Path | None = None,
+    force: bool = False,
+) -> Capture:
+    """Archive a companyfacts payload the caller has ALREADY fetched.
+
+    The report entry points hold the exact document the engine scored
+    (`DatasetSnapshot.company_facts`) and were throwing it away; this stores
+    that document, so the snapshot on disk is byte-for-byte what was scored
+    rather than a second fetch that may straddle a filing. Same gate, same
+    manifest, same content addressing as `capture` — a payload that
+    `capture` would have fetched produces the identical file and digest.
+    """
+    return _store(cik, lambda: facts, now=now, root=root, force=force)
+
+
+def _store(
+    cik: int,
+    load,
+    *,
+    now: datetime | None,
+    root: Path | None,
+    force: bool,
+) -> Capture:
+    """The lock / daily-gate / dedupe / atomic-write core shared by `capture`
+    and `store_snapshot`. `load` is invoked only once the gate has decided a
+    document is actually needed."""
     now = now or datetime.now(timezone.utc)
     today = now.date()
-    cik = client.resolve_cik(ticker)
     with _cik_lock(cik, root) as held:
         if not held:
             # Never touch the manifest without its lock. The process holding
@@ -354,7 +407,7 @@ def capture(
                 _clear_problem_days(cik, root)
             return Capture(cik, today, None, newest, "already checked today")
 
-        facts = client.company_facts_by_cik(cik)
+        facts = load()
         raw = canonical_bytes(facts)
         sha = hashlib.sha256(raw).hexdigest()
         man["last_checked"] = today.isoformat()
