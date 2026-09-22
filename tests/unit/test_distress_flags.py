@@ -171,3 +171,38 @@ def test_real_fixtures_carry_no_distress_component_so_their_flags_are_unchanged(
     result = analyze(ds)
     assert not any(m.distress_signal for m in result.metrics)
     assert all(f.detail.split(" = ")[0] == f.evidence_metrics[0] for f in result.red_flags + result.green_flags)
+
+
+# --- audit regressions (2026-09-22): the card's questions -------------------------
+
+def _red(title, metric):
+    from app.schemas.report import Flag
+
+    return Flag(severity="red", title=title, detail="d", evidence_metrics=[metric],
+                fiscal_label="FY2025Q4")
+
+
+def test_a_distress_flag_keeps_its_analyst_question():
+    """The distress title carries a suffix; an exact-title lookup lost the
+    question, and with only such flags the card said nothing was flagged."""
+    from app.core.pipeline import _analyst_questions
+
+    flag = _red("Operating cash flow lagging reported earnings — net loss with cash burn",
+                "cfo_to_net_income")
+    assert _analyst_questions([flag], []) == [
+        "Which accrual items explain the gap between net income and operating cash flow, "
+        "and are they expected to reverse?"
+    ]
+
+
+def test_red_flags_without_a_template_never_read_as_nothing_flagged():
+    from app.core.pipeline import _analyst_questions
+
+    flags = [_red("Elevated concern: fcf_margin_trend", "fcf_margin_trend"),
+             _red("Elevated leverage — non-positive EBITDA with net debt", "net_debt_to_ebitda")]
+    questions = _analyst_questions(flags, [])
+    assert questions and not any("No elevated-concern items were flagged" in q for q in questions)
+    assert _analyst_questions([], []) == [
+        "No elevated-concern items were flagged; confirm data completeness before "
+        "concluding the period is clean."
+    ]

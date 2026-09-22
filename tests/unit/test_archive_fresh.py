@@ -182,3 +182,31 @@ def test_a_failure_after_the_temp_file_exists_removes_it(tmp_path, monkeypatch):
         c.archive_text(CIK, ACCN, DOC)
     assert list(tmp_path.iterdir()) == [], "temp file left behind after a failed publication"
     assert (c.archives_fetched, c.archives_from_cache) == (0, 0)
+
+
+def test_prospectus_fetches_are_counted_in_the_filing_documents_line(tmp_path):
+    """Offerings fetched prospectuses with a direct client._get, so the
+    report's "Filing documents: N fetched" line left them out."""
+    from datetime import date
+
+    from app.services.ingestion.offerings import fetch_offerings
+    from app.services.ingestion.sec_client import SecClient
+
+    class _Client(SecClient):
+        def __init__(self):
+            super().__init__(cache_dir=tmp_path, identity="Test Suite test@example.com")
+
+        def resolve_cik(self, ticker):
+            return 320193
+
+        def _get(self, url):
+            return b"<html><body>PROSPECTUS SUPPLEMENT 1,000,000 Shares of Common Stock</body></html>"
+
+    subs = {"cik": "320193", "filings": {"recent": {
+        "form": ["424B5", "424B5"], "filingDate": ["2026-08-01", "2026-07-01"],
+        "accessionNumber": ["0000320193-26-000001", "0000320193-26-000002"],
+        "primaryDocument": ["a.htm", "b.htm"],
+    }}}
+    client = _Client()
+    fetch_offerings(client, "AAPL", as_of=date(2026, 9, 21), submissions=subs)
+    assert client.archive_summary() == "2 fetched from EDGAR, 0 served from the immutable archive cache"
