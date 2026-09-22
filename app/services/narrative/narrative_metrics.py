@@ -24,6 +24,10 @@ from app.services.narrative.detectors import (
 from app.services.narrative.evidence import EvidenceLedger
 from app.services.narrative.mismatch import detect_mismatches
 
+# Prior documented periods the KPI comparison unions (kpi_drift's default);
+# passed explicitly so the evidence row names the same periods it compared.
+KPI_PRIOR_WINDOW = 2
+
 _MISSING_SPECS = {
     "adjustment_recurrence_ratio": ("periods with adjustment language / periods analyzed", "documents for >= 3 periods"),
     "recurring_adjustment_terms": ("count of terms appearing in >= 3 periods", "documents for >= 3 periods"),
@@ -103,7 +107,7 @@ def compute_narrative_layer(
             fiscal_label=f.fiscal_label,
             comparison="trailing8",
             source=(
-                ledger.attribute(" | ".join(f.evidence_snippets[:2]))
+                ledger.attribute_snippets(f.evidence_snippets[:2])
                 if f.evidence_snippets else ledger.derived_from(f.fiscal_label)
             ),
             excerpt=" | ".join(f.evidence_snippets[:2]) or f.detail,
@@ -112,7 +116,8 @@ def compute_narrative_layer(
         )
 
     # --- KPI additions/removals + definition changes -----------------------
-    kpi = kpi_drift.analyze(documents)
+    kpi = kpi_drift.analyze(documents, prior_window=KPI_PRIOR_WINDOW)
+    period_labels = [p.fiscal_label for p in periods]
     if kpi.periods_analyzed >= 2:
         result.metrics.append(
             _ok("kpi_removals", label, float(len(kpi.removed)),
@@ -126,7 +131,10 @@ def compute_narrative_layer(
             detector=f.kind,
             fiscal_label=f.fiscal_label,
             comparison="qoq",
-            source=ledger.derived_from(f.fiscal_label),
+            # The compared periods are where a dropped KPI's evidence is.
+            source=ledger.derived_from(
+                f.fiscal_label, compared=period_labels[-(KPI_PRIOR_WINDOW + 1):-1]
+            ),
             excerpt=f.detail,
             detail=f.detail,
             confidence="medium",
@@ -160,7 +168,8 @@ def compute_narrative_layer(
                 )
                 ledger.add(
                     detector="disclosure_reduction", fiscal_label=label, comparison="trailing8",
-                    source=ledger.derived_from(label), excerpt=detail, detail=detail,
+                    source=ledger.derived_from(label, compared=period_labels[:-1]),
+                    excerpt=detail, detail=detail,
                     confidence="medium",
                 )
         else:
