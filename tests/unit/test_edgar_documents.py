@@ -6,6 +6,7 @@ import pytest
 
 from app.schemas.financials import DocumentType
 from app.services.ingestion.edgar_documents import extract_section, html_to_text
+from app.services.ingestion.sec_client import SecClient
 
 
 def make_filing(mdna_body: str, risk_body: str) -> str:
@@ -150,11 +151,12 @@ class TestReviewFindings:
         assert cal > snapped  # therefore the label logic overrides the snap
 
 
-class _FakeClient:
-    """Offline SecClient stand-in for fetch_documents path tests."""
+class _FakeClient(SecClient):
+    """Offline SecClient stand-in for fetch_documents path tests: the real
+    archive cache and counters over a canned transport."""
 
     def __init__(self, tmp_path, subs, archives):
-        self.cache_dir = tmp_path
+        super().__init__(cache_dir=tmp_path, identity="Test Suite test@example.com")
         self._subs = subs
         self._archives = archives  # url substring -> bytes
 

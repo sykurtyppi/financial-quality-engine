@@ -53,6 +53,7 @@ def data_quality_section(
     events_error: str | None = None,
     vintage: str | None = None,
     restatement_scan: str | None = None,
+    archives: str | None = None,
 ) -> str:
     """A fetch failure must be distinguishable from 'the filer didn't disclose'
     (P0-D), for every stream including events (review finding 4).
@@ -61,14 +62,24 @@ def data_quality_section(
     baseline the silent-revision check diffs against. None means capture was
     not attempted (API path, --no-vintage); a failure is rendered, not hidden.
     `restatement_scan` is the scan's coverage line (which fields were and were
-    not inspected for revisions); None means the stream did not run."""
+    not inspected for revisions); None means the stream did not run.
+    `archives` is the client's own count of filing documents fetched vs served
+    from the immutable archive cache — the line says what happened, not what
+    the flag asked for. "Caches bypassed" used to be claimed while every MD&A
+    and EX-99 came from a cache `--fresh` never touched."""
     lines = [
         "## Appendix: Data Acquisition Quality",
         "",
         f"- Data fetched: {fetched_at} "
-        + ("(caches bypassed)" if fresh else "(EDGAR JSON caches up to 24h old; use --fresh on filing days)"),
+        + (
+            "(EDGAR JSON caches bypassed)"
+            if fresh
+            else "(EDGAR JSON caches up to 24h old; use --fresh on filing days)"
+        ),
         f"- XBRL field coverage: {coverage:.0%}",
     ]
+    if archives is not None:
+        lines.append(f"- Filing documents: {archives}")
     if vintage is not None:
         lines.append(f"- Vintage snapshot: {vintage}")
     if restatement_scan is not None:
@@ -86,6 +97,11 @@ def data_quality_section(
                 f"Absence of that section is a data gap, not evidence of {gap}."
             )
     return "\n".join(lines)
+
+
+def _archive_summary(client) -> str | None:
+    summary = getattr(client, "archive_summary", None)
+    return summary() if callable(summary) else None
 
 
 def _restatement_tier1_lines(footprints) -> list[str]:
@@ -354,6 +370,9 @@ def build_report(
             events_error=errors["events"],
             vintage=vintage_note,
             restatement_scan=scan.coverage_line() if scan is not None else None,
+            # The client counted its own archive traffic; a client that does
+            # not count (a stub) yields no line rather than a guessed one.
+            archives=_archive_summary(client),
         ) + "\n"
 
     # Tier-1 sources that could NOT be checked this run — restatement footprints
