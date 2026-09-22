@@ -56,7 +56,10 @@ MISMATCH_SPECS: tuple[MismatchSpec, ...] = (
             "strong profitability", "profitability improved", "record margins",
             "adjusted ebitda margin expansion",
         ),
-        metric_names=("cfo_to_net_income", "fcf_margin_trend", "fcf_to_net_income"),
+        # fcf_to_net_income was listed here too, but concern exists only for
+        # scored metrics and it is not one, so it could never trigger
+        # (evaluation_protocol.md, mid-window change #4).
+        metric_names=("cfo_to_net_income", "fcf_margin_trend"),
         detail_template=(
             "Management emphasizes profitability while {metrics} show cash "
             "conversion weakening. Whether reported profitability is converting "

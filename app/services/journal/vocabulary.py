@@ -11,8 +11,9 @@ a typo caught at resolve time cannot be corrected without breaking the seal:
 the case is simply lost. This module gives `can_lock` the vocabulary it needs
 to refuse the typo at the only moment it is still fixable.
 
-`METRIC_IDS` is written out rather than computed because computing it means
-running the registry over a dataset, which a schema validator must not do.
+`METRIC_IDS` comes from `app.services.metrics_registry`, a table rather than a
+computation, because computing it means running the registry over a dataset,
+which a schema validator must not do.
 `tests/unit/test_assumption_vocabulary.py` pins it to what the registry
 actually emits, so a metric added or renamed in the registry fails there
 instead of silently narrowing what an operator is allowed to commit to.
@@ -26,22 +27,12 @@ from datetime import date
 from pydantic import BaseModel
 
 from app.schemas.financials import PeriodFinancials
+from app.services.metrics_registry import JOURNAL_LOCKABLE
 
-# Engine metric ids from `formulas.registry.compute_metrics` (bundle.history keys).
-METRIC_IDS: frozenset[str] = frozenset({
-    "accrual_trend", "asset_quality_proxy", "beneish_aqi", "beneish_depi",
-    "beneish_dsri", "beneish_gmi", "beneish_lvgi", "beneish_m_score",
-    "beneish_sgai", "beneish_sgi", "beneish_tata", "buyback_offset_ratio",
-    "capex_growth_spread", "capex_intensity_regime_shift", "capex_to_da",
-    "capex_to_revenue", "cfo_to_net_income", "current_ratio", "debt_to_assets",
-    "deferred_revenue_growth_spread", "diluted_share_growth", "dio", "dio_trend",
-    "dpo", "dso", "dso_trend", "fcf_margin", "fcf_margin_trend",
-    "fcf_to_net_income", "goodwill_growth", "incremental_revenue_per_capex",
-    "intangibles_to_assets", "interest_coverage", "inventory_growth_spread",
-    "issuance_pressure", "leverage_change", "net_debt_to_ebitda",
-    "net_share_count_change", "receivables_growth_spread", "sbc_to_cfo",
-    "sbc_to_revenue", "total_accruals", "working_capital_swing_to_income",
-})
+# Engine metric ids the resolver can evaluate: the metrics registry's
+# lockable set (the financial metrics bundle; narrative metrics are excluded —
+# the resolver never sees a document).
+METRIC_IDS: frozenset[str] = JOURNAL_LOCKABLE
 
 # Raw XBRL-mapped fields, minus the three that describe a period rather than
 # measure one — `_lookup_metric_value` would happily return a date or a label

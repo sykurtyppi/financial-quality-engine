@@ -21,11 +21,13 @@ from app.services.scoring.thermometer import DistressThermometer
 
 # Tier-1: validated, low false-positive signals (§7). Mostly event/disclosure
 # streams that populate as they are wired (P0-5 restatement, P1-B 8-K events).
+# Every name in both tiers must be a registered metric or signal kind
+# (app/services/metrics_registry.py).
 TIER1_SIGNALS = frozenset(
     {
         "high_severity_disclosure",
         "restatement_footprint",
-        "auditor_change_8k_402",
+        "auditor_change_8k_401",  # Item 4.01; Item 4.02 is non-reliance
         "non_reliance_8k_402",
         "missed_deadline_nt",
     }
