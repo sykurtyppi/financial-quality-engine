@@ -13,8 +13,13 @@ backtest window. Older history would require paging archived indexes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 
+from app.services.ingestion.payloads import (
+    ExternalPayloadError,
+    recent_filings,
+    sec_date,
+)
 from app.services.ingestion.sec_client import SecClient, assert_submissions_match
 
 FINANCIAL_SIC_RANGE = (6000, 6999)
@@ -38,6 +43,18 @@ class EntityEvents:
         return any(start < d <= end for d in self.non_reliance_8k_dates)
 
 
+def _sic(raw: object) -> int | None:
+    """SEC sends the SIC code as a digit string ("3674"), or empty for none."""
+    if not raw:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+        raise ExternalPayloadError(f"submissions sic {raw!r} is not a code")
+    try:
+        return int(raw)
+    except ValueError as e:
+        raise ExternalPayloadError(f"submissions sic {raw!r} is not a code") from e
+
+
 def fetch_entity_events(
     client: SecClient,
     ticker: str,
@@ -57,18 +74,15 @@ def fetch_entity_events(
         if cik is None:
             cik = client.resolve_cik(ticker)
         data = client.submissions_by_cik(cik)
-    recent = data.get("filings", {}).get("recent", {})
-    forms = recent.get("form", [])
-    items = recent.get("items", [])
-    filed = recent.get("filingDate", [])
+    rows = recent_filings(data, form=str, items=(str, type(None)), filingDate=str)
     dates: list[date] = []
-    for i in range(min(len(forms), len(items), len(filed))):
-        if forms[i].startswith("8-K") and "4.02" in (items[i] or ""):
-            dates.append(datetime.strptime(filed[i], "%Y-%m-%d").date())
+    for form, items, filed in rows:
+        if form.startswith("8-K") and "4.02" in (items or ""):
+            dates.append(sec_date(filed, f"{form} filingDate"))
     sic_raw = data.get("sic")
     return EntityEvents(
         ticker=ticker.upper(),
-        sic=int(sic_raw) if sic_raw else None,
+        sic=_sic(sic_raw),
         sic_description=data.get("sicDescription"),
         non_reliance_8k_dates=sorted(dates),
     )

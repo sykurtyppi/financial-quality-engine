@@ -15,17 +15,21 @@ card + appendix render from the dataset alone.
 
 from __future__ import annotations
 
+import logging
+import os
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from app.schemas.financials import CompanyDataset
 from app.schemas.report import AnalysisResult
+from app.services.ingestion.payloads import ExternalPayloadError
+from app.services.ingestion.sec_client import SecClientError
 from app.services.reporting.decision_card import render_decision_card
 from app.services.reporting.markdown_report import render
 from app.services.scoring.thermometer import DistressThermometer, compute_thermometer
-
 
 SNAPSHOT_UNAVAILABLE = (
     "filing index could not be read once for this run; each evidence stream "
@@ -49,14 +53,14 @@ def data_quality_section(
     coverage: float,
     warnings: list[str],
     doc_diagnostics: list[str],
-    offerings_error: str | None = None,
-    restatements_error: str | None = None,
-    events_error: str | None = None,
+    offerings_error: StreamFailure | str | None = None,
+    restatements_error: StreamFailure | str | None = None,
+    events_error: StreamFailure | str | None = None,
     vintage: str | None = None,
     restatement_scan: str | None = None,
     archives: str | None = None,
     field_notes: list[str] | None = None,
-    vintage_error: str | None = None,
+    vintage_error: StreamFailure | str | None = None,
     vintage_diff: str | None = None,
 ) -> str:
     """A fetch failure must be distinguishable from 'the filer didn't disclose'
@@ -103,9 +107,18 @@ def data_quality_section(
         ("Event (8-K 4.02)", events_error, "no events"),
         ("Silent-revision", vintage_error, "no silent revisions"),
     ):
-        if err is not None:
+        if err is None:
+            continue
+        failure = err if isinstance(err, StreamFailure) else StreamFailure("data", str(err))
+        if failure.internal:
             lines.append(
-                f"- **{label} appendix UNAVAILABLE** (fetch/parse failed: {err}). "
+                f"- **{label} appendix UNAVAILABLE — internal error** ({failure.message}). "
+                "This is a defect in this tool, not a data gap: the section was never "
+                f"computed, so its absence is not evidence of {gap}. Please report it."
+            )
+        else:
+            lines.append(
+                f"- **{label} appendix UNAVAILABLE** (fetch/parse failed: {failure.message}). "
                 f"Absence of that section is a data gap, not evidence of {gap}."
             )
     return "\n".join(lines)
@@ -143,50 +156,62 @@ def _restatement_tier1_lines(footprints) -> list[str]:
     return lines
 
 
-# Exception types that are almost always a defect in this code rather than a
-# problem with what SEC returned. A broad `except Exception` around each
-# evidence stream is deliberate — one failing stream must never cost the whole
-# report — but it was also labelling every failure a fetch/parse problem, so a
-# misplaced variable surfaced to the reader as:
+logger = logging.getLogger(__name__)
+
+# What an evidence stream may fail on without it being a defect here: SEC
+# could not be reached (SecClientError), SEC — or a stored SEC snapshot —
+# returned a shape the parser rejects (ExternalPayloadError, raised by the
+# validated accessors in `ingestion/payloads.py`), or local storage failed
+# (OSError). These degrade the stream to a data-gap notice.
 #
-#   Restatement appendix UNAVAILABLE (fetch/parse failed: name 'field_tags'
-#   is not defined). Absence of that section is a data gap, not evidence of
-#   no revisions.
-#
-# which blames SEC for a bug and invites the reader to discount a section that
-# was never computed. These re-raise instead: a defect should fail loudly in
-# CI and in an operator's run, where it gets fixed, rather than hide behind a
-# data-gap notice for as long as nobody reads the code.
-#
-# The trade-off is deliberate. An unforeseen SEC payload shape that raises one
-# of these will now break the report instead of degrading it — noisy, but
-# recoverable and visible, where the alternative is a wrong all-clear that
-# nobody investigates.
-# Deliberately narrow. The first version also listed AttributeError,
-# TypeError and IndexError, and those are exactly what MALFORMED SEC DATA
-# raises: a `filings.recent` that comes back null makes `.get` an
-# AttributeError, and the whole report then died on bad input from someone
-# else's server. That is the opposite of the intent — it traded a misleading
-# notice for an outage.
-#
-# What is left cannot be produced by data. A NameError means an undefined
-# name, an ImportError a missing module, an AssertionError an invariant this
-# code asserted and broke. No SEC payload can cause any of them, so
-# propagating them is unambiguous, and the defect that motivated this — a
-# misplaced `field_tags` — was a NameError.
-#
-# The complete fix is to translate parser and schema failures into an explicit
-# domain error (`SecPayloadError`) at each reader, so a malformed payload is
-# reported AS a malformed payload rather than inferred from its exception
-# type. That is a larger change across every parser and belongs on its own.
-_PROGRAMMING_ERRORS = (NameError, ImportError, AssertionError)
+# Anything else escaping a stream is a defect in this code by construction:
+# the parsers check payload shapes, so a TypeError or KeyError no longer
+# stands in for "SEC sent something odd". In tests (and with
+# FQE_STRICT_STREAMS=1) it propagates and fails the run. In production the
+# report still renders — a latent bug must not cost a filing-night report —
+# but the stream is labelled an INTERNAL error, never a data gap, the card
+# names it, and the traceback is logged.
+STREAM_DATA_ERRORS: tuple[type[BaseException], ...] = (
+    SecClientError,
+    ExternalPayloadError,
+    OSError,
+)
+# None: read FQE_STRICT_STREAMS at call time. Tests set True (conftest).
+STRICT_STREAMS: bool | None = None
 
 
-def _stream_failure(exc: Exception) -> str:
-    """Record an acquisition failure, or re-raise a defect."""
-    if isinstance(exc, _PROGRAMMING_ERRORS):
+def _strict() -> bool:
+    if STRICT_STREAMS is not None:
+        return STRICT_STREAMS
+    return os.environ.get("FQE_STRICT_STREAMS") == "1"
+
+
+@dataclass(frozen=True)
+class StreamFailure:
+    """Why an evidence stream produced nothing: `data` (a gap in what SEC or
+    the store provided) or `internal` (a defect in this tool)."""
+
+    kind: str  # "data" | "internal"
+    message: str
+
+    @property
+    def internal(self) -> bool:
+        return self.kind == "internal"
+
+    def __str__(self) -> str:
+        return self.message
+
+
+def _stream_failure(stream: str, exc: Exception) -> StreamFailure:
+    """Classify a stream's exception. Data failures are recorded; anything
+    else re-raises under STRICT_STREAMS, and is otherwise logged and recorded
+    as an internal error."""
+    if isinstance(exc, STREAM_DATA_ERRORS):
+        return StreamFailure("data", str(exc))
+    if _strict():
         raise exc
-    return str(exc)
+    logger.error("evidence stream %r failed with a defect", stream, exc_info=exc)
+    return StreamFailure("internal", f"{type(exc).__name__}: {exc}")
 
 
 def _collect_streams(
@@ -229,7 +254,7 @@ def _collect_streams(
         # outage into a structured acquisition_error instead of raising, so check
         # it explicitly — otherwise an outage reads as checked-and-clean.
         if timeline.acquisition_error is not None:
-            errors["offerings"] = timeline.acquisition_error
+            errors["offerings"] = StreamFailure("data", timeline.acquisition_error)
         elif timeline.takedown_count:
             takedowns = list(timeline.takedowns)
             event_lines.append(
@@ -237,7 +262,7 @@ def _collect_streams(
                 f"{timeline.lookback_months} months (see Capital Markets Activity)"
             )
     except Exception as e:  # noqa: BLE001 - a stream must never break the report
-        errors["offerings"] = _stream_failure(e)
+        errors["offerings"] = _stream_failure("offerings", e)
 
     try:
         from app.services.ingestion.restatements import (
@@ -253,7 +278,7 @@ def _collect_streams(
         body_sections.append(render_restatements_section(scan))
         tier1_events += _restatement_tier1_lines(scan.footprints)
     except Exception as e:  # noqa: BLE001
-        errors["restatements"] = _stream_failure(e)
+        errors["restatements"] = _stream_failure("restatements", e)
         scan = None
 
     try:
@@ -266,7 +291,7 @@ def _collect_streams(
             f"8-K Item 4.02 non-reliance (restatement announced) filed {d}" for d in nr_dates
         ]
     except Exception as e:  # noqa: BLE001
-        errors["events"] = _stream_failure(e)
+        errors["events"] = _stream_failure("events", e)
 
     try:
         from app.services.ingestion.vintages import report_diff, silent_revision_tier1_lines
@@ -297,7 +322,7 @@ def _collect_streams(
                 period_since=floor,
             )
     except Exception as e:  # noqa: BLE001
-        errors["vintage"] = _stream_failure(e)
+        errors["vintage"] = _stream_failure("vintage", e)
         vintage_diff = None
 
     return body_sections, event_lines, tier1_events, errors, takedowns, scan, vintage_diff
@@ -479,12 +504,16 @@ def build_report(
             "restatement footprints", "8-K 4.02 events", "silent revisions (vintage diff)",
         ]
     else:
+        def _why(name: str) -> str:
+            failure = errors[name]
+            return " (internal error)" if isinstance(failure, StreamFailure) and failure.internal else ""
+
         if errors["restatements"] is not None:
-            tier1_unavailable.append("restatement footprints")
+            tier1_unavailable.append("restatement footprints" + _why("restatements"))
         if errors["events"] is not None:
-            tier1_unavailable.append("8-K 4.02 events")
+            tier1_unavailable.append("8-K 4.02 events" + _why("events"))
         if errors["vintage"] is not None:
-            tier1_unavailable.append("silent revisions (vintage diff)")
+            tier1_unavailable.append("silent revisions (vintage diff)" + _why("vintage"))
         elif vintage_diff is not None and not vintage_diff.compared:
             # Two snapshots did not exist yet: not a failure, still not checked.
             tier1_unavailable.append("silent revisions (no vintage baseline yet)")

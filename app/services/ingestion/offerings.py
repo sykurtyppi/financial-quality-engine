@@ -19,9 +19,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from app.services.ingestion.edgar_documents import html_to_text
+from app.services.ingestion.payloads import recent_filings, sec_date
 from app.services.ingestion.sec_client import (
     SecClient,
     SecClientError,
@@ -278,20 +279,16 @@ def fetch_offerings(
         timeline.acquisition_error = str(e)
         return timeline
 
-    recent = subs.get("filings", {}).get("recent", {})
     cutoff = reference - timedelta(days=lookback_months * 30)
 
-    rows = zip(
-        recent.get("form", []),
-        recent.get("filingDate", []),
-        recent.get("accessionNumber", []),
-        recent.get("primaryDocument", []),
+    rows = recent_filings(
+        subs, form=str, filingDate=str, accessionNumber=str, primaryDocument=str
     )
     for form, fdate, accession, doc in rows:
         kind = _classify(form)
         if kind is None:
             continue
-        filed = datetime.strptime(fdate, "%Y-%m-%d").date()
+        filed = sec_date(fdate, f"{form} filingDate")
         if filed < cutoff or filed > reference:
             continue  # PIT window: [cutoff, as_of]
         timeline.filings.append(

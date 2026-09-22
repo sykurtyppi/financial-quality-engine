@@ -22,6 +22,11 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
+from app.services.ingestion.payloads import (
+    ExternalPayloadError,
+    SubmissionsMismatchError,
+)
+
 logger = logging.getLogger(__name__)
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -60,13 +65,17 @@ def assert_submissions_match(payload: dict, cik: int | None) -> None:
     """
     if cik is None:
         return
+    if not isinstance(payload, dict):
+        raise ExternalPayloadError(
+            f"submissions payload is {type(payload).__name__}, expected an object"
+        )
     payload_cik = payload.get("cik")
     try:
         matches = payload_cik is not None and int(payload_cik) == cik
     except (TypeError, ValueError):
         matches = False
     if not matches:
-        raise ValueError(
+        raise SubmissionsMismatchError(
             f"submissions payload is for CIK {payload_cik!r}, not the pinned CIK {cik}"
         )
 

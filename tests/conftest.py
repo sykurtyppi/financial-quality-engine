@@ -19,3 +19,14 @@ def _isolated_vintage_store(monkeypatch, tmp_path):
     from app.services.ingestion import vintages
 
     monkeypatch.setattr(vintages, "VINTAGES", tmp_path / "vintages")
+
+
+@pytest.fixture(autouse=True)
+def _strict_streams(monkeypatch):
+    # In production a defect inside an evidence stream is contained and
+    # labelled an internal error so the report still renders; in tests it
+    # must fail loudly. Tests of the production labelling set this back to
+    # False themselves.
+    from app.services.reporting import report_builder
+
+    monkeypatch.setattr(report_builder, "STRICT_STREAMS", True)
