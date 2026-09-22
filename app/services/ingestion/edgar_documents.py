@@ -34,7 +34,6 @@ from app.services.ingestion.sec_client import (
 
 logger = logging.getLogger(__name__)
 
-ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{doc}"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
@@ -154,13 +153,11 @@ def _merged_filings(client: SecClient, subs: dict, before: date | None) -> dict:
 
 
 def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str:
-    cache = client.cache_dir / f"archive_{accession.replace('-', '')}_{doc.replace('/', '_')}"
-    if cache.exists():
-        return cache.read_text(errors="replace")
-    url = ARCHIVES_URL.format(cik=cik, accession=accession.replace("-", ""), doc=doc)
-    text = client._get(url).decode("utf-8", errors="replace")  # noqa: SLF001
-    cache.write_text(text)
-    return text
+    """One archived filing document. The cache lives on the client now
+    (`SecClient.archive_text`) so `--fresh` and the data-quality counters
+    apply to filing documents exactly as they do to the JSON endpoints; this
+    wrapper remains as the seam the parsers and their tests patch."""
+    return client.archive_text(cik, accession, doc)
 
 
 # Maximum accepted distance between an 8-K event and the quarter end it is

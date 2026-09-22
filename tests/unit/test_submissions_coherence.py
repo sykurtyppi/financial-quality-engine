@@ -130,8 +130,9 @@ class TestDocumentsUseTheSuppliedIndex:
         submissions = fetch_submissions_snapshot(TICKER, client)
         before = len(_submissions_gets(fetched))
 
-        class _RefusesAnotherIndexRead:
-            cache_dir = tmp_path
+        class _RefusesAnotherIndexRead(SecClient):
+            def __init__(self):
+                super().__init__(cache_dir=tmp_path, identity="Test Suite test@example.com")
 
             def resolve_cik(self, ticker):
                 raise AssertionError("resolved a cik it was handed an index for")

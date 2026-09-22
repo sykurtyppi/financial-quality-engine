@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
+ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{doc}"
 _REQUEST_INTERVAL_S = 0.15  # stay far under SEC's 10 req/s limit
 
 # A single transport failure used to end a whole unattended sweep pass. Three
@@ -185,6 +186,10 @@ class SecClient:
         self.identity = _identity(identity)
         self.fresh = fresh
         self._last_request = 0.0
+        # Filing-document traffic, so the report's data-quality line can say
+        # exactly what this run served from disk instead of "caches bypassed".
+        self.archives_fetched = 0
+        self.archives_from_cache = 0
 
     def _get(self, url: str) -> bytes:
         req = urllib.request.Request(url, headers={"User-Agent": self.identity})
@@ -294,6 +299,54 @@ class SecClient:
             Path(tmp).unlink(missing_ok=True)
             raise
         return parsed
+
+    def archive_text(self, cik: int, accession: str, doc: str, *, honor_fresh: bool = True) -> str:
+        """One filed document from the EDGAR archive, cached by accession.
+
+        An accession's documents never change once filed, so the entry has
+        no TTL. `fresh` still refetches it (`honor_fresh`): the report's
+        data-quality line used to say "caches bypassed" while MD&A, risk
+        factors and EX-99 text came from a cache nothing could invalidate,
+        and the one way a cached body can be wrong — a write that did not
+        finish, a transport that answered with something other than the
+        document — is exactly what an operator asking for `--fresh` on a
+        filing night wants ruled out. Both outcomes are counted, so
+        `archive_summary` reports what actually happened.
+        """
+        path = self.cache_dir / f"archive_{accession.replace('-', '')}_{doc.replace('/', '_')}"
+        if not (self.fresh and honor_fresh):
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                pass  # a miss, whether absent or unreadable
+            else:
+                self.archives_from_cache += 1
+                return text
+        url = ARCHIVES_URL.format(cik=cik, accession=accession.replace("-", ""), doc=doc)
+        text = self._get(url).decode("utf-8", errors="replace")
+        # Atomic publication: a reader never sees half a document. No
+        # generation ordering is needed here — every writer holds the same
+        # immutable bytes.
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        self.archives_fetched += 1
+        return text
+
+    def archive_summary(self) -> str | None:
+        """What this client did for filing documents, for the data-quality
+        section; None when it fetched none (no documents requested)."""
+        if not (self.archives_fetched or self.archives_from_cache):
+            return None
+        return (
+            f"{self.archives_fetched} fetched from EDGAR, "
+            f"{self.archives_from_cache} served from the immutable archive cache"
+        )
 
     def resolve_cik(self, ticker: str) -> int:
         # `fresh` exists so a filing-day answer is never served from a <24h
