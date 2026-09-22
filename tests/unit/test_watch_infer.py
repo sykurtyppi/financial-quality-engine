@@ -7,14 +7,14 @@ and force a manual --print-at, never a plausible guess.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.services.watch import watchlist as wl
 from app.services.watch.infer import infer_print_at
 
-NOW = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 
 
 def _submissions(entries) -> dict:
@@ -44,7 +44,7 @@ def _quarterly_prints(n: int, start: datetime, gap_days: int = 91):
 
 class TestInference:
     def test_regular_amc_cadence_projects_next_print(self):
-        start = datetime(2025, 8, 27, 20, 21, 19, tzinfo=timezone.utc)
+        start = datetime(2025, 8, 27, 20, 21, 19, tzinfo=UTC)
         est = infer_print_at(_submissions(_quarterly_prints(5, start)), now=NOW)
         assert est is not None
         last = start + timedelta(days=91 * 4)
@@ -53,13 +53,13 @@ class TestInference:
         assert "8-K 2.02" in est.basis
 
     def test_bmo_filer_keeps_morning_clock_time(self):
-        start = datetime(2025, 9, 1, 11, 0, tzinfo=timezone.utc)
+        start = datetime(2025, 9, 1, 11, 0, tzinfo=UTC)
         est = infer_print_at(_submissions(_quarterly_prints(4, start)), now=NOW)
         assert est is not None
         assert est.print_at.hour == 11
 
     def test_fewer_than_three_prints_rejects(self):
-        start = datetime(2026, 2, 1, 21, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 1, 21, 0, tzinfo=UTC)
         assert infer_print_at(_submissions(_quarterly_prints(2, start)), now=NOW) is None
 
     def test_irregular_cadence_rejects(self):
@@ -77,7 +77,7 @@ class TestInference:
         # NVDA-shaped cadence (83-98d wobble): a late estimate would make the
         # poller's `since` filter exclude the real filing, so the projection
         # must use the SHORTEST in-band gap — early, never late.
-        rows, t = [], datetime(2025, 2, 26, 21, 20, tzinfo=timezone.utc)
+        rows, t = [], datetime(2025, 2, 26, 21, 20, tzinfo=UTC)
         for gap in (0, 90, 84, 98, 83, 98):
             t = t + timedelta(days=gap)
             rows.append(("8-K", "2.02,9.01", t.strftime("%Y-%m-%dT%H:%M:%S.000Z")))
@@ -86,7 +86,7 @@ class TestInference:
         assert est.print_at.date() == (t + timedelta(days=83)).date()
 
     def test_non_202_8ks_are_ignored(self):
-        start = datetime(2025, 8, 27, 20, 21, tzinfo=timezone.utc)
+        start = datetime(2025, 8, 27, 20, 21, tzinfo=UTC)
         rows = _quarterly_prints(4, start)
         rows.insert(1, ("8-K", "5.02", "2026-01-10T13:00:00.000Z"))
         rows.insert(0, ("8-K", "1.01,9.01", "2026-06-01T12:00:00.000Z"))
@@ -97,7 +97,7 @@ class TestInference:
     def test_estimate_in_the_past_rolls_one_cadence_forward(self):
         # Last print long ago relative to `now`: naive projection lands in the
         # past; the estimate must step forward one more gap, not go stale.
-        start = datetime(2025, 1, 15, 21, 0, tzinfo=timezone.utc)
+        start = datetime(2025, 1, 15, 21, 0, tzinfo=UTC)
         est = infer_print_at(_submissions(_quarterly_prints(4, start)), now=NOW)
         assert est is not None
         assert est.print_at > start + timedelta(days=91 * 4)

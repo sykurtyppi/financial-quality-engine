@@ -3,9 +3,12 @@ met/violated/unresolvable calls across every input class the CLI can send it."""
 
 from datetime import date
 
-import pytest
-
-from app.schemas.financials import CompanyDataset, CompanyProfile, PeriodFinancials, PeriodType
+from app.schemas.financials import (
+    CompanyDataset,
+    CompanyProfile,
+    PeriodFinancials,
+    PeriodType,
+)
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas.registry import MetricsBundle
 from app.services.journal.resolver import propose_resolution

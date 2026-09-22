@@ -27,7 +27,8 @@ def main() -> int:
         tag = "PURE-FORENSIC" if r.case.healthy_at_time else "distressed-too"
         print(f"\n=== {r.case.name} ({tag}) · 4.02 {r.event_date}")
         if r.error:
-            print(f"    ERROR — {r.error}"); continue
+            print(f"    ERROR — {r.error}")
+            continue
         print(f"    pre-4.02 documents: {r.n_documents} over {r.doc_periods}")
         if r.independent_findings:
             print("    INDEPENDENT narrative findings (could catch what metrics missed):")

@@ -11,7 +11,6 @@ from app.config import scoring_config
 from app.schemas.metrics import MetricStatus
 from app.schemas.report import AnalysisResult
 
-
 DISCLAIMER = (
     "This report is an automated, formula-driven screening analysis of publicly "
     "reported financial data. It expresses opinions about earnings quality and "

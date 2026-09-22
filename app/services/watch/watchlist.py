@@ -15,8 +15,8 @@ import os
 import re
 import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.services.journal import store
@@ -72,7 +72,7 @@ class Watch:
         return self.baseline_accession is not None and self.expected_report_date is not None
 
     def hours_until(self, now: datetime | None = None) -> float:
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         return (self.print_at - now).total_seconds() / 3600.0
 
     def is_before_print(self, now: datetime | None = None) -> bool:
@@ -94,7 +94,7 @@ def _parse_dt(raw: object, ticker: str) -> datetime:
             f"{ticker}: print_at {raw!r} has no timezone. Use an explicit offset, "
             f'e.g. "2026-08-26T20:20:00Z" (AMC prints are ~20:20Z in EDT).'
         )
-    return dt.astimezone(timezone.utc)
+    return dt.astimezone(UTC)
 
 
 def parse_watch(raw: dict) -> Watch:
@@ -309,7 +309,7 @@ def due(watches: list[Watch], within_hours: float, now: datetime | None = None) 
     reminder to write a blind prior on a quarter already reported is worse than
     no reminder — it invites a thesis written with the tape already visible.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     return [w for w in watches if 0 < w.hours_until(now) <= within_hours]
 
 def read_portfolio(path: Path) -> list[str]:

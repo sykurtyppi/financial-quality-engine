@@ -14,7 +14,7 @@ Pure functions over the submissions payload; the CLI does the persistence.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from statistics import median
 
 from app.services.formulas.ttm import MAX_GAP_DAYS, MIN_GAP_DAYS
@@ -98,7 +98,7 @@ def next_arming(
     watch left un-re-armed on the auto track would regenerate the same
     report on every sweep.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     baseline, expected = event_identity(submissions, forms)
     known = {f.accession for f in recent_filings(submissions)}
     if filed is not None and filed.accession not in known:
@@ -131,7 +131,7 @@ def next_arming(
             print_at += timedelta(days=FALLBACK_PRINT_LAG_DAYS)
     else:
         print_at = datetime.combine(
-            anchor + timedelta(days=FALLBACK_PRINT_LAG_DAYS), time(12, 0), tzinfo=timezone.utc
+            anchor + timedelta(days=FALLBACK_PRINT_LAG_DAYS), time(12, 0), tzinfo=UTC
         )
         basis = (f"8-K 2.02 cadence not inferable; print_at = filing date + "
                  f"{FALLBACK_PRINT_LAG_DAYS}d (early-biased hint only)")

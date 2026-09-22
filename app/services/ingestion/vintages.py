@@ -44,7 +44,7 @@ import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.services.ingestion.companyfacts_mapper import (
@@ -388,7 +388,7 @@ def _store(
     """The lock / daily-gate / dedupe / atomic-write core shared by `capture`
     and `store_snapshot`. `load` is invoked only once the gate has decided a
     document is actually needed."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     today = now.date()
     with _cik_lock(cik, root) as held:
         if not held:

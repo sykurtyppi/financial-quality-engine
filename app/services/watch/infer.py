@@ -21,7 +21,7 @@ back to a manual --print-at.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from statistics import median
 
 from app.services.formulas.ttm import MAX_GAP_DAYS, MIN_GAP_DAYS
@@ -44,7 +44,7 @@ def _acceptance(raw: str | None) -> datetime | None:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def earnings_acceptances(submissions: dict) -> list[datetime]:
@@ -62,7 +62,7 @@ def earnings_acceptances(submissions: dict) -> list[datetime]:
 
 
 def infer_print_at(submissions: dict, now: datetime | None = None) -> PrintEstimate | None:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     prints = earnings_acceptances(submissions)
     gaps = [
         (b - a).total_seconds() / 86400.0

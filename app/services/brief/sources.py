@@ -25,6 +25,13 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
+from app.services.brief.assumptions import (
+    DERIVED,
+    HOLDER,
+    load_assumptions,
+    render_for_brief,
+)
+from app.services.brief.derived import derive_for_ticker
 from app.services.ingestion.edgar_documents import (
     _ex99_sort_key,
     _fetch_archive,
@@ -33,13 +40,6 @@ from app.services.ingestion.edgar_documents import (
 )
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
-from app.services.brief.assumptions import (
-    DERIVED,
-    HOLDER,
-    load_assumptions,
-    render_for_brief,
-)
-from app.services.brief.derived import derive_for_ticker
 from app.services.watch.poller import Filing, recent_filings
 
 ROOT = Path(__file__).resolve().parents[3]

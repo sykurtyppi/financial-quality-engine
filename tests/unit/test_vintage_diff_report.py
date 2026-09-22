@@ -12,7 +12,7 @@ not be compared is named; "no baseline yet" never reads as clean.
 from __future__ import annotations
 
 import gzip
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -32,7 +32,7 @@ from app.services.reporting.report_builder import _collect_streams, build_report
 from tests.fixtures.companies import stretch_dataset
 
 CIK = 1045810
-D19, D20, D21 = (datetime(2026, 9, d, 12, 0, tzinfo=timezone.utc) for d in (19, 20, 21))
+D19, D20, D21 = (datetime(2026, 9, d, 12, 0, tzinfo=UTC) for d in (19, 20, 21))
 AS_OF = date(2026, 9, 22)
 FLOOR = date(2024, 9, 22)
 
@@ -158,7 +158,7 @@ def test_a_baseline_older_than_previous_gets_its_own_block(tmp_path):
         baseline_day=date(2026, 9, 19), vintage_root=tmp_path,
     )
     assert errors["vintage"] is None
-    assert [l for l in tier1 if l.startswith("Silent revision:")] == [
+    assert [line for line in tier1 if line.startswith("Silent revision:")] == [
         "Silent revision: total_assets for 2026-06-30 1,000 → 1,100 (+10.0%) between "
         "snapshots 2026-09-19 and 2026-09-21 (detail in appendix; threshold hand-set, uncalibrated)"
     ]
@@ -322,7 +322,6 @@ def test_the_client_less_report_lists_silent_revisions_as_not_checked():
 def test_journal_threads_the_entry_day_and_the_cli_passes_nothing(monkeypatch, tmp_path):
     import importlib
     import sys
-    from types import SimpleNamespace
 
     from app.services.journal import reporting as journal_reporting
 

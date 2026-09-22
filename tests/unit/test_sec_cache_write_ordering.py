@@ -19,14 +19,17 @@ from __future__ import annotations
 import json
 import os
 import threading
-from pathlib import Path
-from contextlib import contextmanager
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
 from app.services.ingestion.sec_client import (
-    SecClient, _is_readable_json, _published_generation_ns, _supersedes,
+    SecClient,
+    _is_readable_json,
+    _published_generation_ns,
+    _supersedes,
 )
 
 URL = "https://data.sec.gov/x"

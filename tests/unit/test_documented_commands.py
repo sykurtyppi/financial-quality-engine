@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import shlex
 import sys
-from types import SimpleNamespace
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -20,9 +20,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+
 import journal  # noqa: E402
-from app.services.watch.poller import Gate, GateResult  # noqa: E402
 from app.services.journal.schema_v2 import BeforeBlock, can_lock  # noqa: E402
+from app.services.watch.poller import Gate, GateResult  # noqa: E402
 
 DOCS = [ROOT / "docs" / "earnings_night_runbook.md", ROOT / "journal" / "JOURNAL.md"]
 
@@ -108,13 +109,13 @@ def _printed_hints(capsys, monkeypatch) -> list[str]:
     harvest every journal invocation it offers the operator."""
     import argparse
     import importlib.util
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     spec = importlib.util.spec_from_file_location("watch_cli_hints", ROOT / "scripts" / "watch.py")
     watch_cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(watch_cli)
 
-    now = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
     watch = watch_cli.wl.Watch(
         ticker="NVDA",
         print_at=now + timedelta(hours=8),

@@ -255,7 +255,6 @@ def test_build_report_hands_the_detector_the_mappers_selection(monkeypatch):
     """Threading the selection only helps if the report actually passes it.
     Without this, reverting the wiring leaves every unit test above green
     while the shipped report goes back to guessing."""
-    from types import SimpleNamespace
 
     from app.core.pipeline import analyze
     from app.services.ingestion import restatements as restatements_mod
@@ -399,8 +398,14 @@ def test_composite_components_are_all_us_gaap():
     another taxonomy, that guess would inspect the wrong series (or none) —
     fail here rather than silently going blind on a summed field."""
     from app.services.ingestion.companyfacts_mapper import (
-        DA_COMPONENTS, DEBT_CURRENT, DEBT_NONCURRENT, DEBT_SHORT, DEBT_TOTAL,
-        FINANCE_LEASE_CURRENT, FINANCE_LEASE_NONCURRENT, SGA_COMPONENTS,
+        DA_COMPONENTS,
+        DEBT_CURRENT,
+        DEBT_NONCURRENT,
+        DEBT_SHORT,
+        DEBT_TOTAL,
+        FINANCE_LEASE_CURRENT,
+        FINANCE_LEASE_NONCURRENT,
+        SGA_COMPONENTS,
     )
     assert all(tax == "us-gaap" for tax, _ in SGA_COMPONENTS + DA_COMPONENTS)
     for group in (DEBT_CURRENT, DEBT_NONCURRENT, DEBT_SHORT, DEBT_TOTAL,

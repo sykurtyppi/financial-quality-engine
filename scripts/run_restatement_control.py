@@ -16,11 +16,9 @@ sys.path.insert(0, str(ROOT))
 from app.services.backtesting.restatement_control import (
     ACCOUNTING_BLOCKS,
     ACCOUNTING_CONCERN,
-    P80,
-    P90,
-    band,
     run_restatement_control,
 )
+from app.services.backtesting.survivorship import P90, band
 
 
 def main() -> int:
@@ -32,9 +30,11 @@ def main() -> int:
         print(f"\n=== {r.case.name} ({tag}) · 4.02 {r.event_date} SIC{r.sic}")
         print(f"    {r.case.note}")
         if r.excluded_financial:
-            print("    EXCLUDED — financial institution."); continue
+            print("    EXCLUDED — financial institution.")
+            continue
         if r.event_date is None:
-            print("    no 4.02 found / unscorable."); continue
+            print("    no 4.02 found / unscorable.")
+            continue
         for h in r.horizons:
             if h.overall is not None:
                 acct = ", ".join(f"{b}={h.blocks.get(b, float('nan')):.0f}" for b in ACCOUNTING_BLOCKS)

@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from datetime import date
 
-from app.schemas.financials import CompanyDataset, CompanyProfile, PeriodFinancials, PeriodType
+from app.schemas.financials import (
+    CompanyDataset,
+    CompanyProfile,
+    PeriodFinancials,
+    PeriodType,
+)
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas import registry, working_capital
 

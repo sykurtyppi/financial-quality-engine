@@ -15,6 +15,7 @@ import pytest
 
 from app.services.brief import sources as bs
 from app.services.ingestion import edgar_documents as ed
+from tests.unit._brief_fixtures import valid_brief as _valid_brief
 
 ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("brief_cli", ROOT / "scripts" / "earnings_brief.py")
@@ -42,8 +43,6 @@ SUBS = {
     }},
 }
 
-
-from tests.unit._brief_fixtures import valid_brief as _valid_brief
 
 
 class _Client:
@@ -90,9 +89,12 @@ class TestLatestEarnings8K:
         # An 8-K/A with Item 2.02 a week after the print must not move the
         # print's identity (and the brief's filename) mid-window.
         rec = {k: list(v) for k, v in SUBS["filings"]["recent"].items()}
-        rec["form"].insert(0, "8-K/A"); rec["accessionNumber"].insert(0, "k-amend")
-        rec["filingDate"].insert(0, "2026-09-02"); rec["reportDate"].insert(0, "2026-08-26")
-        rec["items"].insert(0, "2.02,9.01"); rec["acceptanceDateTime"].insert(0, None)
+        rec["form"].insert(0, "8-K/A")
+        rec["accessionNumber"].insert(0, "k-amend")
+        rec["filingDate"].insert(0, "2026-09-02")
+        rec["reportDate"].insert(0, "2026-08-26")
+        rec["items"].insert(0, "2.02,9.01")
+        rec["acceptanceDateTime"].insert(0, None)
         rec["primaryDocument"].insert(0, None)
         subs = {"name": "X", "filings": {"recent": rec}}
         assert bs.latest_earnings_8k(subs).accession == "k-new"
@@ -325,9 +327,12 @@ class TestPriorRelease:
         # Preliminary results (2.02) on Aug 20, final release Aug 26: the
         # prior guide is May's release, never the preliminary one.
         rec = {k: list(v) for k, v in SUBS["filings"]["recent"].items()}
-        rec["form"].insert(1, "8-K"); rec["accessionNumber"].insert(1, "k-prelim")
-        rec["filingDate"].insert(1, "2026-08-20"); rec["reportDate"].insert(1, "2026-08-20")
-        rec["items"].insert(1, "2.02"); rec["acceptanceDateTime"].insert(1, None)
+        rec["form"].insert(1, "8-K")
+        rec["accessionNumber"].insert(1, "k-prelim")
+        rec["filingDate"].insert(1, "2026-08-20")
+        rec["reportDate"].insert(1, "2026-08-20")
+        rec["items"].insert(1, "2.02")
+        rec["acceptanceDateTime"].insert(1, None)
         rec["primaryDocument"].insert(1, None)
         subs = {"name": "X", "filings": {"recent": rec}}
         assert bs.prior_earnings_8k(subs, bs.latest_earnings_8k(subs)).accession == "k-old"
@@ -431,7 +436,8 @@ class TestCliHelpers:
         assert "labels and diagnostics below are derived from filer-supplied" in first
 
     def test_latest_report_prefers_newest_and_never_the_audit(self, monkeypatch, tmp_path):
-        import os, time as _t
+        import os
+        import time as _t
 
         auto, journal = tmp_path / "auto", tmp_path / "journal"
         auto.mkdir(), journal.mkdir()

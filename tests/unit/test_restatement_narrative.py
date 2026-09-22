@@ -4,7 +4,6 @@ scripts/run_restatement_narrative.py."""
 
 from datetime import date
 
-from app.schemas.financials import DocumentType
 from app.services.backtesting.restatement_narrative import INDEPENDENT_KINDS
 
 

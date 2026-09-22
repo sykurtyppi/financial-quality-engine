@@ -79,27 +79,27 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.brief.sources import BRIEFS, BriefSourceError, latest_earnings_8k
-from app.services.ingestion.vintages import capture as capture_vintage
 from app.services.delivery import notify
 from app.services.ingestion.sec_client import SecClient, SecClientError
-from app.services.watch import watchlist as wl
-from app.services.watch.infer import infer_print_at
-from app.services.watch.rearm import event_identity, next_arming
+from app.services.ingestion.vintages import capture as capture_vintage
 from app.services.journal import store
 from app.services.journal.schema_v2 import verify_lock
+from app.services.watch import watchlist as wl
+from app.services.watch.infer import infer_print_at
 from app.services.watch.poller import (
     Gate,
     PollerError,
     decide,
     pinned_thesis_state,
 )
+from app.services.watch.rearm import event_identity, next_arming
 
 POLITE_INTERVAL_S = 300
 
@@ -150,13 +150,13 @@ def _now(arg: str | None) -> datetime:
     """`--now` exists so the schedule can be rehearsed before the night it
     matters, rather than trusted on first contact with a live print."""
     if not arg:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     dt = datetime.fromisoformat(arg)
-    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _find_watch(ticker: str) -> wl.Watch | None:
@@ -211,7 +211,7 @@ def cmd_due(args: argparse.Namespace) -> int:
                 print(f"    # {w.ticker}: {w.note}")
             print(f"    scripts/journal.py openv2 {w.ticker} --thesis \"...\" "
                   f"--conviction 3 --action hold \\")
-            print(f"      --assumption \"<metric>,>,<number>,FY<yyyy>Q<1-4>,,<resolve-by>\"")
+            print("      --assumption \"<metric>,>,<number>,FY<yyyy>Q<1-4>,,<resolve-by>\"")
             print(f"    scripts/watch.py link {w.ticker}   # pin the entry to the event")
         return 1
     return 0

@@ -29,7 +29,7 @@ then fall back to raw XBRL fields on `PeriodFinancials` (`revenue`, `cfo`, …).
 from __future__ import annotations
 
 from app.schemas.financials import CompanyDataset, PeriodFinancials
-from app.schemas.metrics import MetricResult, MetricStatus
+from app.schemas.metrics import MetricStatus
 from app.services.formulas.registry import MetricsBundle
 from app.services.formulas.ttm import TTM_LABEL_PREFIX
 from app.services.journal.schema_v2 import (

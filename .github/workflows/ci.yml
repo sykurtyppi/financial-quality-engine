@@ -23,5 +23,16 @@ jobs:
           # spec; the lock is what CI and the reference machine actually run).
           pip install -r requirements.lock
           pip install --no-deps -e .
+      # Lock integrity: the installed set must be exactly the lock (no
+      # unpinned transitive dependency resolved at whatever version is newest
+      # that day), and every pyproject requirement pinned at an allowed version.
+      - name: Lock integrity
+        run: python scripts/check_lock.py
+      # Lint and type check run inside the required `test` job so they gate
+      # merges without a branch-protection change. Config: pyproject.toml.
+      - name: Lint (ruff)
+        run: ruff check app scripts tests
+      - name: Type check (mypy)
+        run: mypy
       - name: Test (offline suite)
         run: python -m pytest tests/ -q

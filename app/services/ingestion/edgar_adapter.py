@@ -15,7 +15,10 @@ import logging
 from dataclasses import dataclass
 
 from app.schemas.financials import CompanyDataset
-from app.services.ingestion.companyfacts_mapper import IngestionDiagnostics, build_dataset
+from app.services.ingestion.companyfacts_mapper import (
+    IngestionDiagnostics,
+    build_dataset,
+)
 from app.services.ingestion.sec_client import SecClient, SecClientError
 
 logger = logging.getLogger(__name__)

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from typing import Any
 
 
 class ExternalPayloadError(ValueError):
@@ -40,7 +41,7 @@ class SubmissionsMismatchError(ExternalPayloadError):
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def _mapping(obj: object, what: str) -> dict:
+def _mapping(obj: object, what: str) -> dict[str, Any]:
     if not isinstance(obj, dict):
         raise ExternalPayloadError(f"{what} is {type(obj).__name__}, expected an object")
     return obj
@@ -63,7 +64,7 @@ def sec_date(value: object, what: str) -> date:
 
 def recent_filings(
     submissions: object, **columns: type | tuple[type, ...]
-) -> list[tuple]:
+) -> list[tuple[Any, ...]]:
     """Rows of `filings.recent` from a submissions payload, one tuple per
     filing with the requested columns in the order given, each element
     checked against its declared type.
@@ -83,7 +84,7 @@ def recent_filings(
     recent = _mapping(filings["recent"], "submissions.filings.recent")
     if not recent:
         return []
-    cols: list[list] = []
+    cols: list[list[Any]] = []
     for name in columns:
         if name not in recent:
             raise ExternalPayloadError(f"filings.recent has no {name!r} column")
@@ -104,7 +105,7 @@ def recent_filings(
     return list(zip(*cols)) if cols else []
 
 
-def concept_rows(facts_json: object, taxonomy: str, tag: str, unit: str) -> list[dict]:
+def concept_rows(facts_json: object, taxonomy: str, tag: str, unit: str) -> list[dict[str, Any]]:
     """The fact rows companyfacts holds for one concept and unit.
 
     Share counts some filers mis-file under USD are read from there when no

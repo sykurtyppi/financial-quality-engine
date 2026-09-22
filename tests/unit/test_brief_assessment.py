@@ -4,7 +4,6 @@ import pytest
 
 from app.services.brief.assessment import AssessmentRead, parse_quarter_assessment
 
-
 VALID = """# TEST earnings brief
 
 ## Headline

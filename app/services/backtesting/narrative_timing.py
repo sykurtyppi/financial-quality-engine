@@ -26,7 +26,11 @@ from datetime import date, datetime
 from app.core.pipeline import analyze
 from app.schemas.financials import DocumentType
 from app.services.backtesting.pit import build_pit_dataset, trim_to_mapped_tags
-from app.services.backtesting.restatement_control import CASES, RestatementCase, first_402_date
+from app.services.backtesting.restatement_control import (
+    CASES,
+    RestatementCase,
+    first_402_date,
+)
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.narrative.detectors import HIGH_SEVERITY_RISK_TERMS

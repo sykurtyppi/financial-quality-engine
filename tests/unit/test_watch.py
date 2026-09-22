@@ -6,7 +6,7 @@ journal measures (journal/JOURNAL.md rule 1). It runs unattended on an earnings
 night, so every branch is pinned here rather than discovered live.
 """
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -24,7 +24,7 @@ from app.services.watch.poller import (
     thesis_state,
 )
 
-PRINT_AT = datetime(2026, 8, 26, 20, 20, tzinfo=timezone.utc)
+PRINT_AT = datetime(2026, 8, 26, 20, 20, tzinfo=UTC)
 
 
 BASELINE = "0001045810-26-000052"  # the FQ1-27 10-Q on file when the watch armed
@@ -73,7 +73,7 @@ def _v2_entry(ticker="NVDA", day=date(2026, 8, 26)) -> EntryV2:
         ],
     )
     return EntryV2(ticker=ticker, day=day,
-                   opened=datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc),
+                   opened=datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
                    before=before)
 
 
@@ -199,7 +199,7 @@ class TestDueWindow:
         assert [w.ticker for w in wl.due([_watch()], 36, now)] == ["NVDA"]
 
     def test_outside_window(self):
-        now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 20, tzinfo=UTC)
         assert wl.due([_watch()], 36, now) == []
 
     def test_past_print_drops_out(self):
@@ -395,7 +395,7 @@ class TestPinnedThesisGate:
     def test_reported_pinned_entry_skips(self, monkeypatch, tmp_path):
         entry = self._saved(monkeypatch, tmp_path)
         path = store.find_entry("NVDA", entry.day.isoformat())
-        stamped = entry.model_copy(update={"reported": datetime.now(timezone.utc)})
+        stamped = entry.model_copy(update={"reported": datetime.now(UTC)})
         store.save_v2(stamped, path, allow_update=True)
         g = pinned_thesis_state(_watch(**_pin(entry)))
         assert g.state is Gate.ALREADY_REPORTED and not g.may_generate
@@ -445,7 +445,7 @@ class TestDecide:
         monkeypatch.setattr(store, "ENTRIES", tmp_path)
         entry = lock_entry(_v2_entry())
         path = store.save_v2(entry)
-        store.save_v2(entry.model_copy(update={"reported": datetime.now(timezone.utc)}),
+        store.save_v2(entry.model_copy(update={"reported": datetime.now(UTC)}),
                       path, allow_update=True)
         d = decide(_watch(**_pin(entry)), _submissions(self.FILED))
         assert d.action == "skip"

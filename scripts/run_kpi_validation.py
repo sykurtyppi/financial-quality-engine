@@ -20,7 +20,8 @@ def main() -> int:
     results = run_validation(adjudicator=DeterministicAdjudicator())
     for r in results:
         if r.error:
-            print(f"  [{r.group:8s}] {r.name:16s} ERROR — {r.error}"); continue
+            print(f"  [{r.group:8s}] {r.name:16s} ERROR — {r.error}")
+            continue
         fire = "FIRE" if r.fired else "----"
         lead = f" lead={r.lead_days}d" if r.lead_days is not None else ""
         kpis = (" " + ",".join(r.material_kpis)) if r.material_kpis else ""

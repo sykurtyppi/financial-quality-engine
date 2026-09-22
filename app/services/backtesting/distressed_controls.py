@@ -28,12 +28,9 @@ from app.services.backtesting.pit import build_pit_dataset, trim_to_mapped_tags
 from app.services.backtesting.survivorship import (
     FILING_LAG_DAYS,
     MIN_PIT_PERIODS,
-    P80,
-    P90,
     STALENESS_LIMIT_DAYS,
     HorizonResult,
     _months_before,
-    band,
 )
 from app.services.ingestion.sec_client import SecClient, SecClientError
 

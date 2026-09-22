@@ -5,9 +5,9 @@ consistent with how the EDGAR adapter is treated."""
 from datetime import date
 
 from app.services.backtesting.survivorship import (
-    PILOT,
     P80,
     P90,
+    PILOT,
     _months_before,
     band,
 )

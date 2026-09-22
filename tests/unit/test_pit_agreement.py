@@ -19,7 +19,6 @@ from app.services.backtesting.pit import filter_as_of
 from app.services.ingestion import restatements as rs
 from app.services.ingestion import vintages as vs
 from app.services.ingestion.companyfacts_mapper import (
-    RawFact,
     _collect,
     _dedupe_latest_filed,
 )

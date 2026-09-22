@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,7 +51,7 @@ def main() -> int:
     ticker = args.ticker.upper()
 
     client = SecClient(fresh=args.fresh)
-    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
     dataset, diag = snapshot.dataset, snapshot.diagnostics

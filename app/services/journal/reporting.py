@@ -11,7 +11,7 @@ CLI — not the bare appendix.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.core.pipeline import analyze
@@ -84,7 +84,7 @@ def build_report(
     # PIT fundamentals + `filed <= as_of` across every stream (the pit.py path),
     # which this regeneration does not do.
     generated_on = date.today().isoformat()
-    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     report, thermometer = build_full_report(
         result, dataset,
         generated_on=generated_on,

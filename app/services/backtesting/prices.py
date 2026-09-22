@@ -12,7 +12,7 @@ import json
 import logging
 import time
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -67,8 +67,8 @@ class PriceClient:
                 time.sleep(wait)
             url = CHART_URL.format(
                 ticker=ticker,
-                p1=int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp()),
-                p2=int(datetime(end.year, end.month, end.day, tzinfo=timezone.utc).timestamp()),
+                p1=int(datetime(start.year, start.month, start.day, tzinfo=UTC).timestamp()),
+                p2=int(datetime(end.year, end.month, end.day, tzinfo=UTC).timestamp()),
             )
             req = urllib.request.Request(url, headers={"User-Agent": _UA})
             try:
@@ -95,7 +95,7 @@ class PriceClient:
         for t, c in zip(ts, closes):
             if c is None:
                 continue
-            dates.append(datetime.fromtimestamp(t, tz=timezone.utc).date())
+            dates.append(datetime.fromtimestamp(t, tz=UTC).date())
             vals.append(float(c))
         return PriceSeries(dates, vals) if dates else None
 

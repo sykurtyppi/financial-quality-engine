@@ -277,7 +277,7 @@ def compute_thermometer(
     )
 
 
-def describe(t: "DistressThermometer | None") -> str:
+def describe(t: DistressThermometer | None) -> str:
     """One-line human summary for CLI/journal surfaces. This replaces the
     retired 0-100 composite on every surface (P1-C): the composite measured
     non-discriminating on the live season, in both directions."""

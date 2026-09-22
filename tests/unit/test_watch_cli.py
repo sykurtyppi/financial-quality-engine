@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 from argparse import Namespace
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -197,10 +198,14 @@ class TestLinkAmbiguity:
     entry wins" guess the pin mechanism exists to eliminate)."""
 
     def _entry(self, day):
-        from datetime import date as d, datetime, timezone
+        from datetime import date as d
+        from datetime import datetime
 
         from app.services.journal.schema_v2 import (
-            Assumption, BeforeBlock, EntryV2, lock_entry,
+            Assumption,
+            BeforeBlock,
+            EntryV2,
+            lock_entry,
         )
 
         before = BeforeBlock(
@@ -211,7 +216,7 @@ class TestLinkAmbiguity:
         )
         return lock_entry(EntryV2(
             ticker="NVDA", day=d.fromisoformat(day),
-            opened=datetime(2026, 8, 1, tzinfo=timezone.utc), before=before,
+            opened=datetime(2026, 8, 1, tzinfo=UTC), before=before,
         ))
 
     @pytest.fixture
@@ -257,7 +262,7 @@ class TestLinkAmbiguity:
         # picked the later spent entry and failed with "already reported" —
         # breaking the routine close-one-case-open-the-next workflow. The
         # validated candidate must BE the resolution.
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from app.services.journal import store as st
 
@@ -265,7 +270,7 @@ class TestLinkAmbiguity:
         st.save_v2(wanted)
         spent = self._entry("2026-11-18")
         path = st.save_v2(spent)
-        st.save_v2(spent.model_copy(update={"reported": datetime.now(timezone.utc)}),
+        st.save_v2(spent.model_copy(update={"reported": datetime.now(UTC)}),
                    path, allow_update=True)
 
         rc = watch_cli.cmd_link(Namespace(ticker="NVDA", entry_day=None))
@@ -413,7 +418,8 @@ class TestPollRearm:
         assert not watch_cli._completed(wait, 0)
 
     def test_latest_report_never_returns_the_audit(self, tmp_path):
-        import os, time as _t
+        import os
+        import time as _t
 
         rep = tmp_path / "NVDA_2026-09-01.md"
         rep.write_text("# report")
@@ -495,7 +501,7 @@ def _sweep_args(**over) -> Namespace:
     return Namespace(**base)
 
 
-def _watch(ticker: str, **over) -> "watch_cli.wl.Watch":
+def _watch(ticker: str, **over) -> watch_cli.wl.Watch:
     base = dict(
         ticker=ticker, print_at=watch_cli._now("2026-10-29T20:30:00+00:00"),
         baseline_accession="acc-1", expected_report_date=watch_cli.date(2026, 9, 26),

@@ -28,7 +28,8 @@ def main() -> int:
     for r in results:
         print(f"\n=== {r.case.name} · 4.02 {r.event_date}")
         if r.error:
-            print(f"    ERROR — {r.error}"); continue
+            print(f"    ERROR — {r.error}")
+            continue
         hs_hits = [h for h in r.detector_hits if h.kind == "high_severity_disclosure"]
         kpi_hits = [h for h in r.detector_hits if h.kind == "kpi_definition_change"]
         for h in hs_hits:

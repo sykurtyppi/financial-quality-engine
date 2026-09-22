@@ -319,7 +319,7 @@ class TestWiring:
 
     def test_more_rules_than_max_derived_are_truncated(self, monkeypatch):
         made = [dv.Derived(f"k{i}", f"claim {i}", "basis") for i in range(dv.MAX_DERIVED + 2)]
-        monkeypatch.setattr(dv, "RULES", tuple((lambda d: (lambda q: d))(d) for d in made))
+        monkeypatch.setattr(dv, "RULES", tuple((lambda d: (lambda q: d))(d) for d in made))  # noqa: B023 - the factory binds d
         assert len(dv.derive_assumptions(series(revenue=[1.0] * 8))) == dv.MAX_DERIVED
 
 

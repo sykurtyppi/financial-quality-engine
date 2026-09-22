@@ -48,7 +48,7 @@ class QuarterAssessment(BaseModel):
     dimensions: list[AssessmentDimension]
 
     @model_validator(mode="after")
-    def _complete_once(self) -> "QuarterAssessment":
+    def _complete_once(self) -> QuarterAssessment:
         keys = [item.key for item in self.dimensions]
         expected = list(DIMENSIONS)
         if keys != expected:

@@ -240,13 +240,18 @@ def _collect_streams(
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
-    errors = {"offerings": None, "restatements": None, "events": None, "vintage": None}
+    errors: dict[str, StreamFailure | None] = {
+        "offerings": None, "restatements": None, "events": None, "vintage": None,
+    }
     takedowns: list = []
     scan = None
     vintage_diff = None
 
     try:
-        from app.services.ingestion.offerings import fetch_offerings, render_offerings_section
+        from app.services.ingestion.offerings import (
+            fetch_offerings,
+            render_offerings_section,
+        )
 
         timeline = fetch_offerings(client, ticker, as_of=report_date, submissions=submissions)
         body_sections.append(render_offerings_section(timeline))
@@ -294,7 +299,10 @@ def _collect_streams(
         errors["events"] = _stream_failure("events", e)
 
     try:
-        from app.services.ingestion.vintages import report_diff, silent_revision_tier1_lines
+        from app.services.ingestion.vintages import (
+            report_diff,
+            silent_revision_tier1_lines,
+        )
 
         cik = client.resolve_cik(ticker)
         # Same period window as the restatement section; the Tier-1 floor is
@@ -309,16 +317,19 @@ def _collect_streams(
         # Promote from the lock-to-now window when there is one: a revision
         # that landed in an intermediate state between the thesis lock and
         # today is invisible to previous -> newest.
-        if vintage_diff.changes_since_baseline is not None and vintage_diff.baseline is not None:
+        # `compared` (and a lock window) imply both snapshots exist; the
+        # explicit None checks only let the type checker see it.
+        newest, previous, baseline = vintage_diff.newest, vintage_diff.previous, vintage_diff.baseline
+        if vintage_diff.changes_since_baseline is not None and baseline is not None and newest is not None:
             tier1_events += silent_revision_tier1_lines(
                 vintage_diff.changes_since_baseline,
-                vintage_diff.baseline.captured, vintage_diff.newest.captured,
+                baseline.captured, newest.captured,
                 period_since=floor,
             )
-        elif vintage_diff.compared:
+        elif vintage_diff.compared and previous is not None and newest is not None:
             tier1_events += silent_revision_tier1_lines(
                 vintage_diff.changes_since_previous,
-                vintage_diff.previous.captured, vintage_diff.newest.captured,
+                previous.captured, newest.captured,
                 period_since=floor,
             )
     except Exception as e:  # noqa: BLE001
@@ -457,7 +468,9 @@ def build_report(
     body = render(result, generated_on=generated_on)
     event_lines: list[str] = []
     tier1_events: list[str] = []
-    errors = {"offerings": None, "restatements": None, "events": None, "vintage": None}
+    errors: dict[str, StreamFailure | None] = {
+        "offerings": None, "restatements": None, "events": None, "vintage": None,
+    }
     scan = None
     vintage_diff = None
 
