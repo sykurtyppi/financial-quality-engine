@@ -356,13 +356,10 @@ def unknown_fiscal_year_end() -> dict:
 
 def fifty_two_week() -> dict:
     """A 52/53-week calendar whose fiscal year ends on the first days of a
-    month: ends on day ≤ 4 count toward the previous month.
-
-    Pins a known defect as it stands: a quarter ending 1–4 January is
-    attributed to December for the month but keeps January's calendar year,
-    so 2023-01-01 is labelled FY2024Q1 — the same label as 2023-12-31. The
-    snapshot records today's behaviour; a fix must change it deliberately,
-    in its own reviewed diff."""
+    month: ends on day ≤ 4 count toward the previous month, and 1–4
+    January toward December of the previous year — 2023-01-01 is FY2023Q1,
+    not FY2024Q1 (the label of 2023-12-31), which is what it was labelled
+    until that was fixed."""
     p = Payload("Retail Weeks Co")
     # Year ends 2022-10-02, 2023-10-01, 2024-09-29: fiscal September.
     ends = [date(2021, 10, 3) + timedelta(weeks=13 * i) for i in range(1, 13)]

@@ -164,6 +164,31 @@ Mid-window changes (0.4.0 window):
    golden and calibration snapshot byte-identical. Proof tests:
    `tests/unit/test_evidence_attribution.py`.
 
+7. **2026-09-23 — fiscal labels for quarters ending 1–4 January.**
+   `companyfacts_mapper._fiscal_label` (not a flag-only file) counts a
+   52/53-week period end on day ≤ 4 toward the previous month, but when that
+   rolled January back to December it kept January's calendar year: a
+   quarter ending 2023-01-01 (fiscal September) was labelled FY2024Q1 — the
+   label of 2023-12-31 — and a December year ending 2024-01-02 was FY2024Q4
+   instead of FY2023Q4. Two periods shared one label, so everything keyed on
+   the label merged them: narrative documents grouped per period, the
+   year-ago comparison label, the journal's window match; and the 8-K
+   calendar fallback (which snaps to the Dec 31 month end) already produced
+   the correct label, so documents and periods disagreed. Fixed by rolling
+   the year back with the month (`_effective_period`). **Only labels change,
+   and only for period ends on 1–4 January; no value, score or flag moves**
+   (scoring carries labels as tags; YoY pairing is date-based). None of the
+   AAPL/KO/CRM fixtures has such an end: golden and calibration snapshot
+   byte-identical. `selection_snapshot.json` changes only in
+   `synthetic/fifty_two_week`'s first label (FY2024Q1 → FY2023Q1). Proof
+   tests: `test_companyfacts_mapper.py::TestFiscalLabels` (an exhaustive
+   oracle — every fiscal-year-end month, every quarter-month end 2000–2040,
+   every offset −6..+4 days takes its nominal quarter's label) and
+   `test_labels_are_unique_and_ordered_on_a_52_53_week_calendar`. Operator
+   note: a preregistered window on an affected filer that was written with
+   the old label now names a different quarter — check locked theses on
+   52/53-week filers whose quarters can end in the first days of January.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

@@ -199,7 +199,10 @@ def test_synthetic_derivation_and_tie_branches(golden):
     # Quarter ends and labels.
     assert golden["synthetic/quarter_ends_from_revenue"]["quarter_ends"][-1] == "2024-12-31"
     assert golden["synthetic/unknown_fiscal_year_end"]["labels"][0] == "P2023-03-31"
-    assert golden["synthetic/fifty_two_week"]["fiscal_year_end_month"] == 9
+    weeks = golden["synthetic/fifty_two_week"]
+    assert weeks["fiscal_year_end_month"] == 9
+    assert weeks["quarter_ends"][0] == "2023-01-01" and weeks["labels"][0] == "FY2023Q1"
+    assert len(set(weeks["labels"])) == len(weeks["labels"])
 
 
 # ---------------------------------------------------------------------------

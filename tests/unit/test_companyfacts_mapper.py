@@ -1,7 +1,8 @@
 """Unit tests for the companyfacts mapper — one test class per real-data bug
 class found during v0.2 validation (see docs/real_data_validation.md)."""
 
-from datetime import date
+import calendar
+from datetime import date, timedelta
 
 import pytest
 
@@ -265,6 +266,34 @@ class TestFiscalLabels:
         assert _fiscal_label(date(2026, 1, 31), 1) == "FY2026Q4"
         assert _fiscal_label(date(2026, 4, 30), 1) == "FY2027Q1"
 
+    def test_a_january_1_to_4_end_belongs_to_the_previous_year(self):
+        # Rolling 1-4 January back to December must roll the year back too:
+        # 2023-01-01 used to be FY2024Q1 — the label of 2023-12-31.
+        assert _fiscal_label(date(2023, 1, 1), 9) == "FY2023Q1"
+        assert _fiscal_label(date(2023, 12, 31), 9) == "FY2024Q1"
+        assert _fiscal_label(date(2024, 1, 2), 12) == "FY2023Q4"
+        assert _fiscal_label(date(2023, 12, 30), 12) == "FY2023Q4"
+        # Day 5 is not rolled back.
+        assert _fiscal_label(date(2026, 1, 5), 12) == "FY2026Q1"
+
+    def test_every_52_53_week_end_takes_its_nominal_quarters_label(self):
+        """Exhaustive oracle. A 52/53-week period end falls within a few days
+        of its fiscal quarter's month end — up to six days before it, or up
+        to four days into the next month. Whichever day it lands on, the
+        label is the one the nominal month end carries."""
+        wrong = []
+        for fye in range(1, 13):
+            quarter_months = {(fye - 1 - 3 * k) % 12 + 1 for k in range(4)}
+            for year in range(2000, 2041):
+                for month in sorted(quarter_months):
+                    nominal = date(year, month, calendar.monthrange(year, month)[1])
+                    expected = _fiscal_label(nominal, fye)
+                    for offset in range(-6, 5):
+                        got = _fiscal_label(nominal + timedelta(days=offset), fye)
+                        if got != expected:
+                            wrong.append((fye, str(nominal), offset, got, expected))
+        assert not wrong, wrong[:10]
+
     def test_fye_month_derived_from_annual_facts_not_metadata(self):
         """fy/fp metadata is unreliable (observed wrong on CRM); the month must
         come from annual-duration end dates."""
@@ -281,6 +310,19 @@ class TestFiscalLabels:
         ds, _ = build_dataset(fj, "SYN", n_quarters=8)
         labels = [p.fiscal_label for p in ds.periods]
         assert len(labels) == len(set(labels))
+
+    def test_labels_are_unique_and_ordered_on_a_52_53_week_calendar(self):
+        # Quarter ends 2022-01-02 ... 2024-09-29, fiscal September; two of
+        # them fall on 1-4 January.
+        from tests.fixtures.selection_cases import fifty_two_week
+
+        ds, diag = build_dataset(fifty_two_week(), "WEEKS", n_quarters=8)
+        assert diag.fiscal_year_end_month == 9
+        labels = [p.fiscal_label for p in ds.periods]
+        assert labels == [
+            "FY2023Q1", "FY2023Q2", "FY2023Q3", "FY2023Q4",
+            "FY2024Q1", "FY2024Q2", "FY2024Q3", "FY2024Q4",
+        ]
 
 
 class TestNonAdditiveShares:
