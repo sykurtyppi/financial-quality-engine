@@ -189,6 +189,30 @@ Mid-window changes (0.4.0 window):
    the old label now names a different quarter — check locked theses on
    52/53-week filers whose quarters can end in the first days of January.
 
+8. **2026-09-23 — D&A: separately reported depreciation and amortization are
+   composed (Hermes deep audit, finding 2).** `Depreciation` was an
+   aggregate D&A candidate, and the depreciation + amortization composite
+   won only on strictly greater coverage — so a filer reporting both
+   separately (20 + 10) mapped to 20, with a note claiming only
+   depreciation was available. Hermes measured it on current SEC data
+   (MSFT, GOOGL, INTC understated by the omitted amortization; MSFT
+   `capex_to_da` 3.476 → 3.168). Now (`fields.py`, `companyfacts_mapper.py`):
+   aggregate candidates are aggregate concepts only; the composite wins over
+   the aggregate on strictly greater coverage (unchanged) and over
+   depreciation alone on a tie; depreciation alone is a PARTIAL fallback,
+   used only when it covers strictly more quarters than both, and noted as
+   partial with the reason. Amortization is never added to an aggregate tag
+   (KO reports an aggregate and both components). **A correction of mapped
+   input values, not a scoring change: no anchor, weight or band moves.**
+   AAPL/KO/CRM use aggregate tags — calibration snapshot and golden
+   byte-identical. `selection_snapshot.json`: one note reworded
+   (`composites_lose`), three cases added. Live filers that report the two
+   components separately will see D&A (and `capex_to_da`, EBITDA-based
+   metrics) rise to the true figure. Proof: `test_selection_snapshot.py`
+   (`da_*` cases), `test_field_registry.py::test_strategies_are_well_formed`.
+   The 0.3.0 wide sweep that set the anchors ran on the old mapping; the
+   anchors are not re-fit mid-window — a window-close item.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

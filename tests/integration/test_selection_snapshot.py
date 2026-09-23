@@ -152,6 +152,13 @@ BRANCHES = {
     ("synthetic/tag_choice", "depreciation_amortization"): "Depreciation+AmortizationOfIntangibleAssets",
     ("synthetic/composites_lose", "sga_expense"): "us-gaap:SellingGeneralAndAdministrativeExpense",
     ("synthetic/composites_lose", "depreciation_amortization"): "us-gaap:Depreciation",
+    ("synthetic/da_split_equal_coverage", "depreciation_amortization"): (
+        "Depreciation+AmortizationOfIntangibleAssets"
+    ),
+    ("synthetic/da_aggregate_with_amortization", "depreciation_amortization"): (
+        "us-gaap:DepreciationDepletionAndAmortization"
+    ),
+    ("synthetic/da_amortization_partial", "depreciation_amortization"): "us-gaap:Depreciation",
     ("synthetic/debt_full_breakdown", "total_debt"): (
         "LongTermDebtNoncurrent+LongTermDebtCurrent+ShortTermBorrowings"
         "+FinanceLeaseLiabilityNoncurrent+FinanceLeaseLiabilityCurrent"
@@ -199,6 +206,17 @@ def test_synthetic_derivation_and_tie_branches(golden):
     # Quarter ends and labels.
     assert golden["synthetic/quarter_ends_from_revenue"]["quarter_ends"][-1] == "2024-12-31"
     assert golden["synthetic/unknown_fiscal_year_end"]["labels"][0] == "P2023-03-31"
+    # D&A: separate depreciation + amortization are composed on a tie with
+    # depreciation alone; an aggregate tag never has amortization added.
+    split = _field(golden["synthetic/da_split_equal_coverage"], "depreciation_amortization")
+    assert split["values"]["2023-03-31"] == 34.0  # 24 depreciation + 10 amortization
+    agg = _field(golden["synthetic/da_aggregate_with_amortization"], "depreciation_amortization")
+    assert agg["values"]["2023-03-31"] == 74.0 and agg["notes"] == []
+    partial = _field(golden["synthetic/da_amortization_partial"], "depreciation_amortization")
+    assert partial["notes"] == [
+        "Partial D&A: depreciation used alone; depreciation and amortization are both "
+        "reported in only 5 of 8 quarters (capex/D&A can overstate)."
+    ]
     weeks = golden["synthetic/fifty_two_week"]
     assert weeks["fiscal_year_end_month"] == 9
     assert weeks["quarter_ends"][0] == "2023-01-01" and weeks["labels"][0] == "FY2023Q1"
