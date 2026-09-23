@@ -89,11 +89,13 @@ LEGACY_FLOW_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "sga_expense": (("us-gaap", "SellingGeneralAndAdministrativeExpense"),),
     "operating_income": (("us-gaap", "OperatingIncomeLoss"),),
     "ebit": (("us-gaap", "OperatingIncomeLoss"),),
+    # 2026-09-23 (deliberate, protocol entry #8): `Depreciation` is no longer
+    # an aggregate D&A candidate — it is the partial fallback after the
+    # depreciation + amortization composite.
     "depreciation_amortization": (
         ("us-gaap", "DepreciationDepletionAndAmortization"),
         ("us-gaap", "DepreciationAmortizationAndAccretionNet"),
         ("us-gaap", "DepreciationAndAmortization"),
-        ("us-gaap", "Depreciation"),
     ),
     "interest_expense": (
         ("us-gaap", "InterestExpense"),
@@ -257,12 +259,24 @@ def test_strategies_are_well_formed():
                 assert s.tags and not s.roles, spec.name
             if s.composition is F.Composition.SUM_ALL_REQUIRED:
                 assert len(s.tags) >= 2, spec.name
-        # At most one single-tag strategy, and it comes first: it is the
-        # candidate list, and a composite is only ever its alternative.
+        # A single-tag strategy comes first: it is the candidate list, and a
+        # composite is only ever its alternative. A second single-tag
+        # strategy is a PARTIAL fallback (depreciation for D&A): it comes
+        # last, after a composite, and is drawn from that composite's own
+        # components — a piece of the whole, never another whole.
         kinds = [s.composition for s in spec.strategies]
-        assert kinds.count(F.Composition.SINGLE) <= 1, spec.name
+        assert kinds.count(F.Composition.SINGLE) <= 2, spec.name
         if F.Composition.SINGLE in kinds:
             assert kinds[0] is F.Composition.SINGLE, spec.name
+        if kinds.count(F.Composition.SINGLE) == 2:
+            fallback = spec.strategies[-1]
+            assert fallback.composition is F.Composition.SINGLE, spec.name
+            composite = spec.strategies[-2]
+            assert composite.composition is F.Composition.SUM_ALL_REQUIRED, spec.name
+            assert set(fallback.tags) < set(composite.tags), spec.name
+            assert F.partial_fallback(spec.name) == fallback.tags
+            # and never also an aggregate candidate
+            assert not set(fallback.tags) & set(spec.strategies[0].tags), spec.name
         if spec.lease_inclusive_tags:
             role_concepts = {c for s in spec.strategies for r in s.roles for _, c in r.candidates}
             assert spec.lease_inclusive_tags <= role_concepts

@@ -55,6 +55,7 @@ from app.services.ingestion.fields import (
     Kind,
     candidate_table,
     composite_components,
+    partial_fallback,
     role_tags,
     unit_for,
 )
@@ -72,6 +73,7 @@ FLOW_FIELDS: dict[str, tuple[tuple[str, str], ...]] = candidate_table(Kind.FLOW)
 
 SGA_COMPONENTS = composite_components("sga_expense")
 DA_COMPONENTS = composite_components("depreciation_amortization")
+DA_PARTIAL = partial_fallback("depreciation_amortization")
 
 # LongTermDebt is a TOTAL (current + noncurrent): used only when the split is
 # unavailable, never alongside it (double counting).
@@ -558,14 +560,30 @@ def build_dataset(
             comp_values, comp_methods, comp_tag = _composite_flow(
                 facts_json, DA_COMPONENTS, extended_ends
             )
-            if _score(comp_values, window_ends) > _score(values, window_ends):
+            dep_values, dep_methods, dep_used = _best_series(
+                facts_json, DA_PARTIAL, _unit_for(name), extended_ends, "flow"
+            )
+            agg_n = _score(values, window_ends)
+            comp_n = _score(comp_values, window_ends)
+            dep_n = _score(dep_values, window_ends)
+            if comp_n > agg_n and comp_n >= dep_n:
                 values, methods, used = comp_values, comp_methods, comp_tag
                 notes.append("D&A composed from separate depreciation and amortization tags.")
-            elif used == "us-gaap:Depreciation":
-                notes.append(
-                    "Only a depreciation tag was available; amortization may be excluded "
-                    "(capex/D&A can overstate)."
-                )
+            elif dep_n > max(agg_n, comp_n):
+                # Depreciation alone understates D&A. Used only when nothing
+                # complete covers as many quarters, and always said so.
+                values, methods, used = dep_values, dep_methods, dep_used
+                if comp_n == 0:
+                    notes.append(
+                        "Partial D&A: only a depreciation tag is reported; amortization is "
+                        "not included (capex/D&A can overstate)."
+                    )
+                else:
+                    notes.append(
+                        "Partial D&A: depreciation used alone; depreciation and amortization "
+                        f"are both reported in only {comp_n} of {len(window_ends)} quarters "
+                        "(capex/D&A can overstate)."
+                    )
         if name in NON_ADDITIVE_FLOWS and _score(values, window_ends) < len(window_ends):
             notes.append(
                 "Weighted-average share counts are not additive; quarters without a "

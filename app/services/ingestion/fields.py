@@ -188,19 +188,27 @@ FIELDS: tuple[FieldSpec, ...] = (
     _flow("ebit", _single(*_g("OperatingIncomeLoss"))),
     _flow(
         "depreciation_amortization",
+        # Aggregate concepts only: each already includes amortization, so
+        # nothing is ever added on top of one.
         _single(
             *_g(
                 "DepreciationDepletionAndAmortization",
                 "DepreciationAmortizationAndAccretionNet",
                 "DepreciationAndAmortization",
-                "Depreciation",
             )
         ),
+        # Separately reported depreciation + amortization. Used when it
+        # covers strictly more quarters than the aggregate.
         SeriesStrategy(
             Composition.SUM_ALL_REQUIRED,
             Criterion.BEST_COVERAGE,
             tags=_g("Depreciation", "AmortizationOfIntangibleAssets"),
         ),
+        # Depreciation alone is PARTIAL D&A: used only when it covers strictly
+        # more quarters than both of the above, and always noted as partial.
+        # It was once an aggregate candidate, so 20 depreciation + 10
+        # amortization mapped to 20.
+        _single(*_g("Depreciation")),
     ),
     _flow(
         "interest_expense",
@@ -329,6 +337,13 @@ def composite_components(name: str) -> tuple[Tag, ...]:
         if strategy.composition is Composition.SUM_ALL_REQUIRED:
             return strategy.tags
     raise KeyError(f"{name} has no summed composite")
+
+
+def partial_fallback(name: str) -> tuple[Tag, ...]:
+    """Tags of a field's partial fallback: a SINGLE strategy listed after its
+    first one (depreciation for D&A). Empty when the field has none."""
+    singles = [s for s in field(name).strategies if s.composition is Composition.SINGLE]
+    return singles[1].tags if len(singles) > 1 else ()
 
 
 def role_tags(name: str, role: str) -> tuple[str, ...]:

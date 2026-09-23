@@ -252,6 +252,36 @@ def composites_lose() -> dict:
     return p.data
 
 
+def da_split_equal_coverage() -> dict:
+    """Depreciation and amortization reported separately in every quarter:
+    composed (20 + 10 = 30), not depreciation alone — which is what the
+    mapper built when `Depreciation` was an aggregate candidate."""
+    p = _base("DA Split Co")
+    p.add("Depreciation", [quarter(e, 20.0 + i) for i, e in enumerate(QUARTER_ENDS)])
+    p.add("AmortizationOfIntangibleAssets", [quarter(e, 10.0) for e in QUARTER_ENDS])
+    return p.data
+
+
+def da_aggregate_with_amortization() -> dict:
+    """An aggregate D&A tag plus separately disclosed depreciation and
+    amortization, all in every quarter (KO files all three). The aggregate
+    already includes both: it wins every tie, and nothing is added to it."""
+    p = _base("DA Aggregate Co")
+    p.add("DepreciationDepletionAndAmortization", [quarter(e, 70.0 + i) for i, e in enumerate(QUARTER_ENDS)])
+    p.add("Depreciation", [quarter(e, 55.0 + i) for i, e in enumerate(QUARTER_ENDS)])
+    p.add("AmortizationOfIntangibleAssets", [quarter(e, 12.0) for e in QUARTER_ENDS])
+    return p.data
+
+
+def da_amortization_partial() -> dict:
+    """Amortization reported for only five quarters: depreciation alone
+    covers more, and is used — marked partial, naming the gap."""
+    p = _base("DA Partial Co")
+    p.add("Depreciation", [quarter(e, 30.0 + i) for i, e in enumerate(QUARTER_ENDS)])
+    p.add("AmortizationOfIntangibleAssets", [quarter(e, 5.0) for e in QUARTER_ENDS[7:]])
+    return p.data
+
+
 # ---------------------------------------------------------------------------
 # Total debt: composition by role, first non-empty candidate per role
 
@@ -381,6 +411,9 @@ CASES: dict[str, Callable[[], dict]] = {
     "flows": flows,
     "tag_choice": tag_choice,
     "composites_lose": composites_lose,
+    "da_split_equal_coverage": da_split_equal_coverage,
+    "da_aggregate_with_amortization": da_aggregate_with_amortization,
+    "da_amortization_partial": da_amortization_partial,
     "debt_full_breakdown": debt_full_breakdown,
     "debt_lease_inclusive": debt_lease_inclusive,
     "debt_both_lease_inclusive": debt_both_lease_inclusive,
