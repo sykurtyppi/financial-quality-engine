@@ -234,20 +234,31 @@ def fiscal_year_end_month(facts_json: dict) -> int | None:
     return Counter(months).most_common(1)[0][0]
 
 
+def _effective_period(d: date) -> tuple[int, int]:
+    """(year, month) a period end belongs to. A 52/53-week end on day <= 4
+    belongs to the previous month — and 1-4 January to December of the
+    previous YEAR."""
+    if d.day <= 4:
+        d = d.replace(day=1) - timedelta(days=1)
+    return d.year, d.month
+
+
 def _effective_month(d: date) -> int:
-    m = d.month - 1 if d.day <= 4 else d.month
-    return 12 if m == 0 else m
+    return _effective_period(d)[1]
 
 
 def _fiscal_label(qend: date, fye_month: int | None) -> str:
     """Structural fiscal label. FY numbering = calendar year in which the
-    fiscal year ends (SEC convention; some companies brand differently)."""
+    fiscal year ends (SEC convention; some companies brand differently).
+    The year is the effective one: a quarter ending 2023-01-01 is the
+    December 2022 quarter, not a 2023 one (it was once labelled with the
+    same FY as 2023-12-31)."""
     if fye_month is None:
         return f"P{qend.isoformat()}"
-    month = _effective_month(qend)
+    year, month = _effective_period(qend)
     delta = (fye_month - month) % 12
     quarter = 4 - delta // 3
-    fy_year = qend.year + (1 if month > fye_month else 0)
+    fy_year = year + (1 if month > fye_month else 0)
     return f"FY{fy_year}Q{quarter}"
 
 
