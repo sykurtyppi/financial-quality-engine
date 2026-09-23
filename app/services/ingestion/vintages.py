@@ -52,7 +52,9 @@ from app.services.ingestion.companyfacts_mapper import (
     INSTANT_FIELDS,
     _parse_date,
     _unit_for,
+    build_dataset,
 )
+from app.services.ingestion.fields import FIELDS
 from app.services.ingestion.payloads import ExternalPayloadError
 from app.services.ingestion.restatements import (
     DEFAULT_MATERIALITY_PCT,
@@ -744,6 +746,119 @@ def diff_vintages(
     return changes
 
 
+# `FactKey.taxonomy` of a change to a COMPOSED figure (total debt, a composite
+# SG&A or D&A): its `tag` is the mapper's selection string, not one concept.
+COMPOSED = "composed"
+
+
+@dataclass(frozen=True)
+class _Mapped:
+    """One snapshot as the engine scores it: every field's value per quarter
+    end, the mapper's selection per field, and the quarters it covers."""
+
+    values: dict[str, dict[date, float]]
+    tags: dict[str, str | None]
+    window: list[date]
+
+    def composed(self) -> set[str]:
+        # Composed = total debt always; SG&A and D&A when the composite won
+        # (an unqualified "A+B" selection rather than "us-gaap:X").
+        return {
+            name for name, tag in self.tags.items()
+            if tag is not None and (name == "total_debt" or ":" not in tag)
+        }
+
+
+def _mapped(facts: dict) -> _Mapped | None:
+    """The snapshot built by the mapper itself — the same strategies,
+    exclusions and component rules the engine scores with — or None when
+    the mapper cannot build it at all."""
+    try:
+        ds, diag = build_dataset(facts, "SNAPSHOT")
+    except ValueError:
+        return None
+    values = {
+        d.field_name: {
+            p.period_end: v for p in ds.periods if (v := getattr(p, d.field_name)) is not None
+        }
+        for d in diag.fields
+    }
+    return _Mapped(values, {d.field_name: d.tag_used for d in diag.fields},
+                   [p.period_end for p in ds.periods])
+
+
+@dataclass(frozen=True)
+class ScoredDiff:
+    """Everything the engine scores that moved between two snapshots: the
+    raw facts behind single-tag fields, and the composed figures themselves.
+    `composed_unavailable` says why composed figures were NOT compared (a
+    snapshot the mapper cannot build), so silence is never mistaken for
+    "nothing moved"."""
+
+    changes: list[VintageChange]
+    composed_unavailable: str | None = None
+
+
+def diff_scored(
+    older: dict,
+    newer: dict,
+    *,
+    materiality_pct: float = DEFAULT_MATERIALITY_PCT,
+    since: date | None = None,
+) -> ScoredDiff:
+    """`diff_vintages` over the scored single-tag fields, plus every
+    composed field compared as the value the engine scores, on the quarter
+    ends both snapshots map.
+
+    For a field composed in either snapshot the raw rows are dropped: they
+    follow one candidate tag, which is not the figure that was scored. A
+    field whose composition changed between the snapshots (the mapper now
+    sums different tags) is reported with the new composition and is never
+    promoted: that is a change in how the figure is built, not a revision.
+    """
+    raw = diff_vintages(older, newer, materiality_pct=materiality_pct, since=since)
+    a, b = _mapped(older), _mapped(newer)
+    if a is None or b is None:
+        which = "older" if a is None else "newer"
+        return ScoredDiff(
+            raw,
+            f"composed fields (total debt, composite SG&A/D&A) not compared: the "
+            f"{which} snapshot could not be mapped",
+        )
+    # Composed in EITHER snapshot: a composite that later lost to a single
+    # tag (or the reverse) is compared too, as a change of composition.
+    composed = a.composed() | b.composed()
+    changes = [c for c in raw if c.field_name not in composed]
+    newer_start = min(b.window, default=None)
+    for field_name in sorted(composed):
+        old_series = a.values.get(field_name, {})
+        new_series = b.values.get(field_name, {})
+        old_tag = a.tags.get(field_name) or ""
+        new_tag = b.tags.get(field_name) or ""
+        for end, old in sorted(old_series.items()):
+            if since is not None and end < since:
+                continue
+            key = FactKey(COMPOSED, old_tag or new_tag, _unit_for(field_name), None, end)
+            new = new_series.get(end)
+            if new is None:
+                # Withdrawn only if the newer snapshot still reports that
+                # quarter; one that rolled out of its window was not.
+                if newer_start is not None and end >= newer_start:
+                    changes.append(VintageChange("withdrawn", field_name, key, old, None, "", ""))
+                continue
+            if new == old:
+                continue
+            pct = None if old == 0 else abs(new - old) / abs(old)
+            if pct is not None and pct < materiality_pct:
+                continue
+            changes.append(VintageChange(
+                "revised", field_name, key, old, None, "", "", new, None, "", "", pct,
+                new_tag if new_tag != old_tag else "",
+            ))
+    changes.sort(key=lambda c: (c.key.end, c.field_name, c.key.tag), reverse=True)
+    return ScoredDiff(changes)
+
+
 def render_changes(changes: list[VintageChange], older: str, newer: str) -> str:
     """One markdown section. Says plainly when nothing moved — an empty diff
     is the expected result most of the time and is worth stating."""
@@ -762,11 +877,16 @@ def render_changes(changes: list[VintageChange], older: str, newer: str) -> str:
         "| Field | Period | Was | Now | Change | Originally filed |",
         "|---|---|---|---|---|---|"]
     for c in changes:
+        composed = c.key.taxonomy == COMPOSED
         now = "withdrawn" if c.kind == "withdrawn" else f"{c.new_value:,.0f}"
         if c.moved_tag:
-            now += f" (now tagged {c.new_tag})"
+            now += f" (now {'composed from' if composed else 'tagged'} {c.new_tag})"
         pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
-        filed = f"{c.old_filed} {c.old_form} {c.old_accession}".strip()
+        if composed:
+            # A composed figure has no single filing behind it.
+            filed = f"composed from {c.key.tag}"
+        else:
+            filed = f"{c.old_filed} {c.old_form} {c.old_accession}".strip()
         lines.append(
             f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} | {filed} |")
     return "\n".join(lines) + "\n"
@@ -822,6 +942,9 @@ class VintageDiffReport:
     changes_since_baseline: list[VintageChange] | None = None
     no_baseline_reason: str | None = None
     baseline_note: str | None = None
+    # Why composed figures (total debt, composite SG&A/D&A) were not
+    # compared, when they were not; None when they were.
+    composed_unavailable: str | None = None
 
     @property
     def compared(self) -> bool:
@@ -843,6 +966,8 @@ class VintageDiffReport:
             )
         if self.baseline_note:
             line += f"; {self.baseline_note}"
+        if self.composed_unavailable:
+            line += f"; {self.composed_unavailable}"
         return line
 
 
@@ -902,9 +1027,11 @@ def report_diff(
         )
     newest, previous = visible[-1], visible[-2]
     new_facts = _load_for_diff(newest)
-    changes = diff_vintages(_load_for_diff(previous), new_facts, since=since)
+    scored = diff_scored(_load_for_diff(previous), new_facts, since=since)
+    changes, unavailable = scored.changes, scored.composed_unavailable
     if baseline_day is None:
-        return VintageDiffReport(as_of, newest, previous, changes)
+        return VintageDiffReport(as_of, newest, previous, changes,
+                                 composed_unavailable=unavailable)
 
     baseline = observation_at_or_before(visible, baseline_day - timedelta(days=1))
     if baseline is None:
@@ -914,6 +1041,7 @@ def report_diff(
                 f"no snapshot before the pinned thesis day {baseline_day}; "
                 f"earliest is {visible[0].captured}"
             ),
+            composed_unavailable=unavailable,
         )
     # By content, not identity: a revert (A -> B -> A) is a third observation
     # that reuses A's bytes, and diffing it against the newest A finds nothing.
@@ -922,15 +1050,18 @@ def report_diff(
             f"the pinned thesis snapshot ({baseline.captured}) is the newest "
             "snapshot; nothing to compare since the lock"
         )
-        return VintageDiffReport(as_of, newest, previous, changes, baseline, baseline_note=note)
+        return VintageDiffReport(as_of, newest, previous, changes, baseline,
+                                 baseline_note=note, composed_unavailable=unavailable)
     if baseline.sha256 == previous.sha256:
         note = (
             f"the pinned thesis snapshot ({baseline.captured}) is the previous "
             "snapshot; one comparison covers both"
         )
-        return VintageDiffReport(as_of, newest, previous, changes, baseline, baseline_note=note)
-    since_lock = diff_vintages(_load_for_diff(baseline), new_facts, since=since)
-    return VintageDiffReport(as_of, newest, previous, changes, baseline, since_lock)
+        return VintageDiffReport(as_of, newest, previous, changes, baseline,
+                                 baseline_note=note, composed_unavailable=unavailable)
+    lock = diff_scored(_load_for_diff(baseline), new_facts, since=since)
+    return VintageDiffReport(as_of, newest, previous, changes, baseline, lock.changes,
+                             composed_unavailable=unavailable or lock.composed_unavailable)
 
 
 def silent_revision_tier1_lines(
@@ -946,7 +1077,9 @@ def silent_revision_tier1_lines(
     withdrawal has no ratio to threshold, and a move is a filer re-tagging
     the same number until proven otherwise. Order is the diff's (period
     descending)."""
-    scored = {**INSTANT_FIELDS, **FLOW_FIELDS}
+    # Every field the engine scores — including total debt, which no
+    # single-tag table lists and whose changes come from `diff_scored`.
+    scored = {f.name for f in FIELDS}
     out: list[str] = []
     for c in changes:
         if c.kind != "revised" or c.new_value is None:
