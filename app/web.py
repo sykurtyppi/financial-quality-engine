@@ -12,7 +12,6 @@ only to reduce the friction of running the journal so it actually gets run.
 from __future__ import annotations
 
 import html as _html
-import os
 import re
 import threading
 from pathlib import Path
@@ -44,6 +43,16 @@ def _gen_lock(key: str) -> threading.Lock:
 OPENV2_HINT = 'scripts/journal.py openv2 <TICKER> --thesis "..." --conviction 3'
 
 
+def _read_failure(path) -> str | None:
+    """Why `path` cannot be read, or None if it can."""
+    try:
+        with path.open("rb") as f:
+            f.read(1)
+    except OSError as exc:
+        return exc.strerror or type(exc).__name__
+    return None
+
+
 def _v2_rows() -> list[dict]:
     """Preregistered (v2) entries, read-only. The web UI never wrote these and
     no longer writes any entry; without this they were simply invisible here,
@@ -57,8 +66,11 @@ def _v2_rows() -> list[dict]:
             # `is_v2` answers False for a file it cannot read, which would
             # make an unreadable entry vanish from the one surface meant to
             # show every locked case. Unreadable is a state worth seeing.
-            if not os.access(p, os.R_OK):
-                rows.append({"ticker": p.stem, "day": "", "unreadable": "cannot be read"})
+            # Ask by reading, not by permission bits: `os.access` says yes to
+            # root, and nothing about an I/O error or a bad mount.
+            reason = _read_failure(p)
+            if reason is not None:
+                rows.append({"ticker": p.stem, "day": "", "unreadable": f"cannot be read ({reason})"})
             continue
         try:
             e = store.load_v2(p)

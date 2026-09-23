@@ -7,7 +7,10 @@ impact form writes the AFTER/OUTCOME fields back to the same markdown file.
 
 from __future__ import annotations
 
+import errno
+import os
 from datetime import UTC
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +24,22 @@ def _seed(ticker: str, thesis: str = "a thesis", conviction: int = 3, action: st
     used to create these is retired — only the format's READ paths remain — so
     tests seed them the way the v1 CLI still does."""
     return store.open_entry(ticker, thesis, conviction, action)
+
+
+def _unreadable(monkeypatch, path: Path, err: int = errno.EACCES) -> None:
+    """Make every read of `path` fail as the OS would. `chmod 000` cannot do
+    this for a test run as root — root reads it anyway — so the test either
+    failed or, worse, passed down another path; this fails the read itself,
+    whatever the uid."""
+    def refuse(real):
+        def guarded(self, *args, **kwargs):
+            if self == path:
+                raise OSError(err, os.strerror(err), str(self))  # EACCES → PermissionError
+            return real(self, *args, **kwargs)
+        return guarded
+
+    for name in ("open", "read_text", "read_bytes"):
+        monkeypatch.setattr(Path, name, refuse(getattr(Path, name)))
 
 
 @pytest.fixture
@@ -338,18 +357,19 @@ class TestV2ReadOnly:
         assert r.status_code == 200
         assert "MXL" in r.text and "CCC" in r.text and "unreadable" in r.text
 
-    def test_a_locked_case_we_cannot_read_still_appears(self, client):
+    @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO], ids=["permission", "io-error"])
+    def test_a_locked_case_we_cannot_read_still_appears(self, client, monkeypatch, err):
         # `is_v2` answers False for an unreadable file, which would drop it
-        # from the one surface meant to show every locked case.
+        # from the one surface meant to show every locked case. The row must
+        # say it could not be READ — a readable file that fails validation
+        # also shows as unreadable, and is not this case.
         _seed_v2()
         p = store.ENTRIES / "DDD_2026-07-29.md"
         p.write_text("---json\n{}\n---\n")
-        p.chmod(0o000)
-        try:
-            r = client.get("/")
-            assert r.status_code == 200 and "DDD" in r.text and "unreadable" in r.text
-        finally:
-            p.chmod(0o600)
+        _unreadable(monkeypatch, p, err)
+        r = client.get("/")
+        assert r.status_code == 200 and "DDD" in r.text and "unreadable" in r.text
+        assert f"cannot be read ({os.strerror(err)})" in r.text
 
     def test_write_routes_refuse_a_v2_case_and_say_where_to_go(self, client):
         _seed_v2()
@@ -370,16 +390,13 @@ class TestV2ReadOnly:
         assert r.status_code == 200 and "preregistered (v2) case" in r.text
 
 
-def test_one_unreadable_entry_does_not_lose_every_other_case(client, tmp_path):
+def test_one_unreadable_entry_does_not_lose_every_other_case(client, monkeypatch):
     # A file the parser cannot read used to raise straight out of the tally
     # and 500 the dashboard, losing the count of every readable case with it.
     _seed("KO", "steady staple", 3, "hold")
     bad = store.ENTRIES / "ZZZ_2026-07-29.md"
     bad.write_text("# not really an entry\n")
-    bad.chmod(0o000)
-    try:
-        r = client.get("/")
-        assert r.status_code == 200 and "KO" in r.text
-        assert store.tally()["unreadable"] == ["ZZZ_2026-07-29.md"]
-    finally:
-        bad.chmod(0o600)
+    _unreadable(monkeypatch, bad)
+    r = client.get("/")
+    assert r.status_code == 200 and "KO" in r.text
+    assert store.tally()["unreadable"] == ["ZZZ_2026-07-29.md"]
