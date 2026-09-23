@@ -141,7 +141,11 @@ LEGACY_DA_COMPONENTS = (
 LEGACY_DEBT_NONCURRENT = ("LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations")
 LEGACY_DEBT_CURRENT = ("LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent")
 LEGACY_DEBT_TOTAL = ("LongTermDebt",)
-LEGACY_DEBT_SHORT = ("ShortTermBorrowings", "CommercialPaper", "DebtCurrent")
+# 2026-09-23 (deliberate, protocol entry #9): `DebtCurrent` is aggregate
+# current debt — moved out of the short-term role into its own, exclusive
+# role, and treated as lease-inclusive.
+LEGACY_DEBT_SHORT = ("ShortTermBorrowings", "CommercialPaper")
+LEGACY_DEBT_CURRENT_AGGREGATE = ("DebtCurrent",)
 
 # Finance (capital) lease liabilities are a financing obligation and belong in
 # total debt (P0-10). Operating-lease liabilities are deliberately EXCLUDED —
@@ -151,7 +155,8 @@ LEGACY_FINANCE_LEASE_CURRENT = ("FinanceLeaseLiabilityCurrent",)
 # Debt tags that already embed capital/finance-lease obligations: adding the
 # separately reported finance-lease liability on top would double-count.
 LEGACY_LEASE_INCLUSIVE_DEBT_TAGS = frozenset(
-    {"LongTermDebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligationsCurrent"}
+    {"LongTermDebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligationsCurrent",
+     "DebtCurrent"}
 )
 
 # Weighted-average share counts are not additive across quarters: no Q4
@@ -175,6 +180,7 @@ def _legacy_mapped_tags() -> set[tuple[str, str]]:
     tags.update(LEGACY_DA_COMPONENTS)
     for tag in (
         LEGACY_DEBT_NONCURRENT + LEGACY_DEBT_CURRENT + LEGACY_DEBT_TOTAL + LEGACY_DEBT_SHORT
+        + LEGACY_DEBT_CURRENT_AGGREGATE
         + LEGACY_FINANCE_LEASE_NONCURRENT + LEGACY_FINANCE_LEASE_CURRENT
     ):
         tags.add(("us-gaap", tag))
@@ -192,7 +198,7 @@ def test_candidate_tables_are_unchanged_including_order():
     "name",
     [
         "SGA_COMPONENTS", "DA_COMPONENTS", "DEBT_NONCURRENT", "DEBT_CURRENT", "DEBT_TOTAL",
-        "DEBT_SHORT", "FINANCE_LEASE_NONCURRENT", "FINANCE_LEASE_CURRENT",
+        "DEBT_SHORT", "DEBT_CURRENT_AGGREGATE", "FINANCE_LEASE_NONCURRENT", "FINANCE_LEASE_CURRENT",
         "LEASE_INCLUSIVE_DEBT_TAGS", "NON_ADDITIVE_FLOWS", "COVER_DATE_TOLERANCE_DAYS",
     ],
 )
@@ -254,7 +260,7 @@ def test_strategies_are_well_formed():
             if s.composition is F.Composition.DEBT_BREAKDOWN:
                 assert not s.tags and s.roles, spec.name
                 assert sum(r.required for r in s.roles) == 1, spec.name
-                assert s.criterion is F.Criterion.FIRST_NONEMPTY, spec.name
+                assert s.criterion is F.Criterion.FIRST_PRESENT_PER_DATE, spec.name
             else:
                 assert s.tags and not s.roles, spec.name
             if s.composition is F.Composition.SUM_ALL_REQUIRED:
@@ -318,9 +324,10 @@ def test_shared_debt_roles_agree_across_strategies():
 
 
 def test_debt_roles_match_the_mapper_composition():
-    """`_total_debt_series` sums exactly these roles on each path: the split
-    (noncurrent + current + short + finance leases) and the LongTermDebt
-    fallback (total + short + finance leases). A role missing from one
+    """`composition.compose_total_debt` composes exactly these roles on each
+    path: the split (noncurrent + either aggregate current debt, or the
+    current portion + short-term borrowings; + finance leases) and the
+    LongTermDebt fallback (total + short + finance leases). A role missing from one
     strategy is invisible to the views, which read the first strategy that
     declares it, so pin the shape directly."""
     shapes = [
@@ -328,8 +335,8 @@ def test_debt_roles_match_the_mapper_composition():
         for s in F.field("total_debt").strategies
     ]
     assert shapes == [
-        (("noncurrent", True), ("current", False), ("short", False),
-         ("finance_lease_nc", False), ("finance_lease_c", False)),
+        (("noncurrent", True), ("current_aggregate", False), ("current", False),
+         ("short", False), ("finance_lease_nc", False), ("finance_lease_c", False)),
         (("total", True), ("short", False),
          ("finance_lease_nc", False), ("finance_lease_c", False)),
     ]

@@ -20,8 +20,12 @@ docs/real_data_validation.md — and covered by tests):
 5. WINDOW EDGE — derivations need quarters before the requested window, so the
    mapper computes over a buffered window and trims.
 6. TAG SWITCHES — filers change tags over time (e.g. XOM receivables); each
-   candidate tag is scored and the one with the best period coverage wins
-   (tags are never mixed within one series).
+   candidate tag is scored and the one covering the most REPORTED quarters
+   wins (tags are never mixed within one series). Total debt is the
+   exception: it is composed per balance-sheet date from what was reported
+   at that date (composition.compose_total_debt), because a debt role's tag
+   can change without the series changing meaning (KO's migration to the
+   lease-inclusive tags; Intel's move to aggregate current debt).
 7. COVER-PAGE DATES — dei:EntityCommonStockSharesOutstanding is stamped with
    the cover date (weeks after quarter end); matched with bounded tolerance.
 8. UNRELIABLE fy/fp METADATA — SEC's fy/fp fields can carry the wrong year on
@@ -47,6 +51,14 @@ from app.schemas.financials import (
     CompanyProfile,
     PeriodFinancials,
     PeriodType,
+)
+from app.services.ingestion.composition import (
+    DEBT_TAGS,
+    SPLIT,
+    SPLIT_AGGREGATE_CURRENT,
+    TOTAL_FALLBACK,
+    DebtComposition,
+    compose_total_debt,
 )
 from app.services.ingestion.fields import (
     COVER_DATE_TOLERANCE_DAYS,
@@ -81,6 +93,7 @@ DEBT_NONCURRENT = role_tags("total_debt", "noncurrent")
 DEBT_CURRENT = role_tags("total_debt", "current")
 DEBT_TOTAL = role_tags("total_debt", "total")
 DEBT_SHORT = role_tags("total_debt", "short")
+DEBT_CURRENT_AGGREGATE = role_tags("total_debt", "current_aggregate")
 
 # Finance (capital) lease liabilities are a financing obligation and belong in
 # total debt (P0-10). Operating-lease liabilities are deliberately EXCLUDED —
@@ -370,11 +383,20 @@ def _best_series(
     kind: str,
     allow_derivation: bool = True,
     tolerance_days: int = 0,
+    window_ends: list[date] | None = None,
 ) -> tuple[dict[date, float], dict[date, str], str | None]:
-    """Evaluate every candidate tag; the one covering the most quarters wins
-    (ties break by candidate order). Tags are never mixed within a series —
-    that would fabricate period-over-period jumps."""
-    best: tuple[int, int, dict[date, float], dict[date, str], str | None] = (0, 0, {}, {}, None)
+    """Evaluate every candidate tag; the one covering the most REPORTED
+    quarters (`window_ends`) wins, then the most buffered quarters
+    (`quarter_ends`, which derivations draw on), then candidate order. Tags
+    are never mixed within a series — that would fabricate
+    period-over-period jumps.
+
+    Coverage used to be counted over the buffered window alone, so a tag a
+    filer had abandoned could outrank the one it files today by covering
+    more OLD quarters, leaving reported quarters empty."""
+    window = window_ends if window_ends is not None else quarter_ends
+    best_key: tuple[int, int, int] | None = None
+    best: tuple[dict[date, float], dict[date, str], str | None] = ({}, {}, None)
     for rank, (taxonomy, tag) in enumerate(candidates):
         facts = _collect(facts_json, taxonomy, tag, unit)
         if not facts:
@@ -383,10 +405,10 @@ def _best_series(
             values, methods = _instant_series(facts, quarter_ends, tolerance_days)
         else:
             values, methods = _FlowSeries(facts, allow_derivation).quarterly(quarter_ends)
-        coverage = _score(values, quarter_ends)
-        if coverage > best[0] or (coverage == best[0] and coverage > 0 and -rank > best[1]):
-            best = (coverage, -rank, values, methods, f"{taxonomy}:{tag}")
-    return best[2], best[3], best[4]
+        key = (_score(values, window), _score(values, quarter_ends), -rank)
+        if key[1] > 0 and (best_key is None or key > best_key):
+            best_key, best = key, (values, methods, f"{taxonomy}:{tag}")
+    return best
 
 
 def _composite_flow(
@@ -406,68 +428,74 @@ def _composite_flow(
 
 
 def _total_debt_series(
-    facts_json: dict, quarter_ends: list[date]
+    facts_json: dict,
+    quarter_ends: list[date],
+    window_ends: list[date],
+    labels: dict[date, str],
 ) -> tuple[dict[date, float], str | None, list[str]]:
+    """Total debt at each quarter end, composed from the concepts reported
+    AT THAT DATE by `composition.compose_total_debt` — the one rule the
+    restatement detector applies too. Notes name the reported quarters where
+    a role was missing (counted as zero) or a fallback was used."""
+    by_tag: dict[str, dict[date, float]] = {}
+    for tag in DEBT_TAGS:
+        values, _ = _instant_series(_collect(facts_json, "us-gaap", tag, "USD"), quarter_ends)
+        if values:
+            by_tag[tag] = values
+
+    out: dict[date, float] = {}
+    composed: dict[date, DebtComposition] = {}
+    for q in quarter_ends:
+        present = {tag: values[q] for tag, values in by_tag.items() if q in values}
+        comp = compose_total_debt(present)
+        if comp is not None:
+            out[q] = comp.total
+            composed[q] = comp
+
+    reported = [q for q in window_ends if q in composed]
+    if not reported:
+        return out, None, ["No debt concepts found; company may be debt-free or use custom tags."]
+    used = {tag for q in reported for tag in composed[q].used}
+    tag_used = "+".join(tag for tag in DEBT_TAGS if tag in used)
+
+    def where(quarters: list[date], among: list[date]) -> str:
+        # Silent when it held in every quarter it could apply to: the note
+        # then reads as it always has.
+        if quarters == among:
+            return ""
+        return " at " + ", ".join(labels[q] for q in quarters)
+
+    split = [q for q in reported if composed[q].strategy != TOTAL_FALLBACK]
+    parts = [q for q in split if composed[q].strategy == SPLIT]
+    aggregate = [q for q in split if composed[q].strategy == SPLIT_AGGREGATE_CURRENT]
+    fallback = [q for q in reported if composed[q].strategy == TOTAL_FALLBACK]
     notes: list[str] = []
-
-    def series(tags: tuple[str, ...]) -> tuple[dict[date, float], str | None]:
-        for tag in tags:
-            vals, _ = _instant_series(_collect(facts_json, "us-gaap", tag, "USD"), quarter_ends)
-            if vals:
-                return vals, tag
-        return {}, None
-
-    noncur, noncur_tag = series(DEBT_NONCURRENT)
-    cur, cur_tag = series(DEBT_CURRENT)
-    short, short_tag = series(DEBT_SHORT)
-    fin_nc, fin_nc_tag = series(FINANCE_LEASE_NONCURRENT)
-    fin_c, fin_c_tag = series(FINANCE_LEASE_CURRENT)
-
-    if noncur:
-        # Only add finance-lease liabilities the chosen debt tag does not
-        # already embed (P0-10 double-count guard).
-        add_fin_nc = fin_nc if noncur_tag not in LEASE_INCLUSIVE_DEBT_TAGS else {}
-        add_fin_c = fin_c if cur_tag not in LEASE_INCLUSIVE_DEBT_TAGS else {}
-        used_parts = [noncur_tag, cur_tag or "none", short_tag or "none"]
-        out = {
-            q: noncur[q]
-            + cur.get(q, 0.0)
-            + short.get(q, 0.0)
-            + add_fin_nc.get(q, 0.0)
-            + add_fin_c.get(q, 0.0)
-            for q in quarter_ends
-            if q in noncur
-        }
-        if not cur:
-            notes.append("Current portion of long-term debt unavailable; total debt may understate.")
-        if not short:
-            notes.append("Short-term borrowings unavailable or zero; not included.")
-        if add_fin_nc or add_fin_c:
-            notes.append("Finance-lease liabilities added to total debt; operating leases excluded.")
-            used_parts += [t for t in (fin_nc_tag if add_fin_nc else None, fin_c_tag if add_fin_c else None) if t]
-        return out, "+".join(used_parts), notes
-
-    total, total_tag = series(DEBT_TOTAL)
-    if total:
-        # Review finding 6: finance leases must be added on the fallback path too.
-        # us-gaap:LongTermDebt is not one of the lease-inclusive tags, so add
-        # them (with the standard caveat that the total tag can, for some filers,
-        # already embed capital leases).
-        used_parts = [total_tag, short_tag or "none"]
-        out = {
-            q: total[q] + short.get(q, 0.0) + fin_nc.get(q, 0.0) + fin_c.get(q, 0.0)
-            for q in total
-        }
-        notes.append("Used LongTermDebt total (current/noncurrent split unavailable).")
-        if fin_nc or fin_c:
+    no_current = [q for q in parts if "current" in composed[q].missing]
+    if no_current:
+        notes.append(
+            f"Current portion of long-term debt unavailable{where(no_current, parts)}; "
+            "total debt may understate."
+        )
+    no_short = [q for q in parts if "short" in composed[q].missing]
+    if no_short:
+        notes.append(f"Short-term borrowings unavailable or zero{where(no_short, parts)}; not included.")
+    if aggregate:
+        notes.append(
+            f"Aggregate current debt (DebtCurrent) used{where(aggregate, split)}; the current "
+            "portion of long-term debt and short-term borrowings are not added separately."
+        )
+    if any(composed[q].finance_lease_added for q in split):
+        notes.append("Finance-lease liabilities added to total debt; operating leases excluded.")
+    if fallback:
+        notes.append(
+            f"Used LongTermDebt total{where(fallback, reported)} (current/noncurrent split unavailable)."
+        )
+        if any(composed[q].finance_lease_added for q in fallback):
             notes.append(
                 "Finance-lease liabilities added to total debt; operating leases excluded "
                 "(the LongTermDebt total may, for some filers, already embed capital leases)."
             )
-            used_parts += [t for t in (fin_nc_tag if fin_nc else None, fin_c_tag if fin_c else None) if t]
-        return out, "+".join(used_parts), notes
-
-    return {}, None, ["No debt concepts found; company may be debt-free or use custom tags."]
+    return out, tag_used, notes
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +557,8 @@ def build_dataset(
     for name, tags in INSTANT_FIELDS.items():
         tolerance = COVER_DATE_TOLERANCE_DAYS if name == "shares_outstanding" else 0
         values, methods, used = _best_series(
-            facts_json, tags, _unit_for(name), extended_ends, "instant", tolerance_days=tolerance
+            facts_json, tags, _unit_for(name), extended_ends, "instant",
+            tolerance_days=tolerance, window_ends=window_ends,
         )
         notes = []
         if name == "shares_outstanding" and "nearest" in methods.values():
@@ -547,6 +576,7 @@ def build_dataset(
             extended_ends,
             "flow",
             allow_derivation=name not in NON_ADDITIVE_FLOWS,
+            window_ends=window_ends,
         )
         notes: list[str] = []
         if name == "sga_expense":
@@ -561,7 +591,8 @@ def build_dataset(
                 facts_json, DA_COMPONENTS, extended_ends
             )
             dep_values, dep_methods, dep_used = _best_series(
-                facts_json, DA_PARTIAL, _unit_for(name), extended_ends, "flow"
+                facts_json, DA_PARTIAL, _unit_for(name), extended_ends, "flow",
+                window_ends=window_ends,
             )
             agg_n = _score(values, window_ends)
             comp_n = _score(comp_values, window_ends)
@@ -591,7 +622,9 @@ def build_dataset(
             )
         record(name, values, methods, used, notes)
 
-    debt_values, debt_tag, debt_notes = _total_debt_series(facts_json, extended_ends)
+    debt_values, debt_tag, debt_notes = _total_debt_series(
+        facts_json, extended_ends, window_ends, labels
+    )
     record("total_debt", debt_values, {q: "composite" for q in debt_values}, debt_tag, debt_notes)
 
     coverage_by_field = {d.field_name: d.periods_filled for d in diagnostics}
