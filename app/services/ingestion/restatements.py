@@ -38,6 +38,7 @@ from app.services.ingestion.companyfacts_mapper import (
     _parse_date,
     _unit_for,
 )
+from app.services.ingestion.composition import compose_total_debt
 from app.services.ingestion.fields import FIELDS
 from app.services.ingestion.payloads import concept_rows
 
@@ -248,6 +249,8 @@ def _composite_vintages(
     components: list[tuple[str, str]],
     unit: str,
     as_of: date | None,
+    *,
+    compose_debt: bool = False,
 ) -> dict[tuple[date | None, date], list[tuple[date, float, str, str, frozenset[str]]]]:
     """Rebuild a summed field's value as it stood at each filing vintage.
 
@@ -282,27 +285,37 @@ def _composite_vintages(
     for key in keys:
         vintages = sorted({f[0] for rows in per_component.values() for f in rows.get(key, [])})
         for vintage in vintages:
-            total = 0.0
-            present: set[str] = set()
-            form = accn = ""
-            filed_today: list[tuple[str, str]] = []
-            # Summed in a fixed tag order, not the order the selection string
-            # happened to list the components. Float addition is not
-            # associative, so iteration order moved the aggregate by ~1e-13 —
-            # never enough to flip a materiality decision, but enough that the
-            # same report did not reproduce byte-identically, which is the one
-            # property a point-in-time artifact is supposed to have.
+            # Latest value of each component filed on or before this vintage.
+            # Same tie rule as the mapper: max() keeps the FIRST fact at the
+            # latest date. Iterated in a fixed tag order, not the order the
+            # selection string happened to list the components: float
+            # addition is not associative, and iteration order once moved
+            # the aggregate by ~1e-13 — never enough to flip a materiality
+            # decision, but enough that the same report did not reproduce
+            # byte-identically.
+            latest_by: dict[tuple[str, str], tuple] = {}
             for (taxonomy, tag), rows in sorted(per_component.items()):
-                # Latest value filed on or before this vintage. Same tie rule
-                # as the mapper: max() keeps the FIRST fact at the latest date.
                 eligible = [f for f in rows.get(key, []) if f[0] <= vintage]
-                if not eligible:
+                if eligible:
+                    latest_by[(taxonomy, tag)] = max(eligible, key=lambda f: f[0])
+            if compose_debt:
+                # Total debt is not a sum of whatever was filed: aggregate
+                # current debt excludes the current portion and short-term
+                # borrowings, a lease-inclusive tag excludes finance leases.
+                # The mapper's own rule decides which components count.
+                comp = compose_total_debt({tag: f[1] for (_tax, tag), f in latest_by.items()})
+                if comp is None:
                     continue
-                latest = max(eligible, key=lambda f: f[0])
-                total += latest[1]
-                present.add(f"{taxonomy}:{tag}")
-                if latest[0] == vintage:
-                    filed_today.append((latest[2], latest[3]))
+                counted = {k: f for k, f in latest_by.items() if k[1] in comp.used}
+                total = comp.total
+            else:
+                counted = latest_by
+                total = 0.0
+                for f in counted.values():
+                    total += f[1]
+            present = {f"{taxonomy}:{tag}" for taxonomy, tag in counted}
+            filed_today = [(f[2], f[3]) for f in counted.values() if f[0] == vintage]
+            form = accn = ""
             # Provenance across EVERY component filed on this date, not the
             # first one encountered. Several components can move a summed
             # figure on the same day through different filings, and taking
@@ -464,7 +477,9 @@ def scan_restatements(
         groups: list[tuple[str, dict]] = []
         if composite:
             qualified = "+".join(f"{tax}:{tag}" for tax, tag in series)
-            groups.append((qualified, _composite_vintages(facts_json, series, unit, as_of)))
+            groups.append((qualified, _composite_vintages(
+                facts_json, series, unit, as_of, compose_debt=field_name == "total_debt"
+            )))
         else:
             for taxonomy, tag in series:
                 by_key: dict[tuple[date | None, date], list] = {}

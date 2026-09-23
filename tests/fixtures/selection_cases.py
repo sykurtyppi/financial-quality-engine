@@ -201,9 +201,10 @@ def tag_choice() -> dict:
     # Unequal coverage → the better-covered candidate wins over the earlier.
     p.add("InventoryNet", _instants(200.0, q[7:]))
     p.add("InventoryGross", _instants(250.0))
-    # Coverage is counted over the extended (buffered) window: the first tag
-    # covers 10 of 12 extended quarters but only 6 of the 8 reported; the
-    # second covers the 8 reported. The first still wins.
+    # Coverage is ranked over the REPORTED window first: the first tag covers
+    # 10 of 12 buffered quarters but only 6 of the 8 reported; the second
+    # covers all 8 reported, and wins. (Ranked over the buffered window, the
+    # abandoned tag won and two reported quarters were empty.)
     p.add("CashAndCashEquivalentsAtCarryingValue", _instants(500.0, q[:10]))
     p.add("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", _instants(520.0, q[4:]))
     # Only the third candidate is filed.
@@ -283,7 +284,7 @@ def da_amortization_partial() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Total debt: composition by role, first non-empty candidate per role
+# Total debt: composed per balance-sheet date (composition.compose_total_debt)
 
 
 def debt_full_breakdown() -> dict:
@@ -292,13 +293,65 @@ def debt_full_breakdown() -> dict:
     p.add("LongTermDebtNoncurrent", _instants(2_000.0))
     # Current portion missing at one quarter end → counted as 0 there.
     p.add("LongTermDebtCurrent", [instant(e, 150.0 + i) for i, e in enumerate(q) if e != q[9]])
-    # Short-term role: the first candidate covers three quarters, the second
-    # all twelve. Debt roles take the first NON-EMPTY candidate, not the best
-    # covered one.
+    # Short-term role: the first candidate is reported at three quarter ends,
+    # the second at all twelve. At each date the first candidate reported AT
+    # THAT DATE counts — CommercialPaper where ShortTermBorrowings is absent.
     p.add("ShortTermBorrowings", _instants(40.0, q[9:]))
     p.add("CommercialPaper", _instants(400.0))
     p.add("FinanceLeaseLiabilityNoncurrent", _instants(30.0))
     p.add("FinanceLeaseLiabilityCurrent", _instants(5.0, q[6:]))
+    return p.data
+
+
+def debt_hermes_double_count() -> dict:
+    """Hermes's controlled filing: noncurrent 800, current portion 100,
+    aggregate current debt 150. DebtCurrent already contains the current
+    portion: 950, not 1,050."""
+    p = _base("Debt Aggregate Current Co")
+    p.add("LongTermDebtNoncurrent", _instants(800.0, step=0.0))
+    p.add("LongTermDebtCurrent", _instants(100.0, step=0.0))
+    p.add("DebtCurrent", _instants(150.0, step=0.0))
+    p.add("FinanceLeaseLiabilityCurrent", _instants(7.0, step=0.0))  # inside DebtCurrent
+    return p.data
+
+
+def debt_intel_pattern() -> dict:
+    """Intel's history: current portion and commercial paper in older
+    quarters, aggregate current debt (DebtCurrent) in the latest. CommercialPaper
+    used to be chosen for the whole series because it had values somewhere,
+    and DebtCurrent was dropped from the latest quarters."""
+    p = _base("Debt Intel Pattern Co")
+    q = QUARTER_ENDS
+    p.add("LongTermDebtNoncurrent", _instants(46_000.0, step=100.0))
+    p.add("LongTermDebtCurrent", _instants(1_500.0, q[:9]))
+    p.add("CommercialPaper", _instants(900.0, q[:9]))
+    p.add("DebtCurrent", _instants(1_988.0, q[9:], step=16.0))
+    return p.data
+
+
+def debt_tag_migration() -> dict:
+    """KO's history: the plain debt tags only in the buffer quarters, the
+    lease-inclusive ones in every reported quarter. The buffer tags used to
+    win (first with any value) and every reported quarter was empty."""
+    p = _base("Debt Migration Co")
+    q = QUARTER_ENDS
+    p.add("LongTermDebtNoncurrent", _instants(38_000.0, q[:4]))
+    p.add("LongTermDebtCurrent", _instants(1_200.0, q[:4]))
+    p.add("LongTermDebtAndCapitalLeaseObligations", _instants(40_000.0, q[4:], step=50.0))
+    p.add("LongTermDebtAndCapitalLeaseObligationsCurrent", _instants(1_300.0, q[4:]))
+    p.add("CommercialPaper", _instants(4_000.0))
+    return p.data
+
+
+def debt_fallback_some_quarters() -> dict:
+    """The split is reported only from 2023-09-30; before that only the
+    LongTermDebt total. Each date uses what was reported at it, and the note
+    names the fallback quarters."""
+    p = _base("Debt Partial Split Co")
+    q = QUARTER_ENDS
+    p.add("LongTermDebtNoncurrent", _instants(900.0, q[6:]))
+    p.add("LongTermDebtCurrent", _instants(60.0, q[6:]))
+    p.add("LongTermDebt", _instants(955.0))
     return p.data
 
 
@@ -415,6 +468,10 @@ CASES: dict[str, Callable[[], dict]] = {
     "da_aggregate_with_amortization": da_aggregate_with_amortization,
     "da_amortization_partial": da_amortization_partial,
     "debt_full_breakdown": debt_full_breakdown,
+    "debt_hermes_double_count": debt_hermes_double_count,
+    "debt_intel_pattern": debt_intel_pattern,
+    "debt_tag_migration": debt_tag_migration,
+    "debt_fallback_some_quarters": debt_fallback_some_quarters,
     "debt_lease_inclusive": debt_lease_inclusive,
     "debt_both_lease_inclusive": debt_both_lease_inclusive,
     "debt_noncurrent_only": debt_noncurrent_only,

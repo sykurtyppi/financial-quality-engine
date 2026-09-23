@@ -213,6 +213,43 @@ Mid-window changes (0.4.0 window):
    The 0.3.0 wide sweep that set the anchors ran on the old mapping; the
    anchors are not re-fit mid-window — a window-close item.
 
+9. **2026-09-23 — total debt composed per balance-sheet date; tag selection
+   ranked on reported quarters (Hermes deep audit, finding 1).** Each debt
+   role took the first tag with any value anywhere in the 12-quarter
+   buffered window, and a role's missing quarters counted as zero. An
+   abandoned tag therefore hid the one in use: Intel's historical
+   `CommercialPaper` dropped its current `DebtCurrent` (~$2B understated,
+   per Hermes), and **KO's `total_debt` was empty in all 8 reported
+   quarters** — its pre-migration tags exist only in the buffer — so KO's
+   calibrated Balance Sheet Stress block scored without `net_debt_to_ebitda`,
+   `debt_to_assets` and `leverage_change`, and its Earnings Quality block
+   without the Beneish M-score (LVGI uses total debt). `DebtCurrent`
+   (aggregate current debt) also sat in the short-term role and could be
+   added on top of the current portion it contains (800 + 100 + 150 = 1,050;
+   correct 950). Now one rule, `composition.compose_total_debt`, composes the
+   concepts reported at each date: noncurrent + either `DebtCurrent` alone or
+   current portion + short-term borrowings; `LongTermDebt` only when no
+   noncurrent figure is reported; finance leases unless the tag beside them
+   embeds them (`DebtCurrent` treated as lease-inclusive — "debt and lease
+   obligation, classified as current"; to be confirmed against the
+   taxonomy). A role not reported at a date counts as zero, named quarter by
+   quarter in the field notes (operator decision 2026-09-23: keep the value,
+   flag partial). The restatement detector rebuilds total debt with the same
+   rule. Single-tag candidates are ranked by reported-quarter coverage first
+   (no AAPL/KO/CRM field moves). **A correction of mapped input values, not
+   a scoring change: no anchor, weight or band moves.** Calibration
+   snapshot: **KO only** — Balance Sheet Stress 27.7 → 33.5, Earnings
+   Quality 19.0 → 20.4, overall 22.2 → 23.4, direction unchanged; AAPL and
+   CRM byte-identical. `selection_snapshot.json`: KO debt filled, CRM's tag
+   string loses its `+none` sentinel, synthetic debt cases re-composed, four
+   regression cases added (Hermes's 800/100/150, Intel pattern, KO
+   migration, partial fallback). Proof: `tests/unit/test_debt_composition.py`
+   (rule, hypothesis no-double-count property, mapper == detector on every
+   debt case, scan-level composition), `test_selection_snapshot.py`. The
+   0.3.0 wide sweep that set the anchors ran on the old mapping and may have
+   carried the same gaps; anchors are not re-fit mid-window — a window-close
+   item.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

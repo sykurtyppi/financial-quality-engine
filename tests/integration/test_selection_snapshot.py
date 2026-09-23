@@ -102,7 +102,7 @@ def _pattern(node: ast.expr) -> str:
         return re.escape(node.value)
     if isinstance(node, ast.JoinedStr):
         return "".join(
-            re.escape(v.value) if isinstance(v, ast.Constant) else ".+?" for v in node.values
+            re.escape(v.value) if isinstance(v, ast.Constant) else ".*?" for v in node.values
         )
     raise AssertionError(f"unrecognised note expression: {ast.dump(node)}")
 
@@ -145,7 +145,6 @@ def test_every_mapper_note_appears(golden):
 BRANCHES = {
     ("synthetic/tag_choice", "receivables"): "us-gaap:AccountsReceivableNetCurrent",
     ("synthetic/tag_choice", "inventory"): "us-gaap:InventoryGross",
-    ("synthetic/tag_choice", "cash_and_equivalents"): "us-gaap:CashAndCashEquivalentsAtCarryingValue",
     ("synthetic/tag_choice", "accounts_payable"): "us-gaap:AccountsPayableTradeCurrent",
     ("synthetic/tag_choice", "shares_outstanding"): "dei:EntityCommonStockSharesOutstanding",
     ("synthetic/tag_choice", "sga_expense"): "SellingAndMarketingExpense+GeneralAndAdministrativeExpense",
@@ -160,22 +159,34 @@ BRANCHES = {
     ),
     ("synthetic/da_amortization_partial", "depreciation_amortization"): "us-gaap:Depreciation",
     ("synthetic/debt_full_breakdown", "total_debt"): (
-        "LongTermDebtNoncurrent+LongTermDebtCurrent+ShortTermBorrowings"
+        "LongTermDebtNoncurrent+LongTermDebtCurrent+ShortTermBorrowings+CommercialPaper"
         "+FinanceLeaseLiabilityNoncurrent+FinanceLeaseLiabilityCurrent"
     ),
     ("synthetic/debt_lease_inclusive", "total_debt"): (
-        "LongTermDebtAndCapitalLeaseObligations+LongTermDebtCurrent+none"
-        "+FinanceLeaseLiabilityCurrent"
+        "LongTermDebtAndCapitalLeaseObligations+LongTermDebtCurrent+FinanceLeaseLiabilityCurrent"
     ),
     ("synthetic/debt_both_lease_inclusive", "total_debt"): (
-        "LongTermDebtAndCapitalLeaseObligations+LongTermDebtAndCapitalLeaseObligationsCurrent"
-        "+DebtCurrent"
+        "LongTermDebtAndCapitalLeaseObligations+DebtCurrent"
     ),
-    ("synthetic/debt_noncurrent_only", "total_debt"): "LongTermDebtNoncurrent+none+none",
+    ("synthetic/debt_noncurrent_only", "total_debt"): "LongTermDebtNoncurrent",
     ("synthetic/debt_total_fallback_with_leases", "total_debt"): (
         "LongTermDebt+CommercialPaper+FinanceLeaseLiabilityNoncurrent"
     ),
-    ("synthetic/debt_total_fallback_plain", "total_debt"): "LongTermDebt+none",
+    ("synthetic/debt_total_fallback_plain", "total_debt"): "LongTermDebt",
+    ("synthetic/debt_hermes_double_count", "total_debt"): "LongTermDebtNoncurrent+DebtCurrent",
+    ("synthetic/debt_intel_pattern", "total_debt"): (
+        "LongTermDebtNoncurrent+DebtCurrent+LongTermDebtCurrent+CommercialPaper"
+    ),
+    ("synthetic/debt_tag_migration", "total_debt"): (
+        "LongTermDebtAndCapitalLeaseObligations+LongTermDebtAndCapitalLeaseObligationsCurrent"
+        "+CommercialPaper"
+    ),
+    ("synthetic/debt_fallback_some_quarters", "total_debt"): (
+        "LongTermDebtNoncurrent+LongTermDebt+LongTermDebtCurrent"
+    ),
+    ("synthetic/tag_choice", "cash_and_equivalents"): (
+        "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"
+    ),
     ("synthetic/debt_none", "total_debt"): None,
     ("synthetic/quarter_ends_from_revenue", "revenue"): "us-gaap:Revenues",
 }
@@ -206,6 +217,23 @@ def test_synthetic_derivation_and_tie_branches(golden):
     # Quarter ends and labels.
     assert golden["synthetic/quarter_ends_from_revenue"]["quarter_ends"][-1] == "2024-12-31"
     assert golden["synthetic/unknown_fiscal_year_end"]["labels"][0] == "P2023-03-31"
+    # Debt is composed per balance-sheet date (composition.compose_total_debt).
+    def debt(case: str) -> dict:
+        return _field(golden[f"synthetic/{case}"], "total_debt")
+
+    assert set(debt("debt_hermes_double_count")["values"].values()) == {950.0}
+    intel = debt("debt_intel_pattern")
+    assert intel["values"]["2024-12-31"] == 47_100.0 + 2_020.0  # DebtCurrent counted
+    assert intel["values"]["2024-03-31"] == 46_800.0 + 1_508.0 + 908.0  # split + CP
+    migration = debt("debt_tag_migration")
+    assert migration["periods_filled"] == migration["periods_total"] == 8
+    fallback = debt("debt_fallback_some_quarters")
+    assert fallback["values"]["2023-03-31"] == 959.0  # LongTermDebt total
+    assert "Used LongTermDebt total at FY2023Q1, FY2023Q2 (current/noncurrent split unavailable)." in fallback["notes"]
+    full = debt("debt_full_breakdown")
+    assert "Current portion of long-term debt unavailable at FY2024Q2; total debt may understate." in full["notes"]
+    # KO's real filing: its debt tags migrated inside the buffer window.
+    assert _field(golden["real/KO"], "total_debt")["periods_filled"] == 8
     # D&A: separate depreciation + amortization are composed on a tie with
     # depreciation alone; an aggregate tag never has amortization added.
     split = _field(golden["synthetic/da_split_equal_coverage"], "depreciation_amortization")

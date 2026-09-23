@@ -40,17 +40,17 @@
     },
     "KO": {
       "blocks": {
-        "Balance Sheet Stress": 27.7,
+        "Balance Sheet Stress": 33.5,
         "Capex Discipline": 23.7,
         "Capital Integrity": 24.6,
         "Cash Conversion": 19.2,
-        "Earnings Quality": 19.0,
+        "Earnings Quality": 20.4,
         "Narrative Drift": null,
         "Revenue Quality": 21.8,
         "Working Capital Stress": 22.0
       },
       "direction": "positive",
-      "overall": 22.2
+      "overall": 23.4
     }
   },
   "config_version": "0.4.0",

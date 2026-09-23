@@ -86,6 +86,7 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
+    "app.services.ingestion.composition",
     "app.services.ingestion.fields",
     "app.services.ingestion.payloads",
     "app.services.metrics_registry",

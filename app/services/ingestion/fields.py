@@ -45,8 +45,13 @@ class Composition(str, Enum):
 
 
 class Criterion(str, Enum):
-    BEST_COVERAGE = "best_coverage"  # most quarters covered wins; ties by candidate order
-    FIRST_NONEMPTY = "first_nonempty"  # first candidate with any value wins
+    # most reported-window quarters covered wins; ties by extended-window
+    # coverage, then candidate order
+    BEST_COVERAGE = "best_coverage"
+    # at each balance-sheet date, the first candidate reported AT THAT DATE
+    # (composition.compose_total_debt). Not "first with any value anywhere":
+    # a tag used only in old quarters hid the one in use today.
+    FIRST_PRESENT_PER_DATE = "first_present_per_date"
 
 
 @dataclass(frozen=True)
@@ -100,7 +105,10 @@ def _flow(name: str, *strategies: SeriesStrategy, **kw: Any) -> FieldSpec:
 # dei share counts are stamped with cover dates, weeks after the quarter end.
 COVER_DATE_TOLERANCE_DAYS = 60
 
-_DEBT_SHORT = RoleSpec("short", _g("ShortTermBorrowings", "CommercialPaper", "DebtCurrent"))
+# Short-term borrowings reported apart from the current portion of
+# long-term debt. `DebtCurrent` is NOT one: it is aggregate current debt and
+# has its own, mutually exclusive role.
+_DEBT_SHORT = RoleSpec("short", _g("ShortTermBorrowings", "CommercialPaper"))
 _FINANCE_LEASE_NC = RoleSpec("finance_lease_nc", _g("FinanceLeaseLiabilityNoncurrent"))
 _FINANCE_LEASE_C = RoleSpec("finance_lease_c", _g("FinanceLeaseLiabilityCurrent"))
 
@@ -267,13 +275,17 @@ FIELDS: tuple[FieldSpec, ...] = (
         (
             SeriesStrategy(
                 Composition.DEBT_BREAKDOWN,
-                Criterion.FIRST_NONEMPTY,
+                Criterion.FIRST_PRESENT_PER_DATE,
                 roles=(
                     RoleSpec(
                         "noncurrent",
                         _g("LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations"),
                         required=True,
                     ),
+                    # Aggregate current debt (current portion + short-term
+                    # borrowings). When reported it IS the current side, and
+                    # "current"/"short" are not added (double counting).
+                    RoleSpec("current_aggregate", _g("DebtCurrent")),
                     RoleSpec(
                         "current",
                         _g("LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent"),
@@ -285,7 +297,7 @@ FIELDS: tuple[FieldSpec, ...] = (
             ),
             SeriesStrategy(
                 Composition.DEBT_BREAKDOWN,
-                Criterion.FIRST_NONEMPTY,
+                Criterion.FIRST_PRESENT_PER_DATE,
                 roles=(
                     RoleSpec("total", _g("LongTermDebt"), required=True),
                     _DEBT_SHORT,
@@ -294,8 +306,15 @@ FIELDS: tuple[FieldSpec, ...] = (
                 ),
             ),
         ),
+        # `DebtCurrent` is "debt and lease obligation, classified as current"
+        # in the US-GAAP taxonomy: a current finance-lease liability is not
+        # added beside it.
         lease_inclusive_tags=frozenset(
-            {"LongTermDebtAndCapitalLeaseObligations", "LongTermDebtAndCapitalLeaseObligationsCurrent"}
+            {
+                "LongTermDebtAndCapitalLeaseObligations",
+                "LongTermDebtAndCapitalLeaseObligationsCurrent",
+                "DebtCurrent",
+            }
         ),
     ),
 )
