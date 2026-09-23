@@ -31,6 +31,7 @@ from app.services.ingestion.sec_client import SecClient, SecClientError  # noqa:
 from app.services.ingestion.vintages import (  # noqa: E402
     UNREADABLE,
     capture,
+    diff_scored,
     diff_vintages,
     list_vintages,
     load_vintage,
@@ -112,13 +113,19 @@ def cmd_diff(args: argparse.Namespace) -> int:
         print(f"{args.ticker}: a snapshot could not be read ({e}). The file is kept — "
               "never delete it; capture again to add a readable one.", file=sys.stderr)
         return 1
-    changes = diff_vintages(
-        old_facts, new_facts,
-        scored_only=True,   # every-tag mode exists on the function; not exposed
-                            # until the noise floor of the default is measured
-        since=date.fromisoformat(args.since) if args.since else None,
-        include_split_adjusted=args.splits,
-    )
+    since = date.fromisoformat(args.since) if args.since else None
+    if args.splits:
+        # Share counts on request: the raw fact diff, which alone can
+        # include split-adjusted fields.
+        changes = diff_vintages(old_facts, new_facts, scored_only=True, since=since,
+                                include_split_adjusted=True)
+    else:
+        # What the engine scores: single-tag facts plus composed figures
+        # (total debt, composite SG&A/D&A) compared as the mapper builds them.
+        scored = diff_scored(old_facts, new_facts, since=since)
+        changes = scored.changes
+        if scored.composed_unavailable:
+            print(f"Note: {scored.composed_unavailable}.", file=sys.stderr)
     print(render_changes(changes, older.captured, newer.captured))
     return 0
 
