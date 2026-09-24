@@ -120,12 +120,12 @@ def cmd_diff(args: argparse.Namespace) -> int:
         changes = diff_vintages(old_facts, new_facts, scored_only=True, since=since,
                                 include_split_adjusted=True)
     else:
-        # What the engine scores: single-tag facts plus composed figures
-        # (total debt, composite SG&A/D&A) compared as the mapper builds them.
+        # What the engine scores, compared as the mapper builds it; raw facts
+        # as provenance and pre-window context.
         scored = diff_scored(old_facts, new_facts, since=since)
         changes = scored.changes
-        if scored.composed_unavailable:
-            print(f"Note: {scored.composed_unavailable}.", file=sys.stderr)
+        if scored.canonical_unavailable:
+            print(f"Note: {scored.canonical_unavailable}.", file=sys.stderr)
     print(render_changes(changes, older.captured, newer.captured))
     return 0
 
