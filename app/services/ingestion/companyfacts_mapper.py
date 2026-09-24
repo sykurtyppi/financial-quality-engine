@@ -44,7 +44,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.financials import (
     CompanyDataset,
@@ -65,9 +65,10 @@ from app.services.ingestion.composition import (
     resolve_by_strategy,
 )
 from app.services.ingestion.fields import (
-    COVER_DATE_TOLERANCE_DAYS,
+    COVER_DATE_TOLERANCE_DAYS,  # noqa: F401  (re-exported view)
     CRITICAL_FIELDS,
     FIELDS,
+    FieldSpec,
     Kind,
     candidate_table,
     composite_components,
@@ -77,6 +78,7 @@ from app.services.ingestion.fields import (
 from app.services.ingestion.fields import field as field_spec
 from app.services.ingestion.precedence import Rank, current_conflict, latest
 from app.services.ingestion.precedence import rank as fact_rank
+from app.services.ingestion.selection import Composer, SeriesSelection, composer_for
 
 QTD_DAYS = (70, 100)
 ANNUAL_DAYS = (330, 380)
@@ -153,6 +155,18 @@ class FieldDiagnostic(BaseModel):
     # series-level `tag_used` cannot say this once a field can be built
     # differently from one quarter to the next.
     period_sources: dict[str, PeriodSource] = Field(default_factory=dict)
+    # What was selected, as an object: the qualified components and the rule
+    # that composes them. `tag_used` is its legacy rendering.
+    selection: SeriesSelection | None = None
+
+    @model_validator(mode="after")
+    def _tag_used_is_the_selection(self) -> FieldDiagnostic:
+        if self.selection is not None and self.tag_used != self.selection.tag_used:
+            raise ValueError(
+                f"{self.field_name}: tag_used {self.tag_used!r} is not the selection's "
+                f"{self.selection.tag_used!r}"
+            )
+        return self
 
 
 class IngestionDiagnostics(BaseModel):
@@ -178,6 +192,12 @@ class IngestionDiagnostics(BaseModel):
         restatement detector does) must read it from here rather than
         re-deriving it from the payload and hoping the two agree."""
         return {f.field_name: f.tag_used for f in self.fields}
+
+    def selected_series(self) -> dict[str, SeriesSelection | None]:
+        """What backed each canonical field, as objects: the components with
+        their taxonomy and the composer the mapper used. Pass this, not
+        `selected_tags()`, to anything that must rebuild the scored figure."""
+        return {f.field_name: f.selection for f in self.fields}
 
     def field_notes(self) -> list[str]:
         """Every per-field mapping note, prefixed with its field, in mapper
@@ -501,7 +521,9 @@ def _resolved_flow(
     labels: dict[date, str],
     single: tuple[dict[date, float], dict[date, str], str | None],
     mixed: set[date] | None = None,
-) -> tuple[dict[date, float], dict[date, str], str | None, list[str], dict[date, PeriodSource]]:
+) -> tuple[
+    dict[date, float], dict[date, str], tuple[str, ...], list[str], dict[date, PeriodSource]
+]:
     """A flow field with alternative strategies (SG&A, D&A), resolved per
     quarter by `composition.resolve_by_strategy` — the rule the restatement
     detector applies too. `single` is the field's own concept as
@@ -544,14 +566,10 @@ def _resolved_flow(
             methods[q] = component_series[r.used[0]][1][q]
 
     reported = [q for q in window_ends if q in resolved]
-    used = [t for t in ([single_tag] if single_tag else []) + list(component_series)
-            if any(t in resolved[q].used for q in reported)]
-    if not used:
-        tag_used = None
-    elif len(used) == 1:
-        tag_used = _qualified(used[0])
-    else:
-        tag_used = "+".join(used)
+    used = tuple(
+        _qualified(t) for t in ([single_tag] if single_tag else []) + list(component_series)
+        if any(t in resolved[q].used for q in reported)
+    )
     sources = {
         q: PeriodSource(
             strategy=resolved[q].strategy,
@@ -577,7 +595,7 @@ def _resolved_flow(
                 f"Partial D&A{_where(partial_q, reported, labels)}: only a depreciation tag is "
                 "reported; amortization is not included (capex/D&A can overstate)."
             )
-    return values, methods, tag_used, notes, sources
+    return values, methods, used, notes, sources
 
 
 def _total_debt_series(
@@ -585,7 +603,7 @@ def _total_debt_series(
     quarter_ends: list[date],
     window_ends: list[date],
     labels: dict[date, str],
-) -> tuple[dict[date, float], str | None, list[str], dict[date, PeriodSource]]:
+) -> tuple[dict[date, float], tuple[str, ...], list[str], dict[date, PeriodSource]]:
     """Total debt at each quarter end, composed from the concepts reported
     AT THAT DATE by `composition.compose_total_debt` — the one rule the
     restatement detector applies too. Notes name the reported quarters where
@@ -607,9 +625,9 @@ def _total_debt_series(
 
     reported = [q for q in window_ends if q in composed]
     if not reported:
-        return out, None, ["No debt concepts found; company may be debt-free or use custom tags."], {}
+        return out, (), ["No debt concepts found; company may be debt-free or use custom tags."], {}
     used = {tag for q in reported for tag in composed[q].used}
-    tag_used = "+".join(tag for tag in DEBT_TAGS if tag in used)
+    components = tuple(_qualified(tag) for tag in DEBT_TAGS if tag in used)
 
     def where(quarters: list[date], among: list[date]) -> str:
         return _where(quarters, among, labels)
@@ -653,7 +671,78 @@ def _total_debt_series(
         )
         for q in reported
     }
-    return out, tag_used, notes, sources
+    return out, components, notes, sources
+
+
+def _select_series(
+    facts_json: dict,
+    spec: FieldSpec,
+    quarter_ends: list[date],
+    window_ends: list[date],
+    labels: dict[date, str],
+) -> tuple[
+    dict[date, float], dict[date, str], SeriesSelection | None, list[str], dict[date, PeriodSource]
+]:
+    """One field's series, however the registry says it is built — the one
+    place a field is selected. A single concept by reported-window coverage
+    (`_best_series`); a field with alternative strategies resolved per
+    quarter (`_resolved_flow`); total debt composed per balance-sheet date
+    (`_total_debt_series`). Returns values and derivation methods over the
+    buffered window, the selection, the notes, and per-quarter provenance
+    over the reported window."""
+    composer = composer_for(spec.name)
+    notes: list[str] = []
+    sources: dict[date, PeriodSource] | None = None
+    if composer is Composer.DEBT:
+        values, components, notes, sources = _total_debt_series(
+            facts_json, quarter_ends, window_ends, labels
+        )
+        methods = {q: "composite" for q in values}
+    else:
+        mixed: set[date] = set()
+        values, methods, used = _best_series(
+            facts_json,
+            spec.strategies[0].tags,
+            spec.unit,
+            quarter_ends,
+            "instant" if spec.kind is Kind.INSTANT else "flow",
+            allow_derivation=spec.additive,
+            tolerance_days=spec.cover_date_tolerance_days,
+            window_ends=window_ends,
+            mixed_out=mixed,
+        )
+        components = (used,) if used else ()
+        if composer is Composer.STRATEGY:
+            values, methods, components, notes, sources = _resolved_flow(
+                facts_json, spec.name, quarter_ends, window_ends, labels, (values, methods, used),
+                mixed,
+            )
+        mixed_q = [q for q in window_ends if q in mixed and q in values]
+        if mixed_q:
+            where = ", ".join(labels[q] for q in mixed_q)
+            notes.append(
+                f"Derived from filings of different dates at {where}: an earlier period "
+                "did not exist yet when the year-to-date or annual figure it is subtracted "
+                "from was filed, so the latest values were used."
+            )
+        if spec.cover_date_tolerance_days and "nearest" in methods.values():
+            notes.append(
+                "Share counts matched from cover-page dates within "
+                f"{spec.cover_date_tolerance_days} days after quarter end."
+            )
+        if not spec.additive and _score(values, window_ends) < len(window_ends):
+            notes.append(
+                "Weighted-average share counts are not additive; quarters without a "
+                "directly reported value stay missing (no Q4 derivation)."
+            )
+    selection = SeriesSelection.of(spec.name, components) if components else None
+    if sources is None:
+        # One concept for the whole series.
+        sources = {
+            q: PeriodSource(strategy="single", components=list(components), method=methods[q])
+            for q in window_ends if q in values and selection is not None
+        }
+    return values, methods, selection, notes, sources
 
 
 def _same_day_conflict_notes(
@@ -728,94 +817,29 @@ def build_dataset(
             "period labels fall back to raw dates."
         )
 
-    def record(
-        name: str,
-        values: dict[date, float],
-        methods: dict[date, str],
-        tag: str | None,
-        notes: list[str],
-        sources: dict[date, PeriodSource] | None = None,
-    ) -> None:
-        field_values[name] = values
-        if sources is None:
-            # One concept for the whole series.
-            sources = {
-                q: PeriodSource(strategy="single", components=[tag], method=methods[q])
-                for q in window_ends if q in values and tag is not None
-            }
-        notes = notes + _same_day_conflict_notes(facts_json, name, sources, labels)
-        in_window = {q: m for q, m in methods.items() if q in window_ends}
+    for spec in FIELDS:
+        values, methods, selection, notes, sources = _select_series(
+            facts_json, spec, extended_ends, window_ends, labels
+        )
+        notes = notes + _same_day_conflict_notes(facts_json, spec.name, sources, labels)
+        field_values[spec.name] = values
         method_counts: dict[str, int] = {}
-        for m in in_window.values():
-            method_counts[m] = method_counts.get(m, 0) + 1
+        for q, m in methods.items():
+            if q in window_ends:
+                method_counts[m] = method_counts.get(m, 0) + 1
         diagnostics.append(
             FieldDiagnostic(
-                field_name=name,
-                tag_used=tag,
+                field_name=spec.name,
+                tag_used=selection.tag_used if selection is not None else None,
                 periods_filled=sum(1 for q in window_ends if q in values),
                 periods_total=len(window_ends),
                 methods=method_counts,
                 missing_periods=[labels[q] for q in window_ends if q not in values],
                 notes=notes,
                 period_sources={q.isoformat(): src for q, src in sources.items()},
+                selection=selection,
             )
         )
-
-    for name, tags in INSTANT_FIELDS.items():
-        tolerance = COVER_DATE_TOLERANCE_DAYS if name == "shares_outstanding" else 0
-        values, methods, used = _best_series(
-            facts_json, tags, _unit_for(name), extended_ends, "instant",
-            tolerance_days=tolerance, window_ends=window_ends,
-        )
-        notes = []
-        if name == "shares_outstanding" and "nearest" in methods.values():
-            notes.append(
-                "Share counts matched from cover-page dates within "
-                f"{COVER_DATE_TOLERANCE_DAYS} days after quarter end."
-            )
-        record(name, values, methods, used, notes)
-
-    for name, tags in FLOW_FIELDS.items():
-        mixed: set[date] = set()
-        values, methods, used = _best_series(
-            facts_json,
-            tags,
-            _unit_for(name),
-            extended_ends,
-            "flow",
-            allow_derivation=name not in NON_ADDITIVE_FLOWS,
-            window_ends=window_ends,
-            mixed_out=mixed,
-        )
-        notes: list[str] = []
-        sources: dict[date, PeriodSource] | None = None
-        if name in ("sga_expense", "depreciation_amortization"):
-            values, methods, used, notes, sources = _resolved_flow(
-                facts_json, name, extended_ends, window_ends, labels, (values, methods, used),
-                mixed,
-            )
-        mixed_q = [q for q in window_ends if q in mixed and q in values]
-        if mixed_q:
-            where = ", ".join(labels[q] for q in mixed_q)
-            notes.append(
-                f"Derived from filings of different dates at {where}: an earlier period "
-                "did not exist yet when the year-to-date or annual figure it is subtracted "
-                "from was filed, so the latest values were used."
-            )
-        if name in NON_ADDITIVE_FLOWS and _score(values, window_ends) < len(window_ends):
-            notes.append(
-                "Weighted-average share counts are not additive; quarters without a "
-                "directly reported value stay missing (no Q4 derivation)."
-            )
-        record(name, values, methods, used, notes, sources)
-
-    debt_values, debt_tag, debt_notes, debt_sources = _total_debt_series(
-        facts_json, extended_ends, window_ends, labels
-    )
-    record(
-        "total_debt", debt_values, {q: "composite" for q in debt_values}, debt_tag, debt_notes,
-        debt_sources,
-    )
 
     coverage_by_field = {d.field_name: d.periods_filled for d in diagnostics}
     for critical in CRITICAL_FIELDS:

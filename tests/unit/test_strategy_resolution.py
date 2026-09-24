@@ -24,9 +24,8 @@ from app.services.ingestion.composition import (
     resolve_by_strategy,
 )
 from app.services.ingestion.restatements import (
-    _COMPOSERS,
     _composite_vintages,
-    _parse_selection,
+    composer_of,
     detect_restatements,
 )
 from tests.fixtures import selection_cases
@@ -98,11 +97,11 @@ CASES = ["tag_choice", "composites_lose", "da_split_equal_coverage", "da_aggrega
 def test_the_detector_rebuilds_exactly_the_value_the_mapper_scored(case, field_name):
     facts = selection_cases.CASES[case]()
     ds, diag = build_dataset(facts, "X")
-    selected = diag.field_by_name(field_name).tag_used
-    if selected is None:
+    selection = diag.field_by_name(field_name).selection
+    if selection is None:
         return
     rebuilt = _composite_vintages(
-        facts, _parse_selection(selected), "USD", None, compose=_COMPOSERS[field_name]
+        facts, selection.concepts, "USD", None, compose=composer_of(selection)
     )
     for p in ds.periods:
         mapped = getattr(p, field_name)
