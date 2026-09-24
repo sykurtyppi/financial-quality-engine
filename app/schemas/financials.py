@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PeriodType(str, Enum):
@@ -31,6 +32,48 @@ class CompanyProfile(BaseModel):
             "for their balance sheets."
         ),
     )
+
+
+# A fact is added to or subtracted from the value it feeds; nothing else.
+Sign = Literal[-1, 1]
+
+
+class FactRef(BaseModel):
+    """One filed XBRL fact a value was computed from. `sign` is its sign in
+    the computation: a year-to-date difference is +YTD −(prior YTD). Only
+    +1 and -1 validate — a zero or scaled sign would make `Σ sign·value`
+    and "is this fact a reporting fact" (sign > 0) mean something else."""
+
+    model_config = ConfigDict(frozen=True)
+
+    concept: str = Field(description='qualified, e.g. "us-gaap:Revenues"')
+    accession: str
+    filed: date
+    form: str
+    start: date | None
+    end: date
+    value: float
+    sign: Sign = 1
+
+
+class SourcedValue(BaseModel):
+    """Where one period's value of one field came from: how it was built
+    (`strategy`, `method`), whether it is knowingly incomplete, and every
+    filed fact behind it, signed so that `value == Σ sign·input.value`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    field: str
+    value: float
+    strategy: str
+    method: str
+    partial: bool = False
+    inputs: tuple[FactRef, ...] = ()
+    note: str | None = None
+
+    def accessions(self) -> list[str]:
+        """The filings behind the value, in first-seen order."""
+        return list(dict.fromkeys(i.accession for i in self.inputs if i.accession))
 
 
 class PeriodFinancials(BaseModel):
@@ -78,6 +121,14 @@ class PeriodFinancials(BaseModel):
     # Shares
     shares_diluted: float | None = None
     shares_outstanding: float | None = None
+
+    # Field name -> where that value came from, when the period was built
+    # from filed facts (the companyfacts mapper). Parallel to the float
+    # fields, which formulas read unchanged. EXCLUDED from serialization: a
+    # period rebuilt from `model_dump()` (the TTM window) is a different
+    # figure and must not inherit the end quarter's provenance, and the API
+    # and saved datasets stay as they were.
+    sources: dict[str, SourcedValue] = Field(default_factory=dict, exclude=True)
 
     @property
     def ebitda(self) -> float | None:
