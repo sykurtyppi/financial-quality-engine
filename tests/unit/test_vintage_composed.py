@@ -172,11 +172,12 @@ def test_a_quarter_the_newer_snapshot_still_covers_can_be_withdrawn_one_that_rol
 
 
 def test_raw_rows_for_a_composed_field_are_not_reported():
-    # A stale single SG&A tag the engine does not score (the composite covers
-    # more quarters) is revised; that is not a revision of the scored figure.
+    # A single SG&A tag the filer used only before the reported window is
+    # revised; the engine scores the composite in every reported quarter, so
+    # that is not a revision of the scored figure.
     older = _every_field(composites=True)
-    _add(older, "SellingGeneralAndAdministrativeExpense", [quarter(q, 400.0) for q in QUARTER_ENDS[:6]])
-    newer = _bump(older, "SellingGeneralAndAdministrativeExpense", QUARTER_ENDS[5])
+    _add(older, "SellingGeneralAndAdministrativeExpense", [quarter(q, 400.0) for q in QUARTER_ENDS[:4]])
+    newer = _bump(older, "SellingGeneralAndAdministrativeExpense", QUARTER_ENDS[3])
     assert [c for c in diff_vintages(older, newer) if c.field_name == "sga_expense"]
     assert not [c for c in diff_scored(older, newer).changes if c.field_name == "sga_expense"]
 

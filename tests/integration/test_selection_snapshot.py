@@ -147,8 +147,12 @@ BRANCHES = {
     ("synthetic/tag_choice", "inventory"): "us-gaap:InventoryGross",
     ("synthetic/tag_choice", "accounts_payable"): "us-gaap:AccountsPayableTradeCurrent",
     ("synthetic/tag_choice", "shares_outstanding"): "dei:EntityCommonStockSharesOutstanding",
-    ("synthetic/tag_choice", "sga_expense"): "SellingAndMarketingExpense+GeneralAndAdministrativeExpense",
-    ("synthetic/tag_choice", "depreciation_amortization"): "Depreciation+AmortizationOfIntangibleAssets",
+    ("synthetic/tag_choice", "sga_expense"): (
+        "SellingGeneralAndAdministrativeExpense+SellingAndMarketingExpense+GeneralAndAdministrativeExpense"
+    ),
+    ("synthetic/tag_choice", "depreciation_amortization"): (
+        "DepreciationDepletionAndAmortization+Depreciation+AmortizationOfIntangibleAssets"
+    ),
     ("synthetic/composites_lose", "sga_expense"): "us-gaap:SellingGeneralAndAdministrativeExpense",
     ("synthetic/composites_lose", "depreciation_amortization"): "us-gaap:Depreciation",
     ("synthetic/da_split_equal_coverage", "depreciation_amortization"): (
@@ -157,7 +161,12 @@ BRANCHES = {
     ("synthetic/da_aggregate_with_amortization", "depreciation_amortization"): (
         "us-gaap:DepreciationDepletionAndAmortization"
     ),
-    ("synthetic/da_amortization_partial", "depreciation_amortization"): "us-gaap:Depreciation",
+    ("synthetic/da_amortization_partial", "depreciation_amortization"): (
+        "Depreciation+AmortizationOfIntangibleAssets"
+    ),
+    ("synthetic/da_google_pattern", "depreciation_amortization"): (
+        "Depreciation+AmortizationOfIntangibleAssets"
+    ),
     ("synthetic/debt_full_breakdown", "total_debt"): (
         "LongTermDebtNoncurrent+LongTermDebtCurrent+ShortTermBorrowings+CommercialPaper"
         "+FinanceLeaseLiabilityNoncurrent+FinanceLeaseLiabilityCurrent"
@@ -242,8 +251,22 @@ def test_synthetic_derivation_and_tie_branches(golden):
     assert agg["values"]["2023-03-31"] == 74.0 and agg["notes"] == []
     partial = _field(golden["synthetic/da_amortization_partial"], "depreciation_amortization")
     assert partial["notes"] == [
-        "Partial D&A: depreciation used alone; depreciation and amortization are both "
-        "reported in only 5 of 8 quarters (capex/D&A can overstate)."
+        "D&A composed from separate depreciation and amortization tags at FY2023Q4, "
+        "FY2024Q1, FY2024Q2, FY2024Q3, FY2024Q4.",
+        "Partial D&A at FY2023Q1, FY2023Q2, FY2023Q3: only a depreciation tag is reported; "
+        "amortization is not included (capex/D&A can overstate).",
+    ]
+    # Alphabet (Hermes re-audit): D&A is resolved per quarter, so the latest
+    # quarters are complete although amortization covers only four of eight.
+    google = _field(golden["synthetic/da_google_pattern"], "depreciation_amortization")
+    assert google["values"]["2024-12-31"] == 7_104.0 + 367.0
+    sources = google["period_sources"]
+    assert {q: (v["strategy"], v["partial"]) for q, v in sources.items()} == {
+        **{q: ("partial", True) for q in ("2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31")},
+        **{q: ("composite", False) for q in ("2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31")},
+    }
+    assert sources["2024-12-31"]["components"] == [
+        "us-gaap:Depreciation", "us-gaap:AmortizationOfIntangibleAssets"
     ]
     weeks = golden["synthetic/fifty_two_week"]
     assert weeks["fiscal_year_end_month"] == 9

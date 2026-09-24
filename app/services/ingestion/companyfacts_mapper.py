@@ -53,12 +53,16 @@ from app.schemas.financials import (
     PeriodType,
 )
 from app.services.ingestion.composition import (
+    COMPOSITE,
     DEBT_TAGS,
+    PARTIAL,
     SPLIT,
     SPLIT_AGGREGATE_CURRENT,
     TOTAL_FALLBACK,
     DebtComposition,
+    Resolved,
     compose_total_debt,
+    resolve_by_strategy,
 )
 from app.services.ingestion.fields import (
     COVER_DATE_TOLERANCE_DAYS,
@@ -67,7 +71,6 @@ from app.services.ingestion.fields import (
     Kind,
     candidate_table,
     composite_components,
-    partial_fallback,
     role_tags,
     unit_for,
 )
@@ -85,7 +88,6 @@ FLOW_FIELDS: dict[str, tuple[tuple[str, str], ...]] = candidate_table(Kind.FLOW)
 
 SGA_COMPONENTS = composite_components("sga_expense")
 DA_COMPONENTS = composite_components("depreciation_amortization")
-DA_PARTIAL = partial_fallback("depreciation_amortization")
 
 # LongTermDebt is a TOTAL (current + noncurrent): used only when the split is
 # unavailable, never alongside it (double counting).
@@ -124,6 +126,18 @@ class RawFact:
         return (self.end - self.start).days
 
 
+class PeriodSource(BaseModel):
+    """How one reported quarter's value of a field was built: the strategy
+    (`single`, `composite`, `partial`, or total debt's `split` /
+    `split_aggregate_current` / `total`), the qualified concepts it drew on,
+    the derivation method, and whether it is knowingly incomplete."""
+
+    strategy: str
+    components: list[str]
+    method: str
+    partial: bool = False
+
+
 class FieldDiagnostic(BaseModel):
     field_name: str
     tag_used: str | None
@@ -132,6 +146,10 @@ class FieldDiagnostic(BaseModel):
     methods: dict[str, int] = Field(default_factory=dict, description="method -> period count")
     missing_periods: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # Reported quarter end (ISO) -> how that quarter's value was built. The
+    # series-level `tag_used` cannot say this once a field can be built
+    # differently from one quarter to the next.
+    period_sources: dict[str, PeriodSource] = Field(default_factory=dict)
 
 
 class IngestionDiagnostics(BaseModel):
@@ -411,20 +429,96 @@ def _best_series(
     return best
 
 
-def _composite_flow(
+def _where(quarters: list[date], among: list[date], labels: dict[date, str]) -> str:
+    """" at FY…, FY…" naming the quarters a note applies to — or nothing when
+    it applies to every quarter it could, so the note reads as it always
+    has."""
+    if quarters == among:
+        return ""
+    return " at " + ", ".join(labels[q] for q in quarters)
+
+
+def _qualified(concept: str) -> str:
+    return f"us-gaap:{concept}"
+
+
+def _resolved_flow(
     facts_json: dict,
-    components: tuple[tuple[str, str], ...],
+    name: str,
     quarter_ends: list[date],
-) -> tuple[dict[date, float], dict[date, str], str]:
-    """Sum of component flows, only for quarters where ALL components exist."""
-    parts: list[dict[date, float]] = []
-    for taxonomy, tag in components:
-        fs = _FlowSeries(_collect(facts_json, taxonomy, tag, "USD"))
-        parts.append(fs.quarterly(quarter_ends)[0])
-    common = set(parts[0]).intersection(*parts[1:]) if parts else set()
-    values = {q: sum(p[q] for p in parts) for q in common}
-    label = "+".join(tag for _, tag in components)
-    return values, {q: "composite" for q in common}, label
+    window_ends: list[date],
+    labels: dict[date, str],
+    single: tuple[dict[date, float], dict[date, str], str | None],
+) -> tuple[dict[date, float], dict[date, str], str | None, list[str], dict[date, PeriodSource]]:
+    """A flow field with alternative strategies (SG&A, D&A), resolved per
+    quarter by `composition.resolve_by_strategy` — the rule the restatement
+    detector applies too. `single` is the field's own concept as
+    `_best_series` selected it (tags are never mixed within it)."""
+    single_values, single_methods, single_used = single
+    single_tag = single_used.split(":", 1)[1] if single_used else None
+    component_series: dict[str, tuple[dict[date, float], dict[date, str]]] = {}
+    for taxonomy, tag in composite_components(name):
+        component_series[tag] = _FlowSeries(_collect(facts_json, taxonomy, tag, "USD")).quarterly(
+            quarter_ends
+        )
+
+    values: dict[date, float] = {}
+    methods: dict[date, str] = {}
+    resolved: dict[date, Resolved] = {}
+    for q in quarter_ends:
+        present: dict[str, float] = {}
+        if single_tag is not None and q in single_values:
+            present[single_tag] = single_values[q]
+        for tag, (series, _m) in component_series.items():
+            if q in series:
+                present[tag] = series[q]
+        r = resolve_by_strategy(name, present)
+        if r is None:
+            continue
+        values[q] = r.total
+        resolved[q] = r
+        if r.strategy == COMPOSITE:
+            methods[q] = "composite"
+        elif r.used == (single_tag,):
+            methods[q] = single_methods[q]
+        else:
+            methods[q] = component_series[r.used[0]][1][q]
+
+    reported = [q for q in window_ends if q in resolved]
+    used = [t for t in ([single_tag] if single_tag else []) + list(component_series)
+            if any(t in resolved[q].used for q in reported)]
+    if not used:
+        tag_used = None
+    elif len(used) == 1:
+        tag_used = _qualified(used[0])
+    else:
+        tag_used = "+".join(used)
+    sources = {
+        q: PeriodSource(
+            strategy=resolved[q].strategy,
+            components=[_qualified(t) for t in resolved[q].used],
+            method=methods[q],
+            partial=resolved[q].partial,
+        )
+        for q in reported
+    }
+    composite_q = [q for q in reported if resolved[q].strategy == COMPOSITE]
+    partial_q = [q for q in reported if resolved[q].strategy == PARTIAL]
+    notes: list[str] = []
+    if name == "sga_expense" and composite_q:
+        notes.append(f"SG&A composed from separate S&M and G&A tags{_where(composite_q, reported, labels)}.")
+    if name == "depreciation_amortization":
+        if composite_q:
+            notes.append(
+                "D&A composed from separate depreciation and amortization tags"
+                f"{_where(composite_q, reported, labels)}."
+            )
+        if partial_q:
+            notes.append(
+                f"Partial D&A{_where(partial_q, reported, labels)}: only a depreciation tag is "
+                "reported; amortization is not included (capex/D&A can overstate)."
+            )
+    return values, methods, tag_used, notes, sources
 
 
 def _total_debt_series(
@@ -432,7 +526,7 @@ def _total_debt_series(
     quarter_ends: list[date],
     window_ends: list[date],
     labels: dict[date, str],
-) -> tuple[dict[date, float], str | None, list[str]]:
+) -> tuple[dict[date, float], str | None, list[str], dict[date, PeriodSource]]:
     """Total debt at each quarter end, composed from the concepts reported
     AT THAT DATE by `composition.compose_total_debt` — the one rule the
     restatement detector applies too. Notes name the reported quarters where
@@ -454,16 +548,12 @@ def _total_debt_series(
 
     reported = [q for q in window_ends if q in composed]
     if not reported:
-        return out, None, ["No debt concepts found; company may be debt-free or use custom tags."]
+        return out, None, ["No debt concepts found; company may be debt-free or use custom tags."], {}
     used = {tag for q in reported for tag in composed[q].used}
     tag_used = "+".join(tag for tag in DEBT_TAGS if tag in used)
 
     def where(quarters: list[date], among: list[date]) -> str:
-        # Silent when it held in every quarter it could apply to: the note
-        # then reads as it always has.
-        if quarters == among:
-            return ""
-        return " at " + ", ".join(labels[q] for q in quarters)
+        return _where(quarters, among, labels)
 
     split = [q for q in reported if composed[q].strategy != TOTAL_FALLBACK]
     parts = [q for q in split if composed[q].strategy == SPLIT]
@@ -495,7 +585,16 @@ def _total_debt_series(
                 "Finance-lease liabilities added to total debt; operating leases excluded "
                 "(the LongTermDebt total may, for some filers, already embed capital leases)."
             )
-    return out, tag_used, notes
+    sources = {
+        q: PeriodSource(
+            strategy=composed[q].strategy,
+            components=[_qualified(t) for t in composed[q].used],
+            method="composite",
+            partial=bool(composed[q].missing),
+        )
+        for q in reported
+    }
+    return out, tag_used, notes, sources
 
 
 # ---------------------------------------------------------------------------
@@ -536,8 +635,15 @@ def build_dataset(
         methods: dict[date, str],
         tag: str | None,
         notes: list[str],
+        sources: dict[date, PeriodSource] | None = None,
     ) -> None:
         field_values[name] = values
+        if sources is None:
+            # One concept for the whole series.
+            sources = {
+                q: PeriodSource(strategy="single", components=[tag], method=methods[q])
+                for q in window_ends if q in values and tag is not None
+            }
         in_window = {q: m for q, m in methods.items() if q in window_ends}
         method_counts: dict[str, int] = {}
         for m in in_window.values():
@@ -551,6 +657,7 @@ def build_dataset(
                 methods=method_counts,
                 missing_periods=[labels[q] for q in window_ends if q not in values],
                 notes=notes,
+                period_sources={q.isoformat(): src for q, src in sources.items()},
             )
         )
 
@@ -579,53 +686,25 @@ def build_dataset(
             window_ends=window_ends,
         )
         notes: list[str] = []
-        if name == "sga_expense":
-            comp_values, comp_methods, comp_tag = _composite_flow(
-                facts_json, SGA_COMPONENTS, extended_ends
+        sources: dict[date, PeriodSource] | None = None
+        if name in ("sga_expense", "depreciation_amortization"):
+            values, methods, used, notes, sources = _resolved_flow(
+                facts_json, name, extended_ends, window_ends, labels, (values, methods, used)
             )
-            if _score(comp_values, window_ends) > _score(values, window_ends):
-                values, methods, used = comp_values, comp_methods, comp_tag
-                notes.append("SG&A composed from separate S&M and G&A tags.")
-        if name == "depreciation_amortization":
-            comp_values, comp_methods, comp_tag = _composite_flow(
-                facts_json, DA_COMPONENTS, extended_ends
-            )
-            dep_values, dep_methods, dep_used = _best_series(
-                facts_json, DA_PARTIAL, _unit_for(name), extended_ends, "flow",
-                window_ends=window_ends,
-            )
-            agg_n = _score(values, window_ends)
-            comp_n = _score(comp_values, window_ends)
-            dep_n = _score(dep_values, window_ends)
-            if comp_n > agg_n and comp_n >= dep_n:
-                values, methods, used = comp_values, comp_methods, comp_tag
-                notes.append("D&A composed from separate depreciation and amortization tags.")
-            elif dep_n > max(agg_n, comp_n):
-                # Depreciation alone understates D&A. Used only when nothing
-                # complete covers as many quarters, and always said so.
-                values, methods, used = dep_values, dep_methods, dep_used
-                if comp_n == 0:
-                    notes.append(
-                        "Partial D&A: only a depreciation tag is reported; amortization is "
-                        "not included (capex/D&A can overstate)."
-                    )
-                else:
-                    notes.append(
-                        "Partial D&A: depreciation used alone; depreciation and amortization "
-                        f"are both reported in only {comp_n} of {len(window_ends)} quarters "
-                        "(capex/D&A can overstate)."
-                    )
         if name in NON_ADDITIVE_FLOWS and _score(values, window_ends) < len(window_ends):
             notes.append(
                 "Weighted-average share counts are not additive; quarters without a "
                 "directly reported value stay missing (no Q4 derivation)."
             )
-        record(name, values, methods, used, notes)
+        record(name, values, methods, used, notes, sources)
 
-    debt_values, debt_tag, debt_notes = _total_debt_series(
+    debt_values, debt_tag, debt_notes, debt_sources = _total_debt_series(
         facts_json, extended_ends, window_ends, labels
     )
-    record("total_debt", debt_values, {q: "composite" for q in debt_values}, debt_tag, debt_notes)
+    record(
+        "total_debt", debt_values, {q: "composite" for q in debt_values}, debt_tag, debt_notes,
+        debt_sources,
+    )
 
     coverage_by_field = {d.field_name: d.periods_filled for d in diagnostics}
     for critical in CRITICAL_FIELDS:

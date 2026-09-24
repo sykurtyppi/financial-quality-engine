@@ -227,14 +227,16 @@ def tag_choice() -> dict:
     dei.append(instant(q[5] + timedelta(days=70), 4_990.0))
     p.add("EntityCommonStockSharesOutstanding", dei, taxonomy="dei", unit="shares")
     p.add("CommonStockSharesOutstanding", _instants(4_500.0, q[6:]), unit="shares")
-    # SG&A: the single tag covers the last four quarters; S&M + G&A cover
-    # all twelve → the composite wins on strictly greater window coverage.
+    # SG&A: the single tag is reported for the last four quarters, S&M + G&A
+    # for all twelve. Each quarter uses the single tag where it is reported
+    # and the composite elsewhere.
     p.add("SellingGeneralAndAdministrativeExpense", [quarter(e, 330.0) for e in q[8:]])
     p.add("SellingAndMarketingExpense", [quarter(e, 200.0 + i) for i, e in enumerate(q)])
     p.add("GeneralAndAdministrativeExpense", [quarter(e, 100.0 + 2 * i) for i, e in enumerate(q)])
-    # D&A: the old combined tag covers 10 extended quarters (6 reported) and
-    # beats Depreciation (8) on extended coverage; Depreciation +
-    # Amortization cover all 8 reported → the composite wins on the window.
+    # D&A: the aggregate tag is reported for the first 10 quarters (6 of the
+    # reported ones), depreciation + amortization for the last 8. Each
+    # quarter takes the aggregate where it is reported and the composite in
+    # the last two — the aggregate is the filer's own total.
     p.add("DepreciationDepletionAndAmortization", [quarter(e, 60.0) for e in q[:10]])
     p.add("Depreciation", [quarter(e, 40.0 + i) for i, e in enumerate(q) if i >= 4])
     p.add("AmortizationOfIntangibleAssets", [quarter(e, 15.0) for e in q[4:]])
@@ -275,11 +277,27 @@ def da_aggregate_with_amortization() -> dict:
 
 
 def da_amortization_partial() -> dict:
-    """Amortization reported for only five quarters: depreciation alone
-    covers more, and is used — marked partial, naming the gap."""
+    """Amortization reported only from 2023-12-31: those quarters are
+    composed, the three before them are depreciation alone — each named as
+    partial. (The choice used to be made for the whole window, and
+    depreciation alone won everywhere.)"""
     p = _base("DA Partial Co")
     p.add("Depreciation", [quarter(e, 30.0 + i) for i, e in enumerate(QUARTER_ENDS)])
     p.add("AmortizationOfIntangibleAssets", [quarter(e, 5.0) for e in QUARTER_ENDS[7:]])
+    return p.data
+
+
+def da_google_pattern() -> dict:
+    """Alphabet's history (Hermes re-audit): depreciation in every quarter,
+    separate amortization only in the latest four. The latest four are
+    complete (7,104 + 367 = 7,471 at the last quarter end, not 7,104); the
+    older four are depreciation alone, flagged partial."""
+    p = _base("DA Alphabet Pattern Co")
+    q = QUARTER_ENDS
+    p.add("Depreciation", [quarter(e, 5_000.0 + 191.0 * i) for i, e in enumerate(q[:-1])]
+          + [quarter(q[-1], 7_104.0)])
+    p.add("AmortizationOfIntangibleAssets", [quarter(e, 300.0 + 22.0 * i) for i, e in enumerate(q[8:-1])]
+          + [quarter(q[-1], 367.0)])
     return p.data
 
 
@@ -467,6 +485,7 @@ CASES: dict[str, Callable[[], dict]] = {
     "da_split_equal_coverage": da_split_equal_coverage,
     "da_aggregate_with_amortization": da_aggregate_with_amortization,
     "da_amortization_partial": da_amortization_partial,
+    "da_google_pattern": da_google_pattern,
     "debt_full_breakdown": debt_full_breakdown,
     "debt_hermes_double_count": debt_hermes_double_count,
     "debt_intel_pattern": debt_intel_pattern,

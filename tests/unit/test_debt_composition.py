@@ -31,7 +31,11 @@ from app.services.ingestion.composition import (
     TOTAL_FALLBACK,
     compose_total_debt,
 )
-from app.services.ingestion.restatements import _composite_vintages, _parse_selection
+from app.services.ingestion.restatements import (
+    _COMPOSERS,
+    _composite_vintages,
+    _parse_selection,
+)
 from tests.fixtures import selection_cases
 
 # --- the rule ---------------------------------------------------------------
@@ -151,7 +155,7 @@ def test_the_detector_rebuilds_exactly_the_value_the_mapper_scored(case):
     series = _parse_selection(selected)
     # (A single component is compared tag by tag by the detector; the
     # rebuild below reduces to that tag's latest value, so it is checked too.)
-    rebuilt = _composite_vintages(facts, series, "USD", None, compose_debt=True)
+    rebuilt = _composite_vintages(facts, series, "USD", None, compose=_COMPOSERS["total_debt"])
     for p in ds.periods:
         vintages = rebuilt.get((None, p.period_end))
         if p.total_debt is None:
@@ -167,7 +171,7 @@ def test_summing_instead_of_composing_would_double_count():
     series = [("us-gaap", t) for t in ("LongTermDebtNoncurrent", "LongTermDebtCurrent", "DebtCurrent")]
     q = selection_cases.QUARTER_ENDS[-1]
     summed = _composite_vintages(facts, series, "USD", None)[(None, q)][-1][1]
-    composed = _composite_vintages(facts, series, "USD", None, compose_debt=True)[(None, q)][-1][1]
+    composed = _composite_vintages(facts, series, "USD", None, compose=_COMPOSERS["total_debt"])[(None, q)][-1][1]
     assert (summed, composed) == (1_050.0, 950.0)
 
 

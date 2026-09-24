@@ -28,7 +28,7 @@ timeline rendered as a report section (matches ROADMAP_2026Q3 P1-F done-when).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -38,7 +38,7 @@ from app.services.ingestion.companyfacts_mapper import (
     _parse_date,
     _unit_for,
 )
-from app.services.ingestion.composition import compose_total_debt
+from app.services.ingestion.composition import compose_total_debt, resolve_by_strategy
 from app.services.ingestion.fields import FIELDS
 from app.services.ingestion.payloads import concept_rows
 
@@ -244,13 +244,33 @@ def _parse_selection(selected: str) -> list[tuple[str, str]]:
     return parts
 
 
+def _compose_debt(present: Mapping[str, float]) -> tuple[float, tuple[str, ...]] | None:
+    c = compose_total_debt(present)
+    return None if c is None else (c.total, c.used)
+
+
+def _resolver(name: str) -> Callable[[Mapping[str, float]], tuple[float, tuple[str, ...]] | None]:
+    def compose(present: Mapping[str, float]) -> tuple[float, tuple[str, ...]] | None:
+        r = resolve_by_strategy(name, present)
+        return None if r is None else (r.total, r.used)
+    return compose
+
+
+# Fields the mapper composes per date: rebuilt here with the same rule.
+_COMPOSERS = {
+    "total_debt": _compose_debt,
+    "sga_expense": _resolver("sga_expense"),
+    "depreciation_amortization": _resolver("depreciation_amortization"),
+}
+
+
 def _composite_vintages(
     facts_json: dict,
     components: list[tuple[str, str]],
     unit: str,
     as_of: date | None,
     *,
-    compose_debt: bool = False,
+    compose: Callable[[Mapping[str, float]], tuple[float, tuple[str, ...]] | None] | None = None,
 ) -> dict[tuple[date | None, date], list[tuple[date, float, str, str, frozenset[str]]]]:
     """Rebuild a summed field's value as it stood at each filing vintage.
 
@@ -298,16 +318,16 @@ def _composite_vintages(
                 eligible = [f for f in rows.get(key, []) if f[0] <= vintage]
                 if eligible:
                     latest_by[(taxonomy, tag)] = max(eligible, key=lambda f: f[0])
-            if compose_debt:
-                # Total debt is not a sum of whatever was filed: aggregate
-                # current debt excludes the current portion and short-term
-                # borrowings, a lease-inclusive tag excludes finance leases.
-                # The mapper's own rule decides which components count.
-                comp = compose_total_debt({tag: f[1] for (_tax, tag), f in latest_by.items()})
-                if comp is None:
+            if compose is not None:
+                # Not a sum of whatever was filed: aggregate current debt
+                # excludes the current portion, an aggregate D&A tag
+                # excludes its components. The mapper's own per-date rule
+                # decides which components count.
+                composed = compose({tag: f[1] for (_tax, tag), f in latest_by.items()})
+                if composed is None:
                     continue
-                counted = {k: f for k, f in latest_by.items() if k[1] in comp.used}
-                total = comp.total
+                total, used = composed
+                counted = {k: f for k, f in latest_by.items() if k[1] in used}
             else:
                 counted = latest_by
                 total = 0.0
@@ -478,7 +498,7 @@ def scan_restatements(
         if composite:
             qualified = "+".join(f"{tax}:{tag}" for tax, tag in series)
             groups.append((qualified, _composite_vintages(
-                facts_json, series, unit, as_of, compose_debt=field_name == "total_debt"
+                facts_json, series, unit, as_of, compose=_COMPOSERS.get(field_name)
             )))
         else:
             for taxonomy, tag in series:
