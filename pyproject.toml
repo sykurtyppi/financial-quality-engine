@@ -93,6 +93,8 @@ module = [
     "app.services.ingestion.selection",
     "app.services.metrics_registry",
     "app.services.provenance",
+    "app.schemas.ledger",
+    "app.services.reporting.ledger",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

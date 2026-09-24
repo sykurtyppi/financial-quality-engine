@@ -15,6 +15,7 @@ card + appendix render from the dataset alone.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from collections import defaultdict
@@ -243,13 +244,16 @@ def _stream_failure(stream: str, exc: Exception) -> StreamFailure:
 class _Staged:
     """One evidence stream's output, held until the stream has finished.
     `failure` is a data failure the stream reports about itself while still
-    rendering an honest section (the offerings acquisition error)."""
+    rendering an honest section (the offerings acquisition error).
+    `evidence` holds the raw stream objects for the evidence ledger, so the
+    ledger — like the report — only ever sees a stream that finished."""
 
     sections: list[str] = field(default_factory=list)
     event_lines: list[str] = field(default_factory=list)
     tier1: list[str] = field(default_factory=list)
     result: Any = None
     failure: StreamFailure | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def _collect_streams(
@@ -262,6 +266,7 @@ def _collect_streams(
     baseline_day: date | None = None,
     vintage_root: Path | None = None,
     n_quarters: int = 8,
+    evidence: dict | None = None,
 ):
     """Fetch offerings, restatements, 8-K 4.02 events and the silent-revision
     diff. Returns (body_sections, event_lines, tier1_events, errors,
@@ -276,7 +281,11 @@ def _collect_streams(
     VintageDiffReport (None when that stream failed); `baseline_day` is the
     pinned thesis day whose snapshot the newest one is also diffed against,
     and `vintage_root` overrides the store location (tests). `n_quarters` is
-    the window the report scored, over which derived quarters are rebuilt."""
+    the window the report scored, over which derived quarters are rebuilt.
+    `evidence`, when given, receives the raw stream objects (the evidence
+    ledger's input)."""
+    evidence = evidence if evidence is not None else {}
+    evidence["ran"] = True
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
@@ -298,6 +307,7 @@ def _collect_streams(
         body_sections.extend(staged.sections)
         event_lines.extend(staged.event_lines)
         tier1_events.extend(staged.tier1)
+        evidence.update(staged.evidence)
         if staged.failure is not None:
             errors[name] = staged.failure
         return staged.result
@@ -310,6 +320,7 @@ def _collect_streams(
 
         out = _Staged(result=[])
         timeline = fetch_offerings(client, ticker, as_of=report_date, submissions=submissions)
+        out.evidence["offerings"] = timeline
         out.sections.append(render_offerings_section(timeline))
         # Review finding 1 (round 5): fetch_offerings swallows a submissions
         # outage into a structured acquisition_error instead of raising, so check
@@ -338,6 +349,7 @@ def _collect_streams(
             n_quarters=n_quarters,
         )
         out = _Staged(result=scan)
+        out.evidence["restatements"] = scan
         out.sections.append(render_restatements_section(scan))
         out.tier1 += _restatement_tier1_lines(scan.footprints)
         out.tier1 += _derived_tier1_lines(scan.derived)
@@ -350,6 +362,7 @@ def _collect_streams(
         cutoff = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
         nr_dates = _pit_dates(found.non_reliance_8k_dates, cutoff, report_date)
         out = _Staged()
+        out.evidence["events"] = found
         out.tier1 += [
             f"8-K Item 4.02 non-reliance (restatement announced) filed {d}" for d in nr_dates
         ]
@@ -371,6 +384,7 @@ def _collect_streams(
             cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root
         )
         out = _Staged(result=vintage_diff)
+        out.evidence["vintage"] = vintage_diff
         out.sections.append(_silent_revisions_section(vintage_diff))
         # Promote from BOTH windows, each fact once. The lock-to-now window
         # catches a revision that landed in an intermediate state (invisible
@@ -502,6 +516,7 @@ def build_report(
     field_notes: list[str] | None = None,
     baseline_day: date | None = None,
     vintage_root: Path | None = None,
+    ledger_out: Path | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -512,6 +527,9 @@ def build_report(
     rejected up front rather than silently diverging (review finding P3).
     `baseline_day` is the pinned thesis day (journal track): the silent-revision
     check also diffs the newest snapshot against the one at or before it.
+    `ledger_out`: where to write the run's evidence ledger (JSON), the same
+    claims as data with the filings behind each. The report never depends on
+    it: a ledger that cannot be built is logged and not written.
     """
     try:
         report_date = date.fromisoformat(generated_on)
@@ -535,6 +553,7 @@ def build_report(
     }
     scan = None
     vintage_diff = None
+    stream_objects: dict = {}
 
     if client is not None and ticker is not None:
         sections, event_lines, tier1_events, errors, takedowns, scan, vintage_diff = (
@@ -544,6 +563,7 @@ def build_report(
                 # The scored window: derived quarters are checked on the
                 # series the report scored, never a wider window's choice.
                 n_quarters=len(dataset.periods),
+                evidence=stream_objects,
             )
         )
         for section in sections:
@@ -624,7 +644,51 @@ def build_report(
         + "\n\n---\n\n# Full report (appendix)\n\n"
         + body
     )
+    if ledger_out is not None:
+        write_ledger(
+            ledger_out, result=result, dataset=dataset,
+            ticker=ticker or dataset.profile.ticker, report_date=report_date,
+            fetched_at=fetched_at, fresh=fresh, coverage=coverage, field_tags=field_tags,
+            streams=stream_objects, errors=errors,
+        )
     return report, thermometer
+
+
+def ledger_path(report_path: Path) -> Path:
+    """The ledger written beside a report: `X_2026-09-24.md` →
+    `X_2026-09-24.ledger.json`."""
+    return report_path.with_suffix(".ledger.json")
+
+
+def write_ledger(path: Path, **kw) -> Path | None:
+    """Build and atomically write the evidence ledger. Returns the path, or
+    None when it could not be built — logged, and re-raised in strict mode
+    (tests), exactly as an evidence stream's defect is."""
+    import tempfile
+
+    from app.services.reporting.ledger import build_ledger
+
+    try:
+        doc = build_ledger(**kw)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(doc.model_dump_json(indent=1) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+    except Exception:
+        if _strict():
+            raise
+        logger.exception("evidence ledger for %s not written", path.name)
+        # An earlier run's ledger must not sit beside this run's report.
+        with contextlib.suppress(OSError):
+            path.unlink()
+        return None
+    return path
 
 
 def _pit_dates(dates, since: date, report_date: date) -> list[date]:

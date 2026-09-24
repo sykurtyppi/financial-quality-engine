@@ -20,7 +20,7 @@ from app.schemas.metrics import MetricResult
 from app.services.formulas import ttm
 from app.services.formulas.registry import MetricsBundle, _year_ago
 from app.services.ingestion.fields import FIELDS
-from app.services.metrics_registry import BASIS, Basis
+from app.services.metrics_registry import BASIS, SERIES_OF, SERIES_WINDOW, Basis
 
 _PRIOR = "_prior"
 _FIELDS = frozenset(spec.name for spec in FIELDS)
@@ -69,16 +69,19 @@ def sources_for(
 ) -> dict[str, list[SourcedValue]]:
     """Input name -> the sourced values it was computed from, in period
     order (a TTM flow input maps to its four quarters). Inputs that are not
-    fields (a trend's statistics) and periods built without sources map to
-    nothing. The M-score resolves through its component indices, which needs
-    the `bundle` they were computed in."""
+    fields and periods built without sources map to nothing. The M-score
+    resolves through its component indices, and a trend through its base
+    metric's history (`metrics_registry.SERIES_OF`); both need the `bundle`
+    they were computed in."""
     basis = BASIS.get(metric.name)
-    if basis is None or basis is Basis.SERIES:
+    if basis is None:
         return {}
     periods = dataset.sorted_periods()
     i = _index(periods, metric.fiscal_label)
     if i is None:
         return {}
+    if basis is Basis.SERIES:
+        return _series_sources(dataset, periods, i, metric.name, bundle)
     if basis is Basis.COMPOSITE:
         out: dict[str, list[SourcedValue]] = {}
         for key in metric.inputs:
@@ -112,6 +115,34 @@ def accessions_for(
             for accession in sv.accessions():
                 seen.setdefault(accession, None)
     return list(seen)
+
+
+def _series_sources(
+    dataset: CompanyDataset,
+    periods: list[PeriodFinancials],
+    i: int,
+    name: str,
+    bundle: MetricsBundle | None,
+) -> dict[str, list[SourcedValue]]:
+    """A statistic over a base metric's history: the base metric's sources
+    in each period it may read, keyed `<base>[<label>].<input>`. The history
+    is the bundle's, so this needs the bundle, as the M-score does."""
+    if bundle is None:
+        return {}
+    base = SERIES_OF[name]
+    labels = [p.fiscal_label for p in periods[: i + 1]]
+    window = SERIES_WINDOW.get(name)
+    if window is not None:
+        labels = labels[-window:]
+    wanted = set(labels)
+    out: dict[str, list[SourcedValue]] = {}
+    for m in bundle.history.get(base, []):
+        label = m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
+        if label not in wanted or m.value is None:
+            continue
+        for key, values in sources_for(dataset, m).items():
+            out[f"{base}[{label}].{key}"] = values
+    return out
 
 
 def _component(bundle: MetricsBundle | None, name: str, label: str) -> MetricResult | None:

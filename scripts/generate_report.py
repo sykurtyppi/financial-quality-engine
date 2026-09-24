@@ -29,7 +29,7 @@ from app.services.ingestion.edgar_adapter import (
 )
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
-from app.services.reporting.report_builder import build_report
+from app.services.reporting.report_builder import build_report, ledger_path
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -79,6 +79,8 @@ def main() -> int:
 
     result = analyze(dataset)
     generated_on = date.today().isoformat()
+    out_dir = ROOT / "reports"
+    out = out_dir / f"{ticker}_{generated_on}.md"
     report, thermometer = build_report(
         result, dataset,
         generated_on=generated_on,
@@ -98,12 +100,13 @@ def main() -> int:
         vintage_note=vintage_note,
         # No baseline_day: the CLI has no pinned thesis; the silent-revision
         # section compares the newest snapshot with the previous one only.
+        ledger_out=ledger_path(out),
     )
 
-    out_dir = ROOT / "reports"
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / f"{ticker}_{generated_on}.md"
     out.write_text(report)
+    ledger = ledger_path(out)
+    print(f"evidence ledger: {ledger if ledger.exists() else 'NOT written (see log)'}")
 
     # Review finding 8: no 0-100 number on any surface, stdout included.
     from app.services.scoring.thermometer import describe
