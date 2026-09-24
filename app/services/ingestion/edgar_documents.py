@@ -26,6 +26,7 @@ from app.services.ingestion.companyfacts_mapper import (
     fiscal_year_end_month,
     select_quarter_ends,
 )
+from app.services.ingestion.payloads import ExternalPayloadError, check_aligned
 from app.services.ingestion.sec_client import (
     SecClient,
     SecClientError,
@@ -125,7 +126,7 @@ def _merged_filings(client: SecClient, subs: dict, before: date | None) -> dict:
     cutoff reaches past the 'recent' block (high-volume filers keep only their
     latest ~1000 filings in 'recent'; older ones live in filings.files)."""
     recent = subs.get("filings", {}).get("recent", {})
-    arrays: dict[str, list] = {k: list(recent.get(k, [])) for k in _FILING_ARRAYS}
+    arrays = _aligned_arrays(recent, "filings.recent")
     if before is None:
         return arrays
     fds = arrays["filingDate"]
@@ -142,14 +143,33 @@ def _merged_filings(client: SecClient, subs: dict, before: date | None) -> dict:
                 pdata = client.submissions_page(page["name"])
             except SecClientError:
                 continue
-            # Older pages may lack 'items' / 'primaryDocument'; pad to length.
-            n = len(pdata.get("form", []))
+            page_arrays = _aligned_arrays(pdata, f"submissions page {page.get('name')!r}")
             for k in _FILING_ARRAYS:
-                vals = pdata.get(k, [])
-                if len(vals) < n:
-                    vals = list(vals) + [""] * (n - len(vals))
-                arrays[k].extend(vals)
+                arrays[k].extend(page_arrays[k])
     return arrays
+
+
+def _aligned_arrays(block: object, what: str) -> dict[str, list]:
+    """The filing-index columns of one block, all of one length.
+
+    A column that is ABSENT (older submissions pages lack `items` and
+    `primaryDocument`; an empty list counts as absent) is filled with "".
+    A column that is present at a different length is malformed: nothing
+    says which element is missing, so every later row could pair one
+    filing's form with another filing's accession — raised, never padded
+    (Hermes audit round 3, finding 2)."""
+    if not isinstance(block, dict):
+        raise ExternalPayloadError(f"{what} is {type(block).__name__}, expected an object")
+    present: dict[str, list] = {}
+    for k in _FILING_ARRAYS:
+        col = block.get(k)
+        if col is None or col == []:
+            continue
+        if not isinstance(col, list):
+            raise ExternalPayloadError(f"{what}.{k} is {type(col).__name__}, expected a list")
+        present[k] = list(col)
+    n = check_aligned(present, what)
+    return {k: present.get(k, [""] * n) for k in _FILING_ARRAYS}
 
 
 def _fetch_archive(client: SecClient, cik: int, accession: str, doc: str) -> str:
@@ -367,7 +387,16 @@ def fetch_documents(
         subs = client.submissions(ticker)
         cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
     fye_month = fiscal_year_end_month(facts_json)
-    merged = _merged_filings(client, subs, before)
+    try:
+        merged = _merged_filings(client, subs, before)
+    except ExternalPayloadError as e:
+        # Fail closed: no document was read, and the narrative checks must
+        # read as unavailable, not as a filer with nothing to flag.
+        result.diagnostics.append(
+            f"filing index malformed ({e}); no MD&A, risk-factor or earnings-release "
+            "text was read — narrative checks are UNAVAILABLE, not clean"
+        )
+        return result
     forms = merged["form"]
     accessions = merged["accessionNumber"]
     primaries = merged["primaryDocument"]

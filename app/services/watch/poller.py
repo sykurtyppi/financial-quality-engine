@@ -19,6 +19,7 @@ from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 
+from app.services.ingestion.payloads import ExternalPayloadError, check_aligned
 from app.services.journal import store
 from app.services.journal.schema_v2 import verify_lock
 from app.services.watch.watchlist import Watch
@@ -125,10 +126,26 @@ def recent_filings(submissions: dict) -> list[Filing]:
     except (KeyError, TypeError) as e:
         raise PollerError(f"unexpected submissions payload shape: missing {e}") from e
 
-    report_dates = recent.get("reportDate") or [None] * len(forms)
-    accepted = recent.get("acceptanceDateTime") or [None] * len(forms)
-    primary = recent.get("primaryDocument") or [None] * len(forms)
-    items = recent.get("items") or [None] * len(forms)
+    # Parallel arrays: row i is element i of every column. A column present
+    # at another length cannot be re-aligned, so every later row could pair
+    # one filing's form with another's accession — refuse the payload rather
+    # than guess (Hermes audit round 3, finding 2). An absent (or empty)
+    # optional column reads as None.
+    columns = {"form": forms, "accessionNumber": accessions, "filingDate": filed}
+    for name in ("reportDate", "acceptanceDateTime", "primaryDocument", "items"):
+        if recent.get(name):
+            columns[name] = recent[name]
+    bad = [k for k, v in columns.items() if not isinstance(v, list)]
+    if bad:
+        raise PollerError(f"unexpected submissions payload shape: {bad[0]} is not a list")
+    try:
+        check_aligned(columns, "filings.recent")
+    except ExternalPayloadError as e:
+        raise PollerError(f"unexpected submissions payload shape: {e}") from e
+    report_dates = columns.get("reportDate") or [None] * len(forms)
+    accepted = columns.get("acceptanceDateTime") or [None] * len(forms)
+    primary = columns.get("primaryDocument") or [None] * len(forms)
+    items = columns.get("items") or [None] * len(forms)
 
     out: list[Filing] = []
     for i, form in enumerate(forms):

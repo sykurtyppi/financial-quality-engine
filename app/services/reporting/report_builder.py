@@ -18,10 +18,11 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from app.schemas.financials import CompanyDataset
 from app.schemas.report import AnalysisResult
@@ -214,6 +215,19 @@ def _stream_failure(stream: str, exc: Exception) -> StreamFailure:
     return StreamFailure("internal", f"{type(exc).__name__}: {exc}")
 
 
+@dataclass
+class _Staged:
+    """One evidence stream's output, held until the stream has finished.
+    `failure` is a data failure the stream reports about itself while still
+    rendering an honest section (the offerings acquisition error)."""
+
+    sections: list[str] = field(default_factory=list)
+    event_lines: list[str] = field(default_factory=list)
+    tier1: list[str] = field(default_factory=list)
+    result: Any = None
+    failure: StreamFailure | None = None
+
+
 def _collect_streams(
     client,
     ticker: str,
@@ -243,33 +257,49 @@ def _collect_streams(
     errors: dict[str, StreamFailure | None] = {
         "offerings": None, "restatements": None, "events": None, "vintage": None,
     }
-    takedowns: list = []
-    scan = None
-    vintage_diff = None
 
-    try:
+    def run(name: str, build: Callable[[], _Staged]) -> Any:
+        """Build one stream into a staging area and commit it only if the
+        whole stream succeeded. A stream that raised halfway used to leave
+        what it had already appended — a Tier-1 alert, a section — beside a
+        line saying the same stream was unavailable (Hermes audit round 3,
+        finding 3). Now a failed stream contributes nothing but its failure."""
+        try:
+            staged = build()
+        except Exception as e:  # noqa: BLE001 - a stream must never break the report
+            errors[name] = _stream_failure(name, e)
+            return None
+        body_sections.extend(staged.sections)
+        event_lines.extend(staged.event_lines)
+        tier1_events.extend(staged.tier1)
+        if staged.failure is not None:
+            errors[name] = staged.failure
+        return staged.result
+
+    def offerings() -> _Staged:
         from app.services.ingestion.offerings import (
             fetch_offerings,
             render_offerings_section,
         )
 
+        out = _Staged(result=[])
         timeline = fetch_offerings(client, ticker, as_of=report_date, submissions=submissions)
-        body_sections.append(render_offerings_section(timeline))
+        out.sections.append(render_offerings_section(timeline))
         # Review finding 1 (round 5): fetch_offerings swallows a submissions
         # outage into a structured acquisition_error instead of raising, so check
-        # it explicitly — otherwise an outage reads as checked-and-clean.
+        # it explicitly — otherwise an outage reads as checked-and-clean. The
+        # section it rendered says so itself.
         if timeline.acquisition_error is not None:
-            errors["offerings"] = StreamFailure("data", timeline.acquisition_error)
+            out.failure = StreamFailure("data", timeline.acquisition_error)
         elif timeline.takedown_count:
-            takedowns = list(timeline.takedowns)
-            event_lines.append(
+            out.result = list(timeline.takedowns)
+            out.event_lines.append(
                 f"{timeline.takedown_count} securities takedown(s) in the last "
                 f"{timeline.lookback_months} months (see Capital Markets Activity)"
             )
-    except Exception as e:  # noqa: BLE001 - a stream must never break the report
-        errors["offerings"] = _stream_failure("offerings", e)
+        return out
 
-    try:
+    def restatements() -> _Staged:
         from app.services.ingestion.restatements import (
             render_restatements_section,
             scan_restatements,
@@ -280,25 +310,24 @@ def _collect_streams(
         scan = scan_restatements(
             facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags
         )
-        body_sections.append(render_restatements_section(scan))
-        tier1_events += _restatement_tier1_lines(scan.footprints)
-    except Exception as e:  # noqa: BLE001
-        errors["restatements"] = _stream_failure("restatements", e)
-        scan = None
+        out = _Staged(result=scan)
+        out.sections.append(render_restatements_section(scan))
+        out.tier1 += _restatement_tier1_lines(scan.footprints)
+        return out
 
-    try:
+    def events() -> _Staged:
         from app.services.backtesting.events import fetch_entity_events
 
-        events = fetch_entity_events(client, ticker, submissions=submissions)
+        found = fetch_entity_events(client, ticker, submissions=submissions)
         cutoff = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
-        nr_dates = _pit_dates(events.non_reliance_8k_dates, cutoff, report_date)
-        tier1_events += [
+        nr_dates = _pit_dates(found.non_reliance_8k_dates, cutoff, report_date)
+        out = _Staged()
+        out.tier1 += [
             f"8-K Item 4.02 non-reliance (restatement announced) filed {d}" for d in nr_dates
         ]
-    except Exception as e:  # noqa: BLE001
-        errors["events"] = _stream_failure("events", e)
+        return out
 
-    try:
+    def vintage() -> _Staged:
         from app.services.ingestion.vintages import (
             report_diff,
             silent_revision_tier1_lines,
@@ -313,7 +342,8 @@ def _collect_streams(
         vintage_diff = report_diff(
             cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root
         )
-        body_sections.append(_silent_revisions_section(vintage_diff))
+        out = _Staged(result=vintage_diff)
+        out.sections.append(_silent_revisions_section(vintage_diff))
         # Promote from BOTH windows, each fact once. The lock-to-now window
         # catches a revision that landed in an intermediate state (invisible
         # to previous -> newest); previous -> newest catches a revision to a
@@ -331,11 +361,14 @@ def _collect_streams(
         promoted: set[tuple] = set()
         for changes, older, newer in windows:
             fresh = [c for c in changes if (c.field_name, c.key.start, c.key.end) not in promoted]
-            tier1_events += silent_revision_tier1_lines(fresh, older, newer, period_since=floor)
+            out.tier1 += silent_revision_tier1_lines(fresh, older, newer, period_since=floor)
             promoted |= {(c.field_name, c.key.start, c.key.end) for c in changes}
-    except Exception as e:  # noqa: BLE001
-        errors["vintage"] = _stream_failure("vintage", e)
-        vintage_diff = None
+        return out
+
+    takedowns = run("offerings", offerings) or []
+    scan = run("restatements", restatements)
+    run("events", events)
+    vintage_diff = run("vintage", vintage)
 
     return body_sections, event_lines, tier1_events, errors, takedowns, scan, vintage_diff
 

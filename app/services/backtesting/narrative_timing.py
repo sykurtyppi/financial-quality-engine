@@ -32,6 +32,7 @@ from app.services.backtesting.restatement_control import (
     first_402_date,
 )
 from app.services.ingestion.edgar_documents import fetch_documents
+from app.services.ingestion.payloads import recent_filings
 from app.services.ingestion.sec_client import SecClient
 from app.services.narrative.detectors import HIGH_SEVERITY_RISK_TERMS
 
@@ -85,9 +86,7 @@ def evaluate(client: SecClient, case: RestatementCase) -> TimingResult:
     if event is None:
         return TimingResult(case, None, error="no 4.02")
     subs = client.submissions_by_cik(case.cik)
-    r = subs.get("filings", {}).get("recent", {})
-    accs, filings = r.get("accessionNumber", []), r.get("filingDate", [])
-    acc_filed = {accs[i]: filings[i] for i in range(min(len(accs), len(filings)))}
+    acc_filed = dict(recent_filings(subs, accessionNumber=str, filingDate=str))
 
     facts = client.company_facts_by_cik(case.cik)
     trimmed = trim_to_mapped_tags(facts)

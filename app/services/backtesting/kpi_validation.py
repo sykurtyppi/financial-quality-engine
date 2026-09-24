@@ -26,6 +26,7 @@ from app.services.ingestion.companyfacts_mapper import (
     fiscal_year_end_month,  # noqa: F401 (kept for parity)
 )
 from app.services.ingestion.edgar_documents import fetch_documents
+from app.services.ingestion.payloads import recent_filings
 from app.services.ingestion.sec_client import SecClient
 from app.services.narrative.kpi_adjudicator import Adjudicator, DeterministicAdjudicator
 from app.services.narrative.kpi_extraction import pair_definition_changes
@@ -87,10 +88,7 @@ def _evaluate(
     if event is not None:
         acc_filed: dict[str, str] = {}
         subs = client.submissions_by_cik(cik)
-        r = subs.get("filings", {}).get("recent", {})
-        accs, fds = r.get("accessionNumber", []), r.get("filingDate", [])
-        for i in range(min(len(accs), len(fds))):
-            acc_filed[accs[i]] = fds[i]
+        acc_filed.update(recent_filings(subs, accessionNumber=str, filingDate=str))
         emergence = material[0].current_period
         filed = None
         for d in docs.documents:
