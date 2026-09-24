@@ -1,0 +1,72 @@
+{
+ "name": "_selftest_amended_10qa",
+ "ticker": "SELF",
+ "cik": null,
+ "as_of": "2025-03-31",
+ "since": "2023-01-01",
+ "why": "harness self-test: a 10-Q/A that moves scored revenue 10%, an 8-K 4.02 inside the card's window, and one older than it",
+ "synthetic": true,
+ "reviewed": {
+  "by": "synthetic (harness self-test; expectations checked against the constructed payload)",
+  "on": "2026-09-24",
+  "filings_read": [
+   "0000000001-25-000901",
+   "0000000001-25-000700",
+   "0000000001-24-002221"
+  ]
+ },
+ "expected": {
+  "tier1": true,
+  "footprints": [
+   {
+    "field": "revenue",
+    "period_end": "2024-09-30",
+    "amended": true
+   },
+   {
+    "field": "net_income",
+    "period_end": "2023-06-30",
+    "amended": false
+   },
+   {
+    "field": "share_issuance_proceeds",
+    "period_end": "2024-06-30",
+    "amended": false
+   }
+  ],
+  "non_reliance": [
+   "0000000001-25-000700"
+  ],
+  "selections": {
+   "buybacks": "us-gaap:PaymentsForRepurchaseOfCommonStock",
+   "capex": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+   "cfo": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+   "cost_of_revenue": "us-gaap:CostOfRevenue",
+   "interest_expense": "us-gaap:InterestExpense",
+   "net_income": "us-gaap:NetIncomeLoss",
+   "revenue": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+   "share_issuance_proceeds": "us-gaap:ProceedsFromIssuanceOfCommonStock",
+   "shares_diluted": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+   "stock_based_compensation": "us-gaap:ShareBasedCompensation",
+   "total_assets": "us-gaap:Assets"
+  },
+  "coverage_min": 0.4,
+  "uninspected": [
+   "accounts_payable",
+   "cash_and_equivalents",
+   "current_assets",
+   "current_liabilities",
+   "deferred_revenue",
+   "depreciation_amortization",
+   "ebit",
+   "goodwill",
+   "intangible_assets",
+   "inventory",
+   "operating_income",
+   "ppe_net",
+   "receivables",
+   "sga_expense",
+   "total_debt"
+  ]
+ }
+}
