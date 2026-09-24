@@ -75,6 +75,8 @@ from app.services.ingestion.fields import (
     unit_for,
 )
 from app.services.ingestion.fields import field as field_spec
+from app.services.ingestion.precedence import Rank, current_conflict, latest
+from app.services.ingestion.precedence import rank as fact_rank
 
 QTD_DAYS = (70, 100)
 ANNUAL_DAYS = (330, 380)
@@ -118,6 +120,7 @@ class RawFact:
     val: float
     filed: date
     form: str
+    accn: str = ""
 
     @property
     def days(self) -> int | None:
@@ -209,6 +212,7 @@ def _collect(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[RawFa
                     val=float(e["val"]),
                     filed=_parse_date(e.get("filed", "1900-01-01")),
                     form=e.get("form", ""),
+                    accn=str(e.get("accn", "")),
                 )
             )
         except (KeyError, ValueError, TypeError):
@@ -216,13 +220,20 @@ def _collect(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[RawFa
     return out
 
 
+def _rank(f: RawFact) -> Rank:
+    """The shared current-fact order (`precedence`): filed date, then an
+    amendment over an original, then accession."""
+    return fact_rank(f.filed, f.form, f.accn)
+
+
 def _dedupe_latest_filed(facts: list[RawFact]) -> dict[tuple[date | None, date], RawFact]:
-    """Latest-filed value wins per (start, end): amendments and comparative
-    re-reports supersede originals."""
+    """The current value per (start, end): amendments and comparative
+    re-reports supersede originals, by the order in `precedence` — a same-day
+    10-Q/A supersedes its 10-Q. A full tie keeps the first fact."""
     best: dict[tuple[date | None, date], RawFact] = {}
     for f in facts:
         key = (f.start, f.end)
-        if key not in best or f.filed > best[key].filed:
+        if key not in best or _rank(f) > _rank(best[key]):
             best[key] = f
     return best
 
@@ -313,7 +324,7 @@ class _FlowSeries:
             for f in self.by_key.values()
             if f.end == qend and f.days is not None and min_days <= f.days <= max_days
         ]
-        return max(matches, key=lambda f: f.filed) if matches else None
+        return latest(matches, key=_rank) if matches else None
 
     def quarterly(self, quarter_ends: list[date]) -> tuple[dict[date, float], dict[date, str]]:
         values: dict[date, float] = {}
@@ -331,7 +342,7 @@ class _FlowSeries:
                 ytd_cur = [
                     f for f in self.by_key.values() if f.end == qend and f.days and f.days > QTD_DAYS[1]
                 ]
-                for f2 in sorted(ytd_cur, key=lambda f: -f.filed.toordinal()):
+                for f2 in sorted(ytd_cur, key=_rank, reverse=True):
                     f1 = self.by_key.get((f2.start, prev_end))
                     if f1 is None:
                         continue
@@ -369,7 +380,7 @@ def _instant_series(
     for f in facts:
         if f.start is not None:
             continue
-        if f.end not in by_end or f.filed > by_end[f.end].filed:
+        if f.end not in by_end or _rank(f) > _rank(by_end[f.end]):
             by_end[f.end] = f
     values: dict[date, float] = {}
     methods: dict[date, str] = {}
@@ -597,6 +608,46 @@ def _total_debt_series(
     return out, tag_used, notes, sources
 
 
+def _same_day_conflict_notes(
+    facts_json: dict,
+    name: str,
+    sources: dict[date, PeriodSource],
+    labels: dict[date, str],
+) -> list[str]:
+    """A note per concept whose value at a reported quarter end was chosen
+    between facts filed on ONE day, at one amendment level, that disagree.
+    Companyfacts records filing dates, not times, so which of them is current
+    is the `precedence` convention (higher accession, else the first listed)
+    — said here rather than chosen silently. A cover-date match (`nearest`) is not checked: its
+    fact does not end on the quarter end."""
+    unit = _unit_for(name)
+    facts_by: dict[str, list[RawFact]] = {}
+    hits: dict[str, list[date]] = {}
+    for q, src in sorted(sources.items()):
+        if src.method == "nearest":
+            continue
+        for concept in src.components:
+            if concept not in facts_by:
+                taxonomy, _, tag = concept.partition(":")
+                facts_by[concept] = _collect(facts_json, taxonomy, tag, unit)
+            by_period: dict[date | None, list[RawFact]] = {}
+            for f in facts_by[concept]:
+                if f.end == q:
+                    by_period.setdefault(f.start, []).append(f)
+            if any(current_conflict(g, key=_rank, value=lambda f: f.val) for g in by_period.values()):
+                hits.setdefault(concept, []).append(q)
+    notes: list[str] = []
+    for concept, quarters in hits.items():
+        where = ", ".join(labels[q] for q in quarters)
+        notes.append(
+            f"Same-day conflicting facts for {concept} at {where}: one day's filings report "
+            "different values for the period, and companyfacts does not record their order, "
+            "so the value used is a convention (the higher accession number, else the first "
+            "listed). Not a revision."
+        )
+    return notes
+
+
 # ---------------------------------------------------------------------------
 # Dataset assembly
 # ---------------------------------------------------------------------------
@@ -644,6 +695,7 @@ def build_dataset(
                 q: PeriodSource(strategy="single", components=[tag], method=methods[q])
                 for q in window_ends if q in values and tag is not None
             }
+        notes = notes + _same_day_conflict_notes(facts_json, name, sources, labels)
         in_window = {q: m for q, m in methods.items() if q in window_ends}
         method_counts: dict[str, int] = {}
         for m in in_window.values():

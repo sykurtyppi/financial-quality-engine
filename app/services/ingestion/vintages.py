@@ -56,6 +56,7 @@ from app.services.ingestion.companyfacts_mapper import (
 )
 from app.services.ingestion.fields import FIELDS
 from app.services.ingestion.payloads import ExternalPayloadError
+from app.services.ingestion.precedence import rank
 from app.services.ingestion.restatements import (
     DEFAULT_MATERIALITY_PCT,
     SPLIT_ADJUSTED_FIELDS,
@@ -662,9 +663,10 @@ def _series(facts: dict, scored_only: bool,
     carrying stale data. The unit is the field's unit, with the same
     mis-filed-share-count fallback the sibling detector uses.
 
-    Same-day filed ties resolve as the mapper's `_dedupe_latest_filed` does:
-    the FIRST row at the latest filed date wins (`>`, not `>=`), over rows in
-    companyfacts order. Round-8 of the sibling detector was a bug where
+    Same-day ties resolve as the mapper's `_dedupe_latest_filed` does, by
+    the shared `precedence` order (an amendment over an original, then the
+    higher accession); a full tie keeps the FIRST row in companyfacts order
+    (`>`, not `>=`). Round-8 of the sibling detector was a bug where
     sorting and taking the last diverged from scoring; do not "tidy" this
     into a sort.
     """
@@ -681,9 +683,10 @@ def _series(facts: dict, scored_only: bool,
                 continue
             k = (field, start, end)
             prev = out.get(k)
-            if prev is None or filed > prev["filed"]:
-                out[k] = {"filed": filed, "val": val, "accn": row.get("accn", ""),
-                          "form": row.get("form", ""),
+            form = row.get("form", "")
+            accn = row.get("accn", "")
+            if prev is None or rank(filed, form, accn) > rank(prev["filed"], prev["form"], prev["accn"]):
+                out[k] = {"filed": filed, "val": val, "accn": accn, "form": form,
                           "key": FactKey(taxonomy, tag, unit, start, end)}
 
     if scored_only:

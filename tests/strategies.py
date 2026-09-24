@@ -94,11 +94,15 @@ def companyfacts(draw, *, as_of: date = AS_OF):
 @st.composite
 def same_day_trails(draw):
     """Several facts for ONE period whose filed dates cluster within a few
-    days, so same-day ties are the common case rather than the rare one."""
+    days, so same-day ties are the common case rather than the rare one —
+    between an original and its amendment, between two accessions, and
+    between two rows of one accession."""
     end = date(2025, 6, 30)
     n = draw(st.integers(2, 6))
     return [
-        {"end": end.isoformat(), "val": float(10 * i + 1), "form": "10-Q", "accn": f"a{i}",
+        {"end": end.isoformat(), "val": float(10 * i + 1),
+         "form": draw(st.sampled_from(["10-Q", "10-Q", "10-Q/A"])),
+         "accn": draw(st.sampled_from(["a0", "a1", "a2"])),
          "filed": (date(2025, 8, 1) + timedelta(days=draw(st.integers(0, 3)))).isoformat()}
         for i in range(n)
     ]

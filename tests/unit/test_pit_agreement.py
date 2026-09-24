@@ -79,10 +79,11 @@ def test_filter_as_of_and_the_detector_keep_the_same_facts(rows):
 
 class TestSameDayTieRule:
     """Two facts for one period filed the SAME day (a 10-Q and its /A, or a
-    duplicate row) must resolve to the same value everywhere: the mapper
-    keeps the FIRST at the latest filed date (`>` not `>=`), and the
-    detector's `current` and the vintage store's `_take` must match it, or
-    the evidence names a value the score did not use."""
+    duplicate row) must resolve to the same value everywhere, by the shared
+    `precedence` order: a same-day amendment supersedes its original (Hermes
+    round 3 — the old first-at-the-date rule scored the 10-Q and hid the
+    /A). The detector's `current` and the vintage store's `_take` must match
+    the mapper, or the evidence names a value the score did not use."""
 
     def _rows(self):
         end = date(2025, 6, 30)
@@ -92,21 +93,28 @@ class TestSameDayTieRule:
             _fact(end, 222.0, date(2025, 8, 10), accn="second-same-day", form="10-Q/A"),
         ]
 
-    def test_mapper_keeps_the_first_fact_at_the_latest_filed_date(self):
+    def test_mapper_takes_the_same_day_amendment(self):
         facts = _collect(_facts(self._rows()), "us-gaap", "Assets", "USD")
         best = _dedupe_latest_filed(facts)
-        assert best[(None, date(2025, 6, 30))].val == 111.0
+        assert best[(None, date(2025, 6, 30))].val == 222.0
+
+    def test_the_amendment_wins_in_either_input_order(self):
+        rows = self._rows()
+        rows[1], rows[2] = rows[2], rows[1]
+        best = _dedupe_latest_filed(_collect(_facts(rows), "us-gaap", "Assets", "USD"))
+        assert best[(None, date(2025, 6, 30))].val == 222.0
 
     def test_detector_current_agrees(self):
         fps = rs.detect_restatements(_facts(self._rows()), selected_tags={"total_assets": "us-gaap:Assets"})
         assert len(fps) == 1
-        assert fps[0].current_value == 111.0
-        assert fps[0].current_accession == "first-same-day"
+        assert fps[0].current_value == 222.0
+        assert fps[0].current_accession == "second-same-day"
+        assert fps[0].is_amendment
 
     def test_vintage_store_agrees(self):
         series = vs._series(_facts(self._rows()), scored_only=True)
         (k, v), = [(k, v) for k, v in series.items() if k[0] == "total_assets"]
-        assert v["val"] == 111.0 and v["accn"] == "first-same-day"
+        assert v["val"] == 222.0 and v["accn"] == "second-same-day"
 
     @given(rows=same_day_trails())
     def test_agreement_on_random_same_day_trails(self, rows):
