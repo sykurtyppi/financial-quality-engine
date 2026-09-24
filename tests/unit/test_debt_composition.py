@@ -199,3 +199,28 @@ def test_the_restatement_scan_composes_debt_it_does_not_sum_it():
     [fp] = [f for f in detect_restatements(facts, selected_tags=diag.selected_tags())
             if f.field_name == "total_debt"]
     assert (fp.period_end, fp.original_value, fp.current_value) == (q[-1], 950.0, 980.0)
+
+
+def test_an_amendment_after_a_component_first_appears_is_still_found():
+    # 2024-03-31: the noncurrent figure is filed first; the current portion
+    # is first reported by a later filing, and then amended. The first
+    # vintage is composed differently (noncurrent alone), so it is not
+    # compared — but the amendment inside the stable composition is a
+    # revision of the scored total: 900 -> 950.
+    from datetime import date
+
+    from app.services.ingestion.restatements import detect_restatements
+
+    q = selection_cases.QUARTER_ENDS[8]
+    p = selection_cases._base("Debt Adoption Co")
+    p.add("LongTermDebtNoncurrent", selection_cases._instants(800.0, step=0.0))
+    p.add("LongTermDebtCurrent", [
+        *(selection_cases.instant(e, 100.0) for e in selection_cases.QUARTER_ENDS if e != q),
+        selection_cases.instant(q, 100.0, filed=date(2024, 8, 1)),
+        selection_cases.instant(q, 150.0, filed=date(2024, 11, 1), form="10-Q/A"),
+    ])
+    facts = p.data
+    _ds, diag = build_dataset(facts, "X")
+    [fp] = [f for f in detect_restatements(facts, selected_tags=diag.selected_tags())
+            if f.field_name == "total_debt" and f.period_end == q]
+    assert (fp.original_value, fp.current_value) == (900.0, 950.0)
