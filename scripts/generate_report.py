@@ -28,7 +28,7 @@ from app.services.ingestion.edgar_adapter import (
     store_vintage_snapshot,
 )
 from app.services.ingestion.edgar_documents import fetch_documents
-from app.services.ingestion.sec_client import SecClient
+from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.reporting.report_builder import build_report
 
 logging.basicConfig(level=logging.WARNING)
@@ -112,5 +112,19 @@ def main() -> int:
     return 0
 
 
+def _main() -> int:
+    """`main`, with SEC acquisition failures reported as what they are. The
+    fundamentals are the report: when SEC cannot supply them (unreachable,
+    throttled, a cache entry that cannot be refetched) there is nothing to
+    build, and a traceback told the operator less than the one line below."""
+    try:
+        return main()
+    except SecClientError as e:
+        print(f"error: {e}", file=sys.stderr)
+        print("no report written: the fundamentals could not be acquired. Retry, or "
+              "check EDGAR_IDENTITY and the network.", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_main())

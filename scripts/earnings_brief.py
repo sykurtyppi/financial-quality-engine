@@ -388,14 +388,19 @@ def cmd_assume(args: argparse.Namespace) -> int:
         # Preview only, never written to the holder's file: once these land in
         # journal/assumptions/ nothing downstream can tell them from something
         # the holder actually believes. Adopt one by passing it to `assume`.
-        found = derive_for_ticker(ticker)
+        # The cutoff is explicit and printed: derivation reads only history
+        # filed on or before it (the brief itself uses the day before the
+        # print, so the print cannot become its own baseline).
+        as_of = date.fromisoformat(args.as_of) if args.as_of else datetime.now(UTC).date()
+        found = derive_for_ticker(ticker, as_of=as_of)
         if not found:
-            print(f"{ticker}: nothing derivable — too little contiguous quarterly history, "
-                  "or no series steady enough to carry a claim")
+            print(f"{ticker}: nothing derivable from history filed on or before {as_of} — too "
+                  "little contiguous quarterly history, or no series steady enough to carry a claim")
             return 0
         held = load_assumptions(ticker)
-        print(f"{ticker}: {len(found)} assumption(s) the engine would derive from its filed "
-              f"history{' (unused — your own are on file and win)' if held else ''}:")
+        print(f"{ticker}: {len(found)} assumption(s) the engine would derive from its history "
+              f"filed on or before {as_of}"
+              f"{' (unused — your own are on file and win)' if held else ''}:")
         for i, d in enumerate(found, 1):
             print(f"  {i}. {d.text}")
             print(f"     basis: {d.detail}")
@@ -466,6 +471,9 @@ def main() -> int:
     a.add_argument("--derive", action="store_true",
                    help="preview what the engine would derive from filed history when you have "
                         "written none (never written to your file)")
+    a.add_argument("--as-of", metavar="YYYY-MM-DD",
+                   help="with --derive: use only history filed on or before this date "
+                        "(default: today, UTC)")
     a.set_defaults(fn=cmd_assume)
 
     args = p.parse_args()

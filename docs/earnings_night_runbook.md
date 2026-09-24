@@ -396,7 +396,13 @@ the last two years actually support, one per dimension it can speak to:
 
 ```
 scripts/earnings_brief.py assume AMKR --derive    # preview; writes nothing
+scripts/earnings_brief.py assume AMKR --derive --as-of 2026-10-11   # history filed by that day
 ```
+
+The preview reads only history filed on or before `--as-of` (default: today,
+UTC) and prints the cutoff it used. The brief itself derives from history
+filed before the print day, so a preview run the day before the print shows
+what the brief will use.
 
 ```
 1. Revenue keeps growing year over year — it has in each of the last four quarters, by 3.4% to 27.5%.
