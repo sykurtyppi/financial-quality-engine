@@ -2,6 +2,7 @@
 met/violated/unresolvable calls across every input class the CLI can send it."""
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -29,9 +30,8 @@ def _ds(*periods: PeriodFinancials) -> CompanyDataset:
 
 
 def _a(**overrides) -> Assumption:
-    # Default: source=None → numeric-only, resolver auto-terminates. Round-11
-    # finding 2 pushes any source-set assumption to pending; the
-    # TestSourceProvenance suite passes source explicitly.
+    # Default: source=None → a numeric-only commitment. The
+    # TestSourceProvenance suites pass a source explicitly.
     base = dict(metric="revenue", comparator=">", threshold=165_000_000.0,
                 window="FY2026Q2", source=None, resolve_by=date(2026, 8, 15))
     base.update(overrides)
@@ -214,45 +214,206 @@ class TestFabricationSafety:
 
 class TestSourceProvenance:
     """Round-11 finding 2: the {10-K, 10-Q} whitelist was NOT provenance — the
-    same value resolved met under either form with no accession. Now ANY
-    source-set assumption returns pending; only source=None (numeric-only)
-    assumptions auto-terminate. Un-defer once P1-A per-value provenance lands."""
+    same value resolved met under either form with no accession, so every
+    source-set assumption was parked at pending. Mapped values now carry the
+    filed facts they were computed from (`PeriodFinancials.sources`): a
+    preregistered form is attested against the filings that REPORTED the
+    period, and the accession is recorded."""
 
-    def test_no_source_resolves_numerically(self):
-        r = propose_resolution(_a(source=None), _ds(_p(revenue=200_000_000)))
-        assert r.state == "met"
+    @staticmethod
+    def _sourced(value, *refs):
+        from app.schemas.financials import SourcedValue
 
-    def test_10q_source_defers_to_pending(self):
+        method = "direct" if len(refs) == 1 else "ytd_diff"
+        return {"revenue": SourcedValue(field="revenue", value=value, strategy="single",
+                                        method=method, partial=False, inputs=refs)}
+
+    @staticmethod
+    def _ref(form, accession, filed, *, start=date(2026, 4, 1), end=date(2026, 6, 30),
+             value=200_000_000.0, sign=1):
+        from app.schemas.financials import FactRef
+
+        return FactRef(concept="us-gaap:Revenues", accession=accession, filed=filed,
+                       form=form, start=start, end=end, value=value, sign=sign)
+
+    def _period(self, *refs, value=200_000_000.0):
+        return _p(revenue=value, sources=self._sourced(value, *refs))
+
+    def test_no_source_resolves_numerically_and_still_names_the_filing(self):
+        ref = self._ref("10-Q", "0001-26-000010", date(2026, 8, 1))
+        r = propose_resolution(_a(source=None), _ds(self._period(ref)))
+        assert r.state == "met" and r.source_accession == "0001-26-000010"
+        assert "reported in 10-Q 0001-26-000010 filed 2026-08-01" in r.note
+
+    def test_a_same_day_amendment_is_the_filing_cited(self):
+        """Two reporting facts filed on one day: the 10-Q/A is current, by the
+        shared `precedence` order, whichever is listed first."""
+        orig = self._ref("10-Q", "0001-26-000020", date(2026, 8, 1), value=100_000_000.0)
+        amended = self._ref("10-Q/A", "0001-26-000010", date(2026, 8, 1), value=100_000_000.0)
+        for refs in ((orig, amended), (amended, orig)):
+            r = propose_resolution(_a(source=None), _ds(self._period(*refs)))
+            assert r.source_accession == "0001-26-000010"
+            assert "reported in 10-Q/A 0001-26-000010 filed 2026-08-01" in r.note
+
+    def test_a_matching_form_resolves_with_its_accession(self):
+        ref = self._ref("10-Q", "0001-26-000010", date(2026, 8, 1))
+        r = propose_resolution(_a(source="10-Q"), _ds(self._period(ref)))
+        assert r.state == "met" and r.source_accession == "0001-26-000010"
+        r = propose_resolution(_a(source="10-Q", threshold=300_000_000.0),
+                               _ds(self._period(ref)))
+        assert r.state == "violated" and r.source_accession == "0001-26-000010"
+
+    def test_another_form_stays_pending_and_names_what_reported_it(self):
+        ref = self._ref("10-K", "0001-26-000099", date(2026, 9, 1))
+        r = propose_resolution(_a(source="10-Q"), _ds(self._period(ref)))
+        assert r.state == "pending" and r.source_accession is None
+        assert "10-K 0001-26-000099 filed 2026-09-01" in r.note
+        assert r.observed == 200_000_000.0  # shown, never committed
+
+    def test_the_family_takes_an_amendment_but_an_amendment_source_takes_only_one(self):
+        amended = self._ref("10-Q/A", "0001-26-000011", date(2026, 9, 10))
+        original = self._ref("10-Q", "0001-26-000010", date(2026, 8, 1))
+        assert propose_resolution(_a(source="10-Q"), _ds(self._period(amended))).state == "met"
+        assert propose_resolution(_a(source="10-Q/A"), _ds(self._period(amended))).state == "met"
+        assert propose_resolution(_a(source="10-Q/A"), _ds(self._period(original))).state == "pending"
+        assert propose_resolution(_a(source="10-K"), _ds(self._period(amended))).state == "pending"
+
+    def test_proxy_and_other_forms(self):
+        def state(source, form):
+            ref = self._ref(form, "0001-26-000012", date(2026, 8, 1))
+            return propose_resolution(_a(source=source), _ds(self._period(ref))).state
+
+        assert state("proxy", "DEF 14A") == "met" and state("proxy", "10-Q") == "pending"
+        assert state("other", "20-F") == "met" and state("other", "10-K") == "pending"
+        assert state("8-K", "8-K") == "met" and state("8-K", "10-Q") == "pending"
+
+    def test_the_subtracted_prior_quarter_is_not_what_reported_the_period(self):
+        """A year-to-date difference: +H1 (this 10-Q) −Q1 (an earlier 10-K/A,
+        say). The earlier filing reported Q1, not this quarter."""
+        ytd = self._ref("10-Q", "0001-26-000010", date(2026, 8, 1), start=date(2026, 1, 1),
+                        value=300_000_000.0)
+        q1 = self._ref("10-K/A", "0001-26-000005", date(2026, 5, 20), start=date(2026, 1, 1),
+                       end=date(2026, 3, 31), value=100_000_000.0, sign=-1)
+        r = propose_resolution(_a(source="10-Q"), _ds(self._period(ytd, q1)))
+        assert r.state == "met" and r.source_accession == "0001-26-000010"
+
+    def test_every_filing_that_reported_the_period_must_match(self):
+        a = self._ref("10-Q", "0001-26-000010", date(2026, 8, 1), value=120_000_000.0)
+        b = self._ref("8-K", "0001-26-000020", date(2026, 8, 2), value=80_000_000.0)
+        r = propose_resolution(_a(source="10-Q"), _ds(self._period(a, b)))
+        assert r.state == "pending" and "8-K 0001-26-000020" in r.note
+
+    def test_the_accession_is_the_filing_that_completed_the_value(self):
+        """Two reporting facts, both 10-Q family — a component re-filed on a
+        10-Q/A: the value as it stands was completed by the later filing."""
+        a = self._ref("10-Q", "0001-26-000010", date(2026, 8, 1), value=120_000_000.0)
+        b = self._ref("10-Q/A", "0001-26-000011", date(2026, 9, 10), value=80_000_000.0)
+        r = propose_resolution(_a(source="10-Q"), _ds(self._period(a, b)))
+        assert r.state == "met" and r.source_accession == "0001-26-000011"
+        r = propose_resolution(_a(source="10-Q"), _ds(self._period(b, a)))
+        assert r.source_accession == "0001-26-000011"
+
+    def test_without_per_value_provenance_it_stays_pending(self):
         r = propose_resolution(_a(source="10-Q"), _ds(_p(revenue=200_000_000)))
-        assert r.state == "pending"
-        assert "10-Q" in (r.note or "") or "provenance" in (r.note or "")
+        assert r.state == "pending" and "no per-value provenance" in r.note
+        assert propose_resolution(_a(source=None), _ds(_p(revenue=200_000_000))).state == "met"
 
-    def test_10k_source_defers_to_pending(self):
-        r = propose_resolution(_a(source="10-K"), _ds(_p(revenue=200_000_000)))
-        assert r.state == "pending"
-
-    def test_8k_and_proxy_defer_to_pending(self):
-        for src in ("8-K", "proxy"):
-            r = propose_resolution(_a(source=src), _ds(_p(revenue=200_000_000)))
-            assert r.state == "pending", f"{src} must be pending"
-
-    def test_amendments_defer_to_pending(self):
-        for src in ("10-K/A", "10-Q/A"):
-            r = propose_resolution(_a(source=src), _ds(_p(revenue=200_000_000)))
-            assert r.state == "pending", f"{src} must be pending"
-
-    def test_pending_source_precedes_period_check(self):
-        # Source provenance is a protocol failure regardless of numeric — the
-        # resolver returns pending without probing the data.
+    def test_a_missing_period_or_value_is_pending_before_any_attestation(self):
         r = propose_resolution(_a(source="8-K", window="FY2029Q1"), _ds(_p(revenue=1)))
-        assert r.state == "pending"
+        assert r.state == "pending" and "no period matching" in r.note
+        r = propose_resolution(_a(source="10-Q", metric="nonsense"), _ds(_p(revenue=1)))
+        assert r.state == "unresolvable"
 
-    def test_pending_source_defers_before_symbolic_mismatch(self):
-        # Even a would-be-unresolvable symbolic mismatch is preempted by the
-        # source gate — you can't audit numeric semantics if you can't audit
-        # the number's origin.
+    def test_an_attested_symbolic_mismatch_is_unresolvable(self):
+        from app.schemas.financials import SourcedValue
+
+        ref = self._ref("10-Q", "0001-26-000010", date(2026, 8, 1), value=5.0)
+        cfo = SourcedValue(field="cfo", value=5.0, strategy="single", method="direct",
+                           partial=False, inputs=(ref,))
         r = propose_resolution(
             _a(source="10-Q", metric="cfo", comparator="<", threshold="positive"),
-            _ds(_p(cfo=5.0)),
+            _ds(_p(cfo=5.0, sources={"cfo": cfo})),
         )
-        assert r.state == "pending"
+        assert r.state == "unresolvable" and r.source_accession == "0001-26-000010"
+
+
+class TestSourceProvenanceOnRealFilings:
+    """On a real companyfacts payload: a quarter a 10-Q reported attests as
+    10-Q; a fourth quarter the mapper derives from the 10-K's year was
+    reported by the 10-K — the 10-Q whose nine months it subtracts did not
+    report it — and says so; an engine metric attests through the facts
+    behind its inputs."""
+
+    @staticmethod
+    def _ko():
+        import json
+        from pathlib import Path
+
+        from app.services.formulas.registry import compute_metrics
+        from app.services.ingestion.companyfacts_mapper import build_dataset
+
+        path = Path(__file__).resolve().parents[1] / "fixtures" / "real" / "companyfacts_KO_trimmed.json"
+        ds, _ = build_dataset(json.loads(path.read_text()), "KO")
+        return ds, compute_metrics(ds)
+
+    @staticmethod
+    def _assume(metric, period, source):
+        return _a(metric=metric, comparator=">", threshold=0.0, window=period.fiscal_label,
+                  source=source)
+
+    def test_a_10q_quarter_attests_as_10q_with_the_filing_used(self):
+        ds, bundle = self._ko()
+        period = next(p for p in ds.periods if p.sources["revenue"].method == "direct"
+                      and p.sources["revenue"].inputs[0].form.startswith("10-Q"))
+        r = propose_resolution(self._assume("revenue", period, "10-Q"), ds, bundle)
+        assert r.state == "met"
+        assert r.source_accession == period.sources["revenue"].inputs[0].accession
+
+    def test_a_q4_derived_from_the_10k_is_the_10ks(self):
+        ds, bundle = self._ko()
+        # KO's Q4: the 10-K's year less the nine months its Q3 10-Q reported.
+        period = next(p for p in ds.periods if p.fiscal_label.endswith("Q4"))
+        annual, nine_months = period.sources["revenue"].inputs
+        assert annual.form == "10-K" and annual.sign == 1
+        assert nine_months.form == "10-Q" and nine_months.sign == -1
+        r = propose_resolution(self._assume("revenue", period, "10-Q"), ds, bundle)
+        assert r.state == "pending" and annual.accession in r.note
+        r = propose_resolution(self._assume("revenue", period, "10-K"), ds, bundle)
+        assert r.state == "met" and r.source_accession == annual.accession
+
+    def test_an_engine_metric_attests_through_its_inputs(self):
+        ds, bundle = self._ko()
+        metric = bundle.get_latest("cfo_to_net_income")
+        period = next(p for p in ds.periods if metric.fiscal_label.endswith(p.fiscal_label))
+        expect = {r.form.removesuffix("/A") for sv in (period.sources["cfo"],
+                                                       period.sources["net_income"])
+                  for r in sv.inputs if r.sign > 0 and r.end >= period.period_end}
+        [form] = expect  # one filing reported the metric's own quarter
+        r = propose_resolution(self._assume("cfo_to_net_income", period, form), ds, bundle)
+        assert r.state in ("met", "violated") and r.source_accession
+        assert "TTM ending" in r.note
+
+
+def test_the_resolve_command_prints_the_filing_behind_each_proposal(monkeypatch, capsys):
+    import argparse
+    from types import SimpleNamespace
+
+    from app.services.ingestion import edgar_adapter
+    from scripts import journal
+
+    ds, _bundle = TestSourceProvenanceOnRealFilings._ko()
+    period = ds.sorted_periods()[-1]
+    assumption = _a(metric="revenue", comparator=">", threshold=0.0,
+                    window=period.fiscal_label, source="10-Q")
+    entry = SimpleNamespace(ticker="KO", before=SimpleNamespace(assumptions=[assumption]))
+    monkeypatch.setattr(journal.store, "find_entry", lambda t, d: Path("KO_x.md"))
+    monkeypatch.setattr(journal.store, "is_v2", lambda p: True)
+    monkeypatch.setattr(journal.store, "load_v2", lambda p: entry)
+    monkeypatch.setattr(journal, "verify_lock", lambda e: True)
+    monkeypatch.setattr(journal, "open_assumption_indices", lambda e: [0])
+    monkeypatch.setattr(edgar_adapter, "fetch_dataset", lambda t: (ds, None))
+
+    assert journal.cmd_resolve(argparse.Namespace(ticker="KO", date=None, commit=False)) == 0
+    out = capsys.readouterr().out
+    accession = period.sources["revenue"].inputs[0].accession
+    assert "MET" in out and f"source: {accession}" in out

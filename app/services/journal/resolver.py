@@ -12,10 +12,11 @@ Round-10 & round-11 fixes:
    (unknown metric, unsupported comparator, unknown symbolic threshold).
  - **round-11 finding 2 (source provenance)**: whitelisting {10-K, 10-Q} was
    NOT provenance — the same quarterly value resolved met under either form
-   with `source_accession=None`. Now: ANY assumption that specifies `source`
-   returns pending until per-value provenance (P1-A) can attest form and
-   accession. Assumptions without `source` set are numeric-only commitments
-   and DO auto-terminate.
+   with `source_accession=None`. The interim rule parked every source-set
+   assumption at pending. Now the mapped values carry the filed facts they
+   were computed from (`PeriodFinancials.sources`), so a preregistered form
+   is ATTESTED: the value resolves only when the filings that reported it
+   are of that form, and `source_accession` names the filing.
  - **round-11 finding 3 (symbolic comparator)**: `_resolve_symbolic` used to
    ignore the comparator, letting `cfo < positive` resolve `met` when
    CFO=+5. Fixed at can_lock (mismatched pairs refused) and here (defensive:
@@ -28,16 +29,24 @@ then fall back to raw XBRL fields on `PeriodFinancials` (`revenue`, `cfo`, …).
 
 from __future__ import annotations
 
-from app.schemas.financials import CompanyDataset, PeriodFinancials
-from app.schemas.metrics import MetricStatus
+from app.schemas.financials import (
+    CompanyDataset,
+    FactRef,
+    PeriodFinancials,
+    SourcedValue,
+)
+from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas.registry import MetricsBundle
 from app.services.formulas.ttm import TTM_LABEL_PREFIX
+from app.services.ingestion.precedence import latest as latest_fact
+from app.services.ingestion.precedence import rank
 from app.services.journal.schema_v2 import (
     _SYMBOLIC_THRESHOLDS,
     Assumption,
     Comparator,
     Resolution,
 )
+from app.services.provenance import sources_for
 
 
 def _find_period(dataset: CompanyDataset, window: str) -> PeriodFinancials | None:
@@ -107,6 +116,74 @@ def _lookup_metric_value(
     return None, f"unknown metric or field '{metric_name}'", True
 
 
+def _engine_metric(
+    metric_name: str, period: PeriodFinancials, bundle: MetricsBundle | None
+) -> MetricResult | None:
+    """The bundle's result for this metric in this period (either label
+    spelling, as `_lookup_metric_value` accepts), or None."""
+    if bundle is None:
+        return None
+    labels = (period.fiscal_label, f"{TTM_LABEL_PREFIX}{period.fiscal_label}")
+    return next((m for m in bundle.history.get(metric_name, []) if m.fiscal_label in labels), None)
+
+
+def _sourced_values(
+    metric_name: str,
+    period: PeriodFinancials,
+    dataset: CompanyDataset,
+    bundle: MetricsBundle | None,
+) -> list[SourcedValue]:
+    """The mapped values the resolved number was computed from: an engine
+    metric's inputs (`provenance.sources_for`, the registry's own pairing
+    rules), else the raw field's own value."""
+    metric = _engine_metric(metric_name, period, bundle)
+    if metric is not None:
+        return [sv for values in sources_for(dataset, metric, bundle=bundle).values()
+                for sv in values]
+    sv = period.sources.get(metric_name)
+    return [sv] if sv is not None else []
+
+
+def _reporting_facts(values: list[SourcedValue], period: PeriodFinancials) -> list[FactRef]:
+    """The filed facts that REPORT the period itself: added, not subtracted
+    (a year-to-date difference subtracts the prior quarter's figure, which an
+    earlier filing reported), and ending at or after the period end (a
+    trailing window's earlier quarters were reported by earlier filings; a
+    cover-page share count is dated after the quarter end)."""
+    out: list[FactRef] = []
+    for sv in values:
+        for ref in sv.inputs:
+            if ref.sign > 0 and ref.end >= period.period_end and ref not in out:
+                out.append(ref)
+    return out
+
+
+_FORM_FAMILIES = ("10-K", "10-Q", "8-K")
+
+
+def _is_proxy(form: str) -> bool:
+    return "14A" in form or "14C" in form
+
+
+def _form_matches(source: str, form: str) -> bool:
+    """Whether a fact filed on `form` honours a preregistered `source`. An
+    amendment source (`10-Q/A`) is a commitment to the amendment itself;
+    `10-Q` is the quarterly report, original or amended; `other` is any
+    form outside the named families."""
+    if source.endswith("/A"):
+        return form == source
+    family = form.removesuffix("/A")
+    if source in _FORM_FAMILIES:
+        return family == source
+    if source == "proxy":
+        return _is_proxy(family)
+    return family not in _FORM_FAMILIES and not _is_proxy(family)
+
+
+def _filing(ref: FactRef) -> str:
+    return f"{ref.form} {ref.accession} filed {ref.filed.isoformat()}"
+
+
 def _apply_comparator(value: float, cmp: Comparator, threshold: float) -> bool:
     if cmp == ">":
         return value > threshold
@@ -166,26 +243,6 @@ def propose_resolution(
                       this resolver (unknown metric name, unsupported
                       comparator, unknown symbolic threshold). Terminal.
     """
-    # Round-11 finding 2. The old whitelist ({10-K, 10-Q}) was NOT provenance:
-    # the mapper's canonical dataset merges companyfacts values and cannot say
-    # which form supplied any given number, so the same quarter resolved `met`
-    # under either source with `source_accession=None`. Honest interim rule:
-    # if the user preregistered a specific source they COMMITTED to that
-    # form/accession attribution — refuse to auto-terminate until per-value
-    # provenance (P1-A) lands. Numeric-only assumptions (source=None) are
-    # legitimate: the user is not claiming a form, only a value.
-    if assumption.source is not None:
-        return Resolution(
-            assumption_index=assumption_index,
-            state="pending",
-            note=(
-                f"source '{assumption.source}' preregistered but the mapper "
-                f"cannot yet attest per-value form/accession (P1-A). Resolve "
-                f"manually with a source_accession, or leave source unset for "
-                f"a numeric-only commitment."
-            ),
-        )
-
     period = _find_period(dataset, assumption.window)
     if period is None:
         # Window not present — filing may simply not have arrived; retryable.
@@ -204,6 +261,49 @@ def propose_resolution(
             note=note,
         )
 
+    # Round-11 finding 2, closed: which filings reported this number. A
+    # preregistered `source` is a commitment to a form; it is honoured only
+    # when every filing that reported the period was of that form. Anything
+    # less stays pending (never committed), naming what did report it, so
+    # the user can attest by hand.
+    reporting = _reporting_facts(
+        _sourced_values(assumption.metric, period, dataset, bundle), period
+    )
+    if assumption.source is not None:
+        why = None
+        if not reporting:
+            why = (
+                f"no per-value provenance for '{assumption.metric}' in "
+                f"{period.fiscal_label} (the dataset was not mapped from filed facts)"
+            )
+        else:
+            other = [r for r in reporting if not _form_matches(assumption.source, r.form)]
+            if other:
+                why = (
+                    f"preregistered source '{assumption.source}', but "
+                    f"{period.fiscal_label} was reported by "
+                    + "; ".join(dict.fromkeys(_filing(r) for r in other))
+                )
+        if why is not None:
+            return Resolution(
+                assumption_index=assumption_index,
+                state="pending",
+                observed=value,
+                at=period.period_end,
+                note=why + ". Resolve manually with a source_accession if that is the commitment.",
+            )
+    # The filing that completed the value: the current reporting fact, by the
+    # order every reader of filed facts shares (`precedence`: filed date, then
+    # an amendment over an original, then accession) — so a same-day 10-Q/A
+    # is the filing cited, not whichever fact was listed first.
+    latest = (
+        latest_fact(reporting, key=lambda r: rank(r.filed, r.form, r.accession))
+        if reporting else None
+    )
+    accession = latest.accession if latest is not None else None
+    if latest is not None:
+        note = f"{note}; reported in {_filing(latest)}"
+
     # Symbolic threshold path.
     if isinstance(assumption.threshold, str):
         outcome = _resolve_symbolic(value, assumption.comparator, assumption.threshold)
@@ -213,6 +313,7 @@ def propose_resolution(
                 state="unresolvable",
                 observed=value,
                 at=period.period_end,
+                source_accession=accession,
                 note=(
                     f"symbolic threshold '{assumption.threshold}' with comparator "
                     f"'{assumption.comparator}' not recognized"
@@ -223,6 +324,7 @@ def propose_resolution(
             state=outcome,  # type: ignore[arg-type]  # Literal validated by pydantic
             observed=value,
             at=period.period_end,
+            source_accession=accession,
             note=note,
         )
 
@@ -235,6 +337,7 @@ def propose_resolution(
             state="unresolvable",
             observed=value,
             at=period.period_end,
+            source_accession=accession,
             note="comparator 'within' requires a range syntax not yet supported",
         )
 
@@ -244,5 +347,6 @@ def propose_resolution(
         state="met" if met else "violated",
         observed=value,
         at=period.period_end,
+        source_accession=accession,
         note=note,
     )
