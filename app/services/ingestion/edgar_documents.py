@@ -381,11 +381,23 @@ def fetch_documents(
         subs = submissions
         if cik is None:
             cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
-    elif cik is not None:
-        subs = client.submissions_by_cik(cik)
     else:
-        subs = client.submissions(ticker)
-        cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
+        try:
+            if cik is not None:
+                subs = client.submissions_by_cik(cik)
+            else:
+                subs = client.submissions(ticker)
+                cik = int(subs["cik"]) if "cik" in subs else client.resolve_cik(ticker)
+        except SecClientError as e:
+            # The filing index is where every document is found. Without it
+            # none was read — say so, rather than abort a report whose
+            # fundamentals and other streams stand on their own (found by
+            # the CLI drills: an index outage used to end the whole run).
+            result.diagnostics.append(
+                f"filing index unavailable ({e}); no MD&A, risk-factor or earnings-release "
+                "text was read — narrative checks are UNAVAILABLE, not clean"
+            )
+            return result
     fye_month = fiscal_year_end_month(facts_json)
     try:
         merged = _merged_filings(client, subs, before)

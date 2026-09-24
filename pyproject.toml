@@ -81,7 +81,7 @@ ignore = [
 # and removed, is held to the check from then on.
 [tool.mypy]
 python_version = "3.12"
-files = ["app"]
+files = ["app", "scripts"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -121,3 +121,29 @@ module = [
     "app.services.watch.rearm",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Scripts are type-checked since 2026-09-24: `earnings_brief.py assume
+# --derive` crashed on a missing keyword argument that only a run could find
+# (Hermes audit round 3, finding 4). Known debt in these scripts is Optional
+# narrowing and loose annotations, so only those codes are relaxed here —
+# a missing or unexpected argument (`call-arg`) still fails the check. A
+# script not listed is held to the full check.
+module = [
+    "analyze_backtest",
+    "journal",
+    "make_real_fixtures",
+    "miss_test",
+    "run_distressed_controls",
+    "run_restatement_control",
+    "spike_definition_isolation",
+    "validate_thermometer",
+    "verify_against_filings",
+    "vintage",
+    "watch",
+    "wide_sweep",
+]
+disable_error_code = [
+    "union-attr", "arg-type", "return-value", "operator", "var-annotated", "attr-defined",
+    "misc", "assignment",
+]

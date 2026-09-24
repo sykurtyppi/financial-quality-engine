@@ -233,3 +233,23 @@ def test_dropping_one_element_of_any_read_column_is_refused(data):
             fetch_offerings(client, "AAPL", as_of=DAY, submissions=subs)
         else:
             _merged_filings(client, subs, None)
+
+
+def test_documents_degrade_when_the_filing_index_cannot_be_fetched():
+    """Found by the CLI drills: an index outage used to abort the whole
+    report from inside the document fetch."""
+    from app.services.ingestion.sec_client import SecClientError
+
+    class Down(_Client):
+        def submissions(self, ticker):
+            raise SecClientError("SEC request failed for submissions after 3 attempts")
+
+        def submissions_by_cik(self, cik):
+            raise SecClientError("SEC request failed for submissions after 3 attempts")
+
+    for kw in ({}, {"cik": CIK}):
+        result = fetch_documents(Down(_index()), "AAPL", {"facts": {}}, **kw)
+        assert result.documents == []
+        (line,) = result.diagnostics
+        assert line.startswith("filing index unavailable (SEC request failed")
+        assert "UNAVAILABLE, not clean" in line
