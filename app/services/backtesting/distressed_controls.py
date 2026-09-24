@@ -121,7 +121,10 @@ def evaluate_survivor(client: SecClient, ds: DistressedSurvivor) -> ControlResul
             continue
         result = analyze(dset)
         if result.overall is None or result.overall.score is None:
-            horizons.append(HorizonResult(months, asof, "no_score", coverage=round(diag.coverage(), 2)))
+            horizons.append(HorizonResult(
+                months, asof, "no_score", coverage=round(diag.coverage(), 2),
+                selections_digest=diag.selections_digest(),
+            ))
             continue
         blocks = sorted((b for b in result.block_scores if b.score is not None),
                         key=lambda b: -b.score)[:2]  # type: ignore[arg-type]
@@ -130,6 +133,7 @@ def evaluate_survivor(client: SecClient, ds: DistressedSurvivor) -> ControlResul
             overall=round(result.overall.score, 1),
             top_blocks=", ".join(f"{b.name}={b.score:.0f}" for b in blocks),
             coverage=round(diag.coverage(), 2),
+            selections_digest=diag.selections_digest(),
             n_red_flags=len(result.red_flags),
         ))
     return ControlResult(ds, sic, False, None, horizons)

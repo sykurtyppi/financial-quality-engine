@@ -199,6 +199,17 @@ class IngestionDiagnostics(BaseModel):
         re-deriving it from the payload and hoping the two agree."""
         return {f.field_name: f.tag_used for f in self.fields}
 
+    def selections_digest(self) -> str:
+        """A short fingerprint of which concepts backed which field: two runs
+        with the same digest mapped every field from the same concepts. A
+        backtest row carries it so a moved score can be told apart from a
+        moved tag choice without re-running the mapper."""
+        import hashlib
+
+        pairs = "\n".join(f"{f.field_name}={f.tag_used or ''}"
+                          for f in sorted(self.fields, key=lambda f: f.field_name))
+        return hashlib.sha256(pairs.encode()).hexdigest()[:12]
+
     def selected_series(self) -> dict[str, SeriesSelection | None]:
         """What backed each canonical field, as objects: the components with
         their taxonomy and the composer the mapper used. Pass this, not

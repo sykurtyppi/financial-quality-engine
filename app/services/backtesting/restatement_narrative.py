@@ -54,6 +54,8 @@ class NarrativeResult:
     independent_findings: list[tuple[str, str]] = field(default_factory=list)  # (kind, detail)
     mismatches: list[tuple[str, str]] = field(default_factory=list)  # (kind, confidence)
     error: str | None = None
+    coverage: float | None = None  # what the mapper built the dataset from
+    selections_digest: str = ""
 
     @property
     def has_independent_signal(self) -> bool:
@@ -67,7 +69,7 @@ def evaluate_case(client: SecClient, rc: RestatementCase) -> NarrativeResult:
     facts = client.company_facts_by_cik(rc.cik)
     trimmed = trim_to_mapped_tags(facts)
     try:
-        ds, _ = build_pit_dataset(trimmed, rc.name, event, n_quarters=8)
+        ds, diag = build_pit_dataset(trimmed, rc.name, event, n_quarters=8)
     except ValueError as e:
         return NarrativeResult(rc, event, 0, [], error=f"pit: {e}")
 
@@ -85,6 +87,7 @@ def evaluate_case(client: SecClient, rc: RestatementCase) -> NarrativeResult:
         rc, event, len(docs.documents),
         sorted({d.fiscal_label for d in docs.documents}),
         independent, mismatches,
+        coverage=round(diag.coverage(), 2), selections_digest=diag.selections_digest(),
     )
 
 

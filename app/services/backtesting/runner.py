@@ -57,6 +57,10 @@ def csv_header() -> list[str]:
         + [f"c_{n}" for n in component_metric_names()]
         + ["rel_3m", "rel_6m", "rel_12m", "op_margin_chg_4q", "fcf_margin_chg_4q",
            "ni_growth_fwd_4q", "non_reliance_24m"]
+        # What the mapper built the row from (appended, so every earlier
+        # column keeps its position): field coverage, and a fingerprint of
+        # which concept backed each field.
+        + ["coverage", "selections_digest"]
     )
 
 
@@ -132,12 +136,16 @@ def run_backtest(
                     "asof": asof.isoformat(),
                 }
                 try:
-                    pit_ds, _ = build_pit_dataset(
+                    pit_ds, pit_diag = build_pit_dataset(
                         trimmed, member.ticker, asof, n_quarters=n_quarters, sector=member.sector
                     )
                 except ValueError:
                     writer.writerow({**base, "status": "skip_no_pit_data"})
                     continue
+                base.update(
+                    coverage=round(pit_diag.coverage(), 3),
+                    selections_digest=pit_diag.selections_digest(),
+                )
 
                 pit_ds.profile.is_financial_institution = events.is_financial_institution
                 latest = pit_ds.periods[-1].period_end
