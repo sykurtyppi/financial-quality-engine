@@ -519,7 +519,7 @@ def _capital_integrity_offerings_caveat(
     if ci is None or ci.score is None or ci.score >= cfg.DIRECTION_POSITIVE_BELOW:
         return None
     return (
-        f"CAVEAT — Capital Integrity reads low-concern ({ci.score:.0f}/100) but is "
+        "CAVEAT — Capital Integrity reads low-concern but is "
         f"blind to the {len(secondary)} selling-stockholder takedown(s) above "
         "(secondary/mixed offerings per the parsed prospectuses): the block scores "
         "issuer-side dilution only (measured miss, 2026Q2). Read Capital Markets "

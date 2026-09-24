@@ -51,7 +51,7 @@ class TestDriverRanking:
             _component("not_meaningful", None, 0.5),
         ]))
         assert "not_meaningful" not in drivers
-        assert "computed (40)" in drivers
+        assert drivers == "computed"  # names only: no 0-100 number
 
     def test_a_block_with_nothing_usable_says_so(self):
         # A blank cell and a genuinely clean block must not look alike — that
@@ -81,9 +81,57 @@ class TestScorecardRendering:
 
     def test_the_drivers_column_replaced_it(self):
         card = self._scorecard()
-        assert "| Block | Score | Top drivers |" in card
-        # and it is populated, not an empty column
-        assert "beneish_m_score (" in card
+        assert "| Block | Top drivers | Confidence | Coverage | Weight |" in card
+        # and it is populated, not an empty column — by names, not numbers
+        assert "| Earnings Quality | beneish_m_score, " in card
 
     def test_the_retirement_is_explained_in_the_report(self):
         assert "No Direction word is shown per block" in self._scorecard()
+
+
+class TestNoZeroToHundredNumberRemains:
+    """P1-C's done-when: no 0-100 number on any rendered surface. The scores
+    are still computed — the calibration snapshot pins them — they are just
+    not shown, because they measured non-discriminating."""
+
+    ZERO_TO_HUNDRED = r"(?:/100\b|concern \d+|\(\d{1,3}\)|0[–-]100 concern)"
+
+    def test_the_golden_report_carries_none(self):
+        import re
+        from pathlib import Path
+
+        golden = (Path(__file__).resolve().parents[1] / "golden_reports"
+                  / "stretchco_report.md").read_text()
+        assert not re.findall(self.ZERO_TO_HUNDRED, golden)
+        for line in golden.split("## 2. Scorecard")[1].split("## 3.")[0].splitlines():
+            if line.startswith("| ") and "---" not in line and "Block" not in line:
+                name, drivers = line.split(" | ")[:2]
+                assert not drivers.strip().isdigit(), line  # no score cell
+
+    def test_a_real_full_report_carries_none(self):
+        import json
+        import re
+        from pathlib import Path
+
+        from app.core.pipeline import analyze
+        from app.services.ingestion.companyfacts_mapper import build_dataset
+        from app.services.reporting.report_builder import build_report
+
+        real = Path(__file__).resolve().parents[1] / "fixtures" / "real"
+        for ticker in ("AAPL", "KO", "CRM"):
+            ds, diag = build_dataset(json.loads((real / f"companyfacts_{ticker}_trimmed.json")
+                                                .read_text()), ticker)
+            report, _ = build_report(analyze(ds), ds, generated_on="2026-09-24",
+                                     coverage=diag.coverage(), fetched_at="2026-09-24 09:00 UTC")
+            assert not re.findall(self.ZERO_TO_HUNDRED, report), ticker
+
+    def test_the_scores_are_still_computed(self):
+        import json
+
+        from app.core.pipeline import analyze
+        from app.schemas.financials import CompanyDataset
+
+        ds = CompanyDataset(**json.loads(open("data/example_company.json").read()))
+        result = analyze(ds)
+        assert result.overall is not None and result.overall.score is not None
+        assert all(b.score is not None for b in result.block_scores if b.data_coverage)

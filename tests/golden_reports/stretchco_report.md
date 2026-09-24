@@ -12,39 +12,39 @@ The screen flagged 7 elevated-concern item(s) and 2 supportive item(s) for STRET
 
 ## 2. Scorecard
 
-All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.
-
 No Direction word is shown per block. Its bands are percentiles of the COMPOSITE distribution, and the blocks' anchor tables were never calibrated to a shared meaning of "concern" — so the same word carries a different prior in each row, and in at least one block the negative cut sits above anything that block's anchors can produce. A label that cannot be reached is not a lenient threshold, it is a dead one. The drivers column says where the concern actually comes from, which is what a screening prompt is for. See docs/scoring_methodology.md.
 
-| Block | Score | Top drivers | Confidence | Coverage | Weight |
-|---|---|---|---|---|---|
-| Earnings Quality | 70 | beneish_m_score (85), total_accruals (64), accrual_trend (57) | high | 100% | 20% |
-| Revenue Quality | 90 | receivables_growth_spread (90), dso_trend (90) | medium | 100% | 10% |
-| Cash Conversion | 81 | cfo_to_net_income (88), fcf_margin_trend (76), fcf_margin (74) | high | 100% | 17% |
-| Working Capital Stress | 45 | dio_trend (60), inventory_growth_spread (36) | medium | 100% | 7% |
-| Capital Integrity | 63 | issuance_pressure (85), diluted_share_growth (28) | medium | 100% | 7% |
-| Capex Discipline | 61 | capex_growth_spread (66), capex_to_da (69), capex_intensity_regime_shift (50) | high | 100% | 15% |
-| Balance Sheet Stress | 28 | interest_coverage (35), net_debt_to_ebitda (27), leverage_change (31) | high | 100% | 14% |
-| Narrative Drift | 40 | kpi_removals (65), disclosure_volume_change (15) | medium | 75% | 10% |
+Blocks carry no 0–100 number: the composite and its block scores measured non-discriminating on the live season. Each row names the metrics carrying its concern, heaviest first; red flags (§3) say which crossed the elevated-concern threshold.
+
+| Block | Top drivers | Confidence | Coverage | Weight |
+|---|---|---|---|---|
+| Earnings Quality | beneish_m_score, total_accruals, accrual_trend | high | 100% | 20% |
+| Revenue Quality | receivables_growth_spread, dso_trend | medium | 100% | 10% |
+| Cash Conversion | cfo_to_net_income, fcf_margin_trend, fcf_margin | high | 100% | 17% |
+| Working Capital Stress | dio_trend, inventory_growth_spread | medium | 100% | 7% |
+| Capital Integrity | issuance_pressure, diluted_share_growth | medium | 100% | 7% |
+| Capex Discipline | capex_growth_spread, capex_to_da, capex_intensity_regime_shift | high | 100% | 15% |
+| Balance Sheet Stress | interest_coverage, net_debt_to_ebitda, leverage_change | high | 100% | 14% |
+| Narrative Drift | kpi_removals, disclosure_volume_change | medium | 75% | 10% |
 
 > Earnings Quality: Beneish M-score note: Computed on TTM flows compared year-over-year; cutoffs are the annual-model cutoffs. TTM basis: flows summed over the 4 quarters ending this period.
 
 ## 3. Top Red Flags
 
-- **Elevated concern: dso_trend** (FY2025Q4): dso_trend = 260 (formula: latest - mean(same fiscal quarter, prior years); period FY2025Q4; concern 90/100). Requires analyst review.
-- **Receivables outpacing revenue** (FY2025Q4): receivables_growth_spread = 2.51 (formula: receivables growth - revenue growth; period FY2025Q4; concern 90/100). Requires analyst review.
-- **Operating cash flow lagging reported earnings** (TTM FY2025Q4): cfo_to_net_income = 0.271 (formula: CFO / Net Income; period TTM FY2025Q4; concern 88/100). Requires analyst review.
-- **Beneish screen in the elevated-attention zone** (TTM FY2025Q4): beneish_m_score = 0.0191 (formula: -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI; period TTM FY2025Q4; concern 85/100). Requires analyst review.
-- **Elevated concern: issuance_pressure** (FY2025Q4): issuance_pressure = 4.18 (formula: Issuance Proceeds / CFO; period FY2025Q4; concern 85/100). Requires analyst review.
-- **Elevated concern: fcf_margin_trend** (TTM FY2025Q4): fcf_margin_trend = -0.0625 (formula: latest - mean(prior); period TTM FY2025Q4; concern 76/100). Requires analyst review.
-- **Weak free-cash-flow generation** (TTM FY2025Q4): fcf_margin = -0.0681 (formula: (CFO - Capex) / Revenue; period TTM FY2025Q4; concern 74/100). Requires analyst review.
+- **Elevated concern: dso_trend** (FY2025Q4): dso_trend = 260 (formula: latest - mean(same fiscal quarter, prior years); period FY2025Q4; at or above the elevated-concern threshold). Requires analyst review.
+- **Receivables outpacing revenue** (FY2025Q4): receivables_growth_spread = 2.51 (formula: receivables growth - revenue growth; period FY2025Q4; at or above the elevated-concern threshold). Requires analyst review.
+- **Operating cash flow lagging reported earnings** (TTM FY2025Q4): cfo_to_net_income = 0.271 (formula: CFO / Net Income; period TTM FY2025Q4; at or above the elevated-concern threshold). Requires analyst review.
+- **Beneish screen in the elevated-attention zone** (TTM FY2025Q4): beneish_m_score = 0.0191 (formula: -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI; period TTM FY2025Q4; at or above the elevated-concern threshold). Requires analyst review.
+- **Elevated concern: issuance_pressure** (FY2025Q4): issuance_pressure = 4.18 (formula: Issuance Proceeds / CFO; period FY2025Q4; at or above the elevated-concern threshold). Requires analyst review.
+- **Elevated concern: fcf_margin_trend** (TTM FY2025Q4): fcf_margin_trend = -0.0625 (formula: latest - mean(prior); period TTM FY2025Q4; at or above the elevated-concern threshold). Requires analyst review.
+- **Weak free-cash-flow generation** (TTM FY2025Q4): fcf_margin = -0.0681 (formula: (CFO - Capex) / Revenue; period TTM FY2025Q4; at or above the elevated-concern threshold). Requires analyst review.
 
 > Funding context (check before treating a weak free-cash-flow reading as deterioration): government grants, tax credits, customer advances, and milestone receipts may affect reported operating cash flow, investing cash flow, or net capital spending depending on their terms and presentation. Their classification is not separately modeled here — verify in the filing's liquidity/commitments notes (measured misread: AMKR 2026Q2).
 
 ## 4. Top Green Flags
 
-- **Supportive: disclosure_volume_change** (FY2025Q4): disclosure_volume_change = 1.26 (formula: latest period word count / mean(prior period word counts); period FY2025Q4; concern 15/100). Supportive indicator.
-- **Supportive: current_ratio** (FY2025Q4): current_ratio = 2.37 (formula: Current Assets / Current Liabilities; period FY2025Q4; concern 17/100). Supportive indicator.
+- **Supportive: disclosure_volume_change** (FY2025Q4): disclosure_volume_change = 1.26 (formula: latest period word count / mean(prior period word counts); period FY2025Q4; within the supportive range). Supportive indicator.
+- **Supportive: current_ratio** (FY2025Q4): current_ratio = 2.37 (formula: Current Assets / Current Liabilities; period FY2025Q4; within the supportive range). Supportive indicator.
 
 ## 5. What Changed This Period
 
