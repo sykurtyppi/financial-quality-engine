@@ -7,7 +7,8 @@ reproduce today's output exactly — and a snapshot taken AFTER the refactor
 would prove nothing. This tool records, for each field of
 `companyfacts_mapper.build_dataset`: the tag (or composed tags) used, the
 derivation methods, the missing periods, the mapping notes and every value,
-plus the quarter ends, fiscal labels and warnings of the run.
+plus the quarter ends, fiscal labels and warnings of the run, and how each
+reported quarter's value was built (strategy, components, method, partial).
 
     python scripts/selection_snapshot.py golden [--check]
         (Re)write tests/golden_reports/selection_snapshot.json from the
@@ -78,6 +79,9 @@ def dump(facts: dict, ticker: str, *, n_quarters: int = N_QUARTERS) -> dict:
             "missing_periods": d.missing_periods,
             "notes": d.notes,
             "values": values,
+            "period_sources": {
+                q: src.model_dump() for q, src in sorted(d.period_sources.items())
+            },
         })
     return {
         "entity_name": diag.entity_name,

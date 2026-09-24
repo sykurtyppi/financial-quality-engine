@@ -1,5 +1,8 @@
-"""One rule for composing total debt, shared by the mapper and the
-restatement detector.
+"""The rules for composing a field from several concepts at one date,
+shared by the mapper and the restatement detector (and, through the mapper,
+the vintage comparison): `compose_total_debt` for total debt, and
+`resolve_by_strategy` for the fields whose registry entry lists alternative
+strategies (SG&A, D&A).
 
 Total debt is assembled from several balance-sheet concepts, and the rule
 for which of them may be added together is accounting, not coverage:
@@ -29,7 +32,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from app.services.ingestion.fields import field, role_tags
+from app.services.ingestion.fields import Composition, field, role_tags
 
 NONCURRENT = role_tags("total_debt", "noncurrent")
 CURRENT_AGGREGATE = role_tags("total_debt", "current_aggregate")
@@ -120,3 +123,49 @@ def compose_total_debt(present: Mapping[str, float]) -> DebtComposition | None:
     add(_first(FINANCE_LEASE_NONCURRENT, present))
     add(_first(FINANCE_LEASE_CURRENT, present))
     return DebtComposition(total, TOTAL_FALLBACK, tuple(used), tuple(missing), len(used) > before)
+
+
+# --- fields with alternative strategies (SG&A, D&A) -------------------------
+
+SINGLE = "single"  # the field's own concept (an aggregate, for D&A)
+COMPOSITE = "composite"  # every component of the summed strategy
+PARTIAL = "partial"  # a partial fallback (depreciation alone, for D&A)
+
+
+@dataclass(frozen=True)
+class Resolved:
+    total: float
+    strategy: str  # SINGLE | COMPOSITE | PARTIAL
+    used: tuple[str, ...]  # bare concept names, in summation order
+
+    @property
+    def partial(self) -> bool:
+        return self.strategy == PARTIAL
+
+
+def resolve_by_strategy(name: str, present: Mapping[str, float]) -> Resolved | None:
+    """The field's value at ONE date from the concepts reported at it
+    (`present`: bare concept name -> value), taking the field's strategies in
+    registry order: its own concept, then every component summed, then a
+    partial fallback. For D&A: the aggregate tag, else depreciation +
+    amortization, else depreciation alone (partial).
+
+    The choice used to be made once for the whole window, so a filer that
+    reported amortization for only part of it (Alphabet) got depreciation
+    alone in EVERY quarter, including those where the full figure was
+    there. `present` should hold at most one of the first strategy's
+    candidates — the one the mapper selected; the first found is used."""
+    spec = field(name)
+    for i, strategy in enumerate(spec.strategies):
+        tags = [concept for _taxonomy, concept in strategy.tags]
+        if strategy.composition is Composition.SINGLE:
+            tag = next((t for t in tags if t in present), None)
+            if tag is not None:
+                return Resolved(present[tag], SINGLE if i == 0 else PARTIAL, (tag,))
+        elif strategy.composition is Composition.SUM_ALL_REQUIRED:
+            if all(t in present for t in tags):
+                total = 0.0
+                for t in tags:
+                    total += present[t]
+                return Resolved(total, COMPOSITE, tuple(tags))
+    return None

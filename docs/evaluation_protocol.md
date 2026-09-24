@@ -250,6 +250,27 @@ Mid-window changes (0.4.0 window):
    carried the same gaps; anchors are not re-fit mid-window — a window-close
    item.
 
+10. **2026-09-24 — SG&A and D&A resolved per quarter (Hermes re-audit,
+    finding 1).** Entry #8 still chose ONE strategy for the whole window, so
+    a filer reporting amortization for only part of it got depreciation
+    alone in every quarter: Alphabet 2026-06-30 D&A $7.104B instead of
+    $7.471B (`capex_to_da` 3.74 instead of 3.56, per Hermes on live data).
+    Now `composition.resolve_by_strategy` resolves each quarter from the
+    field's registry strategies — its own concept (D&A: the selected
+    aggregate tag), else every component summed, else the partial fallback
+    (depreciation alone) — and the restatement detector rebuilds SG&A and
+    D&A with the same function. A depreciation-only quarter keeps its value
+    and is named as partial in the field notes (operator decision
+    2026-09-24, as for debt). Each reported quarter's strategy, components,
+    method and partial flag are recorded (`FieldDiagnostic.period_sources`)
+    and pinned in `selection_snapshot.json`. **A correction of mapped input
+    values, not a scoring change.** AAPL/KO/CRM report their own SG&A/D&A
+    concept (or CRM's composite) in every quarter: calibration snapshot and
+    golden byte-identical. Selection snapshot: `da_amortization_partial` and
+    `tag_choice` re-resolved per quarter, `da_google_pattern` added, every
+    case gains per-quarter provenance. Proof:
+    `tests/unit/test_strategy_resolution.py`, `test_selection_snapshot.py`.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.
