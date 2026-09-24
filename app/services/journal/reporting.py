@@ -18,6 +18,7 @@ from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import (
     fetch_dataset_snapshot,
     fetch_submissions_snapshot,
+    replay_snapshot,
     store_vintage_snapshot,
 )
 from app.services.ingestion.edgar_documents import fetch_documents
@@ -29,6 +30,17 @@ from app.services.scoring.thermometer import describe
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
+
+
+def replay_banner(as_of: date, source: str, rebuilt_on: date) -> str:
+    """The first thing a replayed report says: what it is, and what it is not."""
+    return (
+        f"> **HISTORICAL REPLAY — as of {as_of}.** Rebuilt on {rebuilt_on} from "
+        f"{source}. Every evidence stream is cut at {as_of} (filed on or before). "
+        "It is not the report a reader saw that day: the code is today's, and "
+        "documents, offerings and 8-K events can only see filings that today's "
+        "filing index (SEC's recent-filings block) still lists."
+    )
 
 
 def report_path(ticker: str, day: str | None = None) -> Path:
@@ -44,6 +56,7 @@ def build_report(
     out_dir: Path | None = None,
     banner: str | None = None,
     vintage: bool = True,
+    replay: bool = False,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -63,17 +76,37 @@ def build_report(
     it IS the locked entry's day (watch.py hands it to ``journal.py report
     --date``), so the report diffs the newest snapshot against the one taken
     at or before the lock. It still never sets ``generated_on`` (below).
+
+    ``replay`` rebuilds the report AS OF ``report_day`` instead (historical
+    replay): fundamentals from the newest vintage snapshot captured by then,
+    else today's payload cut there; documents filed by then; every evidence
+    stream cut there (they all anchor on ``generated_on``, which a replay sets
+    to that day). Nothing is archived, the report opens with a replay banner
+    and is written to ``<TICKER>_<day>.replay.md``, never over a real report.
     """
     ticker = ticker.upper()
+    as_of: date | None = None
+    replay_source = ""
+    if replay:
+        if not report_day:
+            raise ValueError("a historical replay needs the day to replay (report_day)")
+        as_of = date.fromisoformat(report_day)
     client = SecClient(fresh=fresh)
-    snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
+    if as_of is not None:
+        snapshot, replay_source = replay_snapshot(client, ticker, as_of, n_quarters=quarters)
+        vintage_note: str | None = "not captured (historical replay)"
+    else:
+        snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
+        vintage_note = store_vintage_snapshot(
+            client, ticker, snapshot.company_facts, enabled=vintage
+        )
     dataset, diag = snapshot.dataset, snapshot.diagnostics
-    vintage_note = store_vintage_snapshot(client, ticker, snapshot.company_facts, enabled=vintage)
     submissions = fetch_submissions_snapshot(ticker, client)
     doc_diagnostics: list[str] = []
     if with_docs:
         docs = fetch_documents(
-            client, ticker, snapshot.company_facts, n_filings=8, submissions=submissions
+            client, ticker, snapshot.company_facts, n_filings=8, submissions=submissions,
+            before=as_of,
         )
         dataset.documents = docs.documents
         doc_diagnostics = list(docs.diagnostics)
@@ -83,11 +116,15 @@ def build_report(
     # date, never a historical `report_day`. `report_day` only names the output
     # file (to match the journal entry). A true historical replay would require
     # PIT fundamentals + `filed <= as_of` across every stream (the pit.py path),
-    # which this regeneration does not do.
-    generated_on = date.today().isoformat()
+    # which this regeneration does not do — a replay (below) does.
+    generated_on = (as_of or date.today()).isoformat()
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     target_dir = out_dir if out_dir is not None else REPORTS
-    out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}.md"
+    suffix = ".replay.md" if replay else ".md"
+    out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}{suffix}"
+    warnings = list(diag.warnings)
+    if as_of is not None:
+        warnings.append(f"HISTORICAL REPLAY as of {as_of}: fundamentals from {replay_source}.")
     report, thermometer = build_full_report(
         result, dataset,
         generated_on=generated_on,
@@ -97,7 +134,7 @@ def build_report(
         client=client,
         ticker=ticker,
         fetched_at=fetched_at,
-        warnings=diag.warnings,
+        warnings=warnings,
         field_notes=diag.field_notes(),
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
@@ -109,6 +146,8 @@ def build_report(
         # The same claims as data, each with the filings behind it.
         ledger_out=ledger_path(out),
     )
+    if as_of is not None:
+        report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"
     if banner:
         report = f"{banner}\n\n{report}"
     target_dir.mkdir(parents=True, exist_ok=True)
