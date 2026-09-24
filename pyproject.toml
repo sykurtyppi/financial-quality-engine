@@ -96,6 +96,7 @@ module = [
     "app.schemas.ledger",
     "app.services.reporting.ledger",
     "app.services.corpus",
+    "app.services.ingestion.filing_events",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

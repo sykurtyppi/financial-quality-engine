@@ -341,6 +341,35 @@ def _non_reliance_items(b: _Builder, events: Any, since: date, report_date: date
         )
 
 
+# Ledger kinds for filing events: the card's signal name where the event has
+# one (so a 4.02 keeps the id it had before this stream existed).
+_EVENT_KINDS = {
+    "non_reliance": "non_reliance_8k_402",
+    "auditor_change": "auditor_change_8k_401",
+    "late_filing_notice": "missed_deadline_nt",
+    "impairment": "impairment_8k_206",
+    "amendment": "periodic_report_amendment",
+    "filing_lag": "filing_lag_drift",
+}
+
+
+def _filing_event_items(b: _Builder, fe: Any) -> None:
+    """Every dated filing event, each resting on the filing itself."""
+    for e in fe.events:
+        kind = _EVENT_KINDS[e.kind]
+        p = _filing(e.accession, e.form, e.filed, role=e.kind)
+        b.add(
+            _id(kind, e.accession),
+            plane=Plane.FILING_BEHAVIOR, kind=kind, subject=e.form, claim=e.detail,
+            provenance=(p,) if p else (),
+            change_state="announced" if e.signal else None,
+            validation_status=(
+                _status({e.signal}) if e.signal else ValidationStatus.DIRECTIONAL
+            ),
+            why_unsourced="the filing is not fully identified",
+        )
+
+
 def _snapshot(obs: Any, role: str) -> Provenance:
     return Provenance(
         kind="snapshot", snapshot_sha256=obs.sha256,
@@ -418,7 +447,7 @@ def build_ledger(
     errors: dict[str, Any] | None = None,
 ) -> LedgerDocument:
     """The ledger of one run. `streams` holds the raw stream objects
-    (`offerings`, `restatements`, `events`, `vintage`) when a client ran
+    (`offerings`, `restatements`, `events`, `filing_events`, `vintage`) when a client ran
     them; `errors` the per-stream failures, as the report renders them."""
     b = _Builder()
     metric_ids = _metric_items(b, result.evidence, dataset)
@@ -434,7 +463,9 @@ def build_ledger(
         _footprint_items(b, scan.footprints)
         _derived_items(b, scan.derived)
     floor = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
-    if (events := streams.get("events")) is not None:
+    if (behaviour := streams.get("filing_events")) is not None:
+        _filing_event_items(b, behaviour)
+    elif (events := streams.get("events")) is not None:
         _non_reliance_items(b, events, floor, report_date)
     rep = streams.get("vintage")
     if rep is not None:
@@ -456,7 +487,7 @@ def build_ledger(
         selections=selections,
         streams={
             name: _stream_state(name, ran, errors, rep)
-            for name in ("offerings", "restatements", "events", "vintage")
+            for name in ("offerings", "restatements", "events", "filing_events", "vintage")
         },
         items=b.items,
         unsourced=b.unsourced,
