@@ -41,6 +41,7 @@ from app.services.ingestion.companyfacts_mapper import (
 from app.services.ingestion.composition import compose_total_debt, resolve_by_strategy
 from app.services.ingestion.fields import FIELDS
 from app.services.ingestion.payloads import concept_rows
+from app.services.ingestion.precedence import Rank, conflicts, earliest, latest, rank
 
 # Relative change below which a same-period revision is treated as rounding or
 # an immaterial reclassification rather than a restatement. The XBRL survey
@@ -111,6 +112,24 @@ class RestatementFootprint:
 
 
 @dataclass(frozen=True)
+class SameDayConflict:
+    """Facts for one period filed on one day, at one amendment level, that
+    disagree. Companyfacts records dates, not times, so which of them counts
+    is the `precedence` convention (highest accession) — reported so a
+    reader knows the choice was a convention. Never a revision, never
+    promoted."""
+
+    field_name: str
+    tag: str  # the component concept that carries the conflict
+    period_end: date
+    period_start: date | None
+    filed: date
+    amended: bool
+    values: tuple[float, ...]
+    accessions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RestatementScan:
     """What one restatement check actually covered, alongside what it found.
 
@@ -137,6 +156,7 @@ class RestatementScan:
     as_of: date | None
     period_since: date | None
     materiality_pct: float
+    conflicts: tuple[SameDayConflict, ...] = ()
 
     @property
     def total(self) -> int:
@@ -264,6 +284,31 @@ _COMPOSERS = {
 }
 
 
+def _trail(
+    facts_json: dict, taxonomy: str, tag: str, unit: str, as_of: date | None
+) -> dict[tuple[date | None, date], list[tuple[date, float, str, str]]]:
+    """Every eligible filing of each period of one concept, as
+    `(filed, value, form, accession)` in companyfacts order."""
+    rows: dict[tuple[date | None, date], list[tuple[date, float, str, str]]] = {}
+    for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
+        try:
+            key = (_parse_date(e["start"]) if "start" in e else None, _parse_date(e["end"]))
+            rows.setdefault(key, []).append(
+                (_parse_date(e["filed"]), float(e["val"]), e.get("form", ""), e.get("accn", ""))
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    return rows
+
+
+def _order(f: tuple) -> Rank:
+    """Current-fact order (`precedence`) of a trail row `(filed, value, form,
+    accession, ...)`. A composite vintage carries its own rank as element 5:
+    its form and accession describe what was filed at that level, which can
+    be nothing the composer counted."""
+    return f[5] if len(f) > 5 else rank(f[0], f[2], f[3])
+
+
 def _composite_vintages(
     facts_json: dict,
     components: list[tuple[str, str]],
@@ -271,13 +316,17 @@ def _composite_vintages(
     as_of: date | None,
     *,
     compose: Callable[[Mapping[str, float]], tuple[float, tuple[str, ...]] | None] | None = None,
-) -> dict[tuple[date | None, date], list[tuple[date, float, str, str, frozenset[str]]]]:
+) -> dict[tuple[date | None, date], list[tuple[date, float, str, str, frozenset[str], Rank]]]:
     """Rebuild a summed field's value as it stood at each filing vintage.
 
-    For every period, a vintage is any date on which some component was filed.
-    The aggregate at that vintage sums each component's latest value filed on
-    or before it — so a component the amendment did not re-report carries
+    For every period, a vintage is any LEVEL — filing date and amendment
+    status (`precedence.level`) — at which some component was filed. The
+    aggregate at that vintage sums each component's current value at or
+    below it — so a component the amendment did not re-report carries
     forward, which is what the mapper does and therefore what was scored.
+    An original and its amendment filed on one day are two vintages, not
+    one: keyed by date alone, the amendment's state was never built and a
+    real 110 -> 160 restatement disappeared (Hermes round 3).
 
     The contributing component set travels with each vintage. A vintage where
     a component is simply ABSENT (a tag the filer had not started using) is a
@@ -286,28 +335,19 @@ def _composite_vintages(
     change — the failure this module's header already warns about for single
     tags. The caller drops such pairs.
     """
-    per_component: dict[tuple[str, str], dict[tuple[date | None, date], list]] = {}
-    for taxonomy, tag in components:
-        rows: dict[tuple[date | None, date], list] = {}
-        for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
-            try:
-                key = (_parse_date(e["start"]) if "start" in e else None, _parse_date(e["end"]))
-                rows.setdefault(key, []).append(
-                    (_parse_date(e["filed"]), float(e["val"]),
-                     e.get("form", ""), e.get("accn", ""))
-                )
-            except (KeyError, ValueError, TypeError):
-                continue
-        per_component[(taxonomy, tag)] = rows
+    per_component: dict[tuple[str, str], dict[tuple[date | None, date], list]] = {
+        (taxonomy, tag): _trail(facts_json, taxonomy, tag, unit, as_of)
+        for taxonomy, tag in components
+    }
 
     out: dict[tuple[date | None, date], list] = {}
     keys = {k for rows in per_component.values() for k in rows}
     for key in keys:
-        vintages = sorted({f[0] for rows in per_component.values() for f in rows.get(key, [])})
-        for vintage in vintages:
-            # Latest value of each component filed on or before this vintage.
-            # Same tie rule as the mapper: max() keeps the FIRST fact at the
-            # latest date. Iterated in a fixed tag order, not the order the
+        levels = sorted({_order(f)[:2] for rows in per_component.values() for f in rows.get(key, [])})
+        for lvl in levels:
+            vintage = lvl[0]
+            # Current value of each component at or below this level, by the
+            # mapper's own order (`precedence`). Iterated in a fixed tag order, not the order the
             # selection string happened to list the components: float
             # addition is not associative, and iteration order once moved
             # the aggregate by ~1e-13 — never enough to flip a materiality
@@ -315,9 +355,9 @@ def _composite_vintages(
             # byte-identically.
             latest_by: dict[tuple[str, str], tuple] = {}
             for (taxonomy, tag), rows in sorted(per_component.items()):
-                eligible = [f for f in rows.get(key, []) if f[0] <= vintage]
+                eligible = [f for f in rows.get(key, []) if _order(f)[:2] <= lvl]
                 if eligible:
-                    latest_by[(taxonomy, tag)] = max(eligible, key=lambda f: f[0])
+                    latest_by[(taxonomy, tag)] = latest(eligible, key=_order)
             if compose is not None:
                 # Not a sum of whatever was filed: aggregate current debt
                 # excludes the current portion, an aggregate D&A tag
@@ -334,7 +374,7 @@ def _composite_vintages(
                 for f in counted.values():
                     total += f[1]
             present = {f"{taxonomy}:{tag}" for taxonomy, tag in counted}
-            filed_today = [(f[2], f[3]) for f in counted.values() if f[0] == vintage]
+            filed_today = [(f[2], f[3]) for f in counted.values() if _order(f)[:2] == lvl]
             form = accn = ""
             # Provenance across EVERY component filed on this date, not the
             # first one encountered. Several components can move a summed
@@ -350,7 +390,7 @@ def _composite_vintages(
                 )
             if present:
                 out.setdefault(key, []).append(
-                    (vintage, total, form, accn, frozenset(present))
+                    (vintage, total, form, accn, frozenset(present), (lvl[0], lvl[1], accn))
                 )
     return out
 
@@ -462,6 +502,7 @@ def scan_restatements(
     inspected: list[str] = []
     uninspected: dict[str, str] = {}
     excluded: dict[str, str] = {}
+    same_day: list[SameDayConflict] = []
 
     for field_name, candidates in _fields_to_inspect(selected_tags).items():
         if field_name in SPLIT_ADJUSTED_FIELDS:
@@ -502,18 +543,7 @@ def scan_restatements(
             )))
         else:
             for taxonomy, tag in series:
-                by_key: dict[tuple[date | None, date], list] = {}
-                for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
-                    try:
-                        key = (_parse_date(e["start"]) if "start" in e else None,
-                               _parse_date(e["end"]))
-                        by_key.setdefault(key, []).append(
-                            (_parse_date(e["filed"]), float(e["val"]),
-                             e.get("form", ""), e.get("accn", ""))
-                        )
-                    except (KeyError, ValueError, TypeError):
-                        continue
-                groups.append((f"{taxonomy}:{tag}", by_key))
+                groups.append((f"{taxonomy}:{tag}", _trail(facts_json, taxonomy, tag, unit, as_of)))
 
         if not any(by_key for _tag, by_key in groups):
             # A resolved series with no eligible fact at all (unit mismatch,
@@ -525,6 +555,21 @@ def scan_restatements(
             continue
         inspected.append(field_name)
 
+        # Same-day disagreements, per component concept: in a summed field
+        # the component is where the choice was made.
+        for taxonomy, tag in series:
+            for (start, end), trail in _trail(facts_json, taxonomy, tag, unit, as_of).items():
+                if period_since is not None and end < period_since:
+                    continue
+                for group in conflicts(trail, key=_order, value=lambda f: f[1]):
+                    same_day.append(SameDayConflict(
+                        field_name=field_name, tag=f"{taxonomy}:{tag}",
+                        period_end=end, period_start=start,
+                        filed=group[0][0], amended=group[0][2].endswith("/A"),
+                        values=tuple(f[1] for f in group),
+                        accessions=tuple(f[3] for f in group),
+                    ))
+
         for qualified_tag, by_key in groups:
             for (start, end), filings in by_key.items():
                 if len(filings) < 2 or (qualified_tag, start, end) in seen:
@@ -532,14 +577,12 @@ def scan_restatements(
                 if period_since is not None and end < period_since:
                     continue
                 # `filings` is in companyfacts order (same source the mapper
-                # reads). `current` MUST resolve same-day filed ties the way the
-                # mapper's _dedupe_latest_filed does — it keeps the FIRST fact at
-                # the latest filed date (`>` not `>=`). Python's max()/min()
-                # return the FIRST extremal element, so max(...key=filed) on the
-                # unsorted list reproduces exactly what the mapper scores
-                # (round-8 finding: sort()+filings[-1] picked the LAST same-day
-                # fact and diverged from scoring).
-                current = max(filings, key=lambda f: f[0])  # latest filed = mapper's value
+                # reads). `current` MUST resolve same-day ties the way the
+                # mapper's _dedupe_latest_filed does — the shared `precedence`
+                # order, keeping the FIRST fact on a full tie (round-8 finding:
+                # sort()+filings[-1] picked the LAST same-day fact and diverged
+                # from scoring).
+                current = latest(filings, key=_order)  # the mapper's value
 
                 if composite:
                     # A vintage where some component did not yet exist
@@ -559,7 +602,16 @@ def scan_restatements(
                         continue
                     filings = stable
 
-                orig = min(filings, key=lambda f: f[0])  # earliest filed
+                orig = earliest(filings, key=_order)  # as first reported
+                # A revision crosses filing levels. Facts sharing the original's
+                # date and amendment status that disagree with it are a
+                # same-day conflict (listed in `scan.conflicts`), not a later
+                # filing changing an earlier one — without this, the accession
+                # tie-break would turn one day's ambiguity into a "revision".
+                first_level = _order(orig)[:2]
+                filings = [f for f in filings if f is orig or _order(f)[:2] != first_level]
+                if len(filings) < 2:
+                    continue
 
                 # Keep the CURRENT value and the amendment EVENT separate (round-7).
                 # `material` = every filing that materially deviates from the
@@ -577,7 +629,7 @@ def scan_restatements(
                 if not material:
                     continue
                 material_amendments = [f for f in material if f[2].endswith("/A")]
-                amendment = max(material_amendments, key=lambda f: f[0]) if material_amendments else None
+                amendment = latest(material_amendments, key=_order) if material_amendments else None
                 # Emit iff there is a NET change (current materially differs from
                 # original) OR a formal /A amendment. A transient non-amendment
                 # revision that fully reverted (current back at ~original, no /A)
@@ -615,6 +667,9 @@ def scan_restatements(
         as_of=as_of,
         period_since=period_since,
         materiality_pct=materiality_pct,
+        conflicts=tuple(sorted(
+            same_day, key=lambda c: (c.period_end, c.field_name, c.tag, c.filed), reverse=True
+        )),
     )
 
 
@@ -669,12 +724,19 @@ def render_restatements_section(scan: RestatementScan) -> str:
             f"- ⚠ Incomplete: {len(scan.uninspected)} field(s) could not be inspected. "
             "Their absence below is a data gap, not evidence of no revision."
         )
+    if scan.conflicts:
+        lines.append(
+            f"- ⚠ {len(scan.conflicts)} same-day conflict(s): one day's filings report "
+            "different values for one period, so which counts is a convention, not "
+            "something the filings establish. Not revisions; listed at the end."
+        )
     lines.append("")
     if not footprints:
         lines.append(
             f"- No revisions detected above the {scan.materiality_pct:.0%} materiality "
             f"threshold among the {len(scan.inspected)} inspected field(s)."
         )
+        lines.extend(_conflict_lines(scan.conflicts))
         return "\n".join(lines)
 
     amended = [f for f in footprints if f.is_amendment]
@@ -706,4 +768,37 @@ def render_restatements_section(scan: RestatementScan) -> str:
     if amended:
         summary += f"; **{len(amended)} via amended (/A) filings**"
     lines.append(summary + ".")
+    lines.extend(_conflict_lines(scan.conflicts))
     return "\n".join(lines)
+
+
+def _conflict_lines(found: tuple[SameDayConflict, ...]) -> list[str]:
+    """Same-day disagreements: evidence of an ambiguity, never a revision.
+    Companyfacts dates filings but does not order them within a day; the
+    value used is the `precedence` convention (higher accession, else the
+    first listed)."""
+    if not found:
+        return []
+    lines = [
+        "",
+        "### Same-day conflicting facts (not revisions)",
+        "",
+        "_Several values filed on one day, at one amendment level, for one period. "
+        "Companyfacts does not record which came last, so the value used is a "
+        "convention (the higher accession number, else the first listed). Read the "
+        "filings before relying on either._",
+        "",
+        "| Period | Field | Component | Filed | Values | Accessions |",
+        "|---|---|---|---|---|---|",
+    ]
+    for c in found[:_MAX_ROWS]:
+        period = f"{c.period_start} → {c.period_end}" if c.period_start else f"{c.period_end}"
+        values = ", ".join(f"{v:,.0f}" for v in c.values)
+        form = " (amendment)" if c.amended else ""
+        lines.append(
+            f"| {period} | {c.field_name} | {c.tag} | {c.filed}{form} | {values} | "
+            f"{', '.join(dict.fromkeys(c.accessions))} |"
+        )
+    if len(found) > _MAX_ROWS:
+        lines.append(f"| … | {len(found) - _MAX_ROWS} more | | | | |")
+    return lines

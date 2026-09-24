@@ -270,6 +270,29 @@ Mid-window changes (0.4.0 window):
     `tag_choice` re-resolved per quarter, `da_google_pattern` added, every
     case gains per-quarter provenance. Proof:
     `tests/unit/test_strategy_resolution.py`, `test_selection_snapshot.py`.
+11. **2026-09-24 — one order for facts filed on the same day (Hermes audit
+    round 3, finding 1).** Companyfacts dates a filing but does not time
+    it. Every "latest filed wins" site broke same-day ties by taking the
+    first row, so an original 10-Q and its 10-Q/A filed on one day scored
+    the ORIGINAL, and the summed-field restatement check, which keyed its
+    vintages by date, never built the amended state: S&M 100 → 150 by a
+    same-day /A (G&A 10) scored 110 and produced no footprint. Now
+    `ingestion/precedence.py` orders facts by filed date, then amendment
+    over original, then accession number, and the mapper, the restatement
+    check (single and summed fields), and the vintage store all use it; the
+    same case scores 160 and reports 110 → 160 as an amendment. Where facts
+    on one day and level still disagree, the choice is a convention: the
+    mapper notes it per field and quarter, and the restatement section lists
+    it as a same-day conflict — never a revision, never Tier-1. Acceptance
+    times are not used: companyfacts does not carry them, and the vintage
+    store, replay and backtests hold only companyfacts (operator decision
+    2026-09-24). **A correction of mapped input values on same-day ties
+    only.** No AAPL/KO/CRM fixture has two facts for one period filed on one
+    day: calibration snapshot and golden byte-identical, AAPL/KO/CRM
+    reports byte-identical to `7129f1d`. Selection snapshot: two synthetic
+    same-day ties (same form, same accession) keep their values and gain
+    the conflict note. Proof: `tests/unit/test_same_day_precedence.py`,
+    `test_pit_agreement.py::TestSameDayTieRule`, `test_selection_snapshot.py`.
 
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —

@@ -209,9 +209,9 @@ class TestFilingTrail:
 
     def test_same_day_tie_matches_mapper(self):
         # Round-8 finding: when the two latest facts share a filed date, the
-        # reported current_value must equal what the mapper actually keeps. The
-        # mapper's _dedupe_latest_filed keeps the FIRST fact at the max filed
-        # date (`>` not `>=`); current must resolve the tie the same way.
+        # reported current_value must equal what the mapper actually keeps.
+        # Both follow `precedence`: same day and form, so the higher
+        # accession — whichever order the rows arrive in.
         from datetime import date as _date
 
         from app.services.ingestion.companyfacts_mapper import (
@@ -231,7 +231,9 @@ class TestFilingTrail:
         fps = detect_restatements(fj)
         assert len(fps) == 1
         assert fps[0].current_value == mapper_value  # report agrees with scoring
-        assert fps[0].current_value == 100.0  # first same-day fact, not 120
+        assert fps[0].current_value == 120.0  # accession C over B
+        swapped = _facts({"Assets": [entries[0], entries[2], entries[1]]})
+        assert detect_restatements(swapped)[0].current_value == 120.0
 
     def test_ongoing_regular_revision_surfaces_as_current(self):
         # A -> B via an ordinary later filing (net change, no /A): current = B,
