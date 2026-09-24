@@ -40,6 +40,7 @@ IngestionDiagnostics.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -215,6 +216,43 @@ class IngestionDiagnostics(BaseModel):
 
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _filed_by(entry: object, as_of: date) -> bool:
+    """Whether a companyfacts entry was filed on or before `as_of`. An entry
+    that cannot be dated cannot be placed before the date: it is not
+    visible (including it would leak whatever it reports)."""
+    if not isinstance(entry, dict):
+        return False
+    filed = entry.get("filed")
+    if not isinstance(filed, str) or not _ISO_DATE.fullmatch(filed):
+        return False
+    try:
+        return date.fromisoformat(filed) <= as_of
+    except ValueError:
+        return False
+
+
+def _visible_as_of(facts_json: dict, as_of: date) -> dict:
+    """The payload as a reader on `as_of` could have seen it: only entries
+    filed on or before that day, and no unit or concept left empty — so the
+    mis-filed share-count fallback in `_collect` sees exactly what it would
+    have seen then. Every read the mapper makes goes through this view,
+    quarter-end selection and the fiscal calendar included."""
+    out: dict = {"entityName": facts_json.get("entityName"), "facts": {}}
+    for taxonomy, tags in facts_json.get("facts", {}).items():
+        for tag, concept in tags.items():
+            units = {
+                unit: kept
+                for unit, entries in concept.get("units", {}).items()
+                if (kept := [e for e in entries if _filed_by(e, as_of)])
+            }
+            if units:
+                out["facts"].setdefault(taxonomy, {})[tag] = {"units": units}
+    return out
 
 
 def _collect(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[RawFact]:
@@ -811,7 +849,18 @@ def build_dataset(
     ticker: str,
     n_quarters: int = 8,
     sector: str | None = None,
+    *,
+    as_of: date | None = None,
 ) -> tuple[CompanyDataset, IngestionDiagnostics]:
+    """Map a companyfacts payload to quarterly periods plus diagnostics.
+
+    `as_of` builds the dataset a reader on that day could have built: only
+    facts filed on or before it (undated facts excluded), so latest-filed-wins
+    resolves among what was then known. It is the one point-in-time path —
+    `pit.build_pit_dataset` is a wrapper of it.
+    """
+    if as_of is not None:
+        facts_json = _visible_as_of(facts_json, as_of)
     # Extended window: edge quarters need earlier history for YTD differencing
     # and FY-minus-3Q derivation; the output is trimmed back afterwards.
     extended_ends = select_quarter_ends(facts_json, n_quarters + WINDOW_BUFFER_QUARTERS)

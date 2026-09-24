@@ -288,22 +288,21 @@ class TestWindowAndCitation:
 
 
 class TestWiring:
-    def test_derive_for_ticker_filters_facts_before_mapping(self, monkeypatch):
+    def test_derive_for_ticker_maps_only_what_was_filed_by_the_cutoff(self, monkeypatch):
+        """The cutoff goes to the mapper itself (`build_dataset(as_of=)`, the
+        one point-in-time path): deriving from the print being assessed would
+        turn the current result into its own standing assumption."""
         cutoff = date(2026, 8, 25)
         raw = {"entityName": "Test", "facts": {}}
-        filtered = {"entityName": "Test", "facts": {}, "cutoff": cutoff.isoformat()}
         dataset = series(revenue=growing(100.0, 0.20))
 
         class Snapshot:
             company_facts = raw
 
         monkeypatch.setattr(dv, "fetch_dataset_snapshot", lambda *a, **k: Snapshot())
-        monkeypatch.setattr(
-            dv, "filter_as_of", lambda facts, as_of: filtered if (facts, as_of) == (raw, cutoff) else None
-        )
 
-        def build(facts, *, ticker, n_quarters):
-            assert facts is filtered
+        def build(facts, *, ticker, n_quarters, as_of):
+            assert facts is raw and as_of == cutoff
             assert ticker == "NVDA" and n_quarters == dv.DERIVE_QUARTERS
             return dataset, object()
 

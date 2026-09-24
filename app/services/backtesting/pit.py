@@ -38,7 +38,9 @@ def trim_to_mapped_tags(facts_json: dict) -> dict:
 
 
 def filter_as_of(facts_json: dict, as_of: date) -> dict:
-    """Keep only fact entries filed on or before `as_of`."""
+    """Keep only fact entries filed on or before `as_of`. The reference the
+    mapper's `build_dataset(as_of=)` is proven equal to; callers that map
+    the result should pass `as_of` to the mapper instead."""
     cutoff = as_of.isoformat()
     out = {"entityName": facts_json.get("entityName"), "facts": {}}
     for taxonomy, tags in facts_json.get("facts", {}).items():
@@ -60,5 +62,9 @@ def build_pit_dataset(
     n_quarters: int = 8,
     sector: str | None = None,
 ) -> tuple[CompanyDataset, IngestionDiagnostics]:
-    pit = filter_as_of(trimmed_facts, as_of)
-    return build_dataset(pit, ticker=ticker, n_quarters=n_quarters, sector=sector)
+    """The mapper's own point-in-time view (`build_dataset(as_of=)`).
+    `filter_as_of` stays as the reference it is proven equal to
+    (tests/unit/test_build_dataset_as_of.py)."""
+    return build_dataset(
+        trimmed_facts, ticker=ticker, n_quarters=n_quarters, sector=sector, as_of=as_of
+    )

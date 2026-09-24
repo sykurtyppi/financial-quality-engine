@@ -312,6 +312,29 @@ Mid-window changes (0.4.0 window):
     (`mixed_vintages`); every existing case unchanged. Proof:
     `tests/unit/test_coherent_derivation.py`, `test_selection_snapshot.py`.
 
+13. **2026-09-24 — one point-in-time path: `build_dataset(as_of=)`
+    (`pit.py`).** The mapper takes the as-of date itself. It reads the
+    payload through a view that keeps only facts filed on or before that
+    day (undated facts excluded, as `filter_as_of` excludes them), and the
+    view covers every read, quarter-end selection and the fiscal calendar
+    included. `pit.build_pit_dataset`, which every backtest and control
+    calls, is now a wrapper of it instead of filtering first and mapping
+    after. The brief's derivation, `validate_thermometer.py` and the
+    selection snapshot's `pit/` cases moved to the same path.
+    `filter_as_of` stays as the pinned reference. **No mapped value
+    moved.** Proof: `tests/unit/test_build_dataset_as_of.py` asserts
+    `build_dataset(filter_as_of(f, d)) == build_dataset(f, as_of=d)` —
+    dataset, per-value sources and diagnostics, exact, or the same refusal.
+    It covers every filing day (and the day before) and every quarter end
+    of the three real fixtures, plus generated payloads with undated facts,
+    same-day ties, amendments, composites and debt roles. Also:
+    `selection_snapshot.json` `golden --check` reports unchanged with its
+    `pit/` cases on the new path, and the calibration snapshot and golden
+    report are byte-identical. No backtest needs rerunning. One difference
+    on malformed input only: a `filed` value that is not a YYYY-MM-DD date
+    is invisible to a dated reader, where `filter_as_of` compared strings.
+    SEC payloads always carry the ISO form.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.
