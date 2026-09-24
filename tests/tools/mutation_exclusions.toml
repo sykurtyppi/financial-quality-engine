@@ -1,0 +1,184 @@
+# Reviewed surviving mutants. Each entry records what a person concluded
+# about one survivor; `kind` says which conclusion (Hermes audit round 6):
+#
+# - "equivalent": no input can tell the mutant from the original. Excluded
+#   from the kill rate and listed with its argument.
+# - "accepted": the mutant DOES behave differently on some input, and that
+#   was accepted: a deliberate policy boundary (a display cap), or a
+#   difference reachable only on malformed input. Excluded from the rate but
+#   listed on its own. Needs `owner` and `review_by` (a date); the run fails
+#   once that date has passed, so an acceptance is looked at again.
+# - "tracked": a known gap being worked. NOT excluded: it still counts as a
+#   survivor; the summary only names it.
+#
+# One entry per mutant, recognised by module, operator and the ORIGINAL line
+# (stripped), not by line number:
+#
+#   [[exclusion]]
+#   kind = "equivalent"
+#   path = "app/services/journal/resolver.py"
+#   operator = "cmp"
+#   source = "if ref.sign > 0 and ref.end >= period.period_end and ref not in out:"
+#   reason = "why no input can tell the mutant from the original"
+#
+# An entry must match exactly one current site (none: the code it argued
+# about has changed; several: add `change` or `function` to say which), and
+# an entry without a reason or kind is refused. "Probably harmless" is a test
+# gap, not an exclusion.
+#
+# For the `continue` operator, `source` is the guard line above the
+# `continue`, then " continue" (a bare `continue` would match them all).
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/restatements.py"
+operator = "continue"
+source = "if not isinstance(row, dict): continue"
+reason = "A payload row is JSON: every non-dict (list, str, number, bool, null) raises TypeError on row[\"filed\"] in the try just below, whose except also continues. Skipping earlier or there is the same outcome."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "continue"
+source = "if not facts: continue"
+reason = "An empty candidate builds an empty series, whose coverage key (0, 0, -rank) fails the `key[1] > 0` test, so it can never be chosen. Skipping it early only saves the work."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/restatements.py"
+operator = "continue"
+source = "if len(stable) < 2: continue"
+function = "scan_restatements"
+reason = "Dropping it passes a one-element `filings` on; the first-level filter below only removes elements, and the `if len(filings) < 2: continue` after it skips the period exactly as this guard does."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/restatements.py"
+operator = "continue"
+source = "if not material: continue"
+function = "scan_restatements"
+reason = "With `material` empty, `material_amendments` is empty, `amendment` is None and `current not in material` holds, so the emit guard just below (`current not in material and amendment is None`) skips the period the same way."
+
+[[exclusion]]
+kind = "accepted"
+path = "app/services/ingestion/restatements.py"
+operator = "const"
+source = "_MAX_ROWS = 20  # spinoff/discontinued-ops re-presentation can produce many rows"
+reason = "A display cap, and NOT equivalent: with 21 rows, 21 render instead of 20 plus '+1 more'. Rows past the cap are counted in the table's '+N more' line (pinned at the cap, whatever its value, by test_long_tables_say_how_many_rows_were_left_out), so no footprint goes unreported; the value 20 is a readability choice, not a finding."
+owner = "repo owner"
+review_by = 2026-11-20
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "cmp"
+source = "f for f in self.by_key.values() if f.end == qend and f.days and f.days > QTD_DAYS[1]"
+change = "> -> >="
+reason = "A fact of exactly QTD_DAYS[1] days ending at the quarter end is a direct quarter: `_find(qend, *QTD_DAYS)` above is inclusive and takes it first, and this year-to-date branch runs only when no direct quarter exists, so no such fact ever reaches this filter."
+
+[[exclusion]]
+kind = "accepted"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "cmp"
+source = "if all(p in values and annual.start <= p for p in prior):"
+change = "<= -> <"
+reason = "NOT equivalent — unreachable on well-formed filings: it differs only when one of the three prior quarter ends falls ON the annual period's first day, i.e. a quarter ending the day the fiscal year starts. A fiscal year starts the day after the preceding quarter ends, so no filing we know of produces it. Revisit if a real payload does."
+owner = "repo owner"
+review_by = 2026-11-20
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/restatements.py"
+operator = "cmp"
+source = "return f[5] if len(f) > 5 else rank(f[0], f[2], f[3])"
+reason = "Trail rows come in exactly two shapes: `_trail` builds 4-tuples (filed, value, form, accession) and `_composite_vintages` 6-tuples that carry their rank as element 5. No row has length 5, the only length on which `> 5` and `>= 5` differ."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "continue"
+source = "except (KeyError, ValueError, TypeError): continue"
+function = "_collect"
+reason = "The `continue` is the last statement of the loop body: after the handler runs, `pass` falls through to the next iteration exactly as `continue` jumps to it."
+
+[[exclusion]]
+kind = "accepted"
+path = "app/services/ingestion/restatements.py"
+operator = "cmp"
+source = "if (end - row_end).days <= 400 and row_end <= end:"
+change = "<= -> < in `(end - row_end).days <= 400`"
+reason = "NOT equivalent: a fact ending exactly 400 days before a derived quarter no longer adds its filing date as a rebuild date. 400 is a lookback buffer, not a boundary of the method: the facts a derived quarter is built from (the year-to-date or annual minuend, the prior year-to-date, the three prior quarters, composite parts) end at most about 280 days before it. An extra rebuild date can change the result only if the mapper's tag choice flips on that date."
+owner = "repo owner"
+review_by = 2026-11-20
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/restatements.py"
+operator = "continue"
+source = "except (KeyError, ValueError, TypeError): continue"
+function = "_trail"
+reason = "The `continue` is the last statement of the loop body: after the handler runs, `pass` falls through to the next row exactly as `continue` jumps to it."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/restatements.py"
+operator = "continue"
+source = "if len(filings) < 2: continue"
+function = "scan_restatements"
+reason = "Left with the original alone, `material` (the filings that differ from it) is empty, and the `if not material: continue` just below skips the period the same way."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/restatements.py"
+operator = "continue"
+source = "if len(stable) < 2: continue"
+function = "derived_revisions"
+reason = "A one-entry run makes `orig` and `cur` the same entry: `moved` is 0, so `moved / base < materiality_pct` (or `base == 0`) skips it on the next line."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "cmp"
+source = "prev_end = quarter_ends[i - 1] if i > 0 else None"
+function = "quarterly"
+reason = "At i == 0 the mutant takes the LAST quarter end as the previous one. A year-to-date fact ending at the first quarter can only be paired with a fact of the same start ending there or later, so the implied quarter is zero or negative days long and fails the QTD_DAYS check: no value either way."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "cmp"
+source = "e for e in by_end if q < e <= q + timedelta(days=tolerance_days)"
+function = "_instant_series"
+reason = "The nearest-date search runs only when `q in by_end` is false, so no key equals `q`: `q < e` and `q <= e` select the same dates."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "cmp"
+source = "if key[1] > 0 and (best_key is None or key > best_key):"
+change = "> -> >= in `key > best_key`"
+reason = "The ranking key ends in the candidate's negated position, so no two candidates ever have equal keys: `>` and `>=` choose the same one."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/companyfacts_mapper.py"
+operator = "continue"
+source = "if src.method == \"nearest\": continue"
+function = "_same_day_conflict_notes"
+reason = "A quarter read by cover date (`nearest`) has no fact of its concept ending on the quarter end — one would have been read directly — so the loop below finds no period to check and adds nothing."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/journal/resolver.py"
+operator = "cmp"
+source = "if ref.sign > 0 and ref.end >= period.period_end and ref not in out:"
+change = "> -> >="
+reason = "`FactRef.sign` is typed `Literal[-1, 1]` (`app/schemas/financials.Sign`): a ref with sign 0 — the only value on which `> 0` and `>= 0` differ — fails validation, so no ref reaching this line has one. (Hermes audit round 6: when `sign` was a plain int this entry was not true; `test_a_fact_ref_is_only_ever_added_or_subtracted` pins the type.)"
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/vintages.py"
+operator = "cmp"
+source = "if best is None or order > best[0]:"
+function = "_filing"
+reason = "`order` is (start, precedence rank = filed date, amendment status, accession), so two rows tie only with the same start, filed date and accession. One accession is one filing, so the form agrees too: the tuple `_filing` returns (filed, accession, form, start) is the same whichever of them is kept."
