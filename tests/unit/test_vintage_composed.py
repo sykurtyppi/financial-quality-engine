@@ -6,6 +6,11 @@ figures — total debt, a composite SG&A or D&A — never reached the
 silent-revision section or Tier-1. `diff_scored` compares those as the mapper
 builds them, and the invariant below holds for every scored field: move the
 facts it is built from and the diff reports it.
+
+Hermes re-audit: that still skipped D&A standing on depreciation alone, and
+the raw diff behind single-concept fields followed `_active_tag`, which can
+pick a tag the mapper does not score. Every scored field is now compared as
+the mapper builds it; raw facts are provenance and pre-window context only.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from tests.fixtures.selection_cases import (
     QUARTER_ENDS,
     Payload,
     annual,
+    duration,
     instant,
     quarter,
 )
@@ -39,15 +45,19 @@ LAST = QUARTER_ENDS[-1]
 FLOOR = date(2022, 1, 1)
 
 
-def _every_field(*, composites: bool) -> dict:
+def _every_field(*, composites: bool, da_partial: bool = False) -> dict:
     """A payload populating every field, each from one concept — or, with
     `composites`, SG&A and D&A from their components and total debt from
-    the split. Values differ by field and quarter."""
+    the split; with `da_partial`, D&A from depreciation alone (the partial
+    fallback). Values differ by field and quarter."""
     p = Payload("Every Field Co")
     for n, spec in enumerate(FIELDS):
         if spec.name == "total_debt":
             continue
         if composites and spec.name in ("sga_expense", "depreciation_amortization"):
+            continue
+        if da_partial and spec.name == "depreciation_amortization":
+            p.add("Depreciation", [quarter(q, 20.0 + i) for i, q in enumerate(QUARTER_ENDS)])
             continue
         taxonomy, tag = spec.strategies[0].tags[0]
         unit = spec.unit if spec.unit != "shares" else "shares"
@@ -95,10 +105,12 @@ def _first_component(facts: dict, field_name: str) -> str:
 SCORED = [f.name for f in FIELDS if f.name not in SPLIT_ADJUSTED_FIELDS]
 
 
-@pytest.mark.parametrize("composites", [False, True], ids=["single", "composed"])
+@pytest.mark.parametrize(
+    "form", ["single", "composed", "partial"], ids=["single", "composed", "partial-da"]
+)
 @pytest.mark.parametrize("field_name", SCORED)
-def test_moving_the_facts_behind_any_scored_field_is_reported(field_name, composites):
-    older = _every_field(composites=composites)
+def test_moving_the_facts_behind_any_scored_field_is_reported(field_name, form):
+    older = _every_field(composites=form == "composed", da_partial=form == "partial")
     newer = _bump(older, _first_component(older, field_name), QUARTER_ENDS[-3])
     moved = {c.field_name for c in diff_scored(older, newer).changes if c.kind == "revised"}
     assert field_name in moved
@@ -129,7 +141,7 @@ def test_a_composed_revision_is_promoted_to_tier_1_and_rendered():
     lines = silent_revision_tier1_lines(changes, "2026-09-01", "2026-09-02", period_since=FLOOR)
     assert any(line.startswith("Silent revision: total_debt for ") for line in lines)
     table = render_changes(changes, "2026-09-01", "2026-09-02")
-    assert "composed from LongTermDebtNoncurrent+LongTermDebtCurrent" in table
+    assert "built from LongTermDebtNoncurrent+LongTermDebtCurrent" in table
 
 
 def test_a_change_of_composition_is_reported_but_never_promoted():
@@ -185,9 +197,9 @@ def test_raw_rows_for_a_composed_field_are_not_reported():
 def test_an_unmappable_snapshot_says_composed_fields_were_not_compared():
     older = {"facts": {"us-gaap": {"Assets": {"units": {"USD": [instant(LAST, 1.0)]}}}}}
     result = diff_scored(older, _every_field(composites=False))
-    assert result.composed_unavailable == (
-        "composed fields (total debt, composite SG&A/D&A) not compared: the older "
-        "snapshot could not be mapped"
+    assert result.canonical_unavailable == (
+        "scored values not compared as the engine builds them: the older snapshot "
+        "could not be mapped (raw facts only)"
     )
 
 
@@ -198,8 +210,93 @@ def test_the_report_shows_a_total_debt_revision(tmp_path):
     store_snapshot(cik, older, now=datetime(2026, 9, 19, 12, tzinfo=UTC), root=tmp_path)
     store_snapshot(cik, newer, now=datetime(2026, 9, 20, 12, tzinfo=UTC), root=tmp_path)
     rep = report_diff(cik, as_of=date(2026, 9, 21), root=tmp_path)
-    assert rep.composed_unavailable is None
+    assert rep.canonical_unavailable is None
     assert [c.field_name for c in rep.changes_since_previous] == ["total_debt"]
     from app.services.reporting.report_builder import _silent_revisions_section
 
-    assert "composed from LongTermDebtNoncurrent+LongTermDebtCurrent" in _silent_revisions_section(rep)
+    assert "built from LongTermDebtNoncurrent+LongTermDebtCurrent" in _silent_revisions_section(rep)
+
+
+# --- one resolver: the vintage diff compares what the mapper scores ----------
+
+
+def test_a_revision_behind_the_partial_depreciation_fallback_is_reported_and_promoted():
+    # Hermes re-audit: canonical D&A 20 -> 40 on depreciation alone (no
+    # amortization reported) went unreported — neither the raw diff (which
+    # followed the aggregate candidates) nor the composed comparison (which
+    # skipped a qualified selection) looked at it.
+    older = _every_field(composites=False, da_partial=True)
+    q = QUARTER_ENDS[-2]
+    newer = _bump(older, "Depreciation", q, factor=2.0)
+    [c] = [c for c in diff_scored(older, newer).changes if c.field_name == "depreciation_amortization"]
+    assert (c.key.end, c.old_value, c.new_value) == (q, 30.0, 60.0)
+    assert c.key.taxonomy == COMPOSED and c.key.tag == "Depreciation (partial)"
+    lines = silent_revision_tier1_lines([c], "a", "b", period_since=FLOOR)
+    assert lines and lines[0].startswith("Silent revision: depreciation_amortization ")
+
+
+def _cash_tags_disagree() -> dict:
+    """The mapper scores CashAndCashEquivalentsAtCarryingValue (it covers
+    every reported quarter); `_active_tag` — the raw diff's approximation,
+    counting distinct periods over all history — picks the restricted-cash
+    tag, which the filer reported at many dates long ago."""
+    older = _every_field(composites=False)
+    del older["facts"]["us-gaap"]["CashAndCashEquivalentsAtCarryingValue"]
+    _add(older, "CashAndCashEquivalentsAtCarryingValue", [instant(q, 500.0 + i) for i, q in enumerate(QUARTER_ENDS[4:])])
+    old_dates = [date(2015 + k // 12, k % 12 + 1, 28) for k in range(40)]
+    _add(older, "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+         [instant(d, 1.0) for d in old_dates] + [instant(q, 520.0) for q in QUARTER_ENDS[:6]])
+    return older
+
+
+def test_the_raw_diffs_tag_approximation_does_not_decide_what_is_reported():
+    older = _cash_tags_disagree()
+    q = QUARTER_ENDS[5]  # a reported quarter
+    _ds, diag = build_dataset(older, "X")
+    assert diag.field_by_name("cash_and_equivalents").tag_used == (
+        "us-gaap:CashAndCashEquivalentsAtCarryingValue"
+    )
+    # The unscored tag moves: the raw diff reports it as cash; nothing scored moved.
+    noise = _bump(older, "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", q)
+    assert [c for c in diff_vintages(older, noise) if c.field_name == "cash_and_equivalents"]
+    assert not [c for c in diff_scored(older, noise).changes if c.field_name == "cash_and_equivalents"]
+    # The scored tag moves: the raw diff cannot see it; the scored diff
+    # reports it, with the filing of the fact behind it.
+    real = _bump(older, "CashAndCashEquivalentsAtCarryingValue", q)
+    assert not [c for c in diff_vintages(older, real) if c.field_name == "cash_and_equivalents"]
+    [c] = [c for c in diff_scored(older, real).changes if c.field_name == "cash_and_equivalents"]
+    assert c.key.tag == "CashAndCashEquivalentsAtCarryingValue" and c.old_accession
+    assert (c.old_value, c.new_value) == (501.0, 751.5)
+
+
+def test_a_single_concept_change_names_the_filing_behind_it():
+    older = _every_field(composites=False)
+    newer = _bump(older, "InventoryNet", QUARTER_ENDS[-3])
+    [c] = [c for c in diff_scored(older, newer).changes if c.field_name == "inventory"]
+    assert c.key.taxonomy == "us-gaap" and c.key.tag == "InventoryNet"
+    assert c.old_filed is not None and c.old_accession
+    assert "built from" not in render_changes([c], "a", "b")
+
+
+def test_an_old_period_revision_of_a_scored_tag_is_context_never_promoted():
+    older = _every_field(composites=False)
+    old_quarter = QUARTER_ENDS[1]  # before the reported window
+    newer = _bump(older, "InventoryNet", old_quarter)
+    changes = [c for c in diff_scored(older, newer).changes if c.field_name == "inventory"]
+    assert [(c.key.end, c.scope) for c in changes] == [(old_quarter, "context")]
+    assert not silent_revision_tier1_lines(changes, "a", "b", period_since=date(2000, 1, 1))
+    assert "(before the scored window)" in render_changes(changes, "a", "b")
+
+
+def test_provenance_names_the_quarters_own_fact_not_the_year_to_date_one():
+    # An ordinary 10-Q carries the quarter and the year to date, both ending
+    # on the quarter end. The scored value is the quarter's; so is its filing.
+    older = _every_field(composites=False)
+    q = QUARTER_ENDS[-3]  # 2024-06-30
+    tag = "RevenueFromContractWithCustomerExcludingAssessedTax"
+    ytd = duration(date(q.year, 1, 1), q, 9_999.0, filed=date(2024, 8, 30))
+    older["facts"]["us-gaap"][tag]["units"]["USD"].append(ytd)
+    newer = _bump(older, tag, q)
+    [c] = [c for c in diff_scored(older, newer).changes if c.field_name == "revenue"]
+    assert c.key.start == date(2024, 4, 1)
+    assert c.old_accession != ytd["accn"]

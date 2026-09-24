@@ -144,12 +144,12 @@ def test_a_baseline_older_than_previous_gets_its_own_block(tmp_path):
     rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 20), root=tmp_path)
     assert rep.changes_since_previous == []
     assert [c.new_value for c in rep.changes_since_baseline] == [1100.0]
-    # (These one-fact snapshots cannot be mapped, so the line says composed
-    # figures were not compared rather than letting silence read as clean.)
+    # (These one-fact snapshots cannot be mapped, so the line says the
+    # scored values were not compared rather than letting silence read as clean.)
     assert rep.status_line() == (
         "compared 2026-09-20 → 2026-09-21: 0 change(s); since pinned thesis 2026-09-19: 1 change(s)"
-        "; composed fields (total debt, composite SG&A/D&A) not compared: the older snapshot "
-        "could not be mapped"
+        "; scored values not compared as the engine builds them: the older snapshot "
+        "could not be mapped (raw facts only)"
     )
     from app.services.reporting.report_builder import _silent_revisions_section
 
