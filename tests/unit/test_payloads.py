@@ -11,6 +11,7 @@ import pytest
 from app.services.ingestion.payloads import (
     ExternalPayloadError,
     SubmissionsMismatchError,
+    check_aligned,
     concept_rows,
     recent_filings,
     sec_date,
@@ -45,15 +46,44 @@ def test_no_filings_is_an_empty_list_not_an_error(subs):
     assert recent_filings(subs, form=str) == []
 
 
-def test_unequal_columns_zip_to_the_shortest_as_before():
+def test_unequal_columns_are_refused_not_truncated():
+    """Hermes audit round 3, finding 2: zip() dropped the rows past the
+    shortest column, and a section then said "none found" about filings it
+    never read. Nothing says which element is missing, so nothing can be
+    re-aligned: the payload is malformed."""
     subs = _subs(form=["8-K", "10-Q", "S-3"], filingDate=["2026-01-02"])
+    with pytest.raises(ExternalPayloadError, match=r"unequal lengths \(form=3, filingDate=1\)"):
+        recent_filings(subs, form=str, filingDate=str)
+
+
+def test_an_unrequested_column_does_not_have_to_line_up():
+    subs = _subs(form=["8-K"], filingDate=["2026-01-02"], items=["2.02", "4.02"])
     assert recent_filings(subs, form=str, filingDate=str) == [("8-K", "2026-01-02")]
 
 
-def test_only_rows_that_are_read_are_type_checked():
-    """A trailing element beyond the shortest column is never read."""
-    subs = _subs(form=["8-K", 7], filingDate=["2026-01-02"])
-    assert recent_filings(subs, form=str, filingDate=str) == [("8-K", "2026-01-02")]
+def test_optional_columns_absent_read_as_none():
+    subs = _subs(form=["8-K", "10-Q"], filingDate=["2026-01-02", "2026-01-03"])
+    assert recent_filings(subs, form=str, optional={"reportDate": (str, type(None))}) == [
+        ("8-K", None), ("10-Q", None),
+    ]
+
+
+def test_optional_columns_present_must_line_up_and_type_check():
+    subs = _subs(form=["8-K", "10-Q"], reportDate=["2025-12-31"])
+    with pytest.raises(ExternalPayloadError, match="unequal lengths"):
+        recent_filings(subs, form=str, optional={"reportDate": str})
+    subs = _subs(form=["8-K"], reportDate=[7])
+    with pytest.raises(ExternalPayloadError, match=r"reportDate\[0\] is int"):
+        recent_filings(subs, form=str, optional={"reportDate": str})
+    subs = _subs(form=["8-K"], reportDate=["2025-12-31"])
+    assert recent_filings(subs, form=str, optional={"reportDate": str}) == [("8-K", "2025-12-31")]
+
+
+def test_check_aligned():
+    assert check_aligned({"a": [1, 2], "b": [3, 4]}, "x") == 2
+    assert check_aligned({}, "x") == 0
+    with pytest.raises(ExternalPayloadError, match="x columns have unequal lengths"):
+        check_aligned({"a": [1], "b": []}, "x")
 
 
 @pytest.mark.parametrize("subs, needle", [

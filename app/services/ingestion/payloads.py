@@ -62,18 +62,40 @@ def sec_date(value: object, what: str) -> date:
         raise ExternalPayloadError(f"{what} {value!r} is not a real date") from e
 
 
+def check_aligned(columns: dict[str, list[Any]], what: str) -> int:
+    """The common length of SEC parallel arrays, or ExternalPayloadError.
+
+    The filing index is one table stored column by column: row i is
+    `form[i]`, `filingDate[i]`, `accessionNumber[i]`, ... Columns of unequal
+    length cannot be re-aligned — nothing says WHICH element is missing — so
+    every row after the gap may pair one filing's form with another's date.
+    Truncating to the shortest column (what `zip` does) silently dropped
+    filings and let a section say "none found" about rows it never read
+    (Hermes audit round 3, finding 2). The only honest answer is to refuse.
+    """
+    lengths = {name: len(col) for name, col in columns.items()}
+    if len(set(lengths.values())) > 1:
+        shown = ", ".join(f"{name}={n}" for name, n in lengths.items())
+        raise ExternalPayloadError(f"{what} columns have unequal lengths ({shown})")
+    return next(iter(lengths.values()), 0)
+
+
 def recent_filings(
-    submissions: object, **columns: type | tuple[type, ...]
+    submissions: object,
+    *,
+    optional: dict[str, type | tuple[type, ...]] | None = None,
+    **columns: type | tuple[type, ...],
 ) -> list[tuple[Any, ...]]:
     """Rows of `filings.recent` from a submissions payload, one tuple per
     filing with the requested columns in the order given, each element
     checked against its declared type.
 
     A payload with no `filings` / `recent` has no filings (a new filer). A
-    `recent` block that has filings but lacks a requested column, or holds
-    a non-list, or an element of the wrong type, is malformed. Columns of
-    unequal length are zipped to the shortest, as the callers always have;
-    only the rows that are actually read are checked.
+    `recent` block that has filings but lacks a requested column, holds a
+    non-list, an element of the wrong type, or columns of unequal length is
+    malformed. `optional` columns follow the required ones in each tuple: an
+    absent optional column reads as None in every row, but one that IS
+    present must line up with the rest like any other.
     """
     subs = _mapping(submissions, "submissions payload")
     if "filings" not in subs:
@@ -84,25 +106,33 @@ def recent_filings(
     recent = _mapping(filings["recent"], "submissions.filings.recent")
     if not recent:
         return []
-    cols: list[list[Any]] = []
-    for name in columns:
+    wanted: dict[str, type | tuple[type, ...]] = dict(columns)
+    present: dict[str, list[Any]] = {}
+    for name in list(columns) + list(optional or {}):
         if name not in recent:
-            raise ExternalPayloadError(f"filings.recent has no {name!r} column")
+            if name in columns:
+                raise ExternalPayloadError(f"filings.recent has no {name!r} column")
+            continue
         col = recent[name]
         if not isinstance(col, list):
             raise ExternalPayloadError(
                 f"filings.recent.{name} is {type(col).__name__}, expected a list"
             )
-        cols.append(col)
-    n = min((len(c) for c in cols), default=0)
-    for (name, types), col in zip(columns.items(), cols):
+        present[name] = col
+        if name not in wanted:
+            wanted[name] = (optional or {})[name]
+    n = check_aligned(present, "filings.recent")
+    for name, col in present.items():
+        types = wanted[name]
         for i in range(n):
             if not isinstance(col[i], types):
                 raise ExternalPayloadError(
                     f"filings.recent.{name}[{i}] is {type(col[i]).__name__}, "
                     f"expected {_type_names(types)}"
                 )
-    return list(zip(*cols)) if cols else []
+    order = list(columns) + list(optional or {})
+    cols = [present.get(name, [None] * n) for name in order]
+    return list(zip(*cols, strict=True)) if cols else []
 
 
 def concept_rows(facts_json: object, taxonomy: str, tag: str, unit: str) -> list[dict[str, Any]]:

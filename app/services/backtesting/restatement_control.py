@@ -30,6 +30,7 @@ from app.services.backtesting.survivorship import (
     MIN_PIT_PERIODS,
     STALENESS_LIMIT_DAYS,
 )
+from app.services.ingestion.payloads import recent_filings
 from app.services.ingestion.sec_client import SecClient
 
 ACCOUNTING_BLOCKS = ("Earnings Quality", "Revenue Quality")
@@ -115,13 +116,10 @@ def _months_before(d: date, months: int) -> date:
 
 def first_402_date(client: SecClient, cik: int) -> date | None:
     subs = client.submissions_by_cik(cik)
-    r = subs.get("filings", {}).get("recent", {})
-    forms, items, dates = r.get("form", []), r.get("items", []), r.get("filingDate", [])
-    hits = [
-        dates[i]
-        for i in range(min(len(forms), len(items), len(dates)))
-        if forms[i].startswith("8-K") and "4.02" in (items[i] or "")
-    ]
+    # Aligned or refused: a zip to the shortest column could drop the very
+    # 4.02 this control dates (Hermes audit round 3, finding 2).
+    rows = recent_filings(subs, form=str, filingDate=str, optional={"items": (str, type(None))})
+    hits = [d for form, d, items in rows if form.startswith("8-K") and "4.02" in (items or "")]
     if not hits:
         return None
     return min(datetime.strptime(d, "%Y-%m-%d").date() for d in hits)
