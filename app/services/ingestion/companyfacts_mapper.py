@@ -312,11 +312,34 @@ def _fiscal_label(qend: date, fye_month: int | None) -> str:
 
 
 class _FlowSeries:
-    """Quarterly value extraction for one duration-based concept."""
+    """Quarterly value extraction for one duration-based concept.
+
+    A derived quarter subtracts earlier periods from a longer figure: a
+    year-to-date total (`ytd_diff`) or the fiscal year (`fy_minus_3q`). The
+    earlier periods are taken AS THEY STOOD WHEN THAT LONGER FIGURE WAS
+    FILED (`_as_of`), not as they stand today. A Q1 amended from 100 to 150
+    after the 10-K reported 400 for the year did not change Q4: the 400
+    still embeds the old 100, so Q4 is 400 - 100 - 100 - 100 = 100, where
+    subtracting today's Q1 made it 50 (Hermes audit round 4). When nothing
+    was revised after the longer figure was filed, the cut sees the same
+    facts and the value is unchanged. Where an earlier period did not exist
+    yet at that filing, the latest values are used and the quarter is
+    listed in `mixed`."""
 
     def __init__(self, facts: list[RawFact], allow_derivation: bool = True):
-        self.by_key = _dedupe_latest_filed([f for f in facts if f.start is not None])
+        self.facts = [f for f in facts if f.start is not None]
+        self.by_key = _dedupe_latest_filed(self.facts)
         self.allow_derivation = allow_derivation
+        self.mixed: set[date] = set()
+        self._cuts: dict[date, _FlowSeries] = {}
+
+    def _as_of(self, cutoff: date) -> _FlowSeries:
+        """This concept as filed on or before `cutoff`."""
+        if cutoff not in self._cuts:
+            self._cuts[cutoff] = _FlowSeries(
+                [f for f in self.facts if f.filed <= cutoff], self.allow_derivation
+            )
+        return self._cuts[cutoff]
 
     def _find(self, qend: date, min_days: int, max_days: int) -> RawFact | None:
         matches = [
@@ -329,6 +352,7 @@ class _FlowSeries:
     def quarterly(self, quarter_ends: list[date]) -> tuple[dict[date, float], dict[date, str]]:
         values: dict[date, float] = {}
         methods: dict[date, str] = {}
+        self.mixed = set()
         for i, qend in enumerate(quarter_ends):
             direct = self._find(qend, *QTD_DAYS)
             if direct is not None:
@@ -348,16 +372,15 @@ class _FlowSeries:
                         continue
                     implied_days = f2.days - (f1.days or 0)  # type: ignore[operator]
                     if QTD_DAYS[0] <= implied_days <= QTD_DAYS[1]:
-                        # Round-14 finding 4 (known limitation): `f2` and `f1`
-                        # are each the LATEST-filed value for their period, but
-                        # they can come from different filings/accessions. If
-                        # a company amends only the longer YTD (Q1-Q2 restated
-                        # but Q1 alone unchanged), the diff mixes vintages.
-                        # The scored-field impact is already caught by
-                        # detect_restatements; a full fix requires per-value
-                        # form/accession provenance (P1-A). Until then, no
-                        # cross-vintage flag is emitted.
-                        values[qend] = f2.val - f1.val
+                        # The earlier period as it stood when this
+                        # year-to-date figure was filed (class docstring):
+                        # a Q1 restated after H1 was filed is not what H1
+                        # embeds.
+                        then = self._as_of(f2.filed).by_key.get((f2.start, prev_end))
+                        if then is None:
+                            then = f1
+                            self.mixed.add(qend)
+                        values[qend] = f2.val - then.val
                         methods[qend] = "ytd_diff"
                         break
             if qend in values:
@@ -366,7 +389,14 @@ class _FlowSeries:
             if annual is not None and i >= 3 and annual.start is not None:
                 prior = quarter_ends[i - 3 : i]
                 if all(p in values and annual.start <= p for p in prior):
-                    values[qend] = annual.val - sum(values[p] for p in prior)
+                    # The three quarters as they stood when the annual figure
+                    # was filed (class docstring).
+                    then, _ = self._as_of(annual.filed).quarterly(quarter_ends[:i])
+                    if all(p in then for p in prior):
+                        values[qend] = annual.val - sum(then[p] for p in prior)
+                    else:
+                        values[qend] = annual.val - sum(values[p] for p in prior)
+                        self.mixed.add(qend)
                     methods[qend] = "fy_minus_3q"
         return values, methods
 
@@ -413,6 +443,7 @@ def _best_series(
     allow_derivation: bool = True,
     tolerance_days: int = 0,
     window_ends: list[date] | None = None,
+    mixed_out: set[date] | None = None,
 ) -> tuple[dict[date, float], dict[date, str], str | None]:
     """Evaluate every candidate tag; the one covering the most REPORTED
     quarters (`window_ends`) wins, then the most buffered quarters
@@ -422,21 +453,30 @@ def _best_series(
 
     Coverage used to be counted over the buffered window alone, so a tag a
     filer had abandoned could outrank the one it files today by covering
-    more OLD quarters, leaving reported quarters empty."""
+    more OLD quarters, leaving reported quarters empty.
+
+    `mixed_out`, when given, receives the winning flow series' quarters that
+    could not be derived from one filing date (`_FlowSeries.mixed`)."""
     window = window_ends if window_ends is not None else quarter_ends
     best_key: tuple[int, int, int] | None = None
     best: tuple[dict[date, float], dict[date, str], str | None] = ({}, {}, None)
+    best_mixed: set[date] = set()
     for rank, (taxonomy, tag) in enumerate(candidates):
         facts = _collect(facts_json, taxonomy, tag, unit)
         if not facts:
             continue
+        mixed: set[date] = set()
         if kind == "instant":
             values, methods = _instant_series(facts, quarter_ends, tolerance_days)
         else:
-            values, methods = _FlowSeries(facts, allow_derivation).quarterly(quarter_ends)
+            series = _FlowSeries(facts, allow_derivation)
+            values, methods = series.quarterly(quarter_ends)
+            mixed = series.mixed
         key = (_score(values, window), _score(values, quarter_ends), -rank)
         if key[1] > 0 and (best_key is None or key > best_key):
-            best_key, best = key, (values, methods, f"{taxonomy}:{tag}")
+            best_key, best, best_mixed = key, (values, methods, f"{taxonomy}:{tag}"), mixed
+    if mixed_out is not None:
+        mixed_out |= best_mixed
     return best
 
 
@@ -460,18 +500,22 @@ def _resolved_flow(
     window_ends: list[date],
     labels: dict[date, str],
     single: tuple[dict[date, float], dict[date, str], str | None],
+    mixed: set[date] | None = None,
 ) -> tuple[dict[date, float], dict[date, str], str | None, list[str], dict[date, PeriodSource]]:
     """A flow field with alternative strategies (SG&A, D&A), resolved per
     quarter by `composition.resolve_by_strategy` — the rule the restatement
     detector applies too. `single` is the field's own concept as
-    `_best_series` selected it (tags are never mixed within it)."""
+    `_best_series` selected it (tags are never mixed within it). `mixed`
+    holds the single concept's quarters that could not be derived from one
+    filing date; on return it holds the resolved field's."""
     single_values, single_methods, single_used = single
     single_tag = single_used.split(":", 1)[1] if single_used else None
+    mixed_by: dict[str | None, set[date]] = {single_tag: set(mixed or ())}
     component_series: dict[str, tuple[dict[date, float], dict[date, str]]] = {}
     for taxonomy, tag in composite_components(name):
-        component_series[tag] = _FlowSeries(_collect(facts_json, taxonomy, tag, "USD")).quarterly(
-            quarter_ends
-        )
+        series = _FlowSeries(_collect(facts_json, taxonomy, tag, "USD"))
+        component_series[tag] = series.quarterly(quarter_ends)
+        mixed_by[tag] = series.mixed
 
     values: dict[date, float] = {}
     methods: dict[date, str] = {}
@@ -488,6 +532,10 @@ def _resolved_flow(
             continue
         values[q] = r.total
         resolved[q] = r
+        if mixed is not None and any(q in mixed_by.get(t, ()) for t in r.used):
+            mixed.add(q)
+        elif mixed is not None:
+            mixed.discard(q)
         if r.strategy == COMPOSITE:
             methods[q] = "composite"
         elif r.used == (single_tag,):
@@ -728,6 +776,7 @@ def build_dataset(
         record(name, values, methods, used, notes)
 
     for name, tags in FLOW_FIELDS.items():
+        mixed: set[date] = set()
         values, methods, used = _best_series(
             facts_json,
             tags,
@@ -736,12 +785,22 @@ def build_dataset(
             "flow",
             allow_derivation=name not in NON_ADDITIVE_FLOWS,
             window_ends=window_ends,
+            mixed_out=mixed,
         )
         notes: list[str] = []
         sources: dict[date, PeriodSource] | None = None
         if name in ("sga_expense", "depreciation_amortization"):
             values, methods, used, notes, sources = _resolved_flow(
-                facts_json, name, extended_ends, window_ends, labels, (values, methods, used)
+                facts_json, name, extended_ends, window_ends, labels, (values, methods, used),
+                mixed,
+            )
+        mixed_q = [q for q in window_ends if q in mixed and q in values]
+        if mixed_q:
+            where = ", ".join(labels[q] for q in mixed_q)
+            notes.append(
+                f"Derived from filings of different dates at {where}: an earlier period "
+                "did not exist yet when the year-to-date or annual figure it is subtracted "
+                "from was filed, so the latest values were used."
             )
         if name in NON_ADDITIVE_FLOWS and _score(values, window_ends) < len(window_ends):
             notes.append(

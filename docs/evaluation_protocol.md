@@ -294,6 +294,24 @@ Mid-window changes (0.4.0 window):
     the conflict note. Proof: `tests/unit/test_same_day_precedence.py`,
     `test_pit_agreement.py::TestSameDayTieRule`, `test_selection_snapshot.py`.
 
+12. **2026-09-25 — derived quarters rebuilt from one filing date (Hermes
+    audit round 4, finding 1).** A quarter derived from a longer figure
+    (year-to-date difference, or the fiscal year less three quarters)
+    subtracted the earlier periods as they stand TODAY. When an earlier
+    period was restated after the longer figure was filed, that mixed two
+    vintages: Q1 amended 100 → 150 after a 10-K reporting 400 for the year
+    made Q4 400 − 150 − 100 − 100 = 50, though the 400 embeds the old Q1 and
+    Q4 is 100. `_FlowSeries` now subtracts the earlier periods as they stood
+    when the longer figure was filed (`_as_of`); when nothing was revised
+    after it, the same facts are selected and the value is unchanged bit for
+    bit. Where no single filing date has both, the latest values are used
+    and the field notes the quarter. **A correction of mapped input values
+    on restated histories only.** AAPL/KO/CRM contain no such history:
+    calibration snapshot and golden byte-identical, reports byte-identical
+    to `4e7010f`. Selection snapshot: one new synthetic case
+    (`mixed_vintages`); every existing case unchanged. Proof:
+    `tests/unit/test_coherent_derivation.py`, `test_selection_snapshot.py`.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.
