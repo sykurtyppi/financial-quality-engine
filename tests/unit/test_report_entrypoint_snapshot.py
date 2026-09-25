@@ -161,7 +161,9 @@ def test_journal_reuses_snapshots_for_documents_and_report(monkeypatch, tmp_path
     monkeypatch.setattr(journal_reporting, "fetch_dataset_snapshot", lambda *a, **k: snapshot)
     monkeypatch.setattr(journal_reporting, "analyze", real_analyze)
 
-    def fake_fetch_documents(actual_client, ticker, facts, *, n_filings, submissions=None):
+    def fake_fetch_documents(actual_client, ticker, facts, *, n_filings, submissions=None,
+                             before=None):
+        assert before is None  # a report of today is not cut; only a replay is
         observed["document_client"] = actual_client
         observed["document_facts"] = facts
         observed["document_submissions"] = submissions

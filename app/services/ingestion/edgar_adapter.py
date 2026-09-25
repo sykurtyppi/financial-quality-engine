@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
 
 from app.schemas.financials import CompanyDataset
 from app.services.ingestion.companyfacts_mapper import (
@@ -109,6 +111,52 @@ def fetch_dataset(
         client=client,
     )
     return snapshot.dataset, snapshot.diagnostics
+
+
+def replay_snapshot(
+    client: SecClient,
+    ticker: str,
+    as_of: date,
+    *,
+    n_quarters: int = 8,
+    sector: str | None = None,
+    root: Path | None = None,
+) -> tuple[DatasetSnapshot, str]:
+    """The fundamentals a reader on `as_of` could have had, and a line saying
+    where they came from.
+
+    Preferred: the newest companyfacts snapshot the vintage store captured on
+    or before that day — what was actually knowable then, including values the
+    filer has since revised in place. Otherwise today's payload, cut to facts
+    filed on or before the day: that undoes later filings but not a value
+    revised without a new filing date, and the line says so. Either way the
+    mapper applies the same cut (`build_dataset(as_of=)`).
+    """
+    from app.services.ingestion.vintages import (
+        load_vintage,
+        observation_at_or_before,
+        observed_vintages,
+    )
+
+    cik = client.resolve_cik(ticker)
+    stored = observation_at_or_before(observed_vintages(cik, root), as_of)
+    if stored is not None:
+        facts = load_vintage(stored.path)
+        source = (
+            f"the vintage snapshot captured {stored.captured} "
+            f"(sha {stored.sha256[:12]}), cut to facts filed on or before {as_of}"
+        )
+    else:
+        facts = client.company_facts(ticker)
+        source = (
+            f"today's companyfacts cut to facts filed on or before {as_of} — no "
+            "snapshot that old is stored, so a value the filer revised in place "
+            "since then shows as revised"
+        )
+    dataset, diagnostics = build_dataset(
+        facts, ticker=ticker, n_quarters=n_quarters, sector=sector, as_of=as_of
+    )
+    return DatasetSnapshot(dataset, diagnostics, facts), source
 
 
 def store_vintage_snapshot(client, ticker: str, facts: dict, *, enabled: bool = True) -> str | None:

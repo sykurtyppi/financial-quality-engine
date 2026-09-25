@@ -47,8 +47,24 @@ def main() -> int:
         "--no-vintage", action="store_true",
         help="do not archive the scored companyfacts payload to data/vintages/",
     )
+    parser.add_argument(
+        "--as-of", metavar="YYYY-MM-DD", type=date.fromisoformat,
+        help="historical replay: rebuild the report as of this day (newest stored "
+             "snapshot by then, else today's facts cut there) -> reports/T_D.replay.md",
+    )
     args = parser.parse_args()
     ticker = args.ticker.upper()
+
+    if args.as_of is not None:
+        from app.services.journal import reporting as journal_reporting
+
+        out, distress = journal_reporting.build_report(
+            ticker, with_docs=not args.no_docs, quarters=args.quarters,
+            report_day=args.as_of.isoformat(), fresh=args.fresh,
+            out_dir=ROOT / "reports", replay=True,
+        )
+        print(f"historical replay as of {args.as_of}: distress signals: {distress} -> {out}")
+        return 0
 
     client = SecClient(fresh=args.fresh)
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")

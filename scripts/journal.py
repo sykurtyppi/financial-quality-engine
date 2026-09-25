@@ -115,6 +115,34 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_replay(path: Path, args: argparse.Namespace) -> int:
+    """Rebuild the report as of the entry's day. Never touches the entry: it
+    is not the blind report (no `reported` stamp, allowed after one), but it
+    is engine output, so the thesis must already be written — and locked
+    unbroken for a v2 entry — exactly as before the real report."""
+    if store.is_v2(path):
+        entry = store.load_v2(path)
+        if not verify_lock(entry):
+            print(f"{path.name}: LOCK BROKEN — refusing to replay.", file=sys.stderr)
+            return 1
+        ticker, day = entry.ticker, entry.day.isoformat()
+    else:
+        if not store.has_thesis(path.read_text()):
+            print("BEFORE block looks empty — write your thesis first.", file=sys.stderr)
+            return 1
+        ticker, day = args.ticker, store.parse_entry(path)["day"]
+    try:
+        out, distress = build_report(
+            ticker, with_docs=not args.no_docs, report_day=day,
+            fresh=getattr(args, "fresh", True), replay=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"Replay failed: {e}", file=sys.stderr)
+        return 1
+    print(f"historical replay as of {day}: distress: {distress} -> {out}")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     try:
         path = store.find_entry(args.ticker, args.date)
@@ -124,6 +152,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if path is None:
         print(f"No open entry for {args.ticker.upper()}. Run `journal.py open` first.", file=sys.stderr)
         return 1
+    if getattr(args, "replay", False):
+        return _cmd_replay(path, args)
     if store.is_v2(path):
         return _cmd_report_v2(path, args)
     text = path.read_text()
@@ -720,6 +750,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--defer-mark", action="store_true",
                        help="generate but do NOT stamp `reported` — the watch flow "
                             "stamps only after a successful audit (mark-reported)")
+    p_rep.add_argument("--replay", action="store_true",
+                       help="historical replay as of the entry's day -> T_DAY.replay.md; "
+                            "never stamps or edits the entry")
     _freshness(p_rep)
     p_rep.set_defaults(func=cmd_report)
 
