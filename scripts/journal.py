@@ -372,8 +372,9 @@ def _parse_assumption(spec: str) -> Assumption:
 
     Threshold is numeric if it parses, else a symbolic keyword.
     Source is optional (round-11 finding 2): pass an empty field to make the
-    assumption numeric-only; setting a source form defers resolution to
-    manual attestation until per-value provenance (P1-A) lands.
+    assumption numeric-only. A source form is a commitment the resolver
+    attests: the value resolves only when the filings that reported it are
+    of that form, and stays pending (for manual attestation) otherwise.
     """
     parts = [p.strip() for p in spec.split(",")]
     if len(parts) != 6:
@@ -549,6 +550,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         obs = "n/a" if r.observed is None else f"{r.observed:g}"
         at = r.at.isoformat() if r.at else "—"
         print(f"      -> {r.state.upper():12s} observed={obs}  at={at}")
+        if r.source_accession:
+            print(f"         source: {r.source_accession}")
         if r.note:
             print(f"         note: {r.note}")
 

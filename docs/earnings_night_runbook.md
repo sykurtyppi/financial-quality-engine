@@ -81,12 +81,15 @@ assumption is six comma-separated fields:
 metric , comparator , threshold , window , source , resolve_by
 ```
 
-**Leave `source` empty** (the doubled comma above) unless you intend to
-resolve that row by hand. An assumption that names a source returns `pending`
-forever until per-value provenance (P1-A) ships, because nothing can yet
-attest the form and accession a value came from; a source-less row is a
-numeric-only commitment and auto-terminates. That is the difference between a
-row that scores itself and a row that sits open for a season.
+**Leave `source` empty** (the doubled comma above) for a numeric-only
+commitment. Name a source only if the form is part of the claim: the resolver
+then checks the filings that reported the value (each mapped value carries
+the accession, form and filed date of the facts it was computed from) and
+resolves only when they are of that form. `10-Q` accepts the quarterly report
+or its amendment; `10-Q/A` only the amendment. A fourth quarter is usually
+derived from the 10-K's year, so it is the 10-K's, not a 10-Q's. When the form
+does not match the row stays `pending` and names the filing that did report
+it; every resolution records the accession either way.
 
 Do this *before* 20:20Z. Afterwards the tape exists and the prior is no longer
 blind — record it in `--contamination` if that happens.

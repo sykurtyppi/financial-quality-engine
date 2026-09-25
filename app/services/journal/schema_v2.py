@@ -75,17 +75,17 @@ class Assumption(BaseModel):
     threshold: float | str = Field(description="Numeric threshold, or a symbolic one like 'positive'")
     window: str = Field(min_length=1, description="Fiscal window, e.g. FY2026Q2 or 'trailing_4q'")
     # Round-11 finding 2: `source` is OPTIONAL. When provided (10-Q, 10-K, etc.)
-    # the resolver returns `pending` and refuses to auto-resolve, because the
-    # mapper's canonical dataset does not carry per-value form/accession
-    # provenance (deferred to P1-A). Leave unspecified for a numeric-only
-    # commitment the resolver can auto-terminate. This is honest: the older
-    # {10-K, 10-Q} whitelist attributed a value to a form without checking.
+    # the resolver ATTESTS it: the mapped value carries the filed facts it was
+    # computed from, and the assumption resolves only when the filings that
+    # reported the period are of that form (else `pending`, naming them). The
+    # older {10-K, 10-Q} whitelist attributed a value to a form without
+    # checking. Leave unspecified for a numeric-only commitment.
     source: SourceForm | None = Field(
         default=None,
         description=(
             "Optional filing form the user COMMITS the value will come from. "
-            "If set, resolver returns `pending` until per-value provenance "
-            "lands (P1-A). Unset -> numeric-only, resolver auto-terminates."
+            "If set, the resolver resolves only when the filings that reported "
+            "the value are of that form (else pending). Unset -> numeric-only."
         ),
     )
 
