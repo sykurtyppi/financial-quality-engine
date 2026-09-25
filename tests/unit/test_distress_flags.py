@@ -19,7 +19,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.pipeline import RED_FLAG_CONCERN, _generate_flags, analyze
+from app.core.pipeline import (
+    GREEN_FLAG_CONCERN,
+    RED_FLAG_CONCERN,
+    _generate_flags,
+    analyze,
+)
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.schemas.report import AnalysisResult
 from app.services.ingestion.companyfacts_mapper import build_dataset
@@ -159,6 +164,47 @@ def test_a_valueless_metric_without_the_distress_flag_is_still_dropped():
     plain = _distress_metric("m").model_copy(update={"distress_signal": False})
     assert _generate_flags(blocks, {"m": plain}) == ([], [])
     assert _generate_flags(blocks, {}) == ([], [])
+
+
+def _valued_metric(name, value=1.0):
+    return MetricResult(name=name, formula="a / b", fiscal_label="FY2025Q4",
+                        status=MetricStatus.OK, value=value)
+
+
+def _flags_for(*components, metrics=None):
+    metrics = metrics or {c.metric_name: _valued_metric(c.metric_name) for c in components}
+    red, green = _generate_flags([SimpleNamespace(components=list(components))], metrics)
+    return [f.evidence_metrics[0] for f in red], [f.evidence_metrics[0] for f in green]
+
+
+# Hermes audit round 5: the harness's own run left three survivors here —
+# both thresholds' equality and the None/duplicate guard were unpinned.
+
+
+@pytest.mark.parametrize(
+    ("concern", "red", "green"),
+    [
+        (RED_FLAG_CONCERN, ["m"], []),  # exactly at the red threshold: red
+        (RED_FLAG_CONCERN - 0.01, [], []),
+        (GREEN_FLAG_CONCERN, [], ["m"]),  # exactly at the green threshold: green
+        (GREEN_FLAG_CONCERN + 0.01, [], []),
+    ],
+)
+def test_a_component_exactly_at_a_threshold_is_flagged(concern, red, green):
+    assert _flags_for(_component("m", weight=0.2, concern=concern, value=1.0)) == (red, green)
+
+
+def test_an_unscored_component_never_reaches_flag_evaluation():
+    # The metric exists and has a value; only the component is unscored.
+    assert _flags_for(_component("m", weight=0.2, concern=None, value=1.0)) == ([], [])
+
+
+def test_a_metric_in_two_blocks_is_flagged_once():
+    first = _component("m", weight=0.2, concern=90.0, value=1.0)
+    again = _component("m", weight=0.3, concern=95.0, value=1.0)
+    blocks = [SimpleNamespace(components=[first]), SimpleNamespace(components=[again])]
+    red, green = _generate_flags(blocks, {"m": _valued_metric("m")})
+    assert [f.evidence_metrics for f in red] == [["m"]] and green == []
 
 
 @pytest.mark.parametrize("ticker", ["AAPL", "KO", "CRM"])
