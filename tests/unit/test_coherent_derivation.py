@@ -21,7 +21,13 @@ from app.services.ingestion.companyfacts_mapper import (
     _FlowSeries,
     build_dataset,
 )
-from tests.fixtures.selection_cases import QUARTER_ENDS, mixed_vintages
+from tests.fixtures.selection_cases import (
+    QUARTER_ENDS,
+    _base,
+    mixed_vintages,
+    quarter,
+    ytd,
+)
 
 Q1, Q2, Q3, Q4 = date(2024, 3, 31), date(2024, 6, 30), date(2024, 9, 30), date(2024, 12, 31)
 ENDS = [Q1, Q2, Q3, Q4]
@@ -119,6 +125,25 @@ def test_the_mapper_notes_the_quarter_it_could_not_rebuild():
     assert diag.field_by_name("operating_income").notes == []
     (note,) = diag.field_by_name("cfo").notes
     assert note.startswith("Derived from filings of different dates at FY2024Q2:")
+
+
+def test_a_composed_field_is_noted_where_a_component_could_not_be_rebuilt():
+    """SG&A composed from S&M + G&A per quarter: the note reaches the field
+    when a COMPONENT's quarter could not be rebuilt at one filing date (G&A
+    Q2 from an H1 filed before its Q1 was), and only that quarter."""
+    p = _base("Composite Vintages Co")
+    q = QUARTER_ENDS
+    p.add("SellingAndMarketingExpense", [quarter(e, 40.0) for e in q])
+    ga = [quarter(e, 20.0) for e in q if e not in (q[8], q[9])]
+    ga.append(quarter(q[8], 25.0, filed=date(2024, 9, 1)))
+    ga.append(ytd(q[9], 55.0, filed=date(2024, 8, 1)))
+    p.add("GeneralAndAdministrativeExpense", ga)
+    ds, diag = build_dataset(p.data, "CV")
+    by_end = {x.period_end: x for x in ds.periods}
+    assert by_end[q[9]].sga_expense == 40.0 + (55.0 - 25.0)
+    notes = diag.field_by_name("sga_expense").notes
+    assert any(n.startswith("Derived from filings of different dates at FY2024Q2:") for n in notes)
+    assert not any("FY2024Q1" in n and "different dates" in n for n in notes)
 
 
 @st.composite
