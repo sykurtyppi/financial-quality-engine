@@ -306,3 +306,104 @@ def test_the_summary_and_the_other_revisions_table_follow_what_was_found():
     amended = render_restatements_section(replace(base, footprints=[fp(True)]))
     assert "**1 via amended (/A) filings**" in amended
     assert "- None." in other_section(amended)
+
+
+# The derived-quarter trail follows the series the report SCORES. The mapper
+# ranks candidate tags on the window it is given, so a rebuild over a wider
+# window than the report's (16 quarters, until 2026-09-25) could follow a
+# different tag — and miss a move in the scored one.
+
+
+def _two_revenue_tags():
+    """`Revenues` covers exactly the 8 scored quarters, with Q2 2024 derived
+    as H1 less Q1 (1,000 - 500). The first candidate covers the 10 oldest
+    quarters, so it wins only over a wider window than the 8 scored — and
+    over the 8 as they stood before the December quarter was filed. Once
+    `Revenues` is the scored tag, the next Q1 10-Q re-files Q1 2024 as a
+    comparative, then a 10-Q/A revises H1 by 0.9% (below materiality):
+    the scored Q2 moves 500 -> 509 (1.8%)."""
+    p = _base("Two Tags Co", revenue=False)
+    scored = [quarter(e, 500.0) for e in QUARTER_ENDS[4:] if e != Q2]
+    scored += [
+        ytd(Q2, 1000.0),
+        quarter(Q1, 500.0, filed=date(2025, 5, 1)),
+        ytd(Q2, 1009.0, filed=date(2025, 6, 1), form="10-Q/A"),
+    ]
+    p.add("Revenues", scored)
+    p.add("RevenueFromContractWithCustomerExcludingAssessedTax",
+          [quarter(e, 700.0) for e in QUARTER_ENDS[:10]])
+    return p.data
+
+
+def test_the_derived_scan_follows_the_scored_series_not_a_wider_windows_choice():
+    facts = _two_revenue_tags()
+    ds, diag = build_dataset(facts, "T")  # the report's window: 8 quarters
+    assert diag.field_by_name("revenue").tag_used == "us-gaap:Revenues"
+    assert [p.revenue for p in ds.periods if p.period_end == Q2] == [509.0]
+    wide, _ = build_dataset(facts, "T", n_quarters=16)
+    assert {p.revenue for p in wide.periods if p.period_end <= Q2} == {700.0}  # the other tag
+
+    scan = scan_restatements(facts, period_since=SINCE, as_of=AS_OF,
+                             selected_tags=diag.selected_tags(), n_quarters=len(ds.periods))
+    (d,) = [x for x in scan.derived if x.field_name == "revenue"]
+    assert (d.period_end, d.original_value, d.current_value, d.is_amendment) == (
+        Q2, 500.0, 509.0, True)
+    assert not [f for f in scan.footprints if f.field_name == "revenue"]  # 0.9%: immaterial
+    # The window is the caller's: rebuilt over 16 quarters, the other tag is
+    # followed and the scored series' move is missed.
+    wider = scan_restatements(facts, period_since=SINCE, as_of=AS_OF,
+                              selected_tags=diag.selected_tags(), n_quarters=16)
+    assert not [x for x in wider.derived if x.field_name == "revenue"]
+
+
+def test_the_report_rebuilds_derived_quarters_over_the_window_it_scored(monkeypatch):
+    from app.core.pipeline import analyze
+    from app.services.reporting import report_builder
+    from tests.fixtures.companies import stretch_dataset
+
+    seen = {}
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop after the call")
+
+    monkeypatch.setattr(report_builder, "_collect_streams", spy)
+    dataset = stretch_dataset()
+    dataset.periods = dataset.periods[-6:]
+    result = analyze(dataset)
+    assert len(result.analyzed_periods) == 6
+    try:
+        report_builder.build_report(result, dataset, generated_on="2025-06-30",
+                                    client=object(), ticker="T")
+    except RuntimeError:
+        pass
+    assert seen["n_quarters"] == 6
+
+
+def test_the_report_streams_hand_the_scored_window_to_the_scan(monkeypatch):
+    import app.services.ingestion.restatements as rs
+    from app.services.reporting.report_builder import _collect_streams
+
+    seen = {}
+    real = rs.scan_restatements
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "scan_restatements", spy)
+
+    class Client:
+        def resolve_cik(self, ticker):
+            return 1
+
+        def company_facts(self, ticker):
+            return facts
+
+        def submissions_by_cik(self, cik):
+            return {"filings": {"recent": {}}}
+
+    facts = _ytd_filer(None)
+    _collect_streams(Client(), "T", AS_OF, company_facts=facts,
+                     submissions={"filings": {"recent": {}}}, n_quarters=5)
+    assert seen["n_quarters"] == 5

@@ -256,6 +256,7 @@ def _collect_streams(
     field_tags: Mapping[str, str | None] | None = None,
     baseline_day: date | None = None,
     vintage_root: Path | None = None,
+    n_quarters: int = 8,
 ):
     """Fetch offerings, restatements, 8-K 4.02 events and the silent-revision
     diff. Returns (body_sections, event_lines, tier1_events, errors,
@@ -269,7 +270,8 @@ def _collect_streams(
     `errors` by the caller — there is no separate list. `vintage_diff` is the
     VintageDiffReport (None when that stream failed); `baseline_day` is the
     pinned thesis day whose snapshot the newest one is also diffed against,
-    and `vintage_root` overrides the store location (tests)."""
+    and `vintage_root` overrides the store location (tests). `n_quarters` is
+    the window the report scored, over which derived quarters are rebuilt."""
     body_sections: list[str] = []
     event_lines: list[str] = []
     tier1_events: list[str] = []
@@ -327,7 +329,8 @@ def _collect_streams(
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
         scan = scan_restatements(
-            facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags
+            facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags,
+            n_quarters=n_quarters,
         )
         out = _Staged(result=scan)
         out.sections.append(render_restatements_section(scan))
@@ -533,6 +536,9 @@ def build_report(
             _collect_streams(
                 client, ticker, report_date, company_facts, submissions, field_tags,
                 baseline_day=baseline_day, vintage_root=vintage_root,
+                # The scored window: derived quarters are checked on the
+                # series the report scored, never a wider window's choice.
+                n_quarters=len(dataset.periods),
             )
         )
         for section in sections:
