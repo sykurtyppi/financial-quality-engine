@@ -188,6 +188,22 @@ def flows() -> dict:
     return p.data
 
 
+def ytd_vintage_mix() -> dict:
+    """CFO reported year to date. 2024 Q1 is restated by a 10-Q/A filed
+    after the H1 figure. H1 still embeds the original Q1, so Q2 = H1 − Q1
+    subtracts Q1 as it stood when H1 was filed (600 − 300), and its
+    provenance names that original fact, not the restatement. The 2023 H1
+    re-reported unchanged as a comparative changes nothing."""
+    p = _base("YTD Vintage Mix Co")
+    q = QUARTER_ENDS
+    rows = [ytd(e, 300.0 * (i % 4 + 1)) for i, e in enumerate(q)]
+    # The following year's 10-Q repeats 2023 H1 unchanged as a comparative.
+    rows.append(ytd(q[5], 600.0, filed=date(2024, 8, 9)))
+    rows.append(ytd(q[8], 340.0, filed=date(2024, 9, 16), form="10-Q/A"))
+    p.add("NetCashProvidedByUsedInOperatingActivities", rows)
+    return p.data
+
+
 # ---------------------------------------------------------------------------
 # Tag choice: coverage, candidate order, cover-page dates, composites
 
@@ -507,6 +523,7 @@ def mixed_vintages() -> dict:
 CASES: dict[str, Callable[[], dict]] = {
     "flows": flows,
     "mixed_vintages": mixed_vintages,
+    "ytd_vintage_mix": ytd_vintage_mix,
     "tag_choice": tag_choice,
     "composites_lose": composites_lose,
     "da_split_equal_coverage": da_split_equal_coverage,

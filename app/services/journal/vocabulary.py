@@ -37,7 +37,7 @@ METRIC_IDS: frozenset[str] = JOURNAL_LOCKABLE
 # Raw XBRL-mapped fields, minus the three that describe a period rather than
 # measure one — `_lookup_metric_value` would happily return a date or a label
 # and then fail to compare it against a numeric threshold.
-_NON_MEASURES = {"fiscal_label", "period_end", "period_type"}
+_NON_MEASURES = {"fiscal_label", "period_end", "period_type", "sources"}  # sources: provenance, not a measure
 
 
 def _period_measures() -> frozenset[str]:

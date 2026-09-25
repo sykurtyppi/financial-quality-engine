@@ -20,6 +20,8 @@ scoring config, which stays the only authority on it.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 # Every metric id `formulas.registry.compute_metrics` emits (bundle.history
 # keys), scored or descriptive.
 FINANCIAL_METRICS: frozenset[str] = frozenset({
@@ -64,6 +66,42 @@ SIGNAL_KINDS: frozenset[str] = frozenset({
 # would seal cleanly and then resolve `unresolvable`, a case lost to a
 # commitment that could never be evaluated.
 JOURNAL_LOCKABLE: frozenset[str] = FINANCIAL_METRICS
+
+
+class Basis(StrEnum):
+    """Which periods a financial metric reads, as `formulas.registry` pairs
+    them — what `provenance.sources_for` needs to name the filings behind a
+    metric. `<field>` inputs are the metric's own period; `<field>_prior`
+    inputs are the comparison period."""
+
+    TTM = "ttm"  # flows summed over the 4 quarters ending here; instants at the end quarter
+    ACCRUALS = "accruals"  # TTM, with the prior instant one year earlier (Sloan's average assets)
+    TTM_YOY = "ttm_yoy"  # TTM here vs the TTM window ending 4 quarters earlier (Beneish)
+    COMPOSITE = "composite"  # built from other metrics (the M-score from its indices)
+    YOY = "yoy"  # this quarter vs the same quarter one year earlier
+    PAIR = "pair"  # this quarter vs the previous quarter
+    SERIES = "series"  # a statistic over the history of another metric
+
+
+BASIS: dict[str, Basis] = {
+    **{n: Basis.TTM for n in ("cfo_to_net_income", "fcf_to_net_income", "fcf_margin",
+                              "net_debt_to_ebitda")},
+    "total_accruals": Basis.ACCRUALS,
+    **{n: Basis.TTM_YOY for n in ("beneish_dsri", "beneish_gmi", "beneish_aqi", "beneish_sgi",
+                                  "beneish_depi", "beneish_sgai", "beneish_tata", "beneish_lvgi")},
+    "beneish_m_score": Basis.COMPOSITE,
+    **{n: Basis.YOY for n in ("receivables_growth_spread", "inventory_growth_spread",
+                              "deferred_revenue_growth_spread", "capex_growth_spread")},
+    **{n: Basis.PAIR for n in (
+        "dso", "dio", "dpo", "working_capital_swing_to_income", "interest_coverage",
+        "debt_to_assets", "current_ratio", "asset_quality_proxy", "intangibles_to_assets",
+        "goodwill_growth", "leverage_change", "sbc_to_revenue", "sbc_to_cfo",
+        "diluted_share_growth", "net_share_count_change", "buyback_offset_ratio",
+        "issuance_pressure", "capex_to_revenue", "capex_to_da",
+    )},
+    **{n: Basis.SERIES for n in ("accrual_trend", "dso_trend", "dio_trend", "fcf_margin_trend",
+                                 "capex_intensity_regime_shift", "incremental_revenue_per_capex")},
+}
 
 
 def all_metric_names() -> frozenset[str]:

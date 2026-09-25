@@ -92,6 +92,7 @@ module = [
     "app.services.ingestion.precedence",
     "app.services.ingestion.selection",
     "app.services.metrics_registry",
+    "app.services.provenance",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
