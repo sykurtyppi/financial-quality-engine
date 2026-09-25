@@ -202,3 +202,44 @@ def test_long_tables_say_how_many_rows_were_left_out():
                         accessions=("a", "b"))
     assert not any("more |" in line for line in _conflict_lines((c,) * _MAX_ROWS))
     assert _conflict_lines((c,) * (_MAX_ROWS + 1))[-1].startswith("| … | 1 more |")
+
+
+def test_a_derived_quarter_withdrawn_in_between_still_reports_its_move():
+    """Found by the mutation harness (Hermes audit round 5). A filing date at
+    which the derived quarter has no value (here the field switched to
+    another tag that lacks it) is not a point in its trail: the quarter
+    moved from 1 to 1.9 between the filings that did derive it, and a
+    missing value in between must not cut that trail short."""
+    q = QUARTER_ENDS
+    cfo, cont = "NetCashProvidedByUsedInOperatingActivities", \
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"
+    p = _base("Withdrawn Co")
+    late = date(2024, 10, 1)
+    a = [quarter(e, 50.0) for e in q[:6]] + [quarter(e, 50.0, filed=late) for e in q[6:8]]
+    a += [quarter(Q1, 100.0), ytd(Q2, 101.0)]  # Q2 = 1, derived
+    a += [quarter(e, 50.0) for e in q[10:]]
+    a.append(ytd(Q2, 101.9, filed=late, form="10-Q/A"))  # 0.9%: below materiality
+    # A filing date of `cfo` itself while the other tag holds the field: an
+    # unchanged re-filing of 2023 Q2 (a comparative), so it is a trail day.
+    a.append(quarter(q[5], 50.0, filed=date(2024, 9, 1)))
+    p.add(cfo, a)
+    # Filed 2024-08-20, covering more reported quarters than `cfo` then did,
+    # but not Q2: until `cfo`'s late quarters arrive the field is taken from
+    # it and Q2 has no value.
+    p.add(cont, [quarter(e, 50.0, filed=date(2024, 8, 20)) for e in q[:9]])
+    facts = p.data
+
+    between, _ = build_dataset(_dated_copy_for_test(facts, date(2024, 9, 1)), "W")
+    assert next(x.cfo for x in between.periods if x.period_end == Q2) is None
+
+    scan = _scan(facts)
+    assert not [f for f in scan.footprints if f.field_name == "cfo"]
+    (d,) = [d for d in scan.derived if d.field_name == "cfo"]
+    assert (d.period_end, d.original_value) == (Q2, 1.0)
+    assert abs(d.current_value - 1.9) < 1e-9 and d.is_amendment
+
+
+def _dated_copy_for_test(facts, day):
+    from app.services.ingestion.restatements import _dated_copy
+
+    return _dated_copy(facts, day)
