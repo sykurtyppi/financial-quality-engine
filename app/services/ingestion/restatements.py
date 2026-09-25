@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from app.services.ingestion.companyfacts_mapper import (
     FLOW_FIELDS,
@@ -130,6 +130,36 @@ class SameDayConflict:
 
 
 @dataclass(frozen=True)
+class DerivedRevision:
+    """A derived quarter (a year-to-date difference, the year less three
+    quarters, or a sum of components) whose scored value moved materially
+    between the filings behind it, reconstructed by re-running the mapper
+    as of each filing date. The raw-fact check can miss it: a 0.9% revision
+    to H1 is below materiality, but moves a Q2 of 1 to 1.9. Evidence, not a
+    verdict: `moved_by` names the filings made on the date it last moved."""
+
+    field_name: str
+    period_start: date | None
+    period_end: date
+    method: str
+    original_value: float
+    original_filed: date
+    current_value: float
+    current_filed: date
+    moved_by: tuple[tuple[str, str], ...]  # (form, accession) filed that day
+
+    @property
+    def pct_change(self) -> float | None:
+        if self.original_value == 0:
+            return None
+        return (self.current_value - self.original_value) / abs(self.original_value)
+
+    @property
+    def is_amendment(self) -> bool:
+        return any(form.endswith("/A") for form, _accn in self.moved_by)
+
+
+@dataclass(frozen=True)
 class RestatementScan:
     """What one restatement check actually covered, alongside what it found.
 
@@ -157,6 +187,7 @@ class RestatementScan:
     period_since: date | None
     materiality_pct: float
     conflicts: tuple[SameDayConflict, ...] = ()
+    derived: tuple[DerivedRevision, ...] = ()
 
     @property
     def total(self) -> int:
@@ -553,6 +584,14 @@ def scan_restatements(
                 + (f" filed by {as_of}" if as_of is not None else "")
             )
             continue
+        if period_since is not None and not any(
+            end >= period_since for _tag, by_key in groups for (_start, end) in by_key
+        ):
+            # Facts exist, but none for a period the scan covers: nothing in
+            # the window was compared, so the field was not inspected (Hermes
+            # audit round 4, finding 3).
+            uninspected[field_name] = f"selected series has no period on or after {period_since}"
+            continue
         inspected.append(field_name)
 
         # Same-day disagreements, per component concept: in a summed field
@@ -659,6 +698,14 @@ def scan_restatements(
                 )
 
     footprints.sort(key=lambda f: (f.period_end, f.field_name), reverse=True)
+    # A quarter already reported from its own filed figure is not repeated.
+    reported = {(f.field_name, f.period_end) for f in footprints if f.period_start is not None}
+    derived = [
+        d for d in derived_revisions(
+            facts_json, as_of=as_of, period_since=period_since, materiality_pct=materiality_pct
+        )
+        if (d.field_name, d.period_end) not in reported
+    ]
     return RestatementScan(
         footprints=footprints,
         inspected=tuple(inspected),
@@ -670,7 +717,162 @@ def scan_restatements(
         conflicts=tuple(sorted(
             same_day, key=lambda c: (c.period_end, c.field_name, c.tag, c.filed), reverse=True
         )),
+        derived=tuple(derived),
     )
+
+
+def _dated_copy(facts_json: dict, cutoff: date | None) -> dict:
+    """The fact rows filed on or before `cutoff` (all dated rows when None),
+    keeping only well-formed levels and rows with a real `filed` date. The
+    raw scan above is what reports a malformed payload; this re-reading
+    only has to never trip over one."""
+    out: dict = {"entityName": facts_json.get("entityName"), "facts": {}}
+    taxonomies = facts_json.get("facts")
+    if not isinstance(taxonomies, dict):
+        return out
+    for taxonomy, tags in taxonomies.items():
+        if not isinstance(tags, dict):
+            continue
+        for tag, concept in tags.items():
+            units = concept.get("units") if isinstance(concept, dict) else None
+            if not isinstance(units, dict):
+                continue
+            kept_units: dict = {}
+            for unit, rows in units.items():
+                if not isinstance(rows, list):
+                    continue
+                kept = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        filed = _parse_date(row["filed"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if cutoff is None or filed <= cutoff:
+                        kept.append(row)
+                if kept:
+                    kept_units[unit] = kept
+            if kept_units:
+                out["facts"].setdefault(taxonomy, {})[tag] = {"units": kept_units}
+    return out
+
+
+# How the mapper builds a quarter it did not find reported as a quarter.
+_DERIVED_METHODS = frozenset({"ytd_diff", "fy_minus_3q", "composite"})
+_DERIVED_QUARTERS = 16  # the scan's window (three years back) plus a buffer
+
+
+def derived_revisions(
+    facts_json: dict,
+    *,
+    as_of: date | None,
+    period_since: date | None,
+    materiality_pct: float = DEFAULT_MATERIALITY_PCT,
+) -> list[DerivedRevision]:
+    """Derived quarters whose SCORED value moved materially across the
+    filings behind them (Hermes audit round 4, finding 2).
+
+    The raw-fact check compares each filed figure with its own earlier
+    filings. A quarter the engine derives is never filed as such, so a
+    revision below materiality on the figure it is derived from can move it
+    by far more, unseen. Here the mapper itself is re-run as of every date
+    a fact behind such a quarter was filed; each quarter's trail of scored
+    values is compared like a filed figure's. Only the trailing run built
+    from the same components is compared: a component appearing is a change
+    in how the figure is composed, not a revision of it."""
+    from app.services.ingestion.companyfacts_mapper import build_dataset
+
+    facts = _dated_copy(facts_json, as_of)
+    try:
+        current, diag = build_dataset(facts, "scan", n_quarters=_DERIVED_QUARTERS)
+    except ValueError:
+        return []
+    targets: dict[tuple[str, date], tuple[str, tuple[str, ...], float, date | None]] = {}
+    for i, period in enumerate(current.periods):
+        if period_since is not None and period.period_end < period_since:
+            continue
+        # A derived quarter has no filed start date: it runs from the day
+        # after the previous quarter end.
+        start = current.periods[i - 1].period_end + timedelta(days=1) if i else None
+        for fd in diag.fields:
+            src = fd.period_sources.get(period.period_end.isoformat())
+            value = getattr(period, fd.field_name, None)
+            if src is None or value is None or src.method not in _DERIVED_METHODS:
+                continue
+            targets[(fd.field_name, period.period_end)] = (
+                src.method, tuple(src.components), value, start,
+            )
+    if not targets:
+        return []
+
+    # Every date a fact behind a target quarter was filed: the vintages at
+    # which its scored value could have changed.
+    by_concept: dict[str, list[dict]] = {}
+    days: set[date] = set()
+    for (field_name, end), (_m, components, _v, _s) in targets.items():
+        for concept in components:
+            if concept not in by_concept:
+                taxonomy, _, tag = concept.partition(":")
+                by_concept[concept] = concept_rows(facts, taxonomy, tag, _unit_for(field_name))
+            for row in by_concept[concept]:
+                try:
+                    row_end, filed = _parse_date(row["end"]), _parse_date(row["filed"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if (end - row_end).days <= 400 and row_end <= end:
+                    days.add(filed)
+
+    trails: dict[tuple[str, date], list[tuple[date, float, tuple[str, ...]]]] = {}
+    for day in sorted(days):
+        try:
+            ds, d_diag = build_dataset(_dated_copy(facts, day), "scan", n_quarters=_DERIVED_QUARTERS)
+        except ValueError:
+            continue  # not enough history yet to establish quarter ends
+        by_end = {p.period_end: p for p in ds.periods}
+        for (field_name, end) in targets:
+            then = by_end.get(end)
+            value = getattr(then, field_name, None) if then is not None else None
+            if value is None:
+                continue
+            src = d_diag.field_by_name(field_name).period_sources.get(end.isoformat())
+            components = tuple(src.components) if src is not None else ()
+            trail = trails.setdefault((field_name, end), [])
+            if not trail or trail[-1][1] != value or trail[-1][2] != components:
+                trail.append((day, value, components))
+
+    found: list[DerivedRevision] = []
+    seen: set[tuple[tuple[str, ...], date]] = set()  # one figure behind two fields: once
+    for key, trail in trails.items():
+        method, components, _value, start = targets[key]
+        stable: list[tuple[date, float, tuple[str, ...]]] = []
+        for entry in reversed(trail):  # the trailing run with today's components
+            if entry[2] != components:
+                break
+            stable.insert(0, entry)
+        if len(stable) < 2:
+            continue
+        orig, cur = stable[0], stable[-1]
+        base = abs(orig[1])
+        moved = abs(cur[1] - orig[1])
+        if base == 0 or moved / base < materiality_pct:
+            continue
+        field_name, end = key
+        if (components, end) in seen:
+            continue
+        seen.add((components, end))
+        moved_by = tuple(dict.fromkeys(
+            (str(row.get("form", "")), str(row.get("accn", "")))
+            for concept in components for row in by_concept.get(concept, [])
+            if str(row.get("filed", "")) == cur[0].isoformat()
+        ))
+        found.append(DerivedRevision(
+            field_name=field_name, period_start=start, period_end=end, method=method,
+            original_value=orig[1], original_filed=orig[0],
+            current_value=cur[1], current_filed=cur[0], moved_by=moved_by,
+        ))
+    found.sort(key=lambda d: (d.period_end, d.field_name), reverse=True)
+    return found
 
 
 _MAX_ROWS = 20  # spinoff/discontinued-ops re-presentation can produce many rows
@@ -732,10 +934,18 @@ def render_restatements_section(scan: RestatementScan) -> str:
         )
     lines.append("")
     if not footprints:
-        lines.append(
-            f"- No revisions detected above the {scan.materiality_pct:.0%} materiality "
-            f"threshold among the {len(scan.inspected)} inspected field(s)."
-        )
+        if scan.derived:
+            lines.append(
+                f"- No filed figure was revised above the {scan.materiality_pct:.0%} "
+                f"materiality threshold, but {len(scan.derived)} derived quarter(s) moved "
+                "(below)."
+            )
+        else:
+            lines.append(
+                f"- No revisions detected above the {scan.materiality_pct:.0%} materiality "
+                f"threshold among the {len(scan.inspected)} inspected field(s)."
+            )
+        lines.extend(_derived_lines(scan.derived))
         lines.extend(_conflict_lines(scan.conflicts))
         return "\n".join(lines)
 
@@ -768,8 +978,47 @@ def render_restatements_section(scan: RestatementScan) -> str:
     if amended:
         summary += f"; **{len(amended)} via amended (/A) filings**"
     lines.append(summary + ".")
+    lines.extend(_derived_lines(scan.derived))
     lines.extend(_conflict_lines(scan.conflicts))
     return "\n".join(lines)
+
+
+_METHOD_LABELS = {
+    "ytd_diff": "year-to-date less earlier quarters",
+    "fy_minus_3q": "fiscal year less three quarters",
+    "composite": "sum of components",
+}
+
+
+def _derived_lines(found: tuple[DerivedRevision, ...]) -> list[str]:
+    """Quarters the engine derives whose scored value moved: invisible to
+    the filed-figure comparison above when the figure it is derived from
+    moved by less than materiality (Hermes audit round 4, finding 2)."""
+    if not found:
+        return []
+    lines = [
+        "",
+        "### Derived quarters that moved (rebuilt from the filings behind them)",
+        "",
+        "_Quarters the engine derives rather than reads, rebuilt as of each date a "
+        "filing behind them was made. A small revision to a year-to-date or annual "
+        "figure can move a derived quarter by far more. An amended filing (/A) behind "
+        "the move promotes it to the card; otherwise it is context._",
+        "",
+        "| Period | Field | Derived as | Original (as of) | Current (as of) | Change | Moved by |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for d in found[:_MAX_ROWS]:
+        pct = f"{d.pct_change * 100:+.1f}%" if d.pct_change is not None else "n/a"
+        moved = ", ".join(f"{form} {accn}" for form, accn in d.moved_by) or "—"
+        lines.append(
+            f"| {d.period_end} | {d.field_name} | {_METHOD_LABELS.get(d.method, d.method)} "
+            f"| {d.original_value:,.0f} ({d.original_filed}) | {d.current_value:,.0f} "
+            f"({d.current_filed}) | {pct} | {moved} |"
+        )
+    if len(found) > _MAX_ROWS:
+        lines.append(f"| … | {len(found) - _MAX_ROWS} more | | | | | |")
+    return lines
 
 
 def _conflict_lines(found: tuple[SameDayConflict, ...]) -> list[str]:
