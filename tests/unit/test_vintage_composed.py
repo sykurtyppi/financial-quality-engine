@@ -300,3 +300,20 @@ def test_provenance_names_the_quarters_own_fact_not_the_year_to_date_one():
     [c] = [c for c in diff_scored(older, newer).changes if c.field_name == "revenue"]
     assert c.key.start == date(2024, 4, 1)
     assert c.old_accession != ytd["accn"]
+
+
+def test_a_quarter_ending_on_the_window_start_is_compared():
+    """Mutation backlog (Hermes audit round 5): `since` is inclusive — a
+    quarter ending exactly on it is in the window."""
+    from datetime import timedelta
+
+    older = _every_field(composites=False)
+    q = QUARTER_ENDS[-3]
+    newer = _bump(older, _first_component(older, "revenue"), q)
+
+    def revised(since):
+        return {c.field_name for c in diff_scored(older, newer, since=since).changes
+                if c.kind == "revised"}
+
+    assert "revenue" in revised(q)
+    assert "revenue" not in revised(q + timedelta(days=1))

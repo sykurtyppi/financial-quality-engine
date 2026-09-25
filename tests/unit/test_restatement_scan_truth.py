@@ -243,3 +243,66 @@ def _dated_copy_for_test(facts, day):
     from app.services.ingestion.restatements import _dated_copy
 
     return _dated_copy(facts, day)
+
+
+# --- Mutation backlog (Hermes audit round 5): each fails under the mutant named.
+
+
+def test_a_revision_of_exactly_the_materiality_threshold_is_material():
+    # `p >= materiality_pct` -> `>`: 100 -> 101 is exactly 1%.
+    p = _base("Threshold Co")
+    oi = [quarter(e, 50.0) for e in QUARTER_ENDS if e != Q1]
+    oi += [quarter(Q1, 100.0), quarter(Q1, 101.0, filed=date(2024, 9, 1), form="10-Q/A")]
+    p.add("OperatingIncomeLoss", oi)
+    scan = _scan(p.data)
+    (fp,) = [f for f in scan.footprints if f.field_name == "operating_income"]
+    assert (fp.original_value, fp.current_value, fp.is_amendment) == (100.0, 101.0, True)
+
+
+def test_a_malformed_taxonomy_is_skipped_by_the_dated_copy():
+    # `if not isinstance(tags, dict): continue` -> `pass` crashed on it.
+    from app.services.ingestion.restatements import _dated_copy
+
+    facts = _ytd_filer(None)
+    facts["facts"]["junk"] = "not a taxonomy"
+    out = _dated_copy(facts, AS_OF)
+    assert "junk" not in out["facts"] and "OperatingIncomeLoss" in out["facts"]["us-gaap"]
+
+
+def test_a_malformed_row_behind_a_derived_quarter_is_ignored():
+    # `continue` -> `pass` after a failed parse used an unbound or stale date.
+    # The dated copy already drops rows without a filed date, so the row that
+    # reaches this parse is one with a filed date and no usable period end.
+    facts = _ytd_filer(101.9)
+    rows = facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["USD"]
+    rows.insert(0, {"end": "not a date", "filed": "2024-08-09", "val": 5.0, "form": "10-Q"})
+    (d,) = [d for d in _scan(facts).derived if d.field_name == "operating_income"]
+    assert d.original_value == 1.0 and abs(d.current_value - 1.9) < 1e-9
+
+
+def test_the_summary_and_the_other_revisions_table_follow_what_was_found():
+    # `if amended:` and `if other:` negated: the summary claimed amendments
+    # that were not there, and the table showed "None." beside a revision.
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    base = _scan(_ytd_filer(None))
+
+    def fp(amended):
+        return SimpleNamespace(
+            period_end=Q2, field_name="revenue", original_value=1.0, current_value=2.0,
+            pct_change=1.0, is_amendment=amended,
+            amendment_value=2.0 if amended else None,
+            amendment_form="10-Q/A" if amended else None,
+            amendment_filed=Q2 if amended else None,
+        )
+
+    def other_section(text):
+        return text.split("### Other prior-period revisions")[1].split("- **")[0]
+
+    plain = render_restatements_section(replace(base, footprints=[fp(False)]))
+    assert "via amended" not in plain
+    assert "| revenue |" in other_section(plain) and "- None." not in other_section(plain)
+    amended = render_restatements_section(replace(base, footprints=[fp(True)]))
+    assert "**1 via amended (/A) filings**" in amended
+    assert "- None." in other_section(amended)
