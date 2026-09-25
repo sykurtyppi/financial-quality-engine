@@ -102,7 +102,13 @@ class RestatementFootprint:
 
     @property
     def direction(self) -> str:
-        return "up" if self.current_value > self.original_value else "down"
+        # An amendment that a later filing reversed leaves the figure where it
+        # started: it is reported for the /A event, and moved neither way.
+        if self.current_value > self.original_value:
+            return "up"
+        if self.current_value < self.original_value:
+            return "down"
+        return "unchanged"
 
     @property
     def is_amendment(self) -> bool:
