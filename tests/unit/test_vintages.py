@@ -665,3 +665,71 @@ class TestSnapshotsWithoutObservations:
         assert [(s.path, s.sha256) for s in states] == [
             (first.path, first.sha256), (second.path, second.sha256)
         ]
+
+
+class TestMutationBacklog:
+    """Boundaries the in-repo mutation harness found unpinned (Hermes audit
+    round 5): each test fails under the mutant named in it."""
+
+    def test_the_lock_waits_for_a_brief_holder(self, tmp_path, monkeypatch):
+        # `max(timeout, 0)` -> `min(...)` gave up at once instead of waiting.
+        import fcntl
+
+        d = v.cik_dir(1045810, tmp_path)
+        d.mkdir(parents=True, exist_ok=True)
+        holder = (d / v.LOCK).open("w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        released = []
+
+        def sleep(_seconds):  # the holder lets go during the first wait
+            if not released:
+                fcntl.flock(holder, fcntl.LOCK_UN)
+                released.append(True)
+
+        monkeypatch.setattr(v.time, "sleep", sleep)
+        try:
+            with v._cik_lock(1045810, tmp_path, timeout=5.0) as got:
+                assert got is True
+        finally:
+            holder.close()
+        assert released == [True]
+
+    def test_an_observation_is_recorded_per_transition(self):
+        # Either `==` flipped in the same-day dedupe drops a real transition
+        # or records a duplicate.
+        man: dict = {}
+        d1, d2 = date(2026, 9, 19), date(2026, 9, 20)
+        v._observe(man, d1, "a")
+        v._observe(man, d1, "a")  # same day, same content: once
+        v._observe(man, d1, "b")  # same day, new content: a transition
+        v._observe(man, d2, "b")  # next day, same content: observed again
+        assert man["observations"] == [
+            {"date": "2026-09-19", "sha256": "a"},
+            {"date": "2026-09-19", "sha256": "b"},
+            {"date": "2026-09-20", "sha256": "b"},
+        ]
+
+    def test_a_full_tie_keeps_the_first_row_as_the_mapper_does(self):
+        # `>` -> `>=` kept the LAST of two rows identical in date, form and
+        # accession; the mapper and `precedence.latest` keep the first.
+        facts = _facts([
+            ("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a"),
+            ("2026-06-30", "2026-08-01", 1100.0, "10-Q", "a"),
+        ])
+        for scored_only in (False, True):
+            rows = [r for k, r in v._series(facts, scored_only).items()
+                    if k[2] == date(2026, 6, 30)]
+            assert [r["val"] for r in rows] == [1000.0]
+
+    def test_a_malformed_row_never_lends_its_neighbours_fields(self):
+        # `continue` -> `pass` after a failed parse reused (or never bound)
+        # the previous row's dates.
+        good = {"end": "2026-06-30", "val": 1.0, "filed": "2026-08-01",
+                "form": "10-Q", "accn": "a"}
+        for bad in ({"end": "2026-06-30", "val": 1.0},  # no filed date
+                    {"val": 1.0, "filed": "2026-08-01"}):  # no end
+            for rows in ([bad, good], [good, bad]):
+                facts = {"facts": {"us-gaap": {"Assets": {"units": {"USD": rows}}}}}
+                assert v._filing(facts, "us-gaap:Assets", "USD", date(2026, 6, 30)) == (
+                    date(2026, 8, 1), "a", "10-Q", None
+                )

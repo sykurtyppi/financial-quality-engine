@@ -361,3 +361,68 @@ class TestDiagnostics:
     def test_quarter_ends_from_assets(self):
         fj = facts_json({"Assets": assets_instants()})
         assert select_quarter_ends(fj, 4) == [date.fromisoformat(e) for e in Q_ENDS[4:]]
+
+
+class TestMutationBacklog:
+    """Boundaries the in-repo mutation harness found unpinned (Hermes audit
+    round 5): each test fails under the mutant named in it."""
+
+    def test_an_annual_fact_at_either_length_bound_sets_the_fiscal_year_end(self):
+        # ANNUAL_DAYS upper bound `<=` -> `<` in fiscal_year_end_month.
+        from app.services.ingestion.companyfacts_mapper import ANNUAL_DAYS
+        from tests.fixtures.selection_cases import Payload, duration
+
+        start = date(2023, 1, 1)
+
+        def fye(days):
+            p = Payload("FYE Co").add("RevenueFromContractWithCustomerExcludingAssessedTax",
+                                      [duration(start, start + timedelta(days=days), 1.0)])
+            return fiscal_year_end_month(p.data)
+
+        lo, hi = ANNUAL_DAYS
+        assert fye(hi) == 1 and fye(lo) == 11  # 2024-01-16 and 2023-11-27
+        assert fye(hi + 1) is None and fye(lo - 1) is None
+
+    def test_a_revenue_quarter_at_either_length_bound_is_a_quarter_end(self):
+        # The revenue fallback for quarter ends: QTD upper bound `<=` -> `<`.
+        from app.services.ingestion.companyfacts_mapper import (
+            QTD_DAYS,
+            select_quarter_ends,
+        )
+        from tests.fixtures.selection_cases import Payload, duration
+
+        start = date(2024, 1, 1)
+
+        def ends(days):
+            p = Payload("Ends Co").add("RevenueFromContractWithCustomerExcludingAssessedTax",
+                                       [duration(start, start + timedelta(days=days), 1.0)])
+            return select_quarter_ends(p.data, 8)
+
+        lo, hi = QTD_DAYS
+        assert ends(hi) == [start + timedelta(days=hi)] and ends(lo) == [start + timedelta(days=lo)]
+        assert ends(hi + 1) == [] and ends(lo - 1) == []
+
+    def test_tag_ties_are_broken_on_exactly_the_buffered_history(self):
+        # WINDOW_BUFFER_QUARTERS 4 -> 5: the tie-break on buffered coverage
+        # must count exactly the quarters fetched for derivations, no more.
+        # Both tags cover every reported quarter. "Revenues" also covers all
+        # 4 buffered quarters; the earlier candidate misses the oldest of
+        # them but has a 5th-oldest quarter nobody fetches. "Revenues" wins.
+        from app.services.ingestion.companyfacts_mapper import WINDOW_BUFFER_QUARTERS
+        from tests.fixtures.selection_cases import (
+            QUARTER_ENDS,
+            Payload,
+            instant,
+            quarter,
+        )
+
+        assert WINDOW_BUFFER_QUARTERS == 4 and len(QUARTER_ENDS) == 8 + 4
+        older = date(2021, 12, 31)
+        p = Payload("Buffer Co")
+        p.add("Assets", [instant(e, 1.0) for e in (older, *QUARTER_ENDS)])
+        p.add("Revenues", [quarter(e, 1000.0) for e in QUARTER_ENDS])
+        p.add("RevenueFromContractWithCustomerExcludingAssessedTax",
+              [quarter(e, 2000.0) for e in (older, *QUARTER_ENDS[1:])])
+        ds, diag = build_dataset(p.data, "BUF", n_quarters=8)
+        assert diag.field_by_name("revenue").tag_used == "us-gaap:Revenues"
+        assert {x.revenue for x in ds.periods} == {1000.0}

@@ -249,3 +249,11 @@ def test_an_amendment_after_a_component_first_appears_is_still_found():
     [fp] = [f for f in detect_restatements(facts, selected_tags=diag.selected_tags())
             if f.field_name == "total_debt" and f.period_end == q]
     assert (fp.original_value, fp.current_value) == (900.0, 950.0)
+
+
+def test_the_fallback_names_a_missing_short_term_role_only_when_it_is_missing():
+    # Mutation backlog (Hermes audit round 5): `if short is None` negated on
+    # the LongTermDebt fallback reported the reverse, and `missing` drives
+    # the "short-term borrowings not reported" note.
+    assert compose_total_debt({"LongTermDebt": 500.0}).missing == ("short",)
+    assert compose_total_debt({"LongTermDebt": 500.0, "CommercialPaper": 9.0}).missing == ()
