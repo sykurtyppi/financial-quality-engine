@@ -3,6 +3,8 @@ met/violated/unresolvable calls across every input class the CLI can send it."""
 
 from datetime import date
 
+import pytest
+
 from app.schemas.financials import (
     CompanyDataset,
     CompanyProfile,
@@ -135,6 +137,36 @@ class TestSymbolicThresholds:
         a = _a(metric="cfo", comparator=">", threshold="negative")
         r = propose_resolution(a, _ds(_p(cfo=-5.0)))
         assert r.state == "unresolvable"
+
+
+    # Hermes audit round 4: the zero boundary of every symbolic keyword was
+    # unpinned — `positive` accepting zero or `non_negative` rejecting it
+    # survived the suite. Zero is where the strict and non-strict keywords
+    # disagree, so it is checked for each, with a value either side.
+    @pytest.mark.parametrize(
+        ("threshold", "comparator", "cfo", "state"),
+        [
+            ("positive", ">", 0.0, "violated"),
+            ("positive", ">", 1e-9, "met"),
+            ("negative", "<", 0.0, "violated"),
+            ("negative", "<", -1e-9, "met"),
+            ("non_negative", ">=", 0.0, "met"),
+            ("nonnegative", ">=", 0.0, "met"),
+            ("non_negative", ">=", -1e-9, "violated"),
+            ("nonnegative", ">=", -1e-9, "violated"),
+            ("non_positive", "<=", 0.0, "met"),
+            ("nonpositive", "<=", 0.0, "met"),
+            ("non_positive", "<=", 1e-9, "violated"),
+            ("nonpositive", "<=", 1e-9, "violated"),
+            ("zero", "==", 0.0, "met"),
+            ("zero", "==", 1e-9, "violated"),
+            ("zero", "==", -1e-9, "violated"),
+        ],
+    )
+    def test_zero_boundary_of_each_keyword(self, threshold, comparator, cfo, state):
+        a = _a(metric="cfo", comparator=comparator, threshold=threshold)
+        r = propose_resolution(a, _ds(_p(cfo=cfo)))
+        assert r.state == state and r.observed == cfo
 
 
 class TestUnsupportedComparator:
