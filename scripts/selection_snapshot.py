@@ -42,7 +42,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.backtesting.pit import filter_as_of
 from app.services.ingestion import vintages
 from app.services.ingestion.companyfacts_mapper import build_dataset
 
@@ -55,12 +54,14 @@ PIT_CUTS = (date(2024, 6, 30), date(2025, 3, 31))
 N_QUARTERS = 8
 
 
-def dump(facts: dict, ticker: str, *, n_quarters: int = N_QUARTERS) -> dict:
+def dump(
+    facts: dict, ticker: str, *, n_quarters: int = N_QUARTERS, as_of: date | None = None
+) -> dict:
     """One mapper run, as plain JSON data. A payload the mapper refuses
     (fewer than two quarter ends) is recorded as its error, so a change in
     what is refused shows up too."""
     try:
-        ds, diag = build_dataset(facts, ticker, n_quarters=n_quarters)
+        ds, diag = build_dataset(facts, ticker, n_quarters=n_quarters, as_of=as_of)
     except ValueError as e:
         return {"error": str(e)}
     fields = []
@@ -127,8 +128,8 @@ def golden_cases() -> dict[str, dict]:
         facts = json.loads((FIXTURES / f"companyfacts_{ticker}_trimmed.json").read_text())
         cases[f"real/{ticker}"] = dump(facts, ticker)
         for cut in PIT_CUTS:
-            # Exactly what `pit.build_pit_dataset` feeds the mapper.
-            cases[f"pit/{ticker}@{cut}"] = dump(filter_as_of(facts, cut), ticker)
+            # The mapper's own cut, as `pit.build_pit_dataset` asks for it.
+            cases[f"pit/{ticker}@{cut}"] = dump(facts, ticker, as_of=cut)
     for name, build in CASES.items():
         cases[f"synthetic/{name}"] = dump(build(), name.upper())
     return cases

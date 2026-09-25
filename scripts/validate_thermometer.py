@@ -30,7 +30,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.backtesting.pit import filter_as_of
 from app.services.ingestion.companyfacts_mapper import build_dataset
 from app.services.scoring.thermometer import MIN_CLUSTER_MEMBERS, _regime_flags
 
@@ -147,8 +146,7 @@ def _regime_add(row: dict, raw: dict, failures: set | None = None) -> float:
     if not facts or not asof:
         return 0.0
     try:
-        pit_facts = filter_as_of(facts, date.fromisoformat(asof))
-        ds, _ = build_dataset(pit_facts, row["ticker"], n_quarters=28)
+        ds, _ = build_dataset(facts, row["ticker"], n_quarters=28, as_of=date.fromisoformat(asof))
     except Exception:  # noqa: BLE001 - unmappable PIT window contributes no regime
         # Round-9 finding 4: a PIT window that passed the 8-quarter load probe can
         # still fail to reconstruct here; record it so the completeness gate does
