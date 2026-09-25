@@ -96,6 +96,31 @@ def test_long_term_debt_total_is_the_fallback_and_never_takes_debt_current():
     assert compose_total_debt({"LongTermDebt": 500.0, "LongTermDebtNoncurrent": 450.0}).strategy == SPLIT
 
 
+# Hermes audit round 4: a false `finance_lease_added` survived the suite —
+# the flag drives the "finance leases added" note, so it is pinned on both
+# strategies, with leases present, absent, and present but embedded.
+@pytest.mark.parametrize(
+    ("present", "added"),
+    [
+        ({"LongTermDebtNoncurrent": 100.0, "LongTermDebtCurrent": 10.0}, False),
+        ({"LongTermDebtNoncurrent": 100.0, "LongTermDebtCurrent": 10.0,
+          "FinanceLeaseLiabilityCurrent": 1.0}, True),
+        ({"LongTermDebtNoncurrent": 100.0, "FinanceLeaseLiabilityNoncurrent": 5.0}, True),
+        # Both leases present but both embedded (lease-inclusive noncurrent
+        # and DebtCurrent): nothing is added.
+        ({"LongTermDebtAndCapitalLeaseObligations": 100.0, "DebtCurrent": 10.0,
+          "FinanceLeaseLiabilityNoncurrent": 5.0, "FinanceLeaseLiabilityCurrent": 1.0}, False),
+        ({"LongTermDebt": 500.0}, False),
+        ({"LongTermDebt": 500.0, "CommercialPaper": 9.0}, False),
+        ({"LongTermDebt": 500.0, "FinanceLeaseLiabilityCurrent": 1.0}, True),
+    ],
+)
+def test_finance_lease_added_says_whether_a_lease_was_added(present, added):
+    c = compose_total_debt(present)
+    assert c.finance_lease_added is added
+    assert c.finance_lease_added == any(t.startswith("FinanceLease") for t in c.used)
+
+
 def test_nothing_to_compose():
     assert compose_total_debt({}) is None
     assert compose_total_debt({"DebtCurrent": 5.0, "CommercialPaper": 1.0}) is None
