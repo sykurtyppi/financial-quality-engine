@@ -74,6 +74,7 @@ class HorizonScore:
     blocks: dict[str, float] = field(default_factory=dict)
     top_block: str = ""
     coverage: float | None = None
+    selections_digest: str = ""  # which concepts the mapper used
 
 
 @dataclass
@@ -153,7 +154,10 @@ def evaluate_case(client: SecClient, rc: RestatementCase) -> CaseResult:
             continue
         result = analyze(dset)
         if result.overall is None or result.overall.score is None:
-            horizons.append(HorizonScore(months, asof, "no_score", coverage=round(diag.coverage(), 2)))
+            horizons.append(HorizonScore(
+                months, asof, "no_score", coverage=round(diag.coverage(), 2),
+                selections_digest=diag.selections_digest(),
+            ))
             continue
         blocks = {b.name: b.score for b in result.block_scores if b.score is not None}
         top = max(blocks.items(), key=lambda kv: kv[1])[0] if blocks else ""
@@ -163,6 +167,7 @@ def evaluate_case(client: SecClient, rc: RestatementCase) -> CaseResult:
             blocks={k: round(v, 1) for k, v in blocks.items()},
             top_block=top,
             coverage=round(diag.coverage(), 2),
+            selections_digest=diag.selections_digest(),
         ))
     return CaseResult(rc, event, sic, False, horizons)
 

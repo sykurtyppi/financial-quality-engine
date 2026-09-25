@@ -335,6 +335,26 @@ Mid-window changes (0.4.0 window):
     is invisible to a dated reader, where `filter_as_of` compared strings.
     SEC payloads always carry the ISO form.
 
+14. **2026-09-24 — backtest rows say what the mapper built them from
+    (`runner.py`).** The backtest and the six controls kept only the
+    dataset `build_pit_dataset` returned and threw its diagnostics away.
+    Each row now carries field coverage and
+    `IngestionDiagnostics.selections_digest()`, a 12-character fingerprint
+    of which concept backed each field. A later rerun can then tell a
+    score that moved from a field that moved to another XBRL concept,
+    without re-running the mapper. The runner's CSV gains two columns,
+    `coverage` and `selections_digest`, **appended after every existing
+    column**. No earlier column moves or changes value, and every reader
+    (`backtesting/analysis.py`, `validate_thermometer.py`) reads by name. The
+    controls' result records gain the same two fields; the three
+    score-based controls already recorded coverage. **No score, anchor,
+    weight or outcome is touched.** Proof: `tests/unit/test_backtest_diagnostics.py`
+    checks four things. The header is the old header plus the two columns.
+    A stub runner run writes each row's values from that row's own PIT
+    dataset. The digest is stable across runs and changes when one field's
+    concept changes. The controls record the same values. Existing sweep
+    CSVs under `data/` keep the old header until they are regenerated.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

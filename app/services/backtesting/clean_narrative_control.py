@@ -91,6 +91,8 @@ class CleanResult:
     doc_periods: list[str]
     independent_kinds: set[str] = field(default_factory=set)
     error: str | None = None
+    coverage: float | None = None  # what the mapper built the dataset from
+    selections_digest: str = ""
 
 
 def evaluate_clean(client: SecClient, cc: CleanCompany, anchor: date = ANCHOR) -> CleanResult:
@@ -105,14 +107,17 @@ def evaluate_clean(client: SecClient, cc: CleanCompany, anchor: date = ANCHOR) -
     try:
         facts = client.company_facts(cc.ticker)
         trimmed = trim_to_mapped_tags(facts)
-        ds, _ = build_pit_dataset(trimmed, cc.name, anchor, n_quarters=8)
+        ds, diag = build_pit_dataset(trimmed, cc.name, anchor, n_quarters=8)
     except (SecClientError, ValueError) as e:
         return CleanResult(cc, has_402, 0, [], error=str(e)[:60])
     docs = fetch_documents(client, cc.ticker, facts, n_filings=8, cik=cik, before=anchor)
     ds.documents = docs.documents
     result = analyze(ds)
     kinds = {f.kind for f in result.narrative_findings if f.kind in INDEPENDENT_KINDS}
-    return CleanResult(cc, has_402, len(docs.documents), sorted({d.fiscal_label for d in docs.documents}), kinds)
+    return CleanResult(
+        cc, has_402, len(docs.documents), sorted({d.fiscal_label for d in docs.documents}), kinds,
+        coverage=round(diag.coverage(), 2), selections_digest=diag.selections_digest(),
+    )
 
 
 def run_clean_control(client: SecClient | None = None) -> list[CleanResult]:
