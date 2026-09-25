@@ -167,3 +167,38 @@ def test_the_report_promotes_an_amended_derived_move():
     )
     assert errors["restatements"] is None
     assert any(t.startswith("Restatement (10-Q/A) moved derived operating_income") for t in tier1)
+
+
+# Found by the in-repo mutation harness on the restatement module.
+
+
+def test_a_derived_quarter_ending_on_the_window_start_is_checked():
+    scan = scan_restatements(_ytd_filer(101.9), period_since=Q2, as_of=AS_OF)
+    assert [d.period_end for d in scan.derived if d.field_name == "operating_income"] == [Q2]
+    later = scan_restatements(_ytd_filer(101.9), period_since=QUARTER_ENDS[10], as_of=AS_OF)
+    assert not [d for d in later.derived if d.field_name == "operating_income"]
+
+
+def test_long_tables_say_how_many_rows_were_left_out():
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from app.services.ingestion.restatements import _MAX_ROWS, _derived_lines, _table
+
+    (d,) = [x for x in _scan(_ytd_filer(101.9)).derived if x.field_name == "operating_income"]
+    full = tuple(replace(d, field_name=f"f{i}") for i in range(_MAX_ROWS))
+    assert not any("more |" in line for line in _derived_lines(full))
+    assert any("| 1 more |" in line for line in _derived_lines(full + (d,)))
+
+    fp = SimpleNamespace(period_end=Q2, field_name="revenue", original_value=1.0,
+                         current_value=2.0, pct_change=1.0, amendment_value=None)
+    assert not any("more |" in row for row in _table([fp] * _MAX_ROWS))
+    assert _table([fp] * (_MAX_ROWS + 1))[-1].startswith("| … | +1 more |")
+
+    from app.services.ingestion.restatements import _conflict_lines
+
+    c = SimpleNamespace(period_start=None, period_end=Q2, field_name="revenue",
+                        tag="us-gaap:Revenues", filed=Q2, amended=False, values=(1.0, 2.0),
+                        accessions=("a", "b"))
+    assert not any("more |" in line for line in _conflict_lines((c,) * _MAX_ROWS))
+    assert _conflict_lines((c,) * (_MAX_ROWS + 1))[-1].startswith("| … | 1 more |")
