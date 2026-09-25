@@ -90,6 +90,7 @@ module = [
     "app.services.ingestion.fields",
     "app.services.ingestion.payloads",
     "app.services.ingestion.precedence",
+    "app.services.ingestion.selection",
     "app.services.metrics_registry",
 ]
 disallow_untyped_defs = true
