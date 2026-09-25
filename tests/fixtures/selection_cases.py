@@ -478,8 +478,35 @@ def fifty_two_week() -> dict:
     return p.data
 
 
+def mixed_vintages() -> dict:
+    """Derived quarters rebuilt from one filing date (Hermes audit round 4).
+
+    Operating income: 2024 Q1-Q3 are 100 each and the 10-K reports 400 for
+    the year (filed 2025-03-01); a 10-Q/A then restates 2024 Q1 to 150
+    (2025-03-10). Q4 is the year less the three quarters AS THE 10-K SAW
+    THEM: 400 - 300 = 100, not 400 - 350 = 50.
+
+    Cash from operations: year-to-date only in 2024 Q2, and the Q1 figure it
+    subtracts was first filed a month AFTER the H1 total (a late
+    re-presentation), so no single filing date has both. The latest values
+    are used and the quarter is noted."""
+    p = _base("Mixed Vintages Co")
+    q = QUARTER_ENDS
+    oi = [quarter(e, 90.0 + i) for i, e in enumerate(q[:8])]
+    oi += [quarter(e, 100.0) for e in q[8:11]]
+    oi += [annual(2022, 400.0), annual(2023, 420.0), annual(2024, 400.0)]
+    oi.append(quarter(q[8], 150.0, filed=date(2025, 3, 10), form="10-Q/A"))
+    p.add("OperatingIncomeLoss", oi)
+    cfo = [quarter(e, 50.0 + i) for i, e in enumerate(q) if e not in (q[8], q[9])]
+    cfo.append(quarter(q[8], 60.0, filed=date(2024, 9, 1)))
+    cfo.append(ytd(q[9], 130.0, filed=date(2024, 8, 1)))
+    p.add("NetCashProvidedByUsedInOperatingActivities", cfo)
+    return p.data
+
+
 CASES: dict[str, Callable[[], dict]] = {
     "flows": flows,
+    "mixed_vintages": mixed_vintages,
     "tag_choice": tag_choice,
     "composites_lose": composites_lose,
     "da_split_equal_coverage": da_split_equal_coverage,
