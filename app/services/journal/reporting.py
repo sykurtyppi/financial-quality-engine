@@ -24,6 +24,7 @@ from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
+from app.services.reporting.report_builder import ledger_path
 from app.services.scoring.thermometer import describe
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -85,6 +86,8 @@ def build_report(
     # which this regeneration does not do.
     generated_on = date.today().isoformat()
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    target_dir = out_dir if out_dir is not None else REPORTS
+    out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}.md"
     report, thermometer = build_full_report(
         result, dataset,
         generated_on=generated_on,
@@ -103,11 +106,11 @@ def build_report(
         fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
         vintage_note=vintage_note,
         baseline_day=date.fromisoformat(report_day) if report_day else None,
+        # The same claims as data, each with the filings behind it.
+        ledger_out=ledger_path(out),
     )
     if banner:
         report = f"{banner}\n\n{report}"
-    target_dir = out_dir if out_dir is not None else REPORTS
     target_dir.mkdir(parents=True, exist_ok=True)
-    out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}.md"
     out.write_text(report)
     return out, describe(thermometer)

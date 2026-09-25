@@ -16,6 +16,8 @@ ablation (docs/thermometer_season_ablation_2026Q2.md).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from app.schemas.report import AnalysisResult, Flag
 from app.services.scoring.thermometer import DistressThermometer
 
@@ -47,7 +49,14 @@ TIER3_SIGNALS = frozenset(
 
 
 def _tier(flag: Flag) -> int:
-    metrics = set(flag.evidence_metrics)
+    return tier_of(flag.evidence_metrics)
+
+
+def tier_of(names: Iterable[str]) -> int:
+    """The card tier of evidence resting on these metric/signal names: 1
+    validated, 2 directional, 3 unvalidated (the evidence ledger labels
+    each item the same way the card ranks it)."""
+    metrics = set(names)
     if metrics & TIER1_SIGNALS:
         return 1
     if metrics and metrics <= TIER3_SIGNALS:

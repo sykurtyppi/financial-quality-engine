@@ -177,6 +177,25 @@ def test_accessions_for_lists_each_filing_once_in_order():
     assert expected and len(expected) == len(set(expected))
 
 
+def test_a_trend_resolves_through_its_base_metrics_history():
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    bundle = compute_metrics(ds)
+    trend = bundle.get_latest("accrual_trend")
+    found = sources_for(ds, trend, bundle=bundle)
+    labels = {k.split("[", 1)[1].split("]", 1)[0] for k in found}
+    base = [m for m in bundle.history["total_accruals"] if m.value is not None]
+    assert labels == {m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX) for m in base}
+    for m in base:  # each period's sources are that period's base-metric sources
+        label = m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
+        for key, values in sources_for(ds, m).items():
+            assert found[f"total_accruals[{label}].{key}"] == values
+    windowed = sources_for(ds, bundle.get_latest("incremental_revenue_per_capex"), bundle=bundle)
+    last5 = [p.fiscal_label for p in ds.sorted_periods()][-5:]
+    assert {k.split("[", 1)[1].split("]", 1)[0] for k in windowed} <= set(last5)
+    assert any(last5[0] in k for k in windowed) and any(last5[-1] in k for k in windowed)
+
+
 @pytest.mark.parametrize("sign", [0, 2, -2])
 def test_a_fact_ref_is_only_ever_added_or_subtracted(sign):
     # Hermes audit round 6: `sign` was a plain int, so a schema-valid

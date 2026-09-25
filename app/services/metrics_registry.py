@@ -104,6 +104,22 @@ BASIS: dict[str, Basis] = {
 }
 
 
+# A SERIES metric is a statistic over the history of one base metric; the
+# filings behind it are those behind that metric in each period it may read
+# (`provenance.sources_for`). None = every period up to the metric's own.
+SERIES_OF: dict[str, str] = {
+    "accrual_trend": "total_accruals",
+    "dso_trend": "dso",
+    "dio_trend": "dio",
+    "fcf_margin_trend": "fcf_margin",
+    # mean(capex/revenue) over recent vs prior quarters
+    "capex_intensity_regime_shift": "capex_to_revenue",
+    # revenue at t and t-4, capex over t-3..t: the last five quarters
+    "incremental_revenue_per_capex": "capex_to_revenue",
+}
+SERIES_WINDOW: dict[str, int] = {"incremental_revenue_per_capex": 5}
+
+
 def all_metric_names() -> frozenset[str]:
     return FINANCIAL_METRICS | NARRATIVE_METRICS
 
