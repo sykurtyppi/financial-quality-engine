@@ -417,3 +417,65 @@ def test_the_report_streams_hand_the_scored_window_to_the_scan(monkeypatch):
     _collect_streams(Client(), "T", AS_OF, company_facts=facts,
                      submissions={"filings": {"recent": {}}}, n_quarters=5)
     assert seen["n_quarters"] == 5
+
+
+# Survivors of the full mutation census (Hermes audit round 6), each run
+# against the whole suite first: each test fails under the mutant named.
+
+
+def _assets(*rows):
+    """Assets facts ending Q1 as (value, filed, form, accession)."""
+    return {"facts": {"us-gaap": {"Assets": {"units": {"USD": [
+        {"end": Q1.isoformat(), "val": val, "filed": filed, "form": form, "accn": accn}
+        for val, filed, form, accn in rows
+    ]}}}}}
+
+
+def test_period_since_is_inclusive_for_footprints_and_same_day_conflicts():
+    # Both `end < period_since` -> `<=`, and the conflict loop's `continue`
+    # -> `pass` (listing conflicts from before the window).
+    from datetime import timedelta
+
+    revised = _assets((1000.0, "2024-05-01", "10-Q", "a"), (1200.0, "2024-08-01", "10-Q", "b"))
+    torn = _assets((1000.0, "2024-05-01", "10-Q", "a"), (1100.0, "2024-05-01", "10-Q", "b"))
+    # A later quarter keeps the field inspected when the window starts after Q1.
+    torn["facts"]["us-gaap"]["Assets"]["units"]["USD"].append(
+        {"end": Q2.isoformat(), "val": 900.0, "filed": "2024-08-01", "form": "10-Q", "accn": "c"})
+    on, after = Q1, Q1 + timedelta(days=1)
+    assert [f.period_end for f in scan_restatements(revised, period_since=on).footprints] == [Q1]
+    assert scan_restatements(revised, period_since=after).footprints == []
+    assert [c.period_end for c in scan_restatements(torn, period_since=on).conflicts] == [Q1]
+    assert scan_restatements(torn, period_since=after).conflicts == ()
+
+
+def test_a_derived_move_of_exactly_the_floor_is_reported():
+    # `moved / base < materiality_pct` -> `<=`: Q2 = H1 - Q1 moves 500 ->
+    # 505, exactly 1%, from an H1 amendment of 0.5%.
+    p = _base("Floor Co", revenue=False)
+    rows = [quarter(e, 500.0) for e in QUARTER_ENDS if e != Q2]
+    rows += [ytd(Q2, 1000.0), ytd(Q2, 1005.0, filed=date(2024, 10, 1), form="10-Q/A")]
+    p.add("Revenues", rows)
+    (d,) = [x for x in _scan(p.data).derived if x.field_name == "revenue"]
+    assert (d.original_value, d.current_value) == (500.0, 505.0)
+
+
+def test_a_tag_migration_at_unchanged_values_starts_the_run_a_revision_is_measured_from():
+    # `trail[-1][2] != components` -> `==`: when the filer moved revenue to
+    # another tag at the same figures, the new tag's first value was not
+    # recorded, so a later amendment on it had nothing to be measured from.
+    p = _base("Migrating Co", revenue=False)
+    new_tag = "RevenueFromContractWithCustomerExcludingAssessedTax"
+    old = [quarter(e, 500.0) for e in QUARTER_ENDS if e != Q2] + [ytd(Q2, 1000.0)]
+    p.add("Revenues", old)
+    # The new tag appears with the Q1 and H1 10-Q only (too little history to
+    # be chosen then), re-files the whole history unchanged on 2025-03-01,
+    # and is amended on 2025-06-01.
+    migrated = [quarter(Q1, 500.0), ytd(Q2, 1000.0)]
+    migrated += [quarter(e, 500.0, filed=date(2025, 3, 1)) for e in QUARTER_ENDS if e != Q2]
+    migrated += [ytd(Q2, 1000.0, filed=date(2025, 3, 1)),
+                 ytd(Q2, 1009.0, filed=date(2025, 6, 1), form="10-Q/A")]
+    p.add(new_tag, migrated)
+    ds, diag = build_dataset(p.data, "T")
+    assert diag.field_by_name("revenue").tag_used == f"us-gaap:{new_tag}"
+    (d,) = [x for x in _scan(p.data).derived if x.field_name == "revenue"]
+    assert (d.original_value, d.current_value, d.is_amendment) == (500.0, 509.0, True)
