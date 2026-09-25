@@ -95,6 +95,7 @@ module = [
     "app.services.provenance",
     "app.schemas.ledger",
     "app.services.reporting.ledger",
+    "app.services.corpus",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

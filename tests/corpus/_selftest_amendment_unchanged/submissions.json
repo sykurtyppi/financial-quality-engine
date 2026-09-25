@@ -1,0 +1,35 @@
+{
+ "cik": "1",
+ "filings": {
+  "recent": {
+   "accessionNumber": [
+    "0000000001-25-000601",
+    "0000000001-25-000902",
+    "0000000001-24-003141"
+   ],
+   "filingDate": [
+    "2025-03-01",
+    "2025-01-20",
+    "2024-11-09"
+   ],
+   "form": [
+    "10-K",
+    "10-Q/A",
+    "10-Q"
+   ],
+   "items": [
+    "",
+    "",
+    ""
+   ],
+   "primaryDocument": [
+    "d.htm",
+    "d.htm",
+    "d.htm"
+   ]
+  }
+ },
+ "name": "SelfTest Co",
+ "sic": "3571",
+ "sicDescription": "synthetic"
+}

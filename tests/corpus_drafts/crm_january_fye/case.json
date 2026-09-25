@@ -1,0 +1,47 @@
+{
+ "name": "crm_january_fye",
+ "ticker": "CRM",
+ "cik": 1108524,
+ "as_of": "2026-05-28",
+ "since": "2024-02-01",
+ "why": "A January fiscal year end (FY2027Q1 ends 2026-04-30): quarter labels, fourth quarters derived as the 10-K year minus the 10-Q nine months, a composed SG&A, and a proxy (DEF 14A) fact in the payload.",
+ "synthetic": false,
+ "reviewed": null,
+ "expected": {
+  "tier1": false,
+  "footprints": [],
+  "non_reliance": [],
+  "selections": {
+   "buybacks": "us-gaap:PaymentsForRepurchaseOfCommonStock",
+   "capex": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+   "cash_and_equivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+   "cfo": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+   "cost_of_revenue": "us-gaap:CostOfGoodsAndServicesSold",
+   "current_assets": "us-gaap:AssetsCurrent",
+   "current_liabilities": "us-gaap:LiabilitiesCurrent",
+   "deferred_revenue": "us-gaap:ContractWithCustomerLiabilityCurrent",
+   "depreciation_amortization": "us-gaap:DepreciationAndAmortization",
+   "ebit": "us-gaap:OperatingIncomeLoss",
+   "goodwill": "us-gaap:Goodwill",
+   "intangible_assets": "us-gaap:FiniteLivedIntangibleAssetsNet",
+   "interest_expense": "us-gaap:InterestExpenseDebt",
+   "net_income": "us-gaap:NetIncomeLoss",
+   "operating_income": "us-gaap:OperatingIncomeLoss",
+   "ppe_net": "us-gaap:PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
+   "receivables": "us-gaap:AccountsReceivableNetCurrent",
+   "revenue": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+   "sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense",
+   "shares_diluted": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+   "shares_outstanding": "dei:EntityCommonStockSharesOutstanding",
+   "stock_based_compensation": "us-gaap:ShareBasedCompensation",
+   "total_assets": "us-gaap:Assets",
+   "total_debt": "LongTermDebtNoncurrent+LongTermDebtCurrent"
+  },
+  "coverage_min": 0.88,
+  "uninspected": [
+   "accounts_payable",
+   "inventory",
+   "share_issuance_proceeds"
+  ]
+ }
+}
