@@ -169,6 +169,25 @@ class TestSymbolicThresholds:
         assert r.state == state and r.observed == cfo
 
 
+class TestNumericBoundaries:
+    # Found by the in-repo mutation harness (`>` -> `>=` survived): a value
+    # exactly AT the threshold is where the strict and non-strict
+    # comparators disagree, and no test put one there.
+    @pytest.mark.parametrize(
+        ("comparator", "revenue", "state"),
+        [
+            (">", 100.0, "violated"), (">", 100.5, "met"),
+            ("<", 100.0, "violated"), ("<", 99.5, "met"),
+            (">=", 100.0, "met"), (">=", 99.5, "violated"),
+            ("<=", 100.0, "met"), ("<=", 100.5, "violated"),
+            ("==", 100.0, "met"), ("==", 100.5, "violated"),
+        ],
+    )
+    def test_a_value_at_the_threshold(self, comparator, revenue, state):
+        a = _a(comparator=comparator, threshold=100.0)
+        assert propose_resolution(a, _ds(_p(revenue=revenue))).state == state
+
+
 class TestUnsupportedComparator:
     def test_within_returns_unresolvable_with_note(self):
         # `can_lock` refuses `within` (round-10 finding 6) so it should not
