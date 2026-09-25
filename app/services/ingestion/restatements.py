@@ -500,6 +500,7 @@ def scan_restatements(
     period_since: date | None = None,
     as_of: date | None = None,
     selected_tags: Mapping[str, str | None] | None = None,
+    n_quarters: int = 8,
 ) -> RestatementScan:
     """Find same-period figures a later filing revised beyond `materiality_pct`,
     and account for every field the check could or could not cover.
@@ -527,6 +528,11 @@ def scan_restatements(
     approximates the choice and can diverge — a legacy tag with a long history
     of periods outside the report window beats the tag actually scored.
     Split-adjusted share fields are excluded (see SPLIT_ADJUSTED_FIELDS).
+
+    `n_quarters` is the window the report scores (the mapper's own default
+    is 8). Derived quarters are rebuilt over exactly that window: the mapper
+    ranks candidate tags on the window it is given, so a wider rebuild can
+    follow a series the report does not score.
     """
     footprints: list[RestatementFootprint] = []
     seen: set[tuple[str, date | None, date]] = set()  # (tag, start, end) dedupe
@@ -702,7 +708,8 @@ def scan_restatements(
     reported = {(f.field_name, f.period_end) for f in footprints if f.period_start is not None}
     derived = [
         d for d in derived_revisions(
-            facts_json, as_of=as_of, period_since=period_since, materiality_pct=materiality_pct
+            facts_json, as_of=as_of, period_since=period_since,
+            materiality_pct=materiality_pct, n_quarters=n_quarters,
         )
         if (d.field_name, d.period_end) not in reported
     ]
@@ -760,7 +767,6 @@ def _dated_copy(facts_json: dict, cutoff: date | None) -> dict:
 
 # How the mapper builds a quarter it did not find reported as a quarter.
 _DERIVED_METHODS = frozenset({"ytd_diff", "fy_minus_3q", "composite"})
-_DERIVED_QUARTERS = 16  # the scan's window (three years back) plus a buffer
 
 
 def derived_revisions(
@@ -769,6 +775,7 @@ def derived_revisions(
     as_of: date | None,
     period_since: date | None,
     materiality_pct: float = DEFAULT_MATERIALITY_PCT,
+    n_quarters: int = 8,
 ) -> list[DerivedRevision]:
     """Derived quarters whose SCORED value moved materially across the
     filings behind them (Hermes audit round 4, finding 2).
@@ -785,7 +792,7 @@ def derived_revisions(
 
     facts = _dated_copy(facts_json, as_of)
     try:
-        current, diag = build_dataset(facts, "scan", n_quarters=_DERIVED_QUARTERS)
+        current, diag = build_dataset(facts, "scan", n_quarters=n_quarters)
     except ValueError:
         return []
     targets: dict[tuple[str, date], tuple[str, tuple[str, ...], float, date | None]] = {}
@@ -826,7 +833,7 @@ def derived_revisions(
     trails: dict[tuple[str, date], list[tuple[date, float, tuple[str, ...]]]] = {}
     for day in sorted(days):
         try:
-            ds, d_diag = build_dataset(_dated_copy(facts, day), "scan", n_quarters=_DERIVED_QUARTERS)
+            ds, d_diag = build_dataset(_dated_copy(facts, day), "scan", n_quarters=n_quarters)
         except ValueError:
             continue  # not enough history yet to establish quarter ends
         by_end = {p.period_end: p for p in ds.periods}
