@@ -46,6 +46,19 @@ class TestDetection:
         assert fp.is_amendment is True
         assert fp.pct_change == pytest.approx(-0.0859, abs=1e-3)
 
+    def test_a_reversed_amendment_is_reported_as_unchanged_not_down(self):
+        # The /A moved the figure and a later filing moved it back: the
+        # amendment event is still reported, but the figure did not go down.
+        fj = _facts({"Assets": [
+            _fact("2024-12-31", 1000.0, "2025-02-15", "10-K", accn="A"),
+            _fact("2024-12-31", 1200.0, "2025-03-15", "10-K/A", accn="B"),
+            _fact("2024-12-31", 1000.0, "2025-05-01", "10-Q", accn="C"),
+        ]})
+        (fp,) = detect_restatements(fj)
+        assert (fp.original_value, fp.current_value, fp.amendment_value) == (1000.0, 1000.0, 1200.0)
+        assert fp.is_amendment and fp.pct_change == 0.0
+        assert fp.direction == "unchanged"
+
     def test_immaterial_change_ignored(self):
         # $1M revision on $3.5B = 0.03% < 1% threshold: rounding/reclassification.
         fj = _facts({"NetIncomeLoss": [

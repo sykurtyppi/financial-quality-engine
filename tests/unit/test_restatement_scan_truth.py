@@ -269,6 +269,16 @@ def test_a_malformed_taxonomy_is_skipped_by_the_dated_copy():
     assert "junk" not in out["facts"] and "OperatingIncomeLoss" in out["facts"]["us-gaap"]
 
 
+def test_a_unit_that_is_not_a_list_of_rows_is_skipped_by_the_dated_copy():
+    # `if not isinstance(rows, list): continue` -> `pass` iterated the junk.
+    from app.services.ingestion.restatements import _dated_copy
+
+    facts = _ytd_filer(None)
+    facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["EUR"] = 7
+    out = _dated_copy(facts, AS_OF)
+    assert list(out["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]) == ["USD"]
+
+
 def test_a_malformed_row_behind_a_derived_quarter_is_ignored():
     # `continue` -> `pass` after a failed parse used an unbound or stale date.
     # The dated copy already drops rows without a filed date, so the row that

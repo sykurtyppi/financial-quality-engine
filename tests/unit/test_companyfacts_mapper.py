@@ -426,3 +426,26 @@ class TestMutationBacklog:
         ds, diag = build_dataset(p.data, "BUF", n_quarters=8)
         assert diag.field_by_name("revenue").tag_used == "us-gaap:Revenues"
         assert {x.revenue for x in ds.periods} == {1000.0}
+
+    def test_the_non_additive_note_appears_only_when_a_quarter_is_missing(self):
+        # `_score(values, window_ends) < len(window_ends)` -> `<=` put the
+        # "stay missing" note on a share count that has every quarter.
+        from tests.fixtures.selection_cases import (
+            QUARTER_ENDS,
+            Payload,
+            instant,
+            quarter,
+        )
+
+        note = "Weighted-average share counts are not additive"
+
+        def notes(ends):
+            p = Payload("Shares Co")
+            p.add("Assets", [instant(e, 1.0) for e in QUARTER_ENDS])
+            p.add("WeightedAverageNumberOfDilutedSharesOutstanding",
+                  [quarter(e, 50.0) for e in ends], unit="shares")
+            _ds, diag = build_dataset(p.data, "SHR", n_quarters=8)
+            return diag.field_by_name("shares_diluted").notes
+
+        assert not any(note in n for n in notes(QUARTER_ENDS))
+        assert any(note in n for n in notes(QUARTER_ENDS[:-1]))
