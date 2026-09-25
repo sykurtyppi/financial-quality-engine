@@ -75,6 +75,30 @@ EDGAR_IDENTITY="Name email" .venv/bin/python scripts/make_corpus_case.py \
 Never type expectations from memory, and never edit an expectation to make a
 case pass.
 
+## Draft cases from the committed fixtures (no SEC access needed)
+
+`tests/corpus_drafts/` holds four real-filer drafts built offline from the
+trimmed AAPL, KO and CRM fixtures:
+
+| Draft | What it exercises |
+|---|---|
+| `ko_10qa_cover_only` | A real 10-Q/A that re-files only the cover share count; must not reach Tier 1 |
+| `ko_8k_recast` | A real 8-K re-presenting 62 prior-period facts at unchanged values; a tag move for interest expense |
+| `aapl_comparative_rounding` | Fourth quarters derived as fiscal year minus nine months; a comparative re-filed at different rounding on an unscored tag |
+| `crm_january_fye` | A January fiscal year end; composed SG&A; a proxy fact in the payload |
+
+Each has a `REVIEW.md` listing what to check and which accession to read.
+The gate never reads them. `tests/integration/test_corpus_drafts.py` checks
+only that they are still unreviewed and that the engine still observes what
+they recorded. To pin one, work through its `REVIEW.md`, correct `expected`,
+fill in `reviewed`, and move the directory to `tests/corpus/`. The first one
+pinned turns `corpus-real` green.
+
+None of the committed fixtures holds a scored 10-Q/A or 10-K/A revision, an
+8-K 4.02, a same-day conflict, or a discontinued-operations re-presentation,
+and none derives a quarter as fiscal year minus three quarters. Those cases
+still need a fresh EDGAR pull (next section).
+
 ## Cases to add
 
 Confirm each accession on EDGAR before pinning. Each case exists for one

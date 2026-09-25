@@ -1,0 +1,48 @@
+{
+ "name": "ko_8k_recast",
+ "ticker": "KO",
+ "cik": 21344,
+ "as_of": "2025-07-31",
+ "since": "2024-01-01",
+ "why": "A real 8-K (0000021344-25-000047, filed 2025-06-26) re-presenting 62 prior-period facts at unchanged values: a comparative re-filing is not a revision; quarters derived year-to-date from 10-Qs.",
+ "synthetic": false,
+ "reviewed": null,
+ "expected": {
+  "tier1": false,
+  "footprints": [],
+  "non_reliance": [],
+  "selections": {
+   "accounts_payable": "us-gaap:AccountsPayableAndAccruedLiabilitiesCurrent",
+   "buybacks": "us-gaap:PaymentsForRepurchaseOfCommonStock",
+   "capex": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+   "cash_and_equivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+   "cfo": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+   "cost_of_revenue": "us-gaap:CostOfGoodsAndServicesSold",
+   "current_assets": "us-gaap:AssetsCurrent",
+   "current_liabilities": "us-gaap:LiabilitiesCurrent",
+   "depreciation_amortization": "us-gaap:DepreciationDepletionAndAmortization",
+   "ebit": "us-gaap:OperatingIncomeLoss",
+   "goodwill": "us-gaap:Goodwill",
+   "intangible_assets": "us-gaap:FiniteLivedIntangibleAssetsNet",
+   "interest_expense": "us-gaap:InterestExpenseNonoperating",
+   "inventory": "us-gaap:InventoryNet",
+   "net_income": "us-gaap:NetIncomeLoss",
+   "operating_income": "us-gaap:OperatingIncomeLoss",
+   "ppe_net": "us-gaap:PropertyPlantAndEquipmentNet",
+   "receivables": "us-gaap:AccountsReceivableNetCurrent",
+   "revenue": "us-gaap:Revenues",
+   "sga_expense": "us-gaap:SellingGeneralAndAdministrativeExpense",
+   "share_issuance_proceeds": "us-gaap:ProceedsFromIssuanceOfCommonStock",
+   "shares_diluted": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+   "shares_outstanding": "dei:EntityCommonStockSharesOutstanding",
+   "stock_based_compensation": "us-gaap:ShareBasedCompensation",
+   "total_assets": "us-gaap:Assets",
+   "total_debt": "LongTermDebtNoncurrent+LongTermDebtAndCapitalLeaseObligations+LongTermDebtCurrent+LongTermDebtAndCapitalLeaseObligationsCurrent+CommercialPaper"
+  },
+  "coverage_min": 0.92,
+  "uninspected": [
+   "deferred_revenue",
+   "intangible_assets"
+  ]
+ }
+}

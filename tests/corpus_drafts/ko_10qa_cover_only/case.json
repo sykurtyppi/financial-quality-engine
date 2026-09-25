@@ -1,0 +1,47 @@
+{
+ "name": "ko_10qa_cover_only",
+ "ticker": "KO",
+ "cik": 21344,
+ "as_of": "2024-06-30",
+ "since": "2023-01-01",
+ "why": "A real 10-Q/A (0000021344-24-000019, filed 2024-05-30) that re-files only the cover share count: an amendment with no scored impact must not reach Tier 1.",
+ "synthetic": false,
+ "reviewed": null,
+ "expected": {
+  "tier1": false,
+  "footprints": [],
+  "non_reliance": [],
+  "selections": {
+   "accounts_payable": "us-gaap:AccountsPayableAndAccruedLiabilitiesCurrent",
+   "buybacks": "us-gaap:PaymentsForRepurchaseOfCommonStock",
+   "capex": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+   "cash_and_equivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+   "cfo": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+   "cost_of_revenue": "us-gaap:CostOfGoodsAndServicesSold",
+   "current_assets": "us-gaap:AssetsCurrent",
+   "current_liabilities": "us-gaap:LiabilitiesCurrent",
+   "depreciation_amortization": "us-gaap:DepreciationDepletionAndAmortization",
+   "ebit": "us-gaap:OperatingIncomeLoss",
+   "goodwill": "us-gaap:Goodwill",
+   "intangible_assets": "us-gaap:FiniteLivedIntangibleAssetsNet",
+   "interest_expense": "us-gaap:InterestExpense",
+   "inventory": "us-gaap:InventoryNet",
+   "net_income": "us-gaap:NetIncomeLoss",
+   "operating_income": "us-gaap:OperatingIncomeLoss",
+   "ppe_net": "us-gaap:PropertyPlantAndEquipmentNet",
+   "receivables": "us-gaap:AccountsReceivableNetCurrent",
+   "revenue": "us-gaap:Revenues",
+   "sga_expense": "us-gaap:SellingGeneralAndAdministrativeExpense",
+   "share_issuance_proceeds": "us-gaap:ProceedsFromIssuanceOfCommonStock",
+   "shares_diluted": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+   "shares_outstanding": "dei:EntityCommonStockSharesOutstanding",
+   "stock_based_compensation": "us-gaap:ShareBasedCompensation",
+   "total_assets": "us-gaap:Assets",
+   "total_debt": "LongTermDebtNoncurrent+LongTermDebtCurrent+CommercialPaper"
+  },
+  "coverage_min": 0.96,
+  "uninspected": [
+   "deferred_revenue"
+  ]
+ }
+}
