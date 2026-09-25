@@ -317,3 +317,70 @@ def test_a_quarter_ending_on_the_window_start_is_compared():
 
     assert "revenue" in revised(q)
     assert "revenue" not in revised(q + timedelta(days=1))
+
+
+# Survivors of the full mutation census (Hermes audit round 6), each run
+# against the whole suite first: each test fails under the mutant named.
+
+WINDOW_START = QUARTER_ENDS[4]  # the oldest of the 8 reported quarters
+
+
+def _set(facts: dict, concept: str, end: date, val: float) -> dict:
+    out = copy.deepcopy(facts)
+    for taxonomy in out["facts"].values():
+        for unit_rows in taxonomy.get(concept, {}).get("units", {}).values():
+            for row in unit_rows:
+                if row["end"] == end.isoformat():
+                    row["val"] = val
+    return out
+
+
+def _inventory(older_val: float, newer_val: float, end: date = QUARTER_ENDS[-3]):
+    base = _every_field(composites=False)
+    changes = diff_scored(_set(base, "InventoryNet", end, older_val),
+                          _set(base, "InventoryNet", end, newer_val)).changes
+    return [c for c in changes if c.field_name == "inventory"]
+
+
+def test_the_scored_diff_applies_the_materiality_floor_inclusively():
+    # `pct < materiality_pct` -> `<=` dropped exactly 1%; the `continue`
+    # -> `pass` reported a move below it.
+    assert [c.kind for c in _inventory(100.0, 101.0)] == ["revised"]
+    assert _inventory(100.0, 100.9) == []
+
+
+def test_a_scored_zero_that_stays_zero_is_not_a_revision():
+    # `if new == old: continue` -> `pass`: 0 -> 0 has no percentage.
+    assert _inventory(0.0, 0.0) == []
+    assert [c.kind for c in _inventory(0.0, 7.0)] == ["revised"]
+
+
+def test_a_share_count_move_is_not_a_scored_revision():
+    # The split-adjusted `continue` -> `pass` compared share counts, where a
+    # split is not a restatement.
+    older = _every_field(composites=False)
+    concept = _first_component(older, "shares_outstanding")
+    newer = _bump(older, concept, QUARTER_ENDS[-3], factor=4.0)
+    assert not [c for c in diff_scored(older, newer).changes
+                if c.field_name in SPLIT_ADJUSTED_FIELDS]
+
+
+def test_the_oldest_reported_quarter_can_be_withdrawn():
+    # `end >= window_start` -> `>`: a figure gone from the first quarter the
+    # newer snapshot still reports was not called withdrawn.
+    older = _every_field(composites=True)
+    newer = copy.deepcopy(older)
+    rows = newer["facts"]["us-gaap"]["LongTermDebtNoncurrent"]["units"]["USD"]
+    newer["facts"]["us-gaap"]["LongTermDebtNoncurrent"]["units"]["USD"] = [
+        r for r in rows if r["end"] != WINDOW_START.isoformat()
+    ]
+    withdrawn = [c.key.end for c in diff_scored(older, newer).changes
+                 if c.field_name == "total_debt" and c.kind == "withdrawn"]
+    assert withdrawn == [WINDOW_START]
+
+
+def test_a_revision_in_the_oldest_reported_quarter_is_not_also_context():
+    # `c.key.end < window_start` -> `<=` listed it twice: once compared,
+    # once as a pre-window context row.
+    changes = _inventory(100.0, 150.0, end=WINDOW_START)
+    assert [(c.key.end, c.scope) for c in changes] == [(WINDOW_START, "scored")]

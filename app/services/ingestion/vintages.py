@@ -901,10 +901,12 @@ def diff_scored(
 
 def _filing(facts: dict, component: str, unit: str, end: date) -> tuple | None:
     """(filed, accession, form, start) of the fact a single-concept value was
-    read from: the concept's latest-filed fact ending on `end`, the shortest
+    read from: the concept's current fact ending on `end`, the shortest
     period first — a quarter's own fact before the year-to-date fact it may
-    have been derived from. Read from the snapshot itself, so provenance
-    never depends on which tag the raw diff happened to follow."""
+    have been derived from — then the shared `precedence` order the mapper
+    reads values by (latest filed, an amendment over an original on the
+    same day, the higher accession). Read from the snapshot itself, so
+    provenance never depends on which tag the raw diff happened to follow."""
     taxonomy, _sep, tag = component.partition(":")
     best: tuple | None = None
     for row in _rows(facts, taxonomy, tag, unit):
@@ -915,9 +917,10 @@ def _filing(facts: dict, component: str, unit: str, end: date) -> tuple | None:
             start = _parse_date(row["start"]) if row.get("start") else None
         except (KeyError, TypeError, ValueError):
             continue
-        rank = (start or end, filed)
-        if best is None or rank > best[0]:
-            best = (rank, (filed, row.get("accn", ""), row.get("form", ""), start))
+        form, accn = row.get("form", ""), row.get("accn", "")
+        order = (start or end, rank(filed, form, accn))
+        if best is None or order > best[0]:
+            best = (order, (filed, accn, form, start))
     return None if best is None else best[1]
 
 

@@ -733,3 +733,116 @@ class TestMutationBacklog:
                 assert v._filing(facts, "us-gaap:Assets", "USD", date(2026, 6, 30)) == (
                     date(2026, 8, 1), "a", "10-Q", None
                 )
+
+
+class TestCensusBacklog:
+    """Survivors of the full mutation census (Hermes audit round 6), each run
+    against the whole suite first: each test fails under the mutant named."""
+
+    Q = "2026-06-30"
+
+    def _pair(self, old, new, **kw):
+        before = _facts([(self.Q, "2026-08-01", old, "10-Q", "a")])
+        after = _facts([(self.Q, "2026-11-01", new, "10-K", "b")])
+        return v.diff_vintages(before, after, **kw)
+
+    def test_a_revision_of_exactly_the_materiality_floor_is_reported(self):
+        # `pct < materiality_pct` -> `<=` dropped a move of exactly 1%.
+        assert [c.kind for c in self._pair(100.0, 101.0)] == ["revised"]
+        assert self._pair(100.0, 100.9) == []
+
+    def test_a_zero_that_stays_zero_is_not_a_revision(self):
+        # `if new == old: continue` -> `pass`: a zero has no percentage, so
+        # an unchanged zero was reported as revised 0 -> 0.
+        assert self._pair(0.0, 0.0) == []
+        assert [c.kind for c in self._pair(0.0, 5.0)] == ["revised"]
+
+    def test_a_period_ending_on_since_is_compared(self):
+        # `end < since` -> `<=` skipped the boundary period.
+        assert [c.kind for c in self._pair(100.0, 120.0, since=date(2026, 6, 30))] == ["revised"]
+        assert self._pair(100.0, 120.0, since=date(2026, 7, 1)) == []
+
+    def test_the_unfiltered_diff_skips_a_malformed_taxonomy(self):
+        # `if not isinstance(tags, dict): continue` -> `pass` crashed on it.
+        before = _facts([(self.Q, "2026-08-01", 100.0, "10-Q", "a")])
+        after = _facts([(self.Q, "2026-11-01", 120.0, "10-K", "b")])
+        for facts in (before, after):
+            facts["facts"]["junk"] = 5
+        changes = v.diff_vintages(before, after, scored_only=False)
+        assert [(c.field_name, c.kind) for c in changes] == [("us-gaap:Assets", "revised")]
+
+    def test_a_split_or_unscored_change_is_never_promoted(self):
+        # The `continue` for unscored and split-adjusted fields -> `pass`
+        # promoted a share-count move (a split) and a tag nobody scores.
+        shares = _facts([(self.Q, "2026-08-01", 100.0, "10-Q", "a")],
+                        tag="EntityCommonStockSharesOutstanding", taxonomy="dei", unit="shares")
+        split = _facts([(self.Q, "2026-11-01", 400.0, "10-K", "b")],
+                       tag="EntityCommonStockSharesOutstanding", taxonomy="dei", unit="shares")
+        moves = v.diff_vintages(shares, split, include_split_adjusted=True)
+        assert [c.field_name for c in moves] == ["shares_outstanding"]
+        other = v.diff_vintages(_facts([(self.Q, "2026-08-01", 100.0, "10-Q", "a")], tag="Foo"),
+                                _facts([(self.Q, "2026-11-01", 400.0, "10-K", "b")], tag="Foo"),
+                                scored_only=False)
+        assert [c.field_name for c in other] == ["us-gaap:Foo"]
+        for changes in (moves, other):
+            assert v.silent_revision_tier1_lines(changes, "a", "b", period_since=date(2020, 1, 1)) == []
+        assert v.silent_revision_tier1_lines(self._pair(100.0, 200.0), "a", "b",
+                                             period_since=date(2020, 1, 1))  # a scored one is
+
+    def test_same_day_states_keep_their_order_and_a_lost_file_is_skipped(self, tmp_path):
+        # `out[-1].sha256 == sha` -> `!=` reordered A, B, A captured on one
+        # day into A, A, B; `continue` -> `pass` kept an observation whose
+        # snapshot file is gone.
+        a = _facts([(self.Q, "2026-08-01", 1000.0, "10-Q", "a")])
+        b = _facts([(self.Q, "2026-09-19", 1200.0, "10-K", "b")])
+        first = v.store_snapshot(1045810, a, now=AT, root=tmp_path)
+        second = v.store_snapshot(1045810, b, now=AT.replace(hour=13), root=tmp_path)
+        v.store_snapshot(1045810, a, now=AT.replace(hour=14), root=tmp_path)
+        states = v.observed_vintages(1045810, tmp_path)
+        assert [s.path for s in states] == [first.path, second.path, first.path]
+        second.path.unlink()
+        assert [s.path for s in v.observed_vintages(1045810, tmp_path)] == [first.path]
+
+    def test_the_lock_gives_up_at_exactly_thirty_seconds(self, tmp_path, monkeypatch):
+        # `time.monotonic() >= give_up` -> `>`, and LOCK_TIMEOUT_S 30 -> 30.3:
+        # a capture waits for a held lock 30 seconds, then does nothing.
+        import fcntl
+
+        d = v.cik_dir(1045810, tmp_path)
+        d.mkdir(parents=True, exist_ok=True)
+        holder = (d / v.LOCK).open("w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        clock = iter([1000.0, 1029.9, 1030.0, 1030.5, 1031.0])
+        waits = []
+        monkeypatch.setattr(v.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(v.time, "sleep", waits.append)
+        try:
+            with v._cik_lock(1045810, tmp_path) as got:
+                assert got is False
+        finally:
+            holder.close()
+        assert len(waits) == 1
+
+    def test_a_temp_file_exactly_at_the_age_limit_is_kept(self, tmp_path, monkeypatch):
+        # `st_mtime < cutoff` -> `<=` removed a file exactly an hour old.
+        import os
+
+        d = v.cik_dir(1045810, tmp_path)
+        d.mkdir(parents=True)
+        edge, older = d / ".a.json.gz.1.tmp", d / ".b.json.gz.2.tmp"
+        for p, mtime in ((edge, 10_000.0 - 3600), (older, 10_000.0 - 3601)):
+            p.write_bytes(b"x")
+            os.utime(p, (mtime, mtime))
+        monkeypatch.setattr(v.time, "time", lambda: 10_000.0)
+        v._sweep_orphans(d)
+        assert edge.exists() and not older.exists()
+
+    def test_provenance_names_the_filing_the_mapper_reads_on_a_same_day_tie(self):
+        # A 10-Q and its 10-Q/A filed the same day for the same quarter: the
+        # value scored is the amendment's (`precedence`), so is its filing.
+        facts = {"facts": {"us-gaap": {"Assets": {"units": {"USD": [
+            {"end": self.Q, "val": 2.0, "filed": "2026-08-01", "form": "10-Q", "accn": "c"},
+            {"end": self.Q, "val": 1.0, "filed": "2026-08-01", "form": "10-Q/A", "accn": "b"},
+        ]}}}}}
+        assert v._filing(facts, "us-gaap:Assets", "USD", date(2026, 6, 30)) == (
+            date(2026, 8, 1), "b", "10-Q/A", None)

@@ -449,3 +449,43 @@ class TestMutationBacklog:
 
         assert not any(note in n for n in notes(QUARTER_ENDS))
         assert any(note in n for n in notes(QUARTER_ENDS[:-1]))
+
+    def test_a_quarter_fact_at_the_shortest_quarter_length_is_read_directly(self):
+        # `_find`: `min_days <= f.days` -> `<` missed a fact of exactly
+        # QTD_DAYS[0] days (census, Hermes audit round 6).
+        from app.services.ingestion.companyfacts_mapper import QTD_DAYS
+        from tests.fixtures.selection_cases import (
+            QUARTER_ENDS,
+            Payload,
+            duration,
+            instant,
+            quarter,
+        )
+
+        short = QUARTER_ENDS[-2]
+        p = Payload("Short Quarter Co")
+        p.add("Assets", [instant(e, 1.0) for e in QUARTER_ENDS])
+        rows = [quarter(e, 100.0) for e in QUARTER_ENDS if e != short]
+        rows.append(duration(short - timedelta(days=QTD_DAYS[0]), short, 70.0))
+        p.add("Revenues", rows)
+        ds, diag = build_dataset(p.data, "SQ", n_quarters=8)
+        assert [x.revenue for x in ds.periods if x.period_end == short] == [70.0]
+        assert diag.field_by_name("revenue").methods == {"direct": 8}
+
+    def test_an_instant_series_ignores_duration_facts_of_its_concept(self):
+        # `_instant_series`: `if f.start is not None: continue` -> `pass`
+        # read a later-filed duration fact as the balance at quarter end.
+        from tests.fixtures.selection_cases import (
+            QUARTER_ENDS,
+            Payload,
+            duration,
+            instant,
+        )
+
+        q = QUARTER_ENDS[-2]
+        p = Payload("Mixed Concept Co")
+        rows = [instant(e, 1000.0) for e in QUARTER_ENDS]
+        rows.append(duration(date(q.year, 1, 1), q, 5.0, filed=date(2025, 3, 1)))
+        p.add("Assets", rows)
+        ds, _diag = build_dataset(p.data, "MIX", n_quarters=8)
+        assert {x.total_assets for x in ds.periods} == {1000.0}
