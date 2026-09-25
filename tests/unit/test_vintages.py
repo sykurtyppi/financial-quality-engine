@@ -631,3 +631,37 @@ class TestProblemDaysAreDistinctDays:
         v.capture(client, "NVDA", now=DAY2, root=tmp_path)
         assert v.read_manifest(1045810, tmp_path)["problem_days"] == 0
         assert list(v.cik_dir(1045810, tmp_path).glob(".busy-*")) == []
+
+
+class TestSnapshotsWithoutObservations:
+    """Found by the mutation harness (Hermes audit round 5): a snapshot the
+    manifest lists but no observation covers — an older manifest, or a crash
+    between the archive rename and the final manifest write — must keep the
+    content hash the manifest recorded for it. An empty hash would make two
+    different states compare equal downstream."""
+
+    def _two_snapshots(self, tmp_path):
+        a = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        b = _facts([("2026-06-30", "2026-09-19", 1200.0, "10-K", "b")])
+        client = _Client(a, b)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        second = v.capture(client, "NVDA", now=NEXT_DAY, root=tmp_path)
+        path = v.cik_dir(1045810, tmp_path) / v.MANIFEST
+        return first, second, path, json.loads(path.read_text())
+
+    def test_no_observations_at_all(self, tmp_path):
+        first, second, path, man = self._two_snapshots(tmp_path)
+        man["observations"] = []
+        path.write_text(json.dumps(man))
+        states = v.observed_vintages(1045810, tmp_path)
+        assert [s.sha256 for s in states] == [first.sha256, second.sha256]
+        assert all(s.sha256 for s in states)
+
+    def test_one_snapshot_left_unobserved_by_a_crash(self, tmp_path):
+        first, second, path, man = self._two_snapshots(tmp_path)
+        man["observations"] = [o for o in man["observations"] if o["sha256"] == first.sha256]
+        path.write_text(json.dumps(man))
+        states = v.observed_vintages(1045810, tmp_path)
+        assert [(s.path, s.sha256) for s in states] == [
+            (first.path, first.sha256), (second.path, second.sha256)
+        ]

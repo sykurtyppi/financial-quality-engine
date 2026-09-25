@@ -176,3 +176,28 @@ def test_nothing_revised_later_means_nothing_changes(facts):
     uncut = _FlowSeries(facts)
     uncut._as_of = lambda cutoff: uncut  # type: ignore[method-assign]
     assert uncut.quarterly(ENDS)[0] == values
+
+
+# Found by the mutation harness (Hermes audit round 5): the year-to-date
+# difference is accepted only when the quarter it implies is 70-100 days
+# long, and neither end of that range sat under a test.
+
+
+def _ytd_across(days_between: int):
+    from tests.fixtures.selection_cases import Payload, duration, instant
+
+    q1 = date(2024, 3, 31)
+    q2 = q1 + timedelta(days=days_between)
+    p = Payload("Boundary Co")
+    p.add("Assets", [instant(q1, 1000.0), instant(q2, 1000.0)])
+    p.add("OperatingIncomeLoss", [duration(Y0, q1, 10.0), duration(Y0, q2, 25.0)])
+    ds, _ = build_dataset(p.data, "BC")
+    return next(x.operating_income for x in ds.periods if x.period_end == q2)
+
+
+def test_the_implied_quarter_length_bounds_are_inclusive():
+    from app.services.ingestion.companyfacts_mapper import QTD_DAYS
+
+    lo, hi = QTD_DAYS
+    assert _ytd_across(hi) == 15.0 and _ytd_across(lo) == 15.0
+    assert _ytd_across(hi + 1) is None and _ytd_across(lo - 1) is None
