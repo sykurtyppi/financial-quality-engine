@@ -63,6 +63,7 @@ def data_quality_section(
     offerings_error: StreamFailure | str | None = None,
     restatements_error: StreamFailure | str | None = None,
     events_error: StreamFailure | str | None = None,
+    filing_events_error: StreamFailure | str | None = None,
     vintage: str | None = None,
     restatement_scan: str | None = None,
     archives: str | None = None,
@@ -112,6 +113,8 @@ def data_quality_section(
         ("Capital-markets", offerings_error, "no activity"),
         ("Restatement", restatements_error, "no revisions"),
         ("Event (8-K 4.02)", events_error, "no events"),
+        ("Filing-behavior (8-K 4.01/2.06, NT, amendments, lag)", filing_events_error,
+         "no such filings"),
         ("Silent-revision", vintage_error, "no silent revisions"),
     ):
         if err is None:
@@ -290,7 +293,8 @@ def _collect_streams(
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors: dict[str, StreamFailure | None] = {
-        "offerings": None, "restatements": None, "events": None, "vintage": None,
+        "offerings": None, "restatements": None, "events": None, "filing_events": None,
+        "vintage": None,
     }
 
     def run(name: str, build: Callable[[], _Staged]) -> Any:
@@ -368,6 +372,32 @@ def _collect_streams(
         ]
         return out
 
+    def behaviour() -> _Staged:
+        # Its own stream, with its own availability: it reads the same index
+        # as the 4.02 events, but a malformed column only it reads (the
+        # period dates the lag check needs) must not take down a 4.02 alert
+        # the index plainly carries — nor leave that alert standing beside an
+        # "events unavailable" line (Hermes audit round 3, finding 3). 4.02 is
+        # promoted by `events`; this stream promotes an auditor change and a
+        # late-filing notice.
+        from app.services.ingestion.filing_events import (
+            AUDITOR_CHANGE,
+            LATE_FILING,
+            filing_events,
+            render_filing_events_section,
+        )
+
+        cutoff = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
+        index = submissions if submissions is not None else client.submissions_by_cik(
+            client.resolve_cik(ticker)
+        )
+        found = filing_events(index, since=cutoff, as_of=report_date)
+        out = _Staged()
+        out.evidence["filing_events"] = found
+        out.sections.append(render_filing_events_section(found))
+        out.tier1 += [e.detail for e in found.of(AUDITOR_CHANGE, LATE_FILING)]
+        return out
+
     def vintage() -> _Staged:
         from app.services.ingestion.vintages import (
             report_diff,
@@ -410,6 +440,7 @@ def _collect_streams(
     takedowns = run("offerings", offerings) or []
     scan = run("restatements", restatements)
     run("events", events)
+    run("filing_events", behaviour)
     vintage_diff = run("vintage", vintage)
 
     return body_sections, event_lines, tier1_events, errors, takedowns, scan, vintage_diff
@@ -549,7 +580,8 @@ def build_report(
     event_lines: list[str] = []
     tier1_events: list[str] = []
     errors: dict[str, StreamFailure | None] = {
-        "offerings": None, "restatements": None, "events": None, "vintage": None,
+        "offerings": None, "restatements": None, "events": None, "filing_events": None,
+        "vintage": None,
     }
     scan = None
     vintage_diff = None
@@ -582,6 +614,7 @@ def build_report(
             offerings_error=errors["offerings"],
             restatements_error=errors["restatements"],
             events_error=errors["events"],
+            filing_events_error=errors["filing_events"],
             vintage=vintage_note,
             restatement_scan=scan.coverage_line() if scan is not None else None,
             # The client counted its own archive traffic; a client that does
@@ -599,7 +632,8 @@ def build_report(
     tier1_unavailable: list[str] = []
     if client is None or ticker is None:
         tier1_unavailable = [
-            "restatement footprints", "8-K 4.02 events", "silent revisions (vintage diff)",
+            "restatement footprints", "8-K 4.02 events", "8-K 4.01 and NT filing events",
+            "silent revisions (vintage diff)",
         ]
     else:
         def _why(name: str) -> str:
@@ -610,6 +644,8 @@ def build_report(
             tier1_unavailable.append("restatement footprints" + _why("restatements"))
         if errors["events"] is not None:
             tier1_unavailable.append("8-K 4.02 events" + _why("events"))
+        if errors["filing_events"] is not None:
+            tier1_unavailable.append("8-K 4.01 and NT filing events" + _why("filing_events"))
         if errors["vintage"] is not None:
             tier1_unavailable.append("silent revisions (vintage diff)" + _why("vintage"))
         elif vintage_diff is not None and not vintage_diff.compared:

@@ -130,8 +130,9 @@ def test_a_mismatch_derives_from_its_narrative_row_and_unsourced_metrics_are_lis
     assert financial == {e.metric_name for e in result.evidence
                          if e.metric_name in FINANCIAL_METRICS}
     assert all("per-value provenance" in u.reason for u in doc.unsourced)
-    assert doc.streams == dict.fromkeys(("offerings", "restatements", "events", "vintage"),
-                                        "not run")
+    assert doc.streams == dict.fromkeys(
+        ("offerings", "restatements", "events", "filing_events", "vintage"), "not run"
+    )
 
 
 def test_validation_follows_the_cards_tiers():
