@@ -461,3 +461,32 @@ def test_a_revert_is_named_not_called_unchanged(tmp_path):
     assert back.describe().startswith("reverted back to an earlier snapshot")
     same = store(CIK, _assets(1000.0), now=D21, root=tmp_path)
     assert same.reason == "unchanged"
+
+
+def test_an_amendment_between_snapshots_is_not_on_the_card_as_silent(tmp_path):
+    """The earnings-night drill's finding: a 10-Q/A beside its original was
+    promoted as a `Silent revision` under "nothing here has an amended filing
+    behind it". It is listed apart, counted apart, and never promoted."""
+    import json
+
+    orig = ("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")
+    _store(tmp_path, _facts([orig]), D19)
+    facts = _facts([orig, ("2026-06-30", "2026-09-15", 1100.0, "10-Q/A", "b")])
+    _store(tmp_path, facts, D20)
+    ds = stretch_dataset()
+    ledger = tmp_path / "r.ledger.json"
+    report, _ = build_report(
+        analyze(ds), ds, generated_on=AS_OF.isoformat(), coverage=1.0, fetched_at="x",
+        client=_Client(facts), ticker="AAPL", company_facts=facts, field_tags={},
+        vintage_root=tmp_path, ledger_out=ledger,
+    )
+    assert "Silent revision:" not in report
+    assert ("- Silent-revision check: compared 2026-09-19 → 2026-09-20: 0 change(s) "
+            "(+1 moved with a later filing, not silent)") in report
+    assert "**Moved with a later filing (not silent).**" in report
+    assert "| total_assets | 2026-06-30 | 1,000 | 1,100 | 10.0% | 2026-08-01 10-Q a | " \
+           "2026-09-15 10-Q/A b |" in report
+    items = [i for i in json.loads(ledger.read_text())["items"] if i["kind"] == "silent_revision"]
+    assert len(items) == 1
+    assert items[0]["validation_status"] != "validated"
+    assert "moved with 10-Q/A b" in items[0]["note"] and "not silent" in items[0]["note"]

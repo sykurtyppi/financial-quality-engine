@@ -81,6 +81,7 @@ class Basis(StrEnum):
     YOY = "yoy"  # this quarter vs the same quarter one year earlier
     PAIR = "pair"  # this quarter vs the previous quarter
     SERIES = "series"  # a statistic over the history of another metric
+    FIELDS = "fields"  # read from period fields at fixed offsets (`FIELD_WINDOWS`)
 
 
 BASIS: dict[str, Basis] = {
@@ -99,25 +100,47 @@ BASIS: dict[str, Basis] = {
         "diluted_share_growth", "net_share_count_change", "buyback_offset_ratio",
         "issuance_pressure", "capex_to_revenue", "capex_to_da",
     )},
-    **{n: Basis.SERIES for n in ("accrual_trend", "dso_trend", "dio_trend", "fcf_margin_trend",
-                                 "capex_intensity_regime_shift", "incremental_revenue_per_capex")},
+    **{n: Basis.SERIES for n in ("accrual_trend", "dso_trend", "dio_trend", "fcf_margin_trend")},
+    **{n: Basis.FIELDS for n in ("capex_intensity_regime_shift", "incremental_revenue_per_capex")},
 }
+
+
+class Select(StrEnum):
+    """Which entries of a base metric's history a SERIES metric reads. Each
+    mirrors its formula, and `tests/unit/test_series_provenance.py`
+    reconciles the cited values to the inputs the metric records."""
+
+    # every OK entry through the latest: `latest - mean(prior OK)`
+    # (`accruals.accrual_trend`, `working_capital.trend_change`)
+    ALL_OK = "all_ok"
+    # the latest entry and the same fiscal quarter in prior years, OK only:
+    # `working_capital.seasonal_trend_change` (positional stride of 4)
+    SAME_QUARTER = "same_quarter"
 
 
 # A SERIES metric is a statistic over the history of one base metric; the
-# filings behind it are those behind that metric in each period it may read
-# (`provenance.sources_for`). None = every period up to the metric's own.
-SERIES_OF: dict[str, str] = {
-    "accrual_trend": "total_accruals",
-    "dso_trend": "dso",
-    "dio_trend": "dio",
-    "fcf_margin_trend": "fcf_margin",
-    # mean(capex/revenue) over recent vs prior quarters
-    "capex_intensity_regime_shift": "capex_to_revenue",
-    # revenue at t and t-4, capex over t-3..t: the last five quarters
-    "incremental_revenue_per_capex": "capex_to_revenue",
+# filings behind it are those behind that metric in exactly the entries it
+# read (`provenance.sources_for`). Hermes audit round 8: inferring them from
+# "the base metric's history" cited periods the formula never read.
+SERIES_OF: dict[str, tuple[str, Select]] = {
+    "accrual_trend": ("total_accruals", Select.ALL_OK),
+    "fcf_margin_trend": ("fcf_margin", Select.ALL_OK),
+    "dso_trend": ("dso", Select.SAME_QUARTER),
+    "dio_trend": ("dio", Select.SAME_QUARTER),
 }
-SERIES_WINDOW: dict[str, int] = {"incremental_revenue_per_capex": 5}
+
+# A FIELDS metric reads period fields directly. `field -> offsets` from the
+# metric's own period (0 = that period, -4 = four periods earlier), or
+# `USABLE_CAPEX_INTENSITY`: every period from the first through the metric's
+# own where capex and revenue are both present and revenue > 0 — the
+# `usable()` rule of `capex.capex_intensity_regime_shift`, which averages
+# capex/revenue over all of them (recent window and prior baseline).
+USABLE_CAPEX_INTENSITY = "usable_capex_intensity"
+FIELD_WINDOWS: dict[str, dict[str, tuple[int, ...]] | str] = {
+    # (Rev_t - Rev_t-4) / sum(Capex_t-3..t): `capex.incremental_revenue_per_capex`
+    "incremental_revenue_per_capex": {"revenue": (0, -4), "capex": (0, -1, -2, -3)},
+    "capex_intensity_regime_shift": USABLE_CAPEX_INTENSITY,
+}
 
 
 def all_metric_names() -> frozenset[str]:

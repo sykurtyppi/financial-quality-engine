@@ -11,16 +11,29 @@ restating them; `metrics_registry.BASIS` says which rule each metric uses.
 A TTM period rebuilt by `ttm.annualize` carries no sources of its own (they
 are excluded from serialization): a four-quarter sum is resolved here, by
 label, to its four quarters.
+
+A statistic over history cites exactly the values its formula read — the
+entries of its base metric's history it used (`metrics_registry.SERIES_OF`),
+or the period fields at the offsets it used (`FIELD_WINDOWS`) — never a
+window around them (Hermes audit round 8). A series metric that computed no
+value read nothing conclusive and cites nothing.
 """
 
 from __future__ import annotations
 
 from app.schemas.financials import CompanyDataset, PeriodFinancials, SourcedValue
-from app.schemas.metrics import MetricResult
+from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas import ttm
 from app.services.formulas.registry import MetricsBundle, _year_ago
 from app.services.ingestion.fields import FIELDS
-from app.services.metrics_registry import BASIS, SERIES_OF, SERIES_WINDOW, Basis
+from app.services.metrics_registry import (
+    BASIS,
+    FIELD_WINDOWS,
+    SERIES_OF,
+    USABLE_CAPEX_INTENSITY,
+    Basis,
+    Select,
+)
 
 _PRIOR = "_prior"
 _FIELDS = frozenset(spec.name for spec in FIELDS)
@@ -28,9 +41,19 @@ _FIELDS = frozenset(spec.name for spec in FIELDS)
 _COMPONENT_PREFIX = "beneish_"
 
 
-def _index(periods: list[PeriodFinancials], label: str) -> int | None:
+def _index(periods: list[PeriodFinancials], label: str, *, last: bool = False) -> int | None:
+    """The period a metric's label names. Quarter ends are every distinct
+    balance-sheet date, so a fiscal-calendar change can put two periods under
+    one label (round-9 review R5): then the label is ambiguous and names no
+    period — unless `last`, for a series metric, which is always computed at
+    the final period."""
     end = label.removeprefix(ttm.TTM_LABEL_PREFIX)
-    return next((i for i, p in enumerate(periods) if p.fiscal_label == end), None)
+    hits = [i for i, p in enumerate(periods) if p.fiscal_label == end]
+    if not hits:
+        return None
+    if last:
+        return hits[-1]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _annual(periods: list[PeriodFinancials], i: int, field: str) -> list[PeriodFinancials]:
@@ -77,11 +100,15 @@ def sources_for(
     if basis is None:
         return {}
     periods = dataset.sorted_periods()
-    i = _index(periods, metric.fiscal_label)
+    i = _index(periods, metric.fiscal_label, last=basis in (Basis.SERIES, Basis.FIELDS))
     if i is None:
         return {}
+    if basis in (Basis.SERIES, Basis.FIELDS) and metric.status is not MetricStatus.OK:
+        return {}
     if basis is Basis.SERIES:
-        return _series_sources(dataset, periods, i, metric.name, bundle)
+        return _series_sources(dataset, metric, bundle)
+    if basis is Basis.FIELDS:
+        return _field_sources(periods, i, metric.name)
     if basis is Basis.COMPOSITE:
         out: dict[str, list[SourcedValue]] = {}
         for key in metric.inputs:
@@ -118,30 +145,57 @@ def accessions_for(
 
 
 def _series_sources(
-    dataset: CompanyDataset,
-    periods: list[PeriodFinancials],
-    i: int,
-    name: str,
-    bundle: MetricsBundle | None,
+    dataset: CompanyDataset, metric: MetricResult, bundle: MetricsBundle | None
 ) -> dict[str, list[SourcedValue]]:
-    """A statistic over a base metric's history: the base metric's sources
-    in each period it may read, keyed `<base>[<label>].<input>`. The history
-    is the bundle's, so this needs the bundle, as the M-score does."""
+    """A statistic over a base metric's history: the base metric's sources in
+    exactly the entries the statistic read, keyed `<base>[<label>].<input>`.
+    The history is the bundle's, so this needs the bundle, as the M-score
+    does. Entries after the metric's own period are never read."""
     if bundle is None:
         return {}
-    base = SERIES_OF[name]
-    labels = [p.fiscal_label for p in periods[: i + 1]]
-    window = SERIES_WINDOW.get(name)
-    if window is not None:
-        labels = labels[-window:]
-    wanted = set(labels)
+    base, select = SERIES_OF[metric.name]
+    own = metric.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
+    full = bundle.history.get(base, [])
+    ends = [k for k, m in enumerate(full)
+            if m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX) == own]
+    if not ends:
+        return {}
+    history = full[: ends[-1] + 1]  # the last entry under the label: the final period
+    if select is Select.SAME_QUARTER:
+        # `seasonal_trend_change`: the latest entry, then every 4th one back.
+        read = [history[-1]] + [history[k] for k in range(len(history) - 5, -1, -4)]
+    else:
+        read = history
     out: dict[str, list[SourcedValue]] = {}
-    for m in bundle.history.get(base, []):
+    # The formulas' own predicate: an entry is read when it is OK AND carries
+    # a value (`MetricResult` allows OK with none).
+    for m in sorted((m for m in read if m.status is MetricStatus.OK and m.value is not None),
+                    key=lambda m: history.index(m)):
         label = m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
-        if label not in wanted or m.value is None:
-            continue
         for key, values in sources_for(dataset, m).items():
             out[f"{base}[{label}].{key}"] = values
+    return out
+
+
+def _field_sources(
+    periods: list[PeriodFinancials], i: int, name: str
+) -> dict[str, list[SourcedValue]]:
+    """Period fields read directly: `<field>[<label>]` -> that period's
+    sourced value, at exactly the offsets `FIELD_WINDOWS` names."""
+    spec = FIELD_WINDOWS[name]
+    wanted: list[tuple[str, PeriodFinancials]] = []
+    if spec == USABLE_CAPEX_INTENSITY:
+        for p in periods[: i + 1]:
+            if p.capex is not None and p.revenue is not None and p.revenue > 0:
+                wanted += [("capex", p), ("revenue", p)]
+    else:
+        assert isinstance(spec, dict)
+        for field, offsets in spec.items():
+            wanted += [(field, periods[i + off]) for off in offsets if i + off >= 0]
+    out: dict[str, list[SourcedValue]] = {}
+    for field, p in sorted(wanted, key=lambda fp: (fp[1].period_end, fp[0])):
+        if field in p.sources:
+            out[f"{field}[{p.fiscal_label}]"] = [p.sources[field]]
     return out
 
 

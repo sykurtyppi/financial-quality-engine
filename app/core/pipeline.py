@@ -59,7 +59,10 @@ _FLAG_PHRASES: dict[str, tuple[str, str]] = {
 }
 
 
-def _flag_detail(m: MetricResult, concern: float, severity: str) -> str:
+def _flag_detail(m: MetricResult, severity: str) -> str:
+    """The flag's sentence. It names the side of the threshold the metric
+    fell on, never a 0-100 concern number (retired from every surface; the
+    number still drives which flags exist)."""
     closing = "Requires analyst review." if severity == "red" else "Supportive indicator."
     if m.value is None:
         # A distress-scored component (P0-9): the ratio is undefined BECAUSE
@@ -68,13 +71,15 @@ def _flag_detail(m: MetricResult, concern: float, severity: str) -> str:
         # a number it does not have.
         return (
             f"{m.name} undefined — {m.note} (formula: {m.formula}; period "
-            f"{m.fiscal_label}; concern {concern:.0f}/100, scored at this metric's "
-            "maximum because the denominator itself signals distress). "
+            f"{m.fiscal_label}; scored at this metric's maximum concern because "
+            "the denominator itself signals distress). "
             f"{closing}"
         )
+    side = ("at or above the elevated-concern threshold" if severity == "red"
+            else "within the supportive range")
     return (
         f"{m.name} = {m.value:.3g} (formula: {m.formula}; period {m.fiscal_label}; "
-        f"concern {concern:.0f}/100). {closing}"
+        f"{side}). {closing}"
     )
 
 
@@ -122,7 +127,7 @@ def _generate_flags(block_components, metrics_by_name: dict[str, MetricResult]) 
                         Flag(
                             severity="red",
                             title=title,
-                            detail=_flag_detail(m, comp.concern_score, "red"),
+                            detail=_flag_detail(m, "red"),
                             evidence_metrics=[m.name],
                             fiscal_label=m.fiscal_label,
                         ),
@@ -136,7 +141,7 @@ def _generate_flags(block_components, metrics_by_name: dict[str, MetricResult]) 
                         Flag(
                             severity="green",
                             title=title,
-                            detail=_flag_detail(m, comp.concern_score, "green"),
+                            detail=_flag_detail(m, "green"),
                             evidence_metrics=[m.name],
                             fiscal_label=m.fiscal_label,
                         ),

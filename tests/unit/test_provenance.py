@@ -134,8 +134,8 @@ def test_a_metrics_sources_reproduce_its_inputs(ticker):
         basis = BASIS[name]
         for m in history:
             found = sources_for(ds, m, bundle=bundle)
-            if basis in (Basis.SERIES, Basis.COMPOSITE):
-                continue
+            if basis in (Basis.SERIES, Basis.COMPOSITE, Basis.FIELDS):
+                continue  # reconciled in test_series_provenance.py
             for key, value in m.inputs.items():
                 field = key.removesuffix("_prior")
                 if value is None or field not in FIELD_NAMES:
@@ -190,10 +190,8 @@ def test_a_trend_resolves_through_its_base_metrics_history():
         label = m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
         for key, values in sources_for(ds, m).items():
             assert found[f"total_accruals[{label}].{key}"] == values
-    windowed = sources_for(ds, bundle.get_latest("incremental_revenue_per_capex"), bundle=bundle)
-    last5 = [p.fiscal_label for p in ds.sorted_periods()][-5:]
-    assert {k.split("[", 1)[1].split("]", 1)[0] for k in windowed} <= set(last5)
-    assert any(last5[0] in k for k in windowed) and any(last5[-1] in k for k in windowed)
+    # Metrics read from period fields at fixed offsets are pinned exactly, and
+    # reconciled to their inputs, in test_series_provenance.py.
 
 
 @pytest.mark.parametrize("sign", [0, 2, -2])
@@ -212,3 +210,35 @@ def test_a_fact_ref_is_only_ever_added_or_subtracted(sign):
     assert FactRef(**kw).sign == 1 and FactRef(**kw, sign=-1).sign == -1
     with pytest.raises(ValidationError):
         FactRef(**kw, sign=sign)
+
+
+def test_a_pair_metrics_prior_at_the_first_period_is_nothing_not_the_last():
+    """Index 0 has no previous quarter; `periods[i - 1]` there would wrap to
+    the LAST period and cite a filing from the other end of the window."""
+    from app.schemas.metrics import MetricResult, MetricStatus
+
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    first = ds.sorted_periods()[0]
+    m = MetricResult(name="dso", formula="x", fiscal_label=first.fiscal_label,
+                     status=MetricStatus.OK, value=1.0,
+                     inputs={"receivables": 1.0, "receivables_prior": 1.0})
+    found = sources_for(ds, m)
+    assert found["receivables"] == [first.sources["receivables"]]
+    assert "receivables_prior" not in found
+
+
+def test_an_input_that_is_not_a_field_is_never_cited():
+    """Only field inputs map to filed facts, even if a period's sources held
+    something under that name."""
+    from app.schemas.metrics import MetricResult, MetricStatus
+
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    last = ds.sorted_periods()[-1]
+    stray = last.sources["revenue"].model_copy(update={"field": "revenue_end"})
+    ds.periods = [p.model_copy(update={"sources": {**p.sources, "revenue_end": stray}})
+                  if p is last else p for p in ds.periods]
+    m = MetricResult(name="dso", formula="x", fiscal_label=last.fiscal_label,
+                     status=MetricStatus.OK, value=1.0, inputs={"revenue_end": 1.0})
+    assert sources_for(ds, m) == {}

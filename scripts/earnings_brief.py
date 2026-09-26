@@ -58,6 +58,7 @@ from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal.store import safe_ticker
+from app.services.reporting.report_files import is_live_report
 
 REPORT_DIRS = (ROOT / "reports" / "auto", ROOT / "reports")
 DEFAULT_TIMEOUT_S = 1800.0
@@ -75,9 +76,11 @@ _HEADING_RE = re.compile(r"^## (.+)$", re.M)
 
 
 def latest_report(ticker: str) -> Path | None:
-    """Newest engine report for the ticker across both tracks (by mtime)."""
+    """Newest engine report for the ticker across both tracks (by mtime) —
+    never an audit, and never a historical replay (`.replay.md`), which is
+    today's code rebuilding an old day, not the current view."""
     matches = [p for d in REPORT_DIRS for p in d.glob(f"{ticker}_*.md")
-               if not p.stem.endswith("_audit")]
+               if is_live_report(p)]
     return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
 

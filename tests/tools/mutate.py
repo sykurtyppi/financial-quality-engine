@@ -75,6 +75,7 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_vintages.py", "tests/unit/test_vintage_composed.py",
         "tests/unit/test_vintage_diff_report.py", "tests/unit/test_replay.py",
         "tests/unit/test_pit_agreement.py", "tests/unit/test_vintage_capture_from_reports.py",
+        "tests/unit/test_vintage_amendment.py",
     )),
     Target("app/services/backtesting/pit.py", (
         "tests/unit/test_pit_agreement.py", "tests/unit/test_build_dataset_as_of.py",
@@ -96,6 +97,17 @@ TARGETS: tuple[Target, ...] = (
         "tests/integration/test_golden_report.py",
         "tests/unit/test_properties_engine.py",
     ), function="_generate_flags"),
+    Target("app/services/provenance.py", (
+        "tests/unit/test_provenance.py", "tests/unit/test_series_provenance.py",
+        "tests/unit/test_ledger.py", "tests/unit/test_journal_resolver.py",
+    )),
+    Target("app/services/reporting/revised_inputs.py", (
+        "tests/unit/test_revised_inputs.py",
+    )),
+    Target("app/services/reporting/report_files.py", (
+        "tests/unit/test_report_files.py", "tests/unit/test_earnings_brief.py",
+        "tests/unit/test_watch_cli.py",
+    )),
     Target("app/services/journal/resolver.py", (
         "tests/unit/test_journal_resolver.py", "tests/unit/test_assumption_vocabulary.py",
         "tests/unit/test_properties_engine.py",

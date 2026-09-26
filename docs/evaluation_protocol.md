@@ -355,6 +355,27 @@ Mid-window changes (0.4.0 window):
     concept changes. The controls record the same values. Existing sweep
     CSVs under `data/` keep the old header until they are regenerated.
 
+15. **2026-09-24 — the 0–100 numbers leave the report (operator decision 1,
+    option A).** The composite and its block scores measured
+    non-discriminating on the live season, and the card had already dropped
+    the composite. The appendix still showed a Score column per block, the
+    "0–100 concern scores" scale sentence, a concern number beside each
+    driver, "concern NN/100" in every flag, and "(NN/100)" in the Capital
+    Integrity caveat. All of these are gone from the rendered text:
+    - drivers stay ranked by weight × concern, as names only;
+    - an unscored block says "not scored (insufficient coverage)";
+    - a flag says which side of its threshold the metric fell on.
+
+    **Rendering only.** `OverallScore` and `BlockScore.score` are still
+    computed and still decide which flags exist. No anchor, weight or flag
+    threshold is touched. `calibration_snapshot.json`, which pins
+    `overall.score`, is byte-identical. The golden report was regenerated,
+    and its diff is wording only: every metric value and every flag is
+    unchanged. Proof: `tests/unit/test_scorecard_drivers.py::TestNoZeroToHundredNumberRemains`
+    finds no 0–100 number in the golden report or in full reports on the
+    three real fixtures, and confirms the scores are still computed.
+    Option C (stop computing them) stays a window-close decision.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

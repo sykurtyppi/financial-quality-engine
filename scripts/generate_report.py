@@ -30,8 +30,19 @@ from app.services.ingestion.edgar_adapter import (
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.reporting.report_builder import build_report, ledger_path
+from app.services.reporting.report_files import replacing
 
 logging.basicConfig(level=logging.WARNING)
+
+
+def _unmappable(ticker: str, e: ValueError) -> int:
+    """The payload arrived but cannot be mapped into a scored dataset (too
+    little history, an unrecognised structure). Same contract as an
+    acquisition failure: one line, no report, exit 2 — not a traceback."""
+    print(f"error: {ticker}: {e}", file=sys.stderr)
+    print("no report written: the fundamentals were fetched but could not be "
+          "mapped into quarters to score.", file=sys.stderr)
+    return 2
 
 
 def main() -> int:
@@ -58,18 +69,26 @@ def main() -> int:
     if args.as_of is not None:
         from app.services.journal import reporting as journal_reporting
 
-        out, distress = journal_reporting.build_report(
-            ticker, with_docs=not args.no_docs, quarters=args.quarters,
-            report_day=args.as_of.isoformat(), fresh=args.fresh,
-            out_dir=ROOT / "reports", replay=True,
-        )
+        try:
+            out, distress = journal_reporting.build_report(
+                ticker, with_docs=not args.no_docs, quarters=args.quarters,
+                report_day=args.as_of.isoformat(), fresh=args.fresh,
+                out_dir=ROOT / "reports", replay=True,
+            )
+        except journal_reporting.UnmappablePayload as e:
+            # Only the snapshot stage's own failure; any other ValueError is a
+            # defect in the build and surfaces as one (round-9 audit F3).
+            return _unmappable(ticker, e)
         print(f"historical replay as of {args.as_of}: distress signals: {distress} -> {out}")
         return 0
 
     client = SecClient(fresh=args.fresh)
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
-    snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
+    try:
+        snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
+    except ValueError as e:
+        return _unmappable(ticker, e)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
     # Archive exactly the payload that is about to be scored: the baseline a
     # later silent revision would otherwise erase. Failure is a report line.
@@ -97,30 +116,35 @@ def main() -> int:
     generated_on = date.today().isoformat()
     out_dir = ROOT / "reports"
     out = out_dir / f"{ticker}_{generated_on}.md"
-    report, thermometer = build_report(
-        result, dataset,
-        generated_on=generated_on,
-        coverage=diag.coverage(),
-        # The evidence must name the same series the score came from.
-        field_tags=diag.selected_series(),
-        client=client,
-        ticker=ticker,
-        fetched_at=fetched_at,
-        fresh=args.fresh,
-        warnings=diag.warnings,
-        field_notes=diag.field_notes(),
-        doc_diagnostics=doc_diagnostics,
-        company_facts=snapshot.company_facts,
-        submissions=submissions,
-        index_degraded=submissions is None,
-        vintage_note=vintage_note,
-        # No baseline_day: the CLI has no pinned thesis; the silent-revision
-        # section compares the newest snapshot with the previous one only.
-        ledger_out=ledger_path(out),
-    )
-
-    out_dir.mkdir(exist_ok=True)
-    out.write_text(report)
+    # Built off to the side, then published: a same-day rerun (filing night:
+    # the /A lands after the first run) copies the earlier report, ledger and
+    # audit to reports/archive/ only once the new report exists, and a build
+    # that fails leaves the live report as it was.
+    with replacing(out) as staged:
+        report, thermometer = build_report(
+            result, dataset,
+            generated_on=generated_on,
+            coverage=diag.coverage(),
+            # The evidence must name the same series the score came from.
+            field_tags=diag.selected_series(),
+            client=client,
+            ticker=ticker,
+            fetched_at=fetched_at,
+            fresh=args.fresh,
+            warnings=diag.warnings,
+            field_notes=diag.field_notes(),
+            doc_diagnostics=doc_diagnostics,
+            company_facts=snapshot.company_facts,
+            submissions=submissions,
+            index_degraded=submissions is None,
+            vintage_note=vintage_note,
+            # No baseline_day: the CLI has no pinned thesis; the silent-revision
+            # section compares the newest snapshot with the previous one only.
+            ledger_out=staged.ledger,
+        )
+        staged.report.write_text(report)
+    for moved in staged.archived:
+        print(f"previous run archived: {moved}")
     ledger = ledger_path(out)
     print(f"evidence ledger: {ledger if ledger.exists() else 'NOT written (see log)'}")
 

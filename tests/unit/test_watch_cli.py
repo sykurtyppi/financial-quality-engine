@@ -427,6 +427,9 @@ class TestPollRearm:
         aud.write_text("# audit")
         later = _t.time() + 10
         os.utime(aud, (later, later))  # the audit is the newer file
+        replay = tmp_path / "NVDA_2025-06-30.replay.md"
+        replay.write_text("# historical replay")
+        os.utime(replay, (later + 10, later + 10))  # and a replay newer still
         assert watch_cli._latest_report("NVDA", tmp_path) == rep
         assert watch_cli._latest_report("AAPL", tmp_path) is None
 

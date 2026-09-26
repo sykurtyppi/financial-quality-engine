@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from collections.abc import Iterable
 from datetime import date
 from typing import Any
@@ -31,10 +32,22 @@ from app.schemas.ledger import (
 )
 from app.schemas.metrics import MetricResult
 from app.schemas.report import AnalysisResult, EvidenceEntry, NarrativeEvidence
+from app.services.formulas import ttm
 from app.services.formulas.registry import MetricsBundle, compute_metrics
-from app.services.metrics_registry import FINANCIAL_METRICS, NARRATIVE_METRICS
+from app.services.metrics_registry import (
+    BASIS,
+    FINANCIAL_METRICS,
+    NARRATIVE_METRICS,
+    Basis,
+)
 from app.services.provenance import sources_for
 from app.services.reporting.decision_card import tier_of
+from app.services.reporting.revised_inputs import (
+    RevisionIndex,
+    revised_inputs,
+    revision_index,
+)
+from app.services.reporting.revised_inputs import note as revised_note
 
 _STATUS = {
     1: ValidationStatus.VALIDATED,
@@ -127,11 +140,17 @@ def _history(bundle: MetricsBundle, name: str, label: str) -> MetricResult | Non
 
 
 def _metric_items(
-    b: _Builder, entries: list[EvidenceEntry], dataset: CompanyDataset
+    b: _Builder, entries: list[EvidenceEntry], dataset: CompanyDataset,
+    revised: RevisionIndex | None = None,
 ) -> dict[str, str]:
-    """One item per metric the report evidences. Returns name -> item id."""
+    """One item per metric the report evidences. Returns name -> item id.
+    A metric that read a figure a revision touched says which
+    (`change_state="reads_revised_input"`): its sources still cite the
+    current filing, and the note names the input's earlier value."""
     bundle = compute_metrics(dataset)
+    period_labels = {p.period_end: p.fiscal_label for p in dataset.periods}
     ids: dict[str, str] = {}
+    labels = Counter(p.fiscal_label for p in dataset.periods)
     for e in entries:
         common: dict[str, Any] = dict(
             kind="metric", subject=e.metric_name, claim=e.claim, fiscal_label=e.fiscal_label,
@@ -153,15 +172,29 @@ def _metric_items(
             note = None
             if incomplete:
                 note = f"{incomplete} input fact(s) name no filing and are not listed"
-            if found and "[" in next(iter(found)):
-                note = (note + "; " if note else "") + (
-                    "a statistic over its base metric's history: sources are that "
-                    "metric's in each period it may read"
-                )
+            series_note = {
+                Basis.SERIES: "a statistic over its base metric's history: sources are "
+                              "that metric's in exactly the periods it read",
+                Basis.FIELDS: "read from period fields: sources are exactly the "
+                              "values it read, by period",
+            }.get(BASIS[e.metric_name])
+            if found and series_note:
+                note = (note + "; " if note else "") + series_note
+            revisions = revised_inputs(dataset, bundle, metric, revised) if revised else []
+            if revisions:
+                note = (note + "; " if note else "") + revised_note(revisions, period_labels)
+            label = e.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
+            why = (
+                f"fiscal label {label} names more than one period in this dataset, so its "
+                "inputs cannot be attributed to filings"
+                if labels[label] > 1 else
+                "its inputs carry no per-value provenance "
+                "(dataset not mapped from companyfacts in this run)"
+            )
             added = b.add(
                 item_id, plane=Plane.ACCOUNTING, provenance=tuple(prov), note=note, **common,
-                why_unsourced="its inputs carry no per-value provenance "
-                "(dataset not mapped from companyfacts in this run)",
+                why_unsourced=why,
+                **({"change_state": "reads_revised_input"} if revisions else {}),
             )
         else:
             added = b.add(
@@ -414,7 +447,12 @@ def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
                 validation_status=(
                     ValidationStatus.VALIDATED if promoted else ValidationStatus.DIRECTIONAL
                 ),
-                note=("before the scored window (context)" if c.scope == "context" else None),
+                note="; ".join(n for n in (
+                    "before the scored window (context)" if c.scope == "context" else "",
+                    f"moved with {c.new_form} {c.new_accession}, which the newer snapshot "
+                    "carries beside the original: not silent (the restatement scan reports it)"
+                    if c.explained_by_filing else "",
+                ) if n) or None,
             )
 
 
@@ -450,12 +488,16 @@ def build_ledger(
     (`offerings`, `restatements`, `events`, `filing_events`, `vintage`) when a client ran
     them; `errors` the per-stream failures, as the report renders them."""
     b = _Builder()
-    metric_ids = _metric_items(b, result.evidence, dataset)
+    streams = streams or {}
+    errors = errors or {}
+    revised = revision_index(
+        streams.get("restatements") if errors.get("restatements") is None else None,
+        streams.get("vintage") if errors.get("vintage") is None else None,
+    )
+    metric_ids = _metric_items(b, result.evidence, dataset, revised)
     ne_ids = _narrative_items(b, result.narrative_evidence, dataset.documents)
     _mismatch_items(b, result, ne_ids, metric_ids)
 
-    streams = streams or {}
-    errors = errors or {}
     ran = bool(streams.get("ran"))
     if (timeline := streams.get("offerings")) is not None and errors.get("offerings") is None:
         _offering_items(b, timeline)

@@ -463,8 +463,10 @@ def _silent_revisions_section(rep) -> str:
     lines.append(
         "_Prior-period figures that changed or disappeared between the two most "
         f"recent distinct companyfacts snapshots taken at or before {rep.as_of}. "
-        "Facts added for new periods are not listed. Nothing here has an amended "
-        "filing behind it — read the filing before calling any of it a restatement._"
+        "Facts added for new periods are not listed. A figure that moved with a later "
+        "filing still carried beside the original is listed apart (the restatement "
+        "scan reads those from filing history); the rest has no such filing behind "
+        "it — read the filing before calling any of it a restatement._"
     )
     lines.append("")
     lines.append(render_changes(rep.changes_since_previous, rep.previous.captured, rep.newest.captured))
@@ -519,7 +521,7 @@ def _capital_integrity_offerings_caveat(
     if ci is None or ci.score is None or ci.score >= cfg.DIRECTION_POSITIVE_BELOW:
         return None
     return (
-        f"CAVEAT — Capital Integrity reads low-concern ({ci.score:.0f}/100) but is "
+        "CAVEAT — Capital Integrity reads low-concern but is "
         f"blind to the {len(secondary)} selling-stockholder takedown(s) above "
         "(secondary/mixed offerings per the parsed prospectuses): the block scores "
         "issuer-side dilution only (measured miss, 2026Q2). Read Capital Markets "
@@ -658,6 +660,17 @@ def build_report(
     )
 
     thermometer = compute_thermometer(result.block_scores, dataset.periods)
+    # Lines whose metric read a figure a revision touched say so (the scan's
+    # footprints and derived moves, and silent changes between snapshots).
+    from app.services.formulas.registry import compute_metrics
+    from app.services.reporting.revised_inputs import card_notes, revision_index
+
+    revised = revision_index(
+        scan if errors["restatements"] is None else None,
+        vintage_diff if errors["vintage"] is None else None,
+    )
+    marks = card_notes(dataset, compute_metrics(dataset), [*result.red_flags, *result.green_flags],
+                       revised) if revised else None
     card = render_decision_card(
         result,
         thermometer,
@@ -672,6 +685,8 @@ def build_report(
         # and clean" over a partial inspection is the false clean bill.
         restatement_scan=scan.coverage_line() if scan is not None else None,
         restatement_gaps=len(scan.uninspected) if scan is not None else 0,
+        change_notes=marks.changes if marks else None,
+        flag_notes=marks.flags if marks else None,
     )
     report = (
         card
@@ -719,7 +734,9 @@ def write_ledger(path: Path, **kw) -> Path | None:
     except Exception:
         if _strict():
             raise
-        logger.exception("evidence ledger for %s not written", path.name)
+        # The live name, not a staging token: say which report lost its ledger.
+        logger.exception("evidence ledger for %s %s not written (%s)",
+                         kw.get("ticker"), kw.get("report_date"), path.name)
         # An earlier run's ledger must not sit beside this run's report.
         with contextlib.suppress(OSError):
             path.unlink()
