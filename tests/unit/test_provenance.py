@@ -210,3 +210,35 @@ def test_a_fact_ref_is_only_ever_added_or_subtracted(sign):
     assert FactRef(**kw).sign == 1 and FactRef(**kw, sign=-1).sign == -1
     with pytest.raises(ValidationError):
         FactRef(**kw, sign=sign)
+
+
+def test_a_pair_metrics_prior_at_the_first_period_is_nothing_not_the_last():
+    """Index 0 has no previous quarter; `periods[i - 1]` there would wrap to
+    the LAST period and cite a filing from the other end of the window."""
+    from app.schemas.metrics import MetricResult, MetricStatus
+
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    first = ds.sorted_periods()[0]
+    m = MetricResult(name="dso", formula="x", fiscal_label=first.fiscal_label,
+                     status=MetricStatus.OK, value=1.0,
+                     inputs={"receivables": 1.0, "receivables_prior": 1.0})
+    found = sources_for(ds, m)
+    assert found["receivables"] == [first.sources["receivables"]]
+    assert "receivables_prior" not in found
+
+
+def test_an_input_that_is_not_a_field_is_never_cited():
+    """Only field inputs map to filed facts, even if a period's sources held
+    something under that name."""
+    from app.schemas.metrics import MetricResult, MetricStatus
+
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    last = ds.sorted_periods()[-1]
+    stray = last.sources["revenue"].model_copy(update={"field": "revenue_end"})
+    ds.periods = [p.model_copy(update={"sources": {**p.sources, "revenue_end": stray}})
+                  if p is last else p for p in ds.periods]
+    m = MetricResult(name="dso", formula="x", fiscal_label=last.fiscal_label,
+                     status=MetricStatus.OK, value=1.0, inputs={"revenue_end": 1.0})
+    assert sources_for(ds, m) == {}

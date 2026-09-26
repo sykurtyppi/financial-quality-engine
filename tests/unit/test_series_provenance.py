@@ -146,3 +146,38 @@ def test_a_series_metric_that_computed_nothing_cites_nothing():
         missing = MetricResult(name=name, formula="x", fiscal_label=label,
                                status=MetricStatus.MISSING_DATA)
         assert sources_for(ds, missing, bundle=bundle) == {}
+
+
+def _ko():
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    return ds
+
+
+def test_a_period_with_zero_revenue_is_not_cited_by_the_regime_shift():
+    """`capex_intensity_regime_shift` skips a period whose revenue is not
+    positive (no capex/revenue ratio); provenance must skip it too."""
+    ds = _ko()
+    periods = ds.sorted_periods()
+    zero = periods[1]
+    ds.periods = [p.model_copy(update={"revenue": 0.0}) if p is zero else p for p in ds.periods]
+    bundle = compute_metrics(ds)
+    m = _ok(bundle.get_latest("capex_intensity_regime_shift"))
+    found = sources_for(ds, m, bundle=bundle)
+    assert f"revenue[{zero.fiscal_label}]" not in found
+    assert f"capex[{zero.fiscal_label}]" not in found
+    assert m.inputs["n_prior"] == 3.0  # the formula skipped it as well
+    assert len({_label(k) for k in found}) == 7
+
+
+def test_a_window_that_starts_at_the_first_period_cites_it():
+    """Five periods: t-4 IS the first period, and its revenue is an input."""
+    ds = _ko()
+    ds.periods = ds.sorted_periods()[-5:]
+    bundle = compute_metrics(ds)
+    m = _ok(bundle.get_latest("incremental_revenue_per_capex"))
+    labels = [p.fiscal_label for p in ds.sorted_periods()]
+    found = sources_for(ds, m, bundle=bundle)
+    assert found[f"revenue[{labels[0]}]"][0].value == pytest.approx(m.inputs["revenue_start"])
+    assert set(found) == {f"revenue[{labels[0]}]", f"revenue[{labels[4]}]"} | {
+        f"capex[{labels[k]}]" for k in range(1, 5)}
