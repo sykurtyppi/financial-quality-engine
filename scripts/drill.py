@@ -211,7 +211,8 @@ class Workspace:
     def write_index(self, index: dict) -> None:
         (self.cache / self.inputs.index_name).write_text(json.dumps(index))
 
-    def run(self, step: Step, script: str, *args: str) -> Command:
+    def run(self, step: Step, script: str, *args: str,
+            env_extra: dict[str, str] | None = None) -> Command:
         env = {k: v for k, v in os.environ.items()
                if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
         closed = "http://127.0.0.1:9"  # discard port: nothing listens
@@ -221,6 +222,7 @@ class Workspace:
             "EDGAR_IDENTITY": "Earnings Drill drill@example.com",
             "PYTHONPATH": str(self.path / "_shim"),
             "PYTHONDONTWRITEBYTECODE": "1",
+            **(env_extra or {}),
         })
         argv = [script, *args]
         t0 = time.monotonic()
@@ -381,8 +383,9 @@ class Drill:
             self._main = self.workspace("night")
         return self._main
 
-    def generate(self, step: Step, ws: Workspace, *extra: str) -> Command:
-        return ws.run(step, "generate_report.py", self.inputs.ticker, *extra)
+    def generate(self, step: Step, ws: Workspace, *extra: str,
+                 env_extra: dict[str, str] | None = None) -> Command:
+        return ws.run(step, "generate_report.py", self.inputs.ticker, *extra, env_extra=env_extra)
 
     def no_traceback(self, step: Step, cmd: Command) -> None:
         step.check(f"`{' '.join(cmd.argv)}`: no traceback", "Traceback" not in cmd.stderr,
@@ -616,6 +619,37 @@ class Drill:
                    len(snaps_after) > len(snaps_before))
 
 
+    # 11 --------------------------------------------------------------------------
+    def s11_failed_rebuild(self, step: Step) -> None:
+        """Hermes audit round 8, finding 2: the earlier run was archived before
+        the rebuild, so a rebuild that failed left no live report or ledger."""
+        ws = self.workspace("failed_rebuild")
+        first = self.generate(step, ws, "--no-docs")
+        self.wrote_report(step, ws, first)
+        live, ledger = ws.live(), ws.live(".ledger.json")
+        before = {p: p.read_bytes() for p in (live, ledger) if p.is_file()}
+        archive = ws.reports / "archive"
+        archived = sorted(archive.iterdir()) if archive.is_dir() else []
+        cmd = self.generate(step, ws, "--no-docs", env_extra={"FQE_DRILL_FAIL_BUILD": "1"})
+        injected = "drill: injected report-build failure" in cmd.stderr
+        step.check("scenario: the report build raises after the data was acquired", injected,
+                   "" if injected else cmd.stderr[-400:])
+        step.check("the failed rebuild exits nonzero", cmd.returncode != 0, f"exit {cmd.returncode}")
+        step.check("the live report and ledger are byte-identical to before",
+                   len(before) == 2 and all(p.is_file() and p.read_bytes() == b
+                                            for p, b in before.items()))
+        step.check("nothing was archived by the failed rebuild",
+                   (sorted(archive.iterdir()) if archive.is_dir() else []) == archived)
+        staging = ws.reports / ".staging"
+        step.check("no staged file is left behind",
+                   not staging.exists() or not any(staging.iterdir()))
+        again = self.generate(step, ws, "--no-docs")
+        step.check("the next rebuild succeeds and archives the first run",
+                   again.returncode == 0 and len(_archived(again)) == 2
+                   and live.read_bytes() != b"",
+                   f"exit {again.returncode}; archived {_archived(again)}")
+
+
 STEPS: tuple[tuple[str, str, Callable[[Drill, Step], None]], ...] = (
     ("baseline", "Baseline report", Drill.s1_baseline),
     ("rerun", "Rerun on the same inputs: deterministic, first run archived", Drill.s2_rerun),
@@ -627,7 +661,27 @@ STEPS: tuple[tuple[str, str, Callable[[Drill, Step], None]], ...] = (
     ("stale", "Stale cache and --fresh with SEC unreachable", Drill.s8_stale),
     ("journal", "Journal path and analyst override", Drill.s9_journal),
     ("rollback", "Roll back to the first run", Drill.s10_rollback),
+    ("failed_rebuild", "A rebuild that fails keeps the live report", Drill.s11_failed_rebuild),
 )
+
+
+# The workspaces' `sitecustomize`: retry back-off sleeps become no-ops, and
+# FQE_DRILL_FAIL_BUILD=1 makes the report build raise once the data is in
+# hand (step 11), in the workspace's copy of the code only.
+_SHIM = """import time
+time.sleep = lambda seconds: None  # drill: retries fail fast
+
+import os
+if os.environ.get("FQE_DRILL_FAIL_BUILD"):
+    import sys
+    sys.path.insert(0, os.getcwd())
+    import app.services.reporting.report_builder as _rb
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("drill: injected report-build failure")
+
+    _rb.build_report = _fail
+"""
 
 
 # --- output ------------------------------------------------------------------------
@@ -728,8 +782,7 @@ def main(argv: list[str] | None = None) -> int:
         shutil.copytree(ROOT / part, code / part,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     (code / "_shim").mkdir()
-    (code / "_shim" / "sitecustomize.py").write_text(
-        "import time\ntime.sleep = lambda seconds: None  # drill: retries fail fast\n")
+    (code / "_shim" / "sitecustomize.py").write_text(_SHIM)
 
     inputs = Inputs(args.ticker, args.cache, out / "work" / "_inputs")
     drill = Drill(inputs, out, code)

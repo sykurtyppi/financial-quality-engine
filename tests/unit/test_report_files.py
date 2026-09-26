@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 import pytest
 
 from app.services.reporting.report_builder import ledger_path
-from app.services.reporting.report_files import archive_existing, is_live_report
+from app.services.reporting.report_files import (
+    STAGING_DIR,
+    archive_existing,
+    is_live_report,
+    replacing,
+)
 
 NOW = datetime(2026, 9, 26, 21, 5, 7, tzinfo=UTC)
 
@@ -116,3 +121,100 @@ class TestIsLiveReport:
         assert not is_live_report(tmp_path / "AAPL_2026-09-26_audit.md")
         assert not is_live_report(tmp_path / "AAPL_2025-06-30.replay.md")
         assert not is_live_report(tmp_path / "AAPL_2025-06-30.replay_audit.md")
+
+
+# --- replacing: build off to the side, publish only a finished rebuild ------------
+# Hermes audit round 8, finding 2: archiving BEFORE the build left no live
+# report or ledger behind a rebuild that failed.
+
+
+def _live(dirpath, name="AAPL_2026-09-26.md"):
+    report = dirpath / name
+    return {p.name: p.read_bytes() for p in (
+        report, ledger_path(report),
+        report.with_name(f"{name.removesuffix('.md')}_audit.md")) if p.exists()}
+
+
+class TestReplacing:
+    def test_a_failed_rebuild_leaves_the_live_run_exactly_as_it_was(self, tmp_path):
+        report = _run(tmp_path)
+        before = _live(tmp_path)
+        with pytest.raises(RuntimeError, match="build failed"):
+            with replacing(report, now=NOW) as staged:
+                staged.ledger.write_text('{"run": "half-built"}')
+                raise RuntimeError("build failed")
+        assert _live(tmp_path) == before and len(before) == 3
+        assert not (tmp_path / "archive").exists()
+        assert not (tmp_path / STAGING_DIR).exists()
+
+    def test_a_rebuild_that_writes_no_report_publishes_nothing(self, tmp_path):
+        report = _run(tmp_path)
+        before = _live(tmp_path)
+        with pytest.raises(RuntimeError, match="wrote no report"):
+            with replacing(report, now=NOW) as staged:
+                staged.ledger.write_text('{"run": "orphan"}')
+        assert _live(tmp_path) == before
+        assert not (tmp_path / "archive").exists()
+        assert not (tmp_path / STAGING_DIR).exists()
+
+    def test_a_finished_rebuild_archives_the_earlier_run_and_goes_live(self, tmp_path):
+        report = _run(tmp_path)
+        with replacing(report, now=NOW) as staged:
+            assert STAGING_DIR in staged.report.parts and not staged.report.exists()
+            assert report.exists()  # still live while the rebuild runs
+            staged.ledger.write_text('{"run": "second"}')
+            staged.report.write_text("# second report")
+        assert report.read_text() == "# second report"
+        assert ledger_path(report).read_text() == '{"run": "second"}'
+        # the earlier run's audit is not left beside the new report
+        assert not report.with_name("AAPL_2026-09-26_audit.md").exists()
+        arch = tmp_path / "archive"
+        assert sorted(p.name for p in staged.archived) == [
+            "AAPL_2026-09-26.210507.ledger.json",
+            "AAPL_2026-09-26.210507.md",
+            "AAPL_2026-09-26.210507_audit.md",
+        ]
+        assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
+        assert (arch / "AAPL_2026-09-26.210507_audit.md").read_text() == "# first audit"
+        assert not (tmp_path / STAGING_DIR).exists()
+
+    def test_a_rebuild_without_a_ledger_leaves_no_stale_ledger_live(self, tmp_path):
+        report = _run(tmp_path, audit=False)
+        with replacing(report, now=NOW) as staged:
+            staged.report.write_text("# second report")  # the ledger write failed
+        assert report.read_text() == "# second report"
+        assert not ledger_path(report).exists()
+        assert (tmp_path / "archive" / "AAPL_2026-09-26.210507.ledger.json").exists()
+
+    def test_a_first_run_archives_nothing(self, tmp_path):
+        report = tmp_path / "AAPL_2026-09-26.md"
+        with replacing(report, now=NOW) as staged:
+            staged.ledger.write_text("{}")
+            staged.report.write_text("# first")
+        assert staged.archived == [] and not (tmp_path / "archive").exists()
+        assert report.read_text() == "# first" and ledger_path(report).exists()
+
+    def test_two_rebuilds_within_a_second_archive_under_two_stamps(self, tmp_path):
+        report = _run(tmp_path, audit=False)
+        for n in ("second", "third"):
+            with replacing(report, now=NOW) as staged:
+                staged.report.write_text(f"# {n} report")
+        arch = tmp_path / "archive"
+        assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
+        assert (arch / "AAPL_2026-09-26.210507-1.md").read_text() == "# second report"
+        assert report.read_text() == "# third report"
+
+    def test_staged_files_are_invisible_to_the_live_report_globs(self, tmp_path):
+        report = _run(tmp_path, audit=False)
+        with replacing(report, now=NOW) as staged:
+            staged.report.write_text("# second report")
+            live = [p.name for p in tmp_path.glob("AAPL_*.md") if is_live_report(p)]
+            assert live == ["AAPL_2026-09-26.md"]
+
+    def test_a_concurrent_rebuilds_staging_is_left_alone(self, tmp_path):
+        report = _run(tmp_path, audit=False)
+        other = tmp_path / STAGING_DIR / "someone-else.md"
+        with replacing(report, now=NOW) as staged:
+            other.write_text("# in progress")
+            staged.report.write_text("# second report")
+        assert other.read_text() == "# in progress"

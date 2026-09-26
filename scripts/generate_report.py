@@ -30,7 +30,7 @@ from app.services.ingestion.edgar_adapter import (
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.reporting.report_builder import build_report, ledger_path
-from app.services.reporting.report_files import archive_existing
+from app.services.reporting.report_files import replacing
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -114,34 +114,35 @@ def main() -> int:
     generated_on = date.today().isoformat()
     out_dir = ROOT / "reports"
     out = out_dir / f"{ticker}_{generated_on}.md"
-    # A same-day rerun (filing night: the /A lands after the first run) keeps
-    # the earlier report, ledger and audit under reports/archive/.
-    for moved in archive_existing(out):
+    # Built off to the side, then published: a same-day rerun (filing night:
+    # the /A lands after the first run) copies the earlier report, ledger and
+    # audit to reports/archive/ only once the new report exists, and a build
+    # that fails leaves the live report as it was.
+    with replacing(out) as staged:
+        report, thermometer = build_report(
+            result, dataset,
+            generated_on=generated_on,
+            coverage=diag.coverage(),
+            # The evidence must name the same series the score came from.
+            field_tags=diag.selected_series(),
+            client=client,
+            ticker=ticker,
+            fetched_at=fetched_at,
+            fresh=args.fresh,
+            warnings=diag.warnings,
+            field_notes=diag.field_notes(),
+            doc_diagnostics=doc_diagnostics,
+            company_facts=snapshot.company_facts,
+            submissions=submissions,
+            index_degraded=submissions is None,
+            vintage_note=vintage_note,
+            # No baseline_day: the CLI has no pinned thesis; the silent-revision
+            # section compares the newest snapshot with the previous one only.
+            ledger_out=staged.ledger,
+        )
+        staged.report.write_text(report)
+    for moved in staged.archived:
         print(f"previous run archived: {moved}")
-    report, thermometer = build_report(
-        result, dataset,
-        generated_on=generated_on,
-        coverage=diag.coverage(),
-        # The evidence must name the same series the score came from.
-        field_tags=diag.selected_series(),
-        client=client,
-        ticker=ticker,
-        fetched_at=fetched_at,
-        fresh=args.fresh,
-        warnings=diag.warnings,
-        field_notes=diag.field_notes(),
-        doc_diagnostics=doc_diagnostics,
-        company_facts=snapshot.company_facts,
-        submissions=submissions,
-        index_degraded=submissions is None,
-        vintage_note=vintage_note,
-        # No baseline_day: the CLI has no pinned thesis; the silent-revision
-        # section compares the newest snapshot with the previous one only.
-        ledger_out=ledger_path(out),
-    )
-
-    out_dir.mkdir(exist_ok=True)
-    out.write_text(report)
     ledger = ledger_path(out)
     print(f"evidence ledger: {ledger if ledger.exists() else 'NOT written (see log)'}")
 

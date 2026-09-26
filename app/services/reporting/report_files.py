@@ -6,14 +6,27 @@ run on the same day writes the same paths, so before this module it replaced
 the first report with no copy (Hermes audit round 7, finding 3: rollback) and
 left the first run's audit beside the second run's report, where
 ``audit_for`` would pair them.
+
+A rerun now goes through ``replacing``: the new report and ledger are built
+in a staging directory, and the earlier run is archived and replaced only
+once they exist. A build that fails leaves the live report, ledger and audit
+exactly as they were (Hermes audit round 8, finding 2: archiving first left
+no live report behind a failed rebuild).
 """
 
 from __future__ import annotations
 
+import os
+import shutil
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 ARCHIVE_DIR = "archive"
+STAGING_DIR = ".staging"
 REPLAY_SUFFIX = ".replay.md"
 
 
@@ -33,10 +46,28 @@ def _companions(report: Path) -> dict[str, Path]:
     }
 
 
+def _archive_targets(report: Path, now: datetime | None) -> dict[str, Path]:
+    """Free archive paths for `report`'s files, all under one stamp
+    (``<base>.<HHMMSS>[-n].*``). A stamp any companion already holds is
+    taken; after 100 stamps within one second nothing is archived."""
+    archive = report.parent / ARCHIVE_DIR
+    stamp = (now or datetime.now(UTC)).strftime("%H%M%S")
+    base = _base(report)
+    for n in range(100):  # bounded: a defect here fails, it does not spin
+        tag = stamp if n == 0 else f"{stamp}-{n}"
+        target = _companions(archive / f"{base}.{tag}.md")
+        if not any(p.exists() for p in target.values()):
+            return target
+    raise FileExistsError(
+        f"{archive}: 100 runs of {base} already archived at {stamp}; nothing moved")
+
+
 def archive_existing(report: Path, *, now: datetime | None = None) -> list[Path]:
     """Move whatever an earlier run left at ``report``'s paths into
     ``<dir>/archive/`` and return where each file went (empty when nothing
-    was there).
+    was there). For setting a run aside by hand (the restore procedure); a
+    rebuild goes through ``replacing``, which archives only once the new
+    report exists.
 
     Everything moves together, so the archived report keeps its own ledger
     and audit (``<base>.<HHMMSS>.md`` / ``.ledger.json`` / ``_audit.md``), and
@@ -48,23 +79,78 @@ def archive_existing(report: Path, *, now: datetime | None = None) -> list[Path]
     present = {role: p for role, p in _companions(report).items() if p.exists()}
     if not present:
         return []
-    archive = report.parent / ARCHIVE_DIR
-    archive.mkdir(parents=True, exist_ok=True)
-    stamp = (now or datetime.now(UTC)).strftime("%H%M%S")
-    base = _base(report)
-    for n in range(100):  # bounded: a defect here fails, it does not spin
-        tag = stamp if n == 0 else f"{stamp}-{n}"
-        target = _companions(archive / f"{base}.{tag}.md")
-        if not any(p.exists() for p in target.values()):
-            break
-    else:
-        raise FileExistsError(
-            f"{archive}: 100 runs of {base} already archived at {stamp}; nothing moved")
+    (report.parent / ARCHIVE_DIR).mkdir(parents=True, exist_ok=True)
+    target = _archive_targets(report, now)
     moved = []
     for role, src in present.items():
         src.replace(target[role])
         moved.append(target[role])
     return moved
+
+
+@dataclass
+class Staged:
+    """Where a rebuild writes before it is published: ``report`` must be
+    written by the caller; ``ledger`` is handed to the builder (which may not
+    write it — a ledger failure is logged, not fatal). ``archived`` lists
+    where the earlier run went once the rebuild is published."""
+
+    report: Path
+    ledger: Path
+    archived: list[Path] = field(default_factory=list)
+
+
+@contextmanager
+def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
+    """Build a report's replacement off to the side, then publish it.
+
+    Inside the block the caller builds into ``staged.report`` and
+    ``staged.ledger`` (under ``<dir>/.staging/``, which no live-report glob
+    reads). If the block raises, the staged files are removed and the live
+    report, ledger and audit are untouched. If it returns without writing
+    ``staged.report``, nothing is published (``RuntimeError``). Otherwise:
+
+    1. the earlier run's report, ledger and audit are COPIED to the archive
+       (one stamp, as ``archive_existing`` names them);
+    2. the new ledger replaces the live one (``os.replace``), or the live
+       ledger is removed when the build wrote none, so a stale ledger never
+       sits beside the new report;
+    3. the new report replaces the live one (``os.replace``): the live path
+       is never missing;
+    4. the earlier run's audit, now archived, is removed from beside it.
+
+    Report and ledger are two files, so between steps 2 and 3 the new ledger
+    sits beside the earlier report for an instant; the report is never absent.
+    """
+    staging = report.parent / STAGING_DIR
+    staging.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:12]
+    staged = Staged(report=staging / f"{token}.md", ledger=staging / f"{token}.ledger.json")
+    try:
+        yield staged
+        if not staged.report.is_file():
+            raise RuntimeError(f"{report.name}: the rebuild wrote no report; nothing published")
+        live = _companions(report)
+        present = {role: p for role, p in live.items() if p.exists()}
+        if present:
+            (report.parent / ARCHIVE_DIR).mkdir(parents=True, exist_ok=True)
+            target = _archive_targets(report, now)
+            for role, src in present.items():
+                shutil.copy2(src, target[role])
+                staged.archived.append(target[role])
+        if staged.ledger.is_file():
+            os.replace(staged.ledger, live["ledger"])
+        else:
+            live["ledger"].unlink(missing_ok=True)
+        os.replace(staged.report, live["report"])
+        live["audit"].unlink(missing_ok=True)
+    finally:
+        staged.report.unlink(missing_ok=True)
+        staged.ledger.unlink(missing_ok=True)
+        try:
+            staging.rmdir()  # only when empty: a concurrent rebuild keeps its files
+        except OSError:
+            pass
 
 
 def is_live_report(path: Path) -> bool:
