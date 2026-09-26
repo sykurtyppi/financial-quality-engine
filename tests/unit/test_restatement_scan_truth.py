@@ -479,3 +479,82 @@ def test_a_tag_migration_at_unchanged_values_starts_the_run_a_revision_is_measur
     assert diag.field_by_name("revenue").tag_used == f"us-gaap:{new_tag}"
     (d,) = [x for x in _scan(p.data).derived if x.field_name == "revenue"]
     assert (d.original_value, d.current_value, d.is_amendment) == (500.0, 509.0, True)
+
+
+class TestALongerRevisedFigureDoesNotHideTheQuarter:
+    """Round-10 audit: a revised year-to-date or annual figure ending on a
+    derived quarter hid that quarter's own move. Only a footprint of the
+    quarter's own figure makes its derived row a repeat."""
+
+    def test_a_material_h1_revision_reports_the_q2_it_moved(self):
+        scan = _scan(_ytd_filer(110.0))  # H1 101 -> 110: +8.9%, material
+        (fp,) = [f for f in scan.footprints if f.field_name == "operating_income"]
+        assert (fp.period_end - fp.period_start).days > 100
+        (d,) = [d for d in scan.derived if d.field_name == "operating_income"]
+        assert d.period_end == Q2 and d.original_value == 1.0 and abs(d.current_value - 10.0) < 1e-9
+        text = render_restatements_section(scan)
+        assert "### Derived quarters that moved" in text and "| 2024-06-30 | operating_income |" in text
+
+    def test_tier_1_carries_the_event_once(self):
+        scan = _scan(_ytd_filer(110.0))
+        (fp,) = [f for f in scan.footprints if f.field_name == "operating_income"]
+        assert fp.is_amendment and scan.derived
+        assert _derived_tier1_lines(scan.derived, scan.footprints) == []
+        # Without the footprint that names the event, the derived move is it.
+        (line,) = _derived_tier1_lines(scan.derived)
+        assert line.startswith("Restatement (10-Q/A) moved derived operating_income for 2024-06-30")
+
+    def test_the_quarters_own_revised_figure_still_stands_for_it(self):
+        """A composite quarter is a sum of quarter facts: its footprint is the
+        quarter's own figure, and the derived row would repeat it."""
+        p = _base("Sum Co")
+        p.add("SellingGeneralAndAdministrativeExpense", [])
+        p.add("SellingAndMarketingExpense", [quarter(e, 60.0) for e in QUARTER_ENDS])
+        p.add("GeneralAndAdministrativeExpense", [
+            *[quarter(e, 40.0) for e in QUARTER_ENDS],
+            quarter(Q2, 60.0, filed=date(2024, 10, 1), form="10-Q/A"),
+        ])
+        scan = _scan(p.data)
+        own = [f for f in scan.footprints if f.field_name == "sga_expense" and f.period_end == Q2]
+        assert own and (own[0].period_end - own[0].period_start).days <= 100
+        assert not [d for d in scan.derived if d.field_name == "sga_expense" and d.period_end == Q2]
+
+
+def test_a_real_annual_amendment_reports_the_derived_q4():
+    """CRM, full-year revenue +2% by a 10-K/A: the derived Q4 moved +7.4%."""
+    import copy
+
+    facts = json.loads((FIXTURES / "companyfacts_CRM_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "CRM")
+    q = [p for p in ds.sorted_periods() if p.sources["revenue"].method != "direct"][-1]
+    fy = next(r for r in q.sources["revenue"].inputs if r.sign == 1)
+    newer = copy.deepcopy(facts)
+    rows = newer["facts"]["us-gaap"][fy.concept.split(":", 1)[1]]["units"]["USD"]
+    row = next(r for r in rows if r["accn"] == fy.accession and r["end"] == fy.end.isoformat()
+               and r.get("start") == fy.start.isoformat())
+    rows.append({**{k: v for k, v in row.items() if k != "frame"},
+                 "val": round(row["val"] * 1.02), "form": "10-K/A", "filed": "2026-09-26",
+                 "accn": "0001108524-26-990010"})
+    _ds2, diag = build_dataset(newer, "CRM")
+    scan = scan_restatements(newer, period_since=date(2023, 1, 1), as_of=date(2026, 9, 26),
+                             selected_tags=diag.selected_series(), n_quarters=8)
+    assert [(f.field_name, f.period_start, f.period_end) for f in scan.footprints] == [
+        ("revenue", fy.start, fy.end)]
+    (d,) = scan.derived
+    assert (d.field_name, d.period_end, d.method) == (
+        "revenue", q.period_end, q.sources["revenue"].method)
+    assert d.original_value == q.revenue and d.pct_change > 0.07
+    assert d.moved_by == (("10-K/A", "0001108524-26-990010"),)
+
+
+def test_a_quarter_is_at_most_a_hundred_days():
+    from datetime import timedelta
+
+    from app.services.ingestion.restatements import longer_than_a_quarter
+
+    end = date(2026, 1, 31)
+    assert not longer_than_a_quarter(end - timedelta(days=91), end)  # a 13-week quarter
+    assert not longer_than_a_quarter(end - timedelta(days=100), end)
+    assert longer_than_a_quarter(end - timedelta(days=101), end)
+    assert longer_than_a_quarter(end - timedelta(days=181), end)  # a half year
+    assert not longer_than_a_quarter(None, end)  # an instant
