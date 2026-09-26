@@ -42,6 +42,12 @@ from app.services.metrics_registry import (
 )
 from app.services.provenance import sources_for
 from app.services.reporting.decision_card import tier_of
+from app.services.reporting.revised_inputs import (
+    RevisionIndex,
+    revised_inputs,
+    revision_index,
+)
+from app.services.reporting.revised_inputs import note as revised_note
 
 _STATUS = {
     1: ValidationStatus.VALIDATED,
@@ -134,10 +140,15 @@ def _history(bundle: MetricsBundle, name: str, label: str) -> MetricResult | Non
 
 
 def _metric_items(
-    b: _Builder, entries: list[EvidenceEntry], dataset: CompanyDataset
+    b: _Builder, entries: list[EvidenceEntry], dataset: CompanyDataset,
+    revised: RevisionIndex | None = None,
 ) -> dict[str, str]:
-    """One item per metric the report evidences. Returns name -> item id."""
+    """One item per metric the report evidences. Returns name -> item id.
+    A metric that read a figure a revision touched says which
+    (`change_state="reads_revised_input"`): its sources still cite the
+    current filing, and the note names the input's earlier value."""
     bundle = compute_metrics(dataset)
+    period_labels = {p.period_end: p.fiscal_label for p in dataset.periods}
     ids: dict[str, str] = {}
     labels = Counter(p.fiscal_label for p in dataset.periods)
     for e in entries:
@@ -169,6 +180,9 @@ def _metric_items(
             }.get(BASIS[e.metric_name])
             if found and series_note:
                 note = (note + "; " if note else "") + series_note
+            revisions = revised_inputs(dataset, bundle, metric, revised) if revised else []
+            if revisions:
+                note = (note + "; " if note else "") + revised_note(revisions, period_labels)
             label = e.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
             why = (
                 f"fiscal label {label} names more than one period in this dataset, so its "
@@ -180,6 +194,7 @@ def _metric_items(
             added = b.add(
                 item_id, plane=Plane.ACCOUNTING, provenance=tuple(prov), note=note, **common,
                 why_unsourced=why,
+                **({"change_state": "reads_revised_input"} if revisions else {}),
             )
         else:
             added = b.add(
@@ -473,12 +488,16 @@ def build_ledger(
     (`offerings`, `restatements`, `events`, `filing_events`, `vintage`) when a client ran
     them; `errors` the per-stream failures, as the report renders them."""
     b = _Builder()
-    metric_ids = _metric_items(b, result.evidence, dataset)
+    streams = streams or {}
+    errors = errors or {}
+    revised = revision_index(
+        streams.get("restatements") if errors.get("restatements") is None else None,
+        streams.get("vintage") if errors.get("vintage") is None else None,
+    )
+    metric_ids = _metric_items(b, result.evidence, dataset, revised)
     ne_ids = _narrative_items(b, result.narrative_evidence, dataset.documents)
     _mismatch_items(b, result, ne_ids, metric_ids)
 
-    streams = streams or {}
-    errors = errors or {}
     ran = bool(streams.get("ran"))
     if (timeline := streams.get("offerings")) is not None and errors.get("offerings") is None:
         _offering_items(b, timeline)

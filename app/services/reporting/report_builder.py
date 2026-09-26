@@ -660,6 +660,17 @@ def build_report(
     )
 
     thermometer = compute_thermometer(result.block_scores, dataset.periods)
+    # Lines whose metric read a figure a revision touched say so (the scan's
+    # footprints and derived moves, and silent changes between snapshots).
+    from app.services.formulas.registry import compute_metrics
+    from app.services.reporting.revised_inputs import card_notes, revision_index
+
+    revised = revision_index(
+        scan if errors["restatements"] is None else None,
+        vintage_diff if errors["vintage"] is None else None,
+    )
+    marks = card_notes(dataset, compute_metrics(dataset), [*result.red_flags, *result.green_flags],
+                       revised) if revised else None
     card = render_decision_card(
         result,
         thermometer,
@@ -674,6 +685,8 @@ def build_report(
         # and clean" over a partial inspection is the false clean bill.
         restatement_scan=scan.coverage_line() if scan is not None else None,
         restatement_gaps=len(scan.uninspected) if scan is not None else 0,
+        change_notes=marks.changes if marks else None,
+        flag_notes=marks.flags if marks else None,
     )
     report = (
         card

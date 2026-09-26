@@ -101,6 +101,9 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_provenance.py", "tests/unit/test_series_provenance.py",
         "tests/unit/test_ledger.py", "tests/unit/test_journal_resolver.py",
     )),
+    Target("app/services/reporting/revised_inputs.py", (
+        "tests/unit/test_revised_inputs.py",
+    )),
     Target("app/services/reporting/report_files.py", (
         "tests/unit/test_report_files.py", "tests/unit/test_earnings_brief.py",
         "tests/unit/test_watch_cli.py",
