@@ -52,17 +52,6 @@ FIXTURE_CIK = 320193
 VOLATILE_LINES = ("- Data fetched:", "- Vintage snapshot:")
 VOLATILE_LEDGER_KEYS = frozenset({"fetched_at"})
 
-# Found by this drill (2026-09-26), reported, not fixed here: the vintage
-# diff compares scored values between snapshots and does not ask whether a
-# new filing explains a move, so an amendment is ALSO promoted to a Tier-1
-# "Silent revision" line, and the appendix row sits under "Nothing here has
-# an amended filing behind it". The fix changes what the card promotes
-# (app/services/ingestion/vintages.py) and needs its own review.
-KNOWN_AMENDMENT_AS_SILENT = (
-    "a 10-Q/A is also promoted to a Tier-1 'Silent revision' line, and the "
-    "silent-revision appendix says nothing there has an amended filing behind it"
-)
-
 _TENQ_HTML = """<html><body>
 <p>Item 2. Management's Discussion and Analysis of Financial Condition and Results of Operations</p>
 <p>Revenue grew on strong demand. We believe margins will remain stable.</p>
@@ -477,15 +466,17 @@ class Drill:
         ledger = ws.live(".ledger.json").read_text() if report else ""
         step.check("ledger cites the /A accession", accn in ledger)
         step.check("vintage captured the new payload", "Vintage snapshot: captured" in report)
-        step.check(
-            "the /A is not also called a silent revision",
-            "Silent revision:" not in report,
-            known=KNOWN_AMENDMENT_AS_SILENT,
-        )
-        m = re.search(r"Silent-revision check: compared .*?(\d+) change", report)
-        step.check("silent-revision check compared two snapshots and saw the change",
-                   m is not None and int(m.group(1)) >= 1,
-                   m.group(0) if m else "no comparison line")
+        # Found by this drill on 2026-09-26: the /A was also promoted as a
+        # Tier-1 "Silent revision" under an appendix saying nothing there had
+        # an amended filing behind it (fixed in vintages.explained_by_filing).
+        step.check("the /A is not also called a silent revision", "Silent revision:" not in report)
+        m = re.search(r"Silent-revision check: compared .*?: (\d+) change\(s\) "
+                      r"\(\+(\d+) moved with a later filing, not silent\)", report)
+        step.check("silent-revision check compared two snapshots and attributed the move "
+                   "to a filing", m is not None and m.group(1) == "0" and int(m.group(2)) >= 1,
+                   m.group(0) if m else "no comparison line naming a filed move")
+        step.check("the appendix names the /A as what revised it",
+                   f"10-Q/A {accn} |" in report.split("**Moved with a later filing")[-1])
         moved = _archived(cmd)
         self.state["s2_archived"] = moved
         step.check("step-2 report archived", any(p.suffix == ".md" for p in moved),
