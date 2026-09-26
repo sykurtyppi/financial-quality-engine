@@ -12,14 +12,18 @@ period, original → current, and what revised it. The metric is never called
 wrong; the input's vintage is what the reader needs.
 
 Matching is by the filed fact where one exists (concept, period, accession:
-a revised year-to-date fact behind a derived quarter is caught), else by the
-field and quarter (a derived or composed figure that moved).
+a revised year-to-date fact behind a derived quarter is caught; a summed
+field's revision by the component the revising filing carries), else by the
+field and quarter (a derived or composed figure that moved — and any other
+field built from the very same filed facts, which the scan reports once).
+A revised fact longer than the quarter is described as what it is (the
+twelve months to the quarter), never with the quarter's label alone.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
 
@@ -29,6 +33,7 @@ from app.services.formulas.registry import MetricsBundle
 from app.services.provenance import sources_for
 
 MAX_LISTED = 2
+QUARTER_DAYS = 100  # a filed period longer than this is not a quarter's own
 
 
 @dataclass(frozen=True)
@@ -40,10 +45,23 @@ class Revision:
     original: float
     current: float
     how: str
+    # The revised fact's own start, when it is longer than a quarter (a
+    # year-to-date or annual figure behind a derived quarter): its values
+    # are that period's, and saying so keeps them from reading as the
+    # quarter's.
+    period_start: date | None = None
 
     def describe(self, label: str | None = None) -> str:
-        return (f"{self.field} {label or self.period_end} {self.original:,.0f} → "
-                f"{self.current:,.0f} ({self.how})")
+        at = label or str(self.period_end)
+        if self.period_start is not None:
+            months = round((self.period_end - self.period_start).days / 30.4375)
+            at = f"for the {months} months to {at}"
+        return f"{self.field} {at} {self.original:,.0f} → {self.current:,.0f} ({self.how})"
+
+
+def _span(start: date | None, end: date) -> date | None:
+    """`start` when the period is longer than a quarter, else None."""
+    return start if start is not None and (end - start).days > QUARTER_DAYS else None
 
 
 @dataclass
@@ -64,19 +82,28 @@ def revision_index(scan: Any = None, vintage: Any = None) -> RevisionIndex:
     for the same fact: it names the filing."""
     idx = RevisionIndex()
     if vintage is not None and getattr(vintage, "compared", False):
-        older = vintage.previous.captured if vintage.previous is not None else "?"
         newer = vintage.newest.captured if vintage.newest is not None else "?"
-        for c in vintage.changes_since_previous:
-            if (c.kind != "revised" or c.new_value is None or c.scope != "scored"
-                    or c.explained_by_filing):
-                continue
-            rev = Revision(c.field_name, c.key.end, c.old_value, c.new_value,
-                           f"changed silently between snapshots {older} → {newer}")
-            if c.key.taxonomy == "composed" or not c.new_accession:
-                idx.by_cell[(c.field_name, c.key.end)] = rev
-            else:
-                idx.by_fact[(f"{c.key.taxonomy}:{c.key.tag}", c.key.start, c.key.end,
-                             c.new_accession)] = rev
+        # Both windows the card's silent-revision lines read, in their order:
+        # since the thesis-day snapshot, then since the previous one.
+        windows = []
+        if vintage.changes_since_baseline is not None and vintage.baseline is not None:
+            windows.append((vintage.changes_since_baseline, vintage.baseline.captured))
+        older = vintage.previous.captured if vintage.previous is not None else "?"
+        windows.append((vintage.changes_since_previous, older))
+        for changes, since in windows:
+            for c in changes:
+                if (c.kind != "revised" or c.new_value is None or c.scope != "scored"
+                        or c.explained_by_filing):
+                    continue
+                # A scored change carries the quarter's own values, whatever
+                # fact the quarter was read from: never a longer period's.
+                rev = Revision(c.field_name, c.key.end, c.old_value, c.new_value,
+                               f"changed silently between snapshots {since} → {newer}")
+                if c.key.taxonomy == "composed" or not c.new_accession:
+                    idx.by_cell.setdefault((c.field_name, c.key.end), rev)
+                else:
+                    idx.by_fact.setdefault((f"{c.key.taxonomy}:{c.key.tag}", c.key.start,
+                                            c.key.end, c.new_accession), rev)
     if scan is not None:
         for d in scan.derived:
             moved = ", ".join(f"{form} {accn}" for form, accn in d.moved_by) or "later filings"
@@ -86,15 +113,39 @@ def revision_index(scan: Any = None, vintage: Any = None) -> RevisionIndex:
         for fp in scan.footprints:
             how = (f"amended by {fp.amendment_form} {fp.amendment_accession}" if fp.is_amendment
                    else f"revised by a later {fp.current_form} {fp.current_accession}")
-            idx.by_fact[(fp.tag, fp.period_start, fp.period_end, fp.current_accession)] = Revision(
-                fp.field_name, fp.period_end, fp.original_value, fp.current_value, how)
+            rev = Revision(fp.field_name, fp.period_end, fp.original_value, fp.current_value, how,
+                           _span(fp.period_start, fp.period_end))
+            # A summed field's footprint is tagged "a+b": its values are the
+            # sum's, and the revising filing is the one a component carries.
+            for concept in fp.tag.split("+"):
+                idx.by_fact[(concept, fp.period_start, fp.period_end, fp.current_accession)] = rev
     return idx
 
 
-def _cells(dataset: CompanyDataset) -> dict[int, tuple[str, date]]:
-    """Each period's sourced value -> (field, quarter end). `sources_for`
-    returns these very objects, so identity names the figure it cited."""
-    return {id(sv): (name, p.period_end) for p in dataset.periods for name, sv in p.sources.items()}
+@dataclass(frozen=True)
+class _Cells:
+    """Each period's sourced value -> (field, quarter end), and the fields
+    of a quarter built from the very same filed facts (`ebit` and
+    `operating_income` from one OperatingIncomeLoss): the scan reports such
+    a figure once, under one field, and every twin read it."""
+
+    at: dict[int, tuple[str, date]]
+    twins: dict[tuple[str, date], tuple[tuple[str, date], ...]]
+
+
+def _cells(dataset: CompanyDataset) -> _Cells:
+    """`sources_for` returns these very objects, so identity names the
+    figure it cited."""
+    at: dict[int, tuple[str, date]] = {}
+    groups: dict[tuple, list[tuple[str, date]]] = {}
+    for p in dataset.periods:
+        for name, sv in p.sources.items():
+            at[id(sv)] = (name, p.period_end)
+            if sv.inputs:
+                groups.setdefault((p.period_end, sv.method, sv.inputs), []).append(
+                    (name, p.period_end))
+    twins = {cell: tuple(g) for g in groups.values() if len(g) > 1 for cell in g}
+    return _Cells(at, twins)
 
 
 def revised_inputs(
@@ -103,10 +154,11 @@ def revised_inputs(
     metric: MetricResult | None,
     index: RevisionIndex,
     *,
-    cells: dict[int, tuple[str, date]] | None = None,
+    cells: _Cells | None = None,
 ) -> list[Revision]:
     """The revisions among the values `metric` read, in the order it cites
-    them, each once. Empty for a metric that computed nothing."""
+    them, each once, named by the field the metric read. Empty for a metric
+    that computed nothing."""
     if metric is None or not index or metric.status is not MetricStatus.OK:
         return []
     cells = _cells(dataset) if cells is None else cells
@@ -119,11 +171,14 @@ def revised_inputs(
     values: Iterable[SourcedValue] = (
         sv for group in sources_for(dataset, metric, bundle=bundle).values() for sv in group)
     for sv in values:
-        cell = cells.get(id(sv))
+        cell = cells.at.get(id(sv))
+        found = [index.by_fact.get((ref.concept, ref.start, ref.end, ref.accession))
+                 for ref in sv.inputs]
         if cell is not None:
-            add(index.by_cell.get(cell))
-        for ref in sv.inputs:
-            add(index.by_fact.get((ref.concept, ref.start, ref.end, ref.accession)))
+            found.insert(0, next((r for c in (cell, *cells.twins.get(cell, ()))
+                                  if (r := index.by_cell.get(c)) is not None), None))
+        for rev in found:
+            add(replace(rev, field=cell[0]) if rev is not None and cell is not None else rev)
     return out
 
 
@@ -132,8 +187,8 @@ def note(revisions: list[Revision], labels: dict[date, str] | None = None) -> st
     labels = labels or {}
     shown = "; ".join(r.describe(labels.get(r.period_end)) for r in revisions[:MAX_LISTED])
     more = len(revisions) - MAX_LISTED
-    noun = "figure" if len(revisions) == 1 else "figures"
-    return f"reads a revised {noun}: {shown}" + (f"; +{more} more" if more > 0 else "")
+    lead = "reads a revised figure" if len(revisions) == 1 else "reads revised figures"
+    return f"{lead}: {shown}" + (f"; +{more} more" if more > 0 else "")
 
 
 def _history(bundle: MetricsBundle, name: str, label: str) -> MetricResult | None:
