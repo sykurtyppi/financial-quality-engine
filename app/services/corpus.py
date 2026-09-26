@@ -144,7 +144,8 @@ def observe(
     scan = scan_restatements(
         facts, period_since=since, as_of=as_of, selected_tags=diag.selected_series()
     )
-    tier1 = list(_restatement_tier1_lines(scan.footprints)) + _derived_tier1_lines(scan.derived)
+    tier1 = list(_restatement_tier1_lines(scan.footprints)) + _derived_tier1_lines(
+        scan.derived, scan.footprints)
     non_reliance: list[str] = []
     if submissions is not None:
         events = fetch_entity_events(None, ticker, submissions=submissions)  # type: ignore[arg-type]

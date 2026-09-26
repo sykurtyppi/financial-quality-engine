@@ -718,7 +718,13 @@ def scan_restatements(
 
     footprints.sort(key=lambda f: (f.period_end, f.field_name), reverse=True)
     # A quarter already reported from its own filed figure is not repeated.
-    reported = {(f.field_name, f.period_end) for f in footprints if f.period_start is not None}
+    # A revised year-to-date or annual figure ending on the quarter is not
+    # the quarter's: a 2% move in the year can move the derived Q4 by 7%,
+    # and that is the figure the engine scores (round-10 audit).
+    reported = {
+        (f.field_name, f.period_end) for f in footprints
+        if f.period_start is not None and not longer_than_a_quarter(f.period_start, f.period_end)
+    }
     derived = [
         d for d in derived_revisions(
             facts_json, as_of=as_of, period_since=period_since,
@@ -780,6 +786,15 @@ def _dated_copy(facts_json: dict, cutoff: date | None) -> dict:
 
 # How the mapper builds a quarter it did not find reported as a quarter.
 _DERIVED_METHODS = frozenset({"ytd_diff", "fy_minus_3q", "composite"})
+# The longest filed period that is one quarter's own: a 13-week quarter
+# runs 91 days, a half year 181.
+QUARTER_MAX_DAYS = 100
+
+
+def longer_than_a_quarter(start: date | None, end: date) -> bool:
+    """A filed period that is not one quarter's own: a year-to-date or
+    annual figure. An instant (no start) is not."""
+    return start is not None and (end - start).days > QUARTER_MAX_DAYS
 
 
 def derived_revisions(

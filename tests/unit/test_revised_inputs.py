@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -310,8 +311,9 @@ def test_a_revised_component_of_a_summed_field_marks_its_readers():
     assert beneish and accn in notes.flags[beneish[0]]
 
 
-def test_a_revised_annual_figure_is_described_as_the_year_not_the_quarter():
-    """A derived Q4 reads the full year: its values are the year's."""
+def _annual_amendment():
+    """CRM's full-year revenue re-filed +2% by a 10-K/A: the derived Q4
+    (the year less three quarters) moves by far more."""
     facts = _crm()
     ds, _ = build_dataset(facts, "CRM")
     q = [p for p in ds.sorted_periods() if p.sources["revenue"].method != "direct"][-1]
@@ -320,9 +322,31 @@ def test_a_revised_annual_figure_is_described_as_the_year_not_the_quarter():
     accn = "0001108524-26-990010"
     newer = _refile(facts, fy, factor=1.02, form="10-K/A", accn=accn)
     ds2, _ = build_dataset(newer, "CRM")
+    q2 = next(p for p in ds2.periods if p.period_end == q.period_end)
+    return newer, ds2, q, q2, fy, accn
+
+
+def test_a_revised_annual_figure_marks_the_quarter_it_moved():
+    """The mark names what the metric read: the quarter's own move, not the
+    year's values under the quarter's label (round-10 audit)."""
+    newer, ds2, q, q2, _fy, accn = _annual_amendment()
     bundle = compute_metrics(ds2)
     m = _at(bundle, "dso", q.fiscal_label)
     (rev,) = revised_inputs(ds2, bundle, m, revision_index(_scan(newer)))
+    text = note([rev], {p.period_end: p.fiscal_label for p in ds2.periods})
+    assert text == (f"reads a revised figure: revenue {q.fiscal_label} {q.revenue:,.0f} → "
+                    f"{q2.revenue:,.0f} (derived quarter moved by 10-K/A {accn})")
+    assert q2.revenue / q.revenue - 1 > 0.05  # the quarter moved far more than the year's 2%
+
+
+def test_a_longer_figure_is_named_by_its_span_when_the_quarter_has_no_move_of_its_own():
+    """Without the derived move (a scan that did not rebuild it), the
+    revised year is still named, as the year."""
+    newer, ds2, q, _q2, fy, accn = _annual_amendment()
+    scan = _scan(newer)
+    bundle = compute_metrics(ds2)
+    m = _at(bundle, "dso", q.fiscal_label)
+    (rev,) = revised_inputs(ds2, bundle, m, revision_index(replace(scan, derived=())))
     text = note([rev], {p.period_end: p.fiscal_label for p in ds2.periods})
     assert text == (f"reads a revised figure: revenue for the 12 months to {q.fiscal_label} "
                     f"{fy.value:,.0f} → {round(fy.value * 1.02):,.0f} (amended by 10-K/A {accn})")
@@ -407,10 +431,11 @@ def _at(bundle, name, label):
 def test_a_period_longer_than_a_quarter_is_named_by_its_span():
     from datetime import timedelta
 
-    from app.services.reporting.revised_inputs import QUARTER_DAYS, Revision, _span
+    from app.services.ingestion.restatements import QUARTER_MAX_DAYS
+    from app.services.reporting.revised_inputs import Revision, _span
 
     end = date(2026, 1, 31)
-    assert QUARTER_DAYS == 100  # a 13-week quarter is 91 days; a half year is 181
+    assert QUARTER_MAX_DAYS == 100  # a 13-week quarter is 91 days; a half year is 181
     assert _span(end - timedelta(days=100), end) is None
     assert _span(end - timedelta(days=101), end) == end - timedelta(days=101)
     assert _span(None, end) is None

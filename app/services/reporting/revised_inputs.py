@@ -30,10 +30,10 @@ from typing import Any
 from app.schemas.financials import CompanyDataset, SourcedValue
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas.registry import MetricsBundle
+from app.services.ingestion.restatements import longer_than_a_quarter
 from app.services.provenance import sources_for
 
 MAX_LISTED = 2
-QUARTER_DAYS = 100  # a filed period longer than this is not a quarter's own
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class Revision:
 
 def _span(start: date | None, end: date) -> date | None:
     """`start` when the period is longer than a quarter, else None."""
-    return start if start is not None and (end - start).days > QUARTER_DAYS else None
+    return start if longer_than_a_quarter(start, end) else None
 
 
 @dataclass
@@ -174,9 +174,14 @@ def revised_inputs(
         cell = cells.at.get(id(sv))
         found = [index.by_fact.get((ref.concept, ref.start, ref.end, ref.accession))
                  for ref in sv.inputs]
-        if cell is not None:
-            found.insert(0, next((r for c in (cell, *cells.twins.get(cell, ()))
-                                  if (r := index.by_cell.get(c)) is not None), None))
+        own = None if cell is None else next(
+            (r for c in (cell, *cells.twins.get(cell, ())) if (r := index.by_cell.get(c)) is not None),
+            None)
+        if own is not None:
+            # The quarter's own move says what the metric read; the longer
+            # figure it was derived from is the same event, in the year's
+            # values.
+            found = [own, *(r for r in found if r is None or r.period_start is None)]
         for rev in found:
             add(replace(rev, field=cell[0]) if rev is not None and cell is not None else rev)
     return out

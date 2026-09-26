@@ -139,13 +139,21 @@ def _archive_summary(client) -> str | None:
     return summary() if callable(summary) else None
 
 
-def _derived_tier1_lines(derived) -> list[str]:
+def _derived_tier1_lines(derived, footprints=()) -> list[str]:
     """A derived quarter that an AMENDED filing moved beyond materiality:
     the same rule as filed figures (amendments only), for the quarters the
-    engine derives rather than reads (Hermes audit round 4, finding 2)."""
+    engine derives rather than reads (Hermes audit round 4, finding 2).
+
+    One line per restatement event: a derived Q4 moved by the 10-K/A that
+    also revised the year is that footprint's event, whose line
+    `_restatement_tier1_lines` already gives; its detail is in the
+    appendix."""
+    events = {(f.amendment_accession, f.period_end) for f in footprints if f.is_amendment}
     lines = []
     for d in derived:
         if not d.is_amendment:
+            continue
+        if any((accn, d.period_end) in events for form, accn in d.moved_by if form.endswith("/A")):
             continue
         forms = ", ".join(dict.fromkeys(form for form, _accn in d.moved_by if form.endswith("/A")))
         lines.append(
@@ -356,7 +364,7 @@ def _collect_streams(
         out.evidence["restatements"] = scan
         out.sections.append(render_restatements_section(scan))
         out.tier1 += _restatement_tier1_lines(scan.footprints)
-        out.tier1 += _derived_tier1_lines(scan.derived)
+        out.tier1 += _derived_tier1_lines(scan.derived, scan.footprints)
         return out
 
     def events() -> _Staged:
