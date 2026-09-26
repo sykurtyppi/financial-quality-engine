@@ -190,3 +190,11 @@ operator = "continue"
 function = "values"
 source = "except (KeyError, TypeError, ValueError): continue"
 reason = "The `continue` is the last statement of the loop body in `_retains.values`: nothing follows the try/except in the loop, so `pass` falls through to the next row exactly as `continue` does."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/provenance.py"
+operator = "cmp"
+source = "if i < 0 or ttm.annualize(periods, i) is None:"
+change = "< -> <="
+reason = "The mutant also returns [] at i == 0, which the original returns too: `ttm.annualize` returns None for any index below 3, so index 0 never has an annual window either way."
