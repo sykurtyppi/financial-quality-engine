@@ -30,8 +30,19 @@ from app.services.ingestion.edgar_adapter import (
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.reporting.report_builder import build_report, ledger_path
+from app.services.reporting.report_files import archive_existing
 
 logging.basicConfig(level=logging.WARNING)
+
+
+def _unmappable(ticker: str, e: ValueError) -> int:
+    """The payload arrived but cannot be mapped into a scored dataset (too
+    little history, an unrecognised structure). Same contract as an
+    acquisition failure: one line, no report, exit 2 — not a traceback."""
+    print(f"error: {ticker}: {e}", file=sys.stderr)
+    print("no report written: the fundamentals were fetched but could not be "
+          "mapped into quarters to score.", file=sys.stderr)
+    return 2
 
 
 def main() -> int:
@@ -58,18 +69,24 @@ def main() -> int:
     if args.as_of is not None:
         from app.services.journal import reporting as journal_reporting
 
-        out, distress = journal_reporting.build_report(
-            ticker, with_docs=not args.no_docs, quarters=args.quarters,
-            report_day=args.as_of.isoformat(), fresh=args.fresh,
-            out_dir=ROOT / "reports", replay=True,
-        )
+        try:
+            out, distress = journal_reporting.build_report(
+                ticker, with_docs=not args.no_docs, quarters=args.quarters,
+                report_day=args.as_of.isoformat(), fresh=args.fresh,
+                out_dir=ROOT / "reports", replay=True,
+            )
+        except ValueError as e:
+            return _unmappable(ticker, e)
         print(f"historical replay as of {args.as_of}: distress signals: {distress} -> {out}")
         return 0
 
     client = SecClient(fresh=args.fresh)
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
-    snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
+    try:
+        snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
+    except ValueError as e:
+        return _unmappable(ticker, e)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
     # Archive exactly the payload that is about to be scored: the baseline a
     # later silent revision would otherwise erase. Failure is a report line.
@@ -97,6 +114,10 @@ def main() -> int:
     generated_on = date.today().isoformat()
     out_dir = ROOT / "reports"
     out = out_dir / f"{ticker}_{generated_on}.md"
+    # A same-day rerun (filing night: the /A lands after the first run) keeps
+    # the earlier report, ledger and audit under reports/archive/.
+    for moved in archive_existing(out):
+        print(f"previous run archived: {moved}")
     report, thermometer = build_report(
         result, dataset,
         generated_on=generated_on,

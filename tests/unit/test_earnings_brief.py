@@ -451,6 +451,9 @@ class TestCliHelpers:
         os.utime(old, (t - 100, t - 100))
         os.utime(new, (t, t))
         os.utime(aud, (t + 100, t + 100))  # newest file of all
+        replay = journal / "NVDA_2025-06-30.replay.md"
+        replay.write_text("# historical replay")
+        os.utime(replay, (t + 200, t + 200))  # newer still, and an old day
         monkeypatch.setattr(brief_cli, "REPORT_DIRS", (auto, journal))
         assert brief_cli.latest_report("NVDA") == new
         assert brief_cli.latest_report("AAPL") is None
