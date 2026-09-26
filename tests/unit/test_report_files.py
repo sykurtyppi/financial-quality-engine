@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from app.services.reporting.report_builder import ledger_path
 from app.services.reporting.report_files import archive_existing, is_live_report
 
@@ -50,6 +52,17 @@ class TestArchiveExisting:
             "AAPL_2026-09-26.210507-1.ledger.json", "AAPL_2026-09-26.210507-1.md"]
         assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
         assert (arch / "AAPL_2026-09-26.210507-1.md").read_text() == "# second report"
+
+    def test_when_every_stamp_is_taken_nothing_moves(self, tmp_path):
+        arch = tmp_path / "archive"
+        arch.mkdir()
+        for n in range(100):
+            tag = "210507" if n == 0 else f"210507-{n}"
+            (arch / f"AAPL_2026-09-26.{tag}.md").write_text("")
+        report = _run(tmp_path, audit=False)
+        with pytest.raises(FileExistsError, match="100 runs"):
+            archive_existing(report, now=NOW)
+        assert report.read_text() == "# first report" and ledger_path(report).exists()
 
     def test_a_stamp_taken_by_any_companion_is_taken(self, tmp_path):
         """Only the earlier run's AUDIT holds the stamp: the next run must still
