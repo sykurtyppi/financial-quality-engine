@@ -480,6 +480,14 @@ class Drill:
                    m.group(0) if m else "no comparison line naming a filed move")
         step.check("the appendix names the /A as what revised it",
                    f"10-Q/A {accn} |" in report.split("**Moved with a later filing")[-1])
+        card = report.split("# Full report (appendix)")[0]
+        marked = [ln for ln in card.splitlines() if "⚠ reads a revised figure: revenue" in ln]
+        step.check("card lines that read the amended revenue say so, naming the /A",
+                   bool(marked) and all(f"amended by 10-Q/A {accn}" in ln for ln in marked),
+                   f"{len(marked)} marked line(s)")
+        step.check("lines that do not read revenue are not marked",
+                   not any("⚠ reads a revised" in ln for ln in card.splitlines()
+                           if ln.startswith(("- Total accruals", "- CFO / Net income"))))
         moved = _archived(cmd)
         self.state["s2_archived"] = moved
         step.check("step-2 report archived", any(p.suffix == ".md" for p in moved),
