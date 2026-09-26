@@ -41,8 +41,9 @@ def _revenue_rows(facts: dict) -> list[dict]:
 
 
 def _original(facts: dict) -> dict:
-    (row,) = (r for r in _revenue_rows(facts) if r["end"] == Q.isoformat() and "start" in r
-              and r["form"] == "10-Q")
+    three_months = quarter(Q, 0.0)["start"]
+    (row,) = (r for r in _revenue_rows(facts) if r["end"] == Q.isoformat()
+              and r.get("start") == three_months and r["form"] == "10-Q")
     return row
 
 
@@ -143,3 +144,27 @@ def test_silent_and_explained_moves_each_keep_their_own_table(older):
     assert "Nothing found here has an amended filing" in silent_part
     assert silent_part.count("| revenue |") == 1 and filed_part.count("| revenue |") == 1
     assert AMENDMENT in filed_part and "Revised by" in filed_part
+
+
+def test_another_filing_carrying_the_old_value_is_not_the_original(older):
+    """Retention is of the FACT the older value was read from, by accession:
+    a later comparative repeating the old number does not stand in for it."""
+    newer = _amended(older, keep_original=False)
+    orig = _original(older)
+    _revenue_rows(newer).append({**orig, "accn": "0000000001-25-000500", "filed": "2025-02-01"})
+    c = _revenue_change(older, newer)
+    assert c.old_accession == orig["accn"]
+    assert not c.original_retained and not c.explained_by_filing
+
+
+def test_the_same_filings_fact_for_another_period_is_not_the_original(older):
+    """The original's filing also carries a year-to-date fact ending on the
+    same day. It survives in the newer snapshot while the quarter's own fact
+    is gone: the quarter's original is not retained."""
+    orig = _original(older)
+    six_months = {**orig, "start": date(Q.year, 1, 1).isoformat(), "val": 7_777.0}
+    _revenue_rows(older).append(six_months)
+    newer = _amended(older, keep_original=False)
+    c = _revenue_change(older, newer)
+    assert c.old_accession == orig["accn"] and c.key.start is not None
+    assert not c.original_retained and not c.explained_by_filing
