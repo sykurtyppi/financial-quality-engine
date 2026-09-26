@@ -42,7 +42,8 @@ def archive_existing(report: Path, *, now: datetime | None = None) -> list[Path]
     and audit (``<base>.<HHMMSS>.md`` / ``.ledger.json`` / ``_audit.md``), and
     nothing from the earlier run is left to sit beside the new report. A
     stamp already taken (two runs within one second) gets a ``-<n>`` suffix;
-    nothing in the archive is ever overwritten.
+    nothing in the archive is ever overwritten, and when 100 stamps of one
+    second are taken nothing moves (``FileExistsError``).
     """
     present = {role: p for role, p in _companions(report).items() if p.exists()}
     if not present:
@@ -51,13 +52,14 @@ def archive_existing(report: Path, *, now: datetime | None = None) -> list[Path]
     archive.mkdir(parents=True, exist_ok=True)
     stamp = (now or datetime.now(UTC)).strftime("%H%M%S")
     base = _base(report)
-    n = 0
-    while True:
+    for n in range(100):  # bounded: a defect here fails, it does not spin
         tag = stamp if n == 0 else f"{stamp}-{n}"
         target = _companions(archive / f"{base}.{tag}.md")
         if not any(p.exists() for p in target.values()):
             break
-        n += 1
+    else:
+        raise FileExistsError(
+            f"{archive}: 100 runs of {base} already archived at {stamp}; nothing moved")
     moved = []
     for role, src in present.items():
         src.replace(target[role])
