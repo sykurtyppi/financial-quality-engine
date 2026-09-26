@@ -98,7 +98,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.lock
           pip install --no-deps -e .
-      - run: python -m pytest tests/integration/test_cli_drills.py -q
+      - run: python -m pytest tests/integration/test_cli_drills.py tests/integration/test_drill.py -q
 
   # Not validated until a real case exists: the corpus gate on real filings.
   # Red on purpose until the operator pins a reviewed case built from real

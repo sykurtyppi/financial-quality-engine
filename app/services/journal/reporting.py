@@ -26,6 +26,7 @@ from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
 from app.services.reporting.report_builder import ledger_path
+from app.services.reporting.report_files import archive_existing
 from app.services.scoring.thermometer import describe
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -125,6 +126,9 @@ def build_report(
     warnings = list(diag.warnings)
     if as_of is not None:
         warnings.append(f"HISTORICAL REPLAY as of {as_of}: fundamentals from {replay_source}.")
+    # A rerun on the same day keeps the earlier report (and its ledger and
+    # audit) under archive/ instead of writing over it.
+    archive_existing(out)
     report, thermometer = build_full_report(
         result, dataset,
         generated_on=generated_on,

@@ -96,6 +96,10 @@ TARGETS: tuple[Target, ...] = (
         "tests/integration/test_golden_report.py",
         "tests/unit/test_properties_engine.py",
     ), function="_generate_flags"),
+    Target("app/services/reporting/report_files.py", (
+        "tests/unit/test_report_files.py", "tests/unit/test_earnings_brief.py",
+        "tests/unit/test_watch_cli.py",
+    )),
     Target("app/services/journal/resolver.py", (
         "tests/unit/test_journal_resolver.py", "tests/unit/test_assumption_vocabulary.py",
         "tests/unit/test_properties_engine.py",

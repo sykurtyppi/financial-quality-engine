@@ -91,6 +91,7 @@ from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.ingestion.vintages import capture as capture_vintage
 from app.services.journal import store
 from app.services.journal.schema_v2 import verify_lock
+from app.services.reporting.report_files import is_live_report
 from app.services.watch import watchlist as wl
 from app.services.watch.infer import infer_print_at
 from app.services.watch.poller import (
@@ -265,9 +266,10 @@ def _generate_auto(ticker: str, no_docs: bool) -> Path | None:
 def _latest_report(ticker: str, directory: Path) -> Path | None:
     """Newest engine report for the ticker in `directory` — never the audit
     written beside it (`<stem>_audit.md`), which a retry after a failed
-    brief would otherwise hand to the auditor as "the report"."""
+    brief would otherwise hand to the auditor as "the report" — and never a
+    historical replay (`.replay.md`)."""
     matches = sorted(
-        (p for p in directory.glob(f"{ticker}_*.md") if not p.stem.endswith("_audit")),
+        (p for p in directory.glob(f"{ticker}_*.md") if is_live_report(p)),
         key=lambda p: p.stat().st_mtime,
     )
     return matches[-1] if matches else None
