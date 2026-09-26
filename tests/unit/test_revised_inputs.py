@@ -218,3 +218,30 @@ def test_the_ledger_item_of_a_metric_that_read_it_says_so(crm):
     assert "revised" not in (metrics["current_ratio"].note or "")
     # the sources still cite the current filing: the input is marked, not dropped
     assert any(p.accession == ACCN for p in dso.provenance)
+
+
+def test_the_note_lists_two_inputs_in_full_and_counts_the_rest():
+    from app.services.reporting.revised_inputs import Revision
+
+    revs = [Revision("revenue", date(2026, 3, 31 - k), 1.0, 2.0, "x") for k in range(3)]
+    assert "more" not in note(revs[:1]) and note(revs[:1]).startswith("reads a revised figure:")
+    two = note(revs[:2])
+    assert "more" not in two
+    assert two.startswith("reads a revised figures: ") and two.count("revenue") == 2
+    three = note(revs)
+    assert three.endswith("; +1 more") and three.count("revenue") == 2
+
+
+@pytest.mark.parametrize("keep, marked", [(2, True), (1, False), (0, False)])
+def test_a_change_line_needs_two_periods_and_marks_either(crm, keep, marked):
+    """`_what_changed` compares the last two OK values; with fewer there is
+    no line to mark, and nothing must fail."""
+    ds, bundle, _, idx = crm
+    b = copy.copy(bundle)
+    b.history = dict(bundle.history)
+    dso = list(bundle.history["dso"])
+    for k in range(len(dso) - keep):
+        dso[k] = dso[k].model_copy(update={"status": MetricStatus.MISSING_DATA, "value": None})
+    b.history["dso"] = dso
+    notes = card_notes(ds, b, [], idx)
+    assert ("Days sales outstanding" in notes.changes) is marked
