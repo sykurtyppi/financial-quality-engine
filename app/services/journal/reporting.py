@@ -25,8 +25,7 @@ from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
-from app.services.reporting.report_builder import ledger_path
-from app.services.reporting.report_files import archive_existing
+from app.services.reporting.report_files import replacing
 from app.services.scoring.thermometer import describe
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -126,34 +125,34 @@ def build_report(
     warnings = list(diag.warnings)
     if as_of is not None:
         warnings.append(f"HISTORICAL REPLAY as of {as_of}: fundamentals from {replay_source}.")
-    # A rerun on the same day keeps the earlier report (and its ledger and
-    # audit) under archive/ instead of writing over it.
-    archive_existing(out)
-    report, thermometer = build_full_report(
-        result, dataset,
-        generated_on=generated_on,
-        coverage=diag.coverage(),
-        # The evidence must name the same series the score came from.
-        field_tags=diag.selected_series(),
-        client=client,
-        ticker=ticker,
-        fetched_at=fetched_at,
-        warnings=warnings,
-        field_notes=diag.field_notes(),
-        doc_diagnostics=doc_diagnostics,
-        company_facts=snapshot.company_facts,
-        submissions=submissions,
-        index_degraded=submissions is None,
-        fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
-        vintage_note=vintage_note,
-        baseline_day=date.fromisoformat(report_day) if report_day else None,
-        # The same claims as data, each with the filings behind it.
-        ledger_out=ledger_path(out),
-    )
-    if as_of is not None:
-        report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"
-    if banner:
-        report = f"{banner}\n\n{report}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    out.write_text(report)
+    # Built off to the side, then published: a rerun on the same day copies
+    # the earlier report (and its ledger and audit) to archive/ only once the
+    # new one exists, and a build that fails leaves the live report as it was.
+    with replacing(out) as staged:
+        report, thermometer = build_full_report(
+            result, dataset,
+            generated_on=generated_on,
+            coverage=diag.coverage(),
+            # The evidence must name the same series the score came from.
+            field_tags=diag.selected_series(),
+            client=client,
+            ticker=ticker,
+            fetched_at=fetched_at,
+            warnings=warnings,
+            field_notes=diag.field_notes(),
+            doc_diagnostics=doc_diagnostics,
+            company_facts=snapshot.company_facts,
+            submissions=submissions,
+            index_degraded=submissions is None,
+            fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
+            vintage_note=vintage_note,
+            baseline_day=date.fromisoformat(report_day) if report_day else None,
+            # The same claims as data, each with the filings behind it.
+            ledger_out=staged.ledger,
+        )
+        if as_of is not None:
+            report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"
+        if banner:
+            report = f"{banner}\n\n{report}"
+        staged.report.write_text(report)
     return out, describe(thermometer)

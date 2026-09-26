@@ -56,6 +56,7 @@ others each start from a clean copy of the inputs.
 | 8 | Stale cache / `--fresh`, SEC unreachable | A 25 h-old companyfacts entry, and `--fresh`, both exit 2 with `SEC request failed`. No report is written. |
 | 9 | Journal path | `openv2`, then `report --no-fresh --no-docs`. A second `report` is refused. `after --disagreed` records the analyst override, and `verify` still passes. |
 | 10 | Rollback | Step 1's run is restored from the archive: report and ledger byte-identical to step 1. The vintage store is append-only (step 1's snapshots are unchanged, and the /A's snapshot is kept). |
+| 11 | A rebuild that fails | After a good report, a rerun whose report build raises once the data is in hand (injected by the drill's shim, `FQE_DRILL_FAIL_BUILD=1`, in the workspace's copy only). It exits nonzero, and the live report and ledger are **byte-identical** to before. Nothing is archived, and no staged file is left. The next rerun succeeds and archives the first run. |
 
 ### Known issues
 
@@ -94,10 +95,14 @@ Found while the drill was being built. Fixed alongside it:
   `generate_report.py` (or `journal.py report` / the auto track) replaced
   the earlier report with no copy. It also left the earlier run's
   `_audit.md` beside the new report, where `earnings_brief.audit_for` would
-  pair them. Now the earlier report, its ledger and its audit move to
-  `reports/archive/<T>_<day>.<HHMMSS>.md` (`.ledger.json`, `_audit.md`)
-  first. An archived run keeps its own companions by name, and the archive
-  never overwrites.
+  pair them. Now a rerun builds its report and ledger in
+  `reports/.staging/`. Only once both exist is the earlier report, ledger and
+  audit copied to `reports/archive/<T>_<day>.<HHMMSS>.md` (`.ledger.json`,
+  `_audit.md`) and the new pair moved into place (`report_files.replacing`).
+  A build that fails leaves the live report exactly as it was; step 11
+  checks this. Hermes round 8 found that the first version archived
+  *before* building, so a failed rebuild left no live report. An archived
+  run keeps its own companions by name, and the archive never overwrites.
 - **A payload that cannot be mapped crashed.** Too little history raised a
   `ValueError` traceback (exit 1). Now `generate_report.py` prints
   `error: <T>: …` and `no report written: …`, and exits 2, the same

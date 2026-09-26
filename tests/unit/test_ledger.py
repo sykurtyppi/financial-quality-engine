@@ -198,6 +198,7 @@ def test_both_entry_points_write_the_ledger_beside_the_report(monkeypatch, tmp_p
 
     def fake_build(*args, **kwargs):
         observed.append(kwargs["ledger_out"])
+        kwargs["ledger_out"].write_text('{"ledger": true}')
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
 
     diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_tags=lambda: {},
@@ -224,10 +225,15 @@ def test_both_entry_points_write_the_ledger_beside_the_report(monkeypatch, tmp_p
     out, _ = journal_reporting.build_report("aapl", with_docs=False, out_dir=tmp_path / "j",
                                             report_day="2026-09-01")
 
+    # Each builder writes into staging (Hermes round 8: a rebuild is built off
+    # to the side), and the ledger is published beside the report it belongs to.
     cli, journal = observed
-    assert cli.parent == tmp_path / "reports" and cli.name.endswith(".ledger.json")
-    assert cli.name.startswith("AAPL_")
-    assert journal == out.with_suffix(".ledger.json")
+    assert cli.parent == tmp_path / "reports" / ".staging" and cli.name.endswith(".ledger.json")
+    assert journal.parent == tmp_path / "j" / ".staging"
+    (cli_report,) = (tmp_path / "reports").glob("AAPL_*.md")
+    assert cli_report.with_suffix(".ledger.json").read_text() == '{"ledger": true}'
+    assert out.with_suffix(".ledger.json").read_text() == '{"ledger": true}'
+    assert not cli.exists() and not journal.exists()
 
 
 def test_ids_do_not_depend_on_what_else_is_in_the_ledger():
