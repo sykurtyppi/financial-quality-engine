@@ -231,3 +231,94 @@ class TestReplacing:
             other.write_text("# in progress")
             staged.report.write_text("# second report")
         assert other.read_text() == "# in progress"
+
+
+# --- round-9 independent review: the commit phase itself fails --------------------
+
+
+class TestReplacingCommitFailures:
+    def _fail_on(self, monkeypatch, fn_name, match, exc):
+        import app.services.reporting.report_files as rf
+
+        real = getattr(rf.os if fn_name == "replace" else rf.shutil, fn_name)
+
+        def flaky(src, dst, *a, **k):
+            if str(dst).endswith(match):
+                raise exc
+            return real(src, dst, *a, **k)
+
+        monkeypatch.setattr(rf.os if fn_name == "replace" else rf.shutil, fn_name, flaky)
+
+    def test_an_interrupt_between_ledger_and_report_rolls_back(self, tmp_path, monkeypatch):
+        """R1: the new ledger was published and the report was not; the pair
+        stayed mismatched and the next rebuild archived it as one run."""
+        report = _run(tmp_path)
+        before = _live(tmp_path)
+        self._fail_on(monkeypatch, "replace", "AAPL_2026-09-26.md", KeyboardInterrupt())
+        with pytest.raises(KeyboardInterrupt):
+            with replacing(report, now=NOW) as staged:
+                staged.ledger.write_text('{"run": "second"}')
+                staged.report.write_text("# second report")
+        assert _live(tmp_path) == before  # report, ledger AND audit as they were
+        assert not list((tmp_path / "archive").glob("*"))  # the live run is not also archived
+        assert not list((tmp_path / STAGING_DIR).glob("*"))
+
+    def test_a_first_run_that_fails_to_publish_leaves_no_orphan_ledger(self, tmp_path, monkeypatch):
+        report = tmp_path / "AAPL_2026-09-26.md"
+        self._fail_on(monkeypatch, "replace", "AAPL_2026-09-26.md", OSError("disk"))
+        with pytest.raises(OSError, match="disk"):
+            with replacing(report, now=NOW) as staged:
+                staged.ledger.write_text("{}")
+                staged.report.write_text("# first")
+        assert not report.exists() and not ledger_path(report).exists()
+
+    def test_an_audit_that_cannot_be_removed_publishes_nothing(self, tmp_path, monkeypatch):
+        """R2: the earlier audit was removed AFTER the new report went live,
+        so a failure there left it beside the new report (the round-7 pairing
+        defect) and the caller saw an error for a published rebuild."""
+        report = _run(tmp_path)
+        before = _live(tmp_path)
+        audit = tmp_path / "AAPL_2026-09-26_audit.md"
+        real_unlink = type(audit).unlink
+
+        def stuck(self, *a, **k):
+            if self == audit:
+                raise PermissionError("audit locked")
+            return real_unlink(self, *a, **k)
+
+        monkeypatch.setattr(type(audit), "unlink", stuck)
+        with pytest.raises(PermissionError):
+            with replacing(report, now=NOW) as staged:
+                staged.ledger.write_text('{"run": "second"}')
+                staged.report.write_text("# second report")
+        monkeypatch.undo()
+        assert _live(tmp_path) == before
+        assert not list((tmp_path / "archive").glob("*"))
+
+    def test_a_failed_archive_copy_leaves_no_partial_archived_run(self, tmp_path, monkeypatch):
+        """R3: a copy that failed part-way left an archived report with no
+        ledger or audit, which then looked like a whole archived run."""
+        report = _run(tmp_path)
+        before = _live(tmp_path)
+        self._fail_on(monkeypatch, "copy2", ".ledger.json", OSError("ENOSPC"))
+        with pytest.raises(OSError, match="ENOSPC"):
+            with replacing(report, now=NOW) as staged:
+                staged.report.write_text("# second report")
+        assert _live(tmp_path) == before
+        assert not list((tmp_path / "archive").glob("*"))
+
+
+def test_a_ledger_failure_is_logged_under_its_report_not_the_staging_token(
+        tmp_path, monkeypatch, caplog):
+    """R4: built into staging, a failed ledger logged only
+    `<token>.ledger.json`, and the operator could not tell which report."""
+    from datetime import date
+
+    from app.services.reporting import report_builder
+
+    monkeypatch.setattr(report_builder, "STRICT_STREAMS", False)
+    with caplog.at_level("ERROR"):
+        assert report_builder.write_ledger(
+            tmp_path / ".staging" / "0123456789ab.ledger.json",
+            ticker="AAPL", report_date=date(2026, 9, 26), result=None) is None
+    assert "AAPL 2026-09-26" in caplog.text
