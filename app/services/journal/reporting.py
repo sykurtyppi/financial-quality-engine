@@ -43,6 +43,14 @@ def replay_banner(as_of: date, source: str, rebuilt_on: date) -> str:
     )
 
 
+class UnmappablePayload(ValueError):
+    """The fundamentals were acquired but cannot be mapped into quarters to
+    score (too little history, an unrecognised structure). Raised only from
+    the snapshot stage, so a caller can name that condition without also
+    catching a ValueError from a defect elsewhere in the build (round-9
+    audit F3)."""
+
+
 def report_path(ticker: str, day: str | None = None) -> Path:
     return REPORTS / f"{safe_ticker(ticker)}_{day or date.today().isoformat()}.md"
 
@@ -92,11 +100,18 @@ def build_report(
             raise ValueError("a historical replay needs the day to replay (report_day)")
         as_of = date.fromisoformat(report_day)
     client = SecClient(fresh=fresh)
+    try:
+        if as_of is not None:
+            snapshot, replay_source = replay_snapshot(client, ticker, as_of, n_quarters=quarters)
+        else:
+            snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
+    except UnmappablePayload:
+        raise
+    except ValueError as e:
+        raise UnmappablePayload(str(e)) from e
     if as_of is not None:
-        snapshot, replay_source = replay_snapshot(client, ticker, as_of, n_quarters=quarters)
         vintage_note: str | None = "not captured (historical replay)"
     else:
-        snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
         vintage_note = store_vintage_snapshot(
             client, ticker, snapshot.company_facts, enabled=vintage
         )

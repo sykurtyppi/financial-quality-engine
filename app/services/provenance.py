@@ -158,7 +158,9 @@ def _series_sources(
     else:
         read = history
     out: dict[str, list[SourcedValue]] = {}
-    for m in sorted((m for m in read if m.status is MetricStatus.OK),
+    # The formulas' own predicate: an entry is read when it is OK AND carries
+    # a value (`MetricResult` allows OK with none).
+    for m in sorted((m for m in read if m.status is MetricStatus.OK and m.value is not None),
                     key=lambda m: history.index(m)):
         label = m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
         for key, values in sources_for(dataset, m).items():

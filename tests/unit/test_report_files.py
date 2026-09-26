@@ -145,7 +145,7 @@ class TestReplacing:
                 raise RuntimeError("build failed")
         assert _live(tmp_path) == before and len(before) == 3
         assert not (tmp_path / "archive").exists()
-        assert not (tmp_path / STAGING_DIR).exists()
+        assert not list((tmp_path / STAGING_DIR).glob("*"))  # nothing left staged
 
     def test_a_rebuild_that_writes_no_report_publishes_nothing(self, tmp_path):
         report = _run(tmp_path)
@@ -155,7 +155,7 @@ class TestReplacing:
                 staged.ledger.write_text('{"run": "orphan"}')
         assert _live(tmp_path) == before
         assert not (tmp_path / "archive").exists()
-        assert not (tmp_path / STAGING_DIR).exists()
+        assert not list((tmp_path / STAGING_DIR).glob("*"))  # nothing left staged
 
     def test_a_finished_rebuild_archives_the_earlier_run_and_goes_live(self, tmp_path):
         report = _run(tmp_path)
@@ -176,7 +176,7 @@ class TestReplacing:
         ]
         assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
         assert (arch / "AAPL_2026-09-26.210507_audit.md").read_text() == "# first audit"
-        assert not (tmp_path / STAGING_DIR).exists()
+        assert not list((tmp_path / STAGING_DIR).glob("*"))  # nothing left staged
 
     def test_a_rebuild_without_a_ledger_leaves_no_stale_ledger_live(self, tmp_path):
         report = _run(tmp_path, audit=False)
@@ -210,6 +210,19 @@ class TestReplacing:
             staged.report.write_text("# second report")
             live = [p.name for p in tmp_path.glob("AAPL_*.md") if is_live_report(p)]
             assert live == ["AAPL_2026-09-26.md"]
+
+    def test_a_rebuild_committing_leaves_another_rebuilds_staging_in_place(self, tmp_path):
+        """Round-9 audit F1: rebuilds of different tickers share `.staging`. A
+        rebuild that committed while another had not yet written anything
+        removed the (empty) directory, and the other's report write failed."""
+        first = _run(tmp_path, audit=False)
+        other = tmp_path / "NVDA_2026-09-26.md"
+        with replacing(other, now=NOW) as staged_other:  # mid-build, nothing written yet
+            with replacing(first, now=NOW) as staged_first:
+                staged_first.report.write_text("# second report")
+            staged_other.report.write_text("# NVDA report")
+        assert first.read_text() == "# second report"
+        assert other.read_text() == "# NVDA report"
 
     def test_a_concurrent_rebuilds_staging_is_left_alone(self, tmp_path):
         report = _run(tmp_path, audit=False)

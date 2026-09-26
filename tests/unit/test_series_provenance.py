@@ -181,3 +181,95 @@ def test_a_window_that_starts_at_the_first_period_cites_it():
     assert found[f"revenue[{labels[0]}]"][0].value == pytest.approx(m.inputs["revenue_start"])
     assert set(found) == {f"revenue[{labels[0]}]", f"revenue[{labels[4]}]"} | {
         f"capex[{labels[k]}]" for k in range(1, 5)}
+
+
+# --- round-9 audit F2: the selectors use the formulas' own predicate ---------------
+# The trend formulas read an entry only when it is OK AND carries a value
+# (`accruals.accrual_trend`, `working_capital.trend_change` /
+# `seasonal_trend_change`); `MetricResult` allows OK with no value.
+
+
+@pytest.mark.parametrize("name, base, back", [("accrual_trend", "total_accruals", 2),
+                                              ("fcf_margin_trend", "fcf_margin", 2),
+                                              ("dso_trend", "dso", 4)])
+def test_an_ok_entry_without_a_value_is_not_cited(name, base, back):
+    ds = _ko()
+    bundle = compute_metrics(ds)
+    m = _ok(bundle.get_latest(name))
+    history = bundle.history[base]
+    hollow = history[-1 - back]
+    history[-1 - back] = hollow.model_copy(update={"value": None})
+    assert history[-1 - back].status is MetricStatus.OK
+    label = hollow.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
+    cited = {_label(k) for k in sources_for(ds, m, bundle=bundle)}
+    assert cited and label not in cited
+
+
+# --- round-9 audit: the same reconciliation on every payload the selection
+# snapshot is built from, plus the real fixtures ------------------------------------
+
+
+def _payloads():
+    from tests.unit.test_series_selection import INPUTS
+
+    out = [(case, facts) for case, facts in INPUTS]
+    for t in TICKERS:
+        out.append((t, json.loads((REAL / f"companyfacts_{t}_trimmed.json").read_text())))
+    return out
+
+
+def _value(values):
+    (sv,) = values
+    return sv.value
+
+
+def _reconcile(ds, bundle, m) -> None:
+    """The cited values reproduce every input the metric recorded."""
+    found = sources_for(ds, m, bundle=bundle)
+    if m.name == "incremental_revenue_per_capex":
+        labels = [p.fiscal_label for p in ds.sorted_periods()]
+        t = labels.index(m.fiscal_label)
+        capex = [_value(found[f"capex[{labels[t - k]}]"]) for k in range(4)]
+        assert len(found) == 6
+        assert _value(found[f"revenue[{labels[t]}]"]) == pytest.approx(m.inputs["revenue_end"])
+        assert _value(found[f"revenue[{labels[t - 4]}]"]) == pytest.approx(m.inputs["revenue_start"])
+        assert sum(capex) == pytest.approx(m.inputs["total_capex"])
+        return
+    if m.name == "capex_intensity_regime_shift":
+        periods = [p for p in ds.sorted_periods() if f"capex[{p.fiscal_label}]" in found]
+        assert len(found) == 2 * len(periods)
+        ratios = [_value(found[f"capex[{p.fiscal_label}]"]) / _value(found[f"revenue[{p.fiscal_label}]"])
+                  for p in periods]
+        assert len(ratios[:-4]) == m.inputs["n_prior"]
+        assert sum(ratios[-4:]) / 4 == pytest.approx(m.inputs["recent_mean"])
+        assert sum(ratios[:-4]) / len(ratios[:-4]) == pytest.approx(m.inputs["prior_mean"])
+        return
+    base = {"accrual_trend": "total_accruals", "fcf_margin_trend": "fcf_margin",
+            "dso_trend": "dso", "dio_trend": "dio"}[m.name]
+    by_label = {x.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX): x for x in bundle.history[base]}
+    cited = sorted({_label(k) for k in found}, key=list(by_label).index)
+    values = [by_label[label].value for label in cited]
+    assert all(v is not None for v in values)
+    assert values[-1] == pytest.approx(m.inputs["latest"])
+    prior = values[:-1]
+    key = "same_quarter_prior_mean" if base in ("dso", "dio") else "prior_mean"
+    assert sum(prior) / len(prior) == pytest.approx(m.inputs[key])
+
+
+SERIES_METRICS = ("incremental_revenue_per_capex", "capex_intensity_regime_shift",
+                  "accrual_trend", "fcf_margin_trend", "dso_trend", "dio_trend")
+
+
+@pytest.mark.parametrize(("case", "facts"), _payloads(), ids=[c for c, _ in _payloads()])
+def test_every_series_metric_reconciles_on_every_payload(case, facts):
+    ds, _ = build_dataset(facts, "X")
+    try:
+        bundle = compute_metrics(ds)
+    except ValueError:
+        pytest.skip("too few periods to compute metrics")
+    for name in SERIES_METRICS:
+        m = bundle.get_latest(name)
+        if m is None or m.status is not MetricStatus.OK:
+            assert m is None or sources_for(ds, m, bundle=bundle) == {}, (case, name)
+            continue
+        _reconcile(ds, bundle, m)
