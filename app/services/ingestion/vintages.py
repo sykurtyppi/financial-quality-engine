@@ -605,6 +605,12 @@ class VintageChange:
     `kind` is `revised` (the scored value changed) or `withdrawn` (the fact is
     gone from the later document). Both are invisible to the within-snapshot
     detector when the filer does not re-present the original.
+
+    `original_retained`: the newer snapshot still carries the fact the older
+    value was read from (same accession, period and value) beside the later
+    filing the value now comes from. The within-snapshot detector reads that
+    pair from filing history, so the move is not silent
+    (`explained_by_filing`): an amendment landing is the ordinary case.
     """
 
     kind: str
@@ -624,10 +630,37 @@ class VintageChange:
     # "context": a raw fact of a scored tag for a period older than the
     # reported window — shown, never promoted.
     scope: str = "scored"
+    original_retained: bool = False
 
     @property
     def moved_tag(self) -> bool:
         return bool(self.new_tag) and self.new_tag != self.key.tag
+
+    @property
+    def explained_by_filing(self) -> bool:
+        """Moved with a later filing that the newer snapshot carries beside
+        the original — visible in filing history, so not a silent revision."""
+        return (self.kind == "revised" and self.original_retained
+                and bool(self.new_accession) and self.new_accession != self.old_accession)
+
+
+def _retains(older: dict, newer: dict, key: FactKey, accession: str) -> bool:
+    """Whether `newer` still carries the fact `older` holds under `accession`
+    for `key`'s concept and period, at the same value."""
+    def values(facts: dict) -> set[float]:
+        out: set[float] = set()
+        for row in _rows(facts, key.taxonomy, key.tag, key.unit):
+            try:
+                if row.get("accn") != accession or _parse_date(row["end"]) != key.end:
+                    continue
+                if (_parse_date(row["start"]) if row.get("start") else None) != key.start:
+                    continue
+                out.add(float(row["val"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    return bool(accession) and bool(values(older) & values(newer))
 
 
 def _scored_tags(include_split_adjusted: bool = False) -> dict[str, tuple]:
@@ -745,10 +778,13 @@ def diff_vintages(
         pct = None if old["val"] == 0 else abs(new["val"] - old["val"]) / abs(old["val"])
         if pct is not None and pct < materiality_pct:
             continue
+        old_accn = old.get("accn", "")
         changes.append(VintageChange(
             "revised", field_name, old["key"], old["val"], old["filed"],
-            old.get("accn", ""), old.get("form", ""), new["val"], new["filed"],
-            new.get("accn", ""), new.get("form", ""), pct, new["key"].tag))
+            old_accn, old.get("form", ""), new["val"], new["filed"],
+            new.get("accn", ""), new.get("form", ""), pct, new["key"].tag,
+            original_retained=(new.get("accn", "") != old_accn
+                               and _retains(older, newer, old["key"], old_accn))))
     changes.sort(key=lambda c: (c.key.end, c.field_name, c.key.tag), reverse=True)
     return changes
 
@@ -874,9 +910,12 @@ def diff_scored(
             after = _filing(newer, old_src[1][0], unit, end) if single else None
             if before is not None and after is not None:
                 taxonomy, _sep, tag = old_src[1][0].partition(":")
+                key = FactKey(taxonomy, tag, unit, before[3], end)
                 changes.append(VintageChange(
-                    "revised", name, FactKey(taxonomy, tag, unit, before[3], end), old,
+                    "revised", name, key, old,
                     before[0], before[1], before[2], new, after[0], after[1], after[2], pct,
+                    original_retained=(after[1] != before[1]
+                                       and _retains(older, newer, key, before[1])),
                 ))
             else:
                 label = _bare(old_src[1]) + (" (partial)" if old_src[0] == "partial" else "")
@@ -924,38 +963,70 @@ def _filing(facts: dict, component: str, unit: str, end: date) -> tuple | None:
     return None if best is None else best[1]
 
 
+def _change_row(c: VintageChange) -> tuple[str, str, str]:
+    """(now, change, originally filed) cells of one change's row."""
+    composed = c.key.taxonomy == COMPOSED
+    now = "withdrawn" if c.kind == "withdrawn" else f"{c.new_value:,.0f}"
+    if c.scope == "context":
+        now += " (before the scored window)"
+    if c.moved_tag:
+        now += f" (now {'built from' if composed else 'tagged'} {c.new_tag})"
+    pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
+    if composed:
+        # No single filing carries this figure: say what it was built from.
+        filed = f"built from {c.key.tag}"
+    else:
+        filed = f"{c.old_filed} {c.old_form} {c.old_accession}".strip()
+    return now, pct, filed
+
+
 def render_changes(changes: list[VintageChange], older: str, newer: str) -> str:
     """One markdown section. Says plainly when nothing moved — an empty diff
-    is the expected result most of the time and is worth stating."""
+    is the expected result most of the time and is worth stating.
+
+    A figure that moved with a later filing the newer snapshot carries beside
+    the original (`explained_by_filing`) is listed apart, never under the
+    "no amended filing behind it" framing: the within-snapshot detector reads
+    it from filing history, and an amendment is the ordinary case."""
     head = f"### Vintage diff — {older} → {newer}\n"
     if not changes:
         return head + "\nNo prior-period figure changed or disappeared between these snapshots.\n"
-    lines = [
-        head, "",
-        "_Context, not an alarm._ Nothing found here has an amended filing "
-        "behind it — that is what makes it invisible to the within-snapshot "
-        "detector, and it also means the ordinary explanations come first: a "
-        "discontinued operation or a spinoff re-presented, a segment "
-        "reclassification, a taxonomy migration. Read the filing before "
-        "calling any of it a restatement.",
-        "",
-        "| Field | Period | Was | Now | Change | Originally filed |",
-        "|---|---|---|---|---|---|"]
-    for c in changes:
-        composed = c.key.taxonomy == COMPOSED
-        now = "withdrawn" if c.kind == "withdrawn" else f"{c.new_value:,.0f}"
-        if c.scope == "context":
-            now += " (before the scored window)"
-        if c.moved_tag:
-            now += f" (now {'built from' if composed else 'tagged'} {c.new_tag})"
-        pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
-        if composed:
-            # No single filing carries this figure: say what it was built from.
-            filed = f"built from {c.key.tag}"
-        else:
-            filed = f"{c.old_filed} {c.old_form} {c.old_accession}".strip()
-        lines.append(
-            f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} | {filed} |")
+    silent = [c for c in changes if not c.explained_by_filing]
+    filed = [c for c in changes if c.explained_by_filing]
+    lines = [head, ""]
+    if silent:
+        lines += [
+            "_Context, not an alarm._ Nothing found here has an amended filing "
+            "behind it — that is what makes it invisible to the within-snapshot "
+            "detector, and it also means the ordinary explanations come first: a "
+            "discontinued operation or a spinoff re-presented, a segment "
+            "reclassification, a taxonomy migration. Read the filing before "
+            "calling any of it a restatement.",
+            "",
+            "| Field | Period | Was | Now | Change | Originally filed |",
+            "|---|---|---|---|---|---|"]
+        for c in silent:
+            now, pct, orig = _change_row(c)
+            lines.append(
+                f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} | {orig} |")
+    else:
+        lines.append("No prior-period figure changed silently between these snapshots.")
+    if filed:
+        lines += [
+            "",
+            "**Moved with a later filing (not silent).** The newer snapshot carries "
+            "the original fact beside the filing that revised it, so the restatement "
+            "scan reads these from filing history; listed so the snapshot trail is "
+            "complete.",
+            "",
+            "| Field | Period | Was | Now | Change | Originally filed | Revised by |",
+            "|---|---|---|---|---|---|---|"]
+        for c in filed:
+            now, pct, orig = _change_row(c)
+            by = f"{c.new_filed} {c.new_form} {c.new_accession}".strip()
+            lines.append(
+                f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} "
+                f"| {orig} | {by} |")
     return "\n".join(lines) + "\n"
 
 
@@ -1024,18 +1095,26 @@ class VintageDiffReport:
         assert self.newest is not None and self.previous is not None
         line = (
             f"compared {self.previous.captured} → {self.newest.captured}: "
-            f"{len(self.changes_since_previous)} change(s)"
+            f"{_count(self.changes_since_previous)}"
         )
         if self.changes_since_baseline is not None and self.baseline is not None:
             line += (
                 f"; since pinned thesis {self.baseline.captured}: "
-                f"{len(self.changes_since_baseline)} change(s)"
+                f"{_count(self.changes_since_baseline)}"
             )
         if self.baseline_note:
             line += f"; {self.baseline_note}"
         if self.canonical_unavailable:
             line += f"; {self.canonical_unavailable}"
         return line
+
+
+def _count(changes: list[VintageChange]) -> str:
+    """"N change(s)" counts the silent ones; moves a later filing explains
+    are counted apart, so an amendment never reads as a silent change."""
+    filed = sum(c.explained_by_filing for c in changes)
+    text = f"{len(changes) - filed} change(s)"
+    return text + (f" (+{filed} moved with a later filing, not silent)" if filed else "")
 
 
 def _load_for_diff(obs: VintageObservation) -> dict:
@@ -1137,8 +1216,10 @@ def silent_revision_tier1_lines(
     """Tier-1 lines for the decision card, one per promoted change.
 
     Promoted: a `revised` scored, non-split field, for a period ending on or
-    after `period_since`, moved by at least SILENT_REVISION_TIER1_PCT, and
-    not a tag migration. A figure revised away from zero (an impairment of 0
+    after `period_since`, moved by at least SILENT_REVISION_TIER1_PCT, not a
+    tag migration, and not explained by a later filing the newer snapshot
+    carries beside the original (the restatement scan's line covers that one:
+    promoting it too put an amendment on the card twice, once as "silent"). A figure revised away from zero (an impairment of 0
     restated to 500M) has no percentage and is promoted too: it cannot be
     immaterial. Withdrawn facts and tag moves stay in the appendix section: a
     withdrawal has no ratio to threshold, and a move is a filer re-tagging
@@ -1158,7 +1239,7 @@ def silent_revision_tier1_lines(
         from_zero = c.old_value == 0 and c.new_value != 0
         if not from_zero and (c.pct_change is None or c.pct_change < SILENT_REVISION_TIER1_PCT):
             continue
-        if c.moved_tag:
+        if c.moved_tag or c.explained_by_filing:
             continue
         move = (
             "from zero" if from_zero

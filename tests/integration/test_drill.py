@@ -45,15 +45,14 @@ class TestTheDrill:
         assert [s["slug"] for s in log["steps"]] == [slug for slug, _, _ in drill.STEPS]
         assert all(s["ok"] for s in log["steps"])
 
-    def test_the_known_issue_is_reported_as_reproducing(self, run):
-        """The amendment-as-silent-revision defect is in the log, marked, and
-        in the summary — a PASS must not hide it."""
+    def test_no_known_issue_is_open(self, run):
+        """The amendment-as-silent-revision defect the drill found is fixed
+        and its marker removed; a new marker must be added deliberately."""
         _, out, _, _ = run
         log = json.loads((out / "drill_log.json").read_text())
-        assert log["known_issues"] == [drill.KNOWN_AMENDMENT_AS_SILENT]
-        md = (out / "drill_log.md").read_text()
-        assert "Known issues reproduced: 1" in md
-        assert "KNOWN ISSUE, reproduces" in md
+        assert log["known_issues"] == []
+        assert "Known issues reproduced: 0" in (out / "drill_log.md").read_text()
+        assert not [c for s in log["steps"] for c in s["checks"] if c["known"]]
 
     def test_the_log_carries_what_an_operator_signs(self, run):
         _, out, _, _ = run

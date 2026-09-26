@@ -463,8 +463,10 @@ def _silent_revisions_section(rep) -> str:
     lines.append(
         "_Prior-period figures that changed or disappeared between the two most "
         f"recent distinct companyfacts snapshots taken at or before {rep.as_of}. "
-        "Facts added for new periods are not listed. Nothing here has an amended "
-        "filing behind it — read the filing before calling any of it a restatement._"
+        "Facts added for new periods are not listed. A figure that moved with a later "
+        "filing still carried beside the original is listed apart (the restatement "
+        "scan reads those from filing history); the rest has no such filing behind "
+        "it — read the filing before calling any of it a restatement._"
     )
     lines.append("")
     lines.append(render_changes(rep.changes_since_previous, rep.previous.captured, rep.newest.captured))

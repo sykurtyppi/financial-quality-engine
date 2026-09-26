@@ -414,7 +414,12 @@ def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
                 validation_status=(
                     ValidationStatus.VALIDATED if promoted else ValidationStatus.DIRECTIONAL
                 ),
-                note=("before the scored window (context)" if c.scope == "context" else None),
+                note="; ".join(n for n in (
+                    "before the scored window (context)" if c.scope == "context" else "",
+                    f"moved with {c.new_form} {c.new_accession}, which the newer snapshot "
+                    "carries beside the original: not silent (the restatement scan reports it)"
+                    if c.explained_by_filing else "",
+                ) if n) or None,
             )
 
 
