@@ -182,3 +182,11 @@ operator = "cmp"
 source = "if best is None or order > best[0]:"
 function = "_filing"
 reason = "`order` is (start, precedence rank = filed date, amendment status, accession), so two rows tie only with the same start, filed date and accession. One accession is one filing, so the form agrees too: the tuple `_filing` returns (filed, accession, form, start) is the same whichever of them is kept."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/ingestion/vintages.py"
+operator = "continue"
+function = "values"
+source = "except (KeyError, TypeError, ValueError): continue"
+reason = "The `continue` is the last statement of the loop body in `_retains.values`: nothing follows the try/except in the loop, so `pass` falls through to the next row exactly as `continue` does."
