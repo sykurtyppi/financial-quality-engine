@@ -50,6 +50,9 @@ class Revision:
     # are that period's, and saying so keeps them from reading as the
     # quarter's.
     period_start: date | None = None
+    # The filings `how` names: a longer figure beside a quarter's own move
+    # is the same event only when they share one.
+    filings: tuple[str, ...] = ()
 
     def describe(self, label: str | None = None) -> str:
         at = label or str(self.period_end)
@@ -109,12 +112,13 @@ def revision_index(scan: Any = None, vintage: Any = None) -> RevisionIndex:
             moved = ", ".join(f"{form} {accn}" for form, accn in d.moved_by) or "later filings"
             idx.by_cell[(d.field_name, d.period_end)] = Revision(
                 d.field_name, d.period_end, d.original_value, d.current_value,
-                f"derived quarter moved by {moved}")
+                f"derived quarter moved by {moved}", filings=tuple(a for _f, a in d.moved_by))
         for fp in scan.footprints:
             how = (f"amended by {fp.amendment_form} {fp.amendment_accession}" if fp.is_amendment
                    else f"revised by a later {fp.current_form} {fp.current_accession}")
+            named = fp.amendment_accession if fp.is_amendment else fp.current_accession
             rev = Revision(fp.field_name, fp.period_end, fp.original_value, fp.current_value, how,
-                           _span(fp.period_start, fp.period_end))
+                           _span(fp.period_start, fp.period_end), filings=(named or "",))
             # A summed field's footprint is tagged "a+b": its values are the
             # sum's, and the revising filing is the one a component carries.
             for concept in fp.tag.split("+"):
@@ -178,10 +182,13 @@ def revised_inputs(
             (r for c in (cell, *cells.twins.get(cell, ())) if (r := index.by_cell.get(c)) is not None),
             None)
         if own is not None:
-            # The quarter's own move says what the metric read; the longer
-            # figure it was derived from is the same event, in the year's
-            # values.
-            found = [own, *(r for r in found if r is None or r.period_start is None)]
+            # The quarter's own move says what the metric read. A longer
+            # figure it was derived from, revised by a filing that move
+            # names, is the same event in the year's values; one revised by
+            # another filing (a 10-K/A before a later comparative moved the
+            # quarter again) is its own, and stays.
+            found = [own, *(r for r in found if r is None or r.period_start is None
+                            or not set(r.filings) & set(own.filings))]
         for rev in found:
             add(replace(rev, field=cell[0]) if rev is not None and cell is not None else rev)
     return out

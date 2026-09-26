@@ -25,7 +25,15 @@ from app.services.ingestion.restatements import (
     scan_restatements,
 )
 from app.services.reporting.report_builder import _derived_tier1_lines
-from tests.fixtures.selection_cases import QUARTER_ENDS, _base, duration, quarter, ytd
+from tests.fixtures.selection_cases import (
+    QUARTER_ENDS,
+    _base,
+    _instants,
+    duration,
+    instant,
+    quarter,
+    ytd,
+)
 
 Q1, Q2 = QUARTER_ENDS[8], QUARTER_ENDS[9]  # 2024-03-31, 2024-06-30
 SINCE, AS_OF = date(2024, 1, 1), date(2025, 6, 30)
@@ -547,14 +555,78 @@ def test_a_real_annual_amendment_reports_the_derived_q4():
     assert d.moved_by == (("10-K/A", "0001108524-26-990010"),)
 
 
-def test_a_quarter_is_at_most_a_hundred_days():
+def test_a_quarters_own_figure_is_what_the_mapper_reads_as_one():
+    """70 to 100 days (`QTD_DAYS`), or an instant; a year-to-date or annual
+    figure is longer, a stub shorter."""
     from datetime import timedelta
 
-    from app.services.ingestion.restatements import longer_than_a_quarter
+    from app.services.ingestion.companyfacts_mapper import QTD_DAYS
+    from app.services.ingestion.restatements import longer_than_a_quarter, quarters_own
 
+    assert QTD_DAYS == (70, 100)  # a 13-week quarter is 91 days, a 14-week one 98
     end = date(2026, 1, 31)
-    assert not longer_than_a_quarter(end - timedelta(days=91), end)  # a 13-week quarter
-    assert not longer_than_a_quarter(end - timedelta(days=100), end)
-    assert longer_than_a_quarter(end - timedelta(days=101), end)
-    assert longer_than_a_quarter(end - timedelta(days=181), end)  # a half year
-    assert not longer_than_a_quarter(None, end)  # an instant
+
+    def span(days):
+        return end - timedelta(days=days)
+
+    assert [quarters_own(span(d), end) for d in (69, 70, 91, 100, 101, 181)] == [
+        False, True, True, True, False, False]
+    assert quarters_own(None, end)  # an instant
+    assert [longer_than_a_quarter(span(d), end) for d in (60, 100, 101, 181)] == [
+        False, False, True, True]
+    assert not longer_than_a_quarter(None, end)
+
+
+class TestRoundElevenReview:
+    """The review of the fix above: each reproduced before it was fixed."""
+
+    def test_a_later_amendment_re_filing_the_value_does_not_repeat_the_event(self):
+        """10-Q/A No.1 moves H1 101 -> 110; No.2 re-files 110. The footprint
+        names No.2, the derived Q2 the No.1 that moved it: one restatement,
+        one Tier-1 line."""
+        facts = _ytd_filer(110.0)
+        facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["USD"].append(
+            ytd(Q2, 110.0, filed=date(2024, 11, 15), form="10-Q/A"))
+        scan = _scan(facts)
+        (fp,) = [f for f in scan.footprints if f.field_name == "operating_income"]
+        (d,) = [d for d in scan.derived if d.field_name == "operating_income"]
+        assert fp.amendment_accession not in {a for _f, a in d.moved_by}
+        assert _derived_tier1_lines(scan.derived, scan.footprints) == []
+
+    def test_another_fields_amendment_does_not_hide_a_derived_move(self):
+        """The 10-Q/A that amends total assets also moves derived Q2
+        operating income +90% (H1 +0.9%, below materiality). Both reach the
+        card, as before the fix."""
+        facts = _ytd_filer(101.9)
+        rows = facts["facts"]["us-gaap"]["Assets"]["units"]["USD"]
+        base = next(r for r in rows if r["end"] == Q2.isoformat())
+        rows.append(instant(Q2, base["val"] * 1.05, filed=date(2024, 10, 1), form="10-Q/A"))
+        scan = _scan(facts)
+        assert [f.field_name for f in scan.footprints] == ["total_assets"]
+        (line,) = _derived_tier1_lines(scan.derived, scan.footprints)
+        assert "moved derived operating_income for 2024-06-30 +90.0%" in line
+
+    def test_a_revised_stub_does_not_stand_for_the_quarter(self):
+        """A 61-day fact ending on Q2 is no quarter the mapper reads: the
+        derived Q2 (H1 less Q1) it hid moved +90%."""
+        facts = _ytd_filer(101.9)
+        rows = facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["USD"]
+        rows.append(duration(date(2024, 5, 1), Q2, 50.0))
+        rows.append(duration(date(2024, 5, 1), Q2, 60.0, filed=date(2024, 10, 1), form="10-Q/A"))
+        scan = _scan(facts)
+        assert [(f.field_name, (f.period_end - f.period_start).days) for f in scan.footprints] == [
+            ("operating_income", 60)]
+        (d,) = [d for d in scan.derived if d.field_name == "operating_income"]
+        assert d.period_end == Q2 and abs(d.current_value - 1.9) < 1e-9
+
+    def test_a_summed_balance_is_reported_once(self):
+        """Total debt is a sum of instants: its footprint and its derived
+        composite row are one figure, listed once."""
+        p = _base("Debt Co")
+        p.add("LongTermDebtNoncurrent", _instants(2000.0) + [
+            instant(Q2, 2300.0, filed=date(2024, 10, 1), form="10-Q/A")])
+        p.add("LongTermDebtCurrent", _instants(150.0))
+        scan = _scan(p.data)
+        (fp,) = [f for f in scan.footprints if f.field_name == "total_debt"]
+        assert fp.period_start is None and fp.is_amendment
+        assert not [d for d in scan.derived if d.field_name == "total_debt"]

@@ -35,6 +35,7 @@ from datetime import date, timedelta
 from app.services.ingestion.companyfacts_mapper import (
     FLOW_FIELDS,
     INSTANT_FIELDS,
+    QTD_DAYS,
     _parse_date,
     _unit_for,
 )
@@ -717,13 +718,16 @@ def scan_restatements(
                 )
 
     footprints.sort(key=lambda f: (f.period_end, f.field_name), reverse=True)
-    # A quarter already reported from its own filed figure is not repeated.
-    # A revised year-to-date or annual figure ending on the quarter is not
-    # the quarter's: a 2% move in the year can move the derived Q4 by 7%,
-    # and that is the figure the engine scores (round-10 audit).
+    # A quarter already reported from its own filed figure is not repeated:
+    # a quarter-length fact, or an instant (a summed balance such as total
+    # debt is the same figure as its derived composite row). A revised
+    # year-to-date or annual figure ending on the quarter is not the
+    # quarter's: a 2% move in the year can move the derived Q4 by 7%, and
+    # that is the figure the engine scores (round-10 audit). Nor is a stub
+    # shorter than any quarter the mapper reads.
     reported = {
         (f.field_name, f.period_end) for f in footprints
-        if f.period_start is not None and not longer_than_a_quarter(f.period_start, f.period_end)
+        if quarters_own(f.period_start, f.period_end)
     }
     derived = [
         d for d in derived_revisions(
@@ -786,15 +790,19 @@ def _dated_copy(facts_json: dict, cutoff: date | None) -> dict:
 
 # How the mapper builds a quarter it did not find reported as a quarter.
 _DERIVED_METHODS = frozenset({"ytd_diff", "fy_minus_3q", "composite"})
-# The longest filed period that is one quarter's own: a 13-week quarter
-# runs 91 days, a half year 181.
-QUARTER_MAX_DAYS = 100
+
+
+def quarters_own(start: date | None, end: date) -> bool:
+    """A filed figure that is one quarter's own, as the mapper reads one
+    (`QTD_DAYS`): an instant, or a period of a quarter's length. A
+    year-to-date or annual figure is longer; a stub is shorter."""
+    return start is None or QTD_DAYS[0] <= (end - start).days <= QTD_DAYS[1]
 
 
 def longer_than_a_quarter(start: date | None, end: date) -> bool:
-    """A filed period that is not one quarter's own: a year-to-date or
-    annual figure. An instant (no start) is not."""
-    return start is not None and (end - start).days > QUARTER_MAX_DAYS
+    """A year-to-date or annual figure: longer than any quarter the mapper
+    reads. An instant (no start) is not."""
+    return start is not None and (end - start).days > QTD_DAYS[1]
 
 
 def derived_revisions(
@@ -1028,7 +1036,9 @@ _METHOD_LABELS = {
 def _derived_lines(found: tuple[DerivedRevision, ...]) -> list[str]:
     """Quarters the engine derives whose scored value moved: invisible to
     the filed-figure comparison above when the figure it is derived from
-    moved by less than materiality (Hermes audit round 4, finding 2)."""
+    moved by less than materiality (Hermes audit round 4, finding 2), and
+    not what it shows when that figure is a year-to-date or annual one (a
+    2% move in the year can move the derived Q4 by 7%)."""
     if not found:
         return []
     lines = [
