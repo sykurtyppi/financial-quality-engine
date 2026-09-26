@@ -111,16 +111,22 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
     ``staged.report``, nothing is published (``RuntimeError``). Otherwise:
 
     1. the earlier run's report, ledger and audit are COPIED to the archive
-       (one stamp, as ``archive_existing`` names them);
-    2. the new ledger replaces the live one (``os.replace``), or the live
+       (one stamp, as ``archive_existing`` names them); a copy that fails
+       removes the copies already made, so no partial archived run is left;
+    2. the earlier run's audit, now archived, is removed from beside it;
+    3. the new ledger replaces the live one (``os.replace``), or the live
        ledger is removed when the build wrote none, so a stale ledger never
        sits beside the new report;
-    3. the new report replaces the live one (``os.replace``): the live path
-       is never missing;
-    4. the earlier run's audit, now archived, is removed from beside it.
+    4. the new report replaces the live one (``os.replace``): the live path
+       is never missing.
 
-    Report and ledger are two files, so between steps 2 and 3 the new ledger
-    sits beside the earlier report for an instant; the report is never absent.
+    If anything in 2-4 fails (an OSError, an interrupt) before the report is
+    published, the earlier run's ledger and audit are put back from their
+    archive copies (or the new ledger removed, on a first run) and those
+    copies deleted: the live run is exactly as it was, not a mismatched pair
+    a later rebuild would archive as one run (round-9 review R1-R3). Report
+    and ledger are two files, so between steps 3 and 4 the new ledger sits
+    beside the earlier report for an instant; the report is never absent.
 
     The staging directory is shared by every rebuild writing to ``<dir>`` and
     is never removed: a rebuild that removed it once it looked empty pulled
@@ -136,21 +142,56 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
             raise RuntimeError(f"{report.name}: the rebuild wrote no report; nothing published")
         live = _companions(report)
         present = {role: p for role, p in live.items() if p.exists()}
+        target: dict[str, Path] = {}
         if present:
             (report.parent / ARCHIVE_DIR).mkdir(parents=True, exist_ok=True)
             target = _archive_targets(report, now)
-            for role, src in present.items():
-                shutil.copy2(src, target[role])
-                staged.archived.append(target[role])
-        if staged.ledger.is_file():
-            os.replace(staged.ledger, live["ledger"])
-        else:
-            live["ledger"].unlink(missing_ok=True)
-        os.replace(staged.report, live["report"])
-        live["audit"].unlink(missing_ok=True)
+            try:
+                for role, src in present.items():
+                    shutil.copy2(src, target[role])
+            except BaseException:
+                _discard(target[role] for role in present)  # the stamp was free: ours
+                raise
+        published = False
+        try:
+            live["audit"].unlink(missing_ok=True)
+            if staged.ledger.is_file():
+                os.replace(staged.ledger, live["ledger"])
+            else:
+                live["ledger"].unlink(missing_ok=True)
+            os.replace(staged.report, live["report"])
+            published = True
+        except BaseException:
+            if not published:
+                _put_back(live, present, target)
+            raise
+        staged.archived.extend(target[role] for role in present)
     finally:
         staged.report.unlink(missing_ok=True)
         staged.ledger.unlink(missing_ok=True)
+
+
+def _discard(paths) -> None:
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _put_back(live: dict[str, Path], present: dict[str, Path], target: dict[str, Path]) -> None:
+    """Undo a publish that failed before the report went live: the earlier
+    run's ledger and audit return from their archive copies (atomically), a
+    first run's new ledger is removed, and the archive copies are deleted —
+    the earlier run is live again, so it is not also archived."""
+    for role in ("ledger", "audit"):
+        if role in present:
+            tmp = live[role].with_name(f".{live[role].name}.{uuid.uuid4().hex[:8]}.restore")
+            shutil.copy2(target[role], tmp)
+            os.replace(tmp, live[role])
+        elif role == "ledger":
+            live[role].unlink(missing_ok=True)
+    _discard(target[role] for role in present)
 
 
 def is_live_report(path: Path) -> bool:

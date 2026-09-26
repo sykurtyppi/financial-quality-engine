@@ -644,10 +644,17 @@ class Drill:
         step.check("no staged file is left behind",
                    not staging.exists() or not any(staging.iterdir()))
         again = self.generate(step, ws, "--no-docs")
-        step.check("the next rebuild succeeds and archives the first run",
-                   again.returncode == 0 and len(_archived(again)) == 2
-                   and live.read_bytes() != b"",
-                   f"exit {again.returncode}; archived {_archived(again)}")
+        moved = {p.name.split(".", 2)[-1]: p for p in _archived(again)}  # "md" / "ledger.json"
+        step.check("the next rebuild succeeds", again.returncode == 0,
+                   f"exit {again.returncode}: {again.stderr[-300:]}")
+        step.check("it archives the first run byte for byte (report and ledger)",
+                   set(moved) == {"md", "ledger.json"}
+                   and moved["md"].read_bytes() == before.get(live)
+                   and moved["ledger.json"].read_bytes() == before.get(ledger),
+                   ", ".join(map(str, moved.values())) or "nothing archived")
+        step.check("the new report and ledger are live, and nothing is left staged",
+                   live.is_file() and ledger.is_file()
+                   and (not staging.exists() or not any(staging.iterdir())))
 
 
 STEPS: tuple[tuple[str, str, Callable[[Drill, Step], None]], ...] = (

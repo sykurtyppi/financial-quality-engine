@@ -41,9 +41,19 @@ _FIELDS = frozenset(spec.name for spec in FIELDS)
 _COMPONENT_PREFIX = "beneish_"
 
 
-def _index(periods: list[PeriodFinancials], label: str) -> int | None:
+def _index(periods: list[PeriodFinancials], label: str, *, last: bool = False) -> int | None:
+    """The period a metric's label names. Quarter ends are every distinct
+    balance-sheet date, so a fiscal-calendar change can put two periods under
+    one label (round-9 review R5): then the label is ambiguous and names no
+    period — unless `last`, for a series metric, which is always computed at
+    the final period."""
     end = label.removeprefix(ttm.TTM_LABEL_PREFIX)
-    return next((i for i, p in enumerate(periods) if p.fiscal_label == end), None)
+    hits = [i for i, p in enumerate(periods) if p.fiscal_label == end]
+    if not hits:
+        return None
+    if last:
+        return hits[-1]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _annual(periods: list[PeriodFinancials], i: int, field: str) -> list[PeriodFinancials]:
@@ -90,7 +100,7 @@ def sources_for(
     if basis is None:
         return {}
     periods = dataset.sorted_periods()
-    i = _index(periods, metric.fiscal_label)
+    i = _index(periods, metric.fiscal_label, last=basis in (Basis.SERIES, Basis.FIELDS))
     if i is None:
         return {}
     if basis in (Basis.SERIES, Basis.FIELDS) and metric.status is not MetricStatus.OK:
@@ -145,13 +155,12 @@ def _series_sources(
         return {}
     base, select = SERIES_OF[metric.name]
     own = metric.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
-    history: list[MetricResult] = []
-    for m in bundle.history.get(base, []):
-        history.append(m)
-        if m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX) == own:
-            break
-    else:
+    full = bundle.history.get(base, [])
+    ends = [k for k, m in enumerate(full)
+            if m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX) == own]
+    if not ends:
         return {}
+    history = full[: ends[-1] + 1]  # the last entry under the label: the final period
     if select is Select.SAME_QUARTER:
         # `seasonal_trend_change`: the latest entry, then every 4th one back.
         read = [history[-1]] + [history[k] for k in range(len(history) - 5, -1, -4)]

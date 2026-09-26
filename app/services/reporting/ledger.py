@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from collections.abc import Iterable
 from datetime import date
 from typing import Any
@@ -31,6 +32,7 @@ from app.schemas.ledger import (
 )
 from app.schemas.metrics import MetricResult
 from app.schemas.report import AnalysisResult, EvidenceEntry, NarrativeEvidence
+from app.services.formulas import ttm
 from app.services.formulas.registry import MetricsBundle, compute_metrics
 from app.services.metrics_registry import (
     BASIS,
@@ -137,6 +139,7 @@ def _metric_items(
     """One item per metric the report evidences. Returns name -> item id."""
     bundle = compute_metrics(dataset)
     ids: dict[str, str] = {}
+    labels = Counter(p.fiscal_label for p in dataset.periods)
     for e in entries:
         common: dict[str, Any] = dict(
             kind="metric", subject=e.metric_name, claim=e.claim, fiscal_label=e.fiscal_label,
@@ -166,10 +169,17 @@ def _metric_items(
             }.get(BASIS[e.metric_name])
             if found and series_note:
                 note = (note + "; " if note else "") + series_note
+            label = e.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
+            why = (
+                f"fiscal label {label} names more than one period in this dataset, so its "
+                "inputs cannot be attributed to filings"
+                if labels[label] > 1 else
+                "its inputs carry no per-value provenance "
+                "(dataset not mapped from companyfacts in this run)"
+            )
             added = b.add(
                 item_id, plane=Plane.ACCOUNTING, provenance=tuple(prov), note=note, **common,
-                why_unsourced="its inputs carry no per-value provenance "
-                "(dataset not mapped from companyfacts in this run)",
+                why_unsourced=why,
             )
         else:
             added = b.add(

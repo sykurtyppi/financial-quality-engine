@@ -721,7 +721,9 @@ def write_ledger(path: Path, **kw) -> Path | None:
     except Exception:
         if _strict():
             raise
-        logger.exception("evidence ledger for %s not written", path.name)
+        # The live name, not a staging token: say which report lost its ledger.
+        logger.exception("evidence ledger for %s %s not written (%s)",
+                         kw.get("ticker"), kw.get("report_date"), path.name)
         # An earlier run's ledger must not sit beside this run's report.
         with contextlib.suppress(OSError):
             path.unlink()

@@ -273,3 +273,51 @@ def test_every_series_metric_reconciles_on_every_payload(case, facts):
             assert m is None or sources_for(ds, m, bundle=bundle) == {}, (case, name)
             continue
         _reconcile(ds, bundle, m)
+
+
+# --- round-9 review R5: two periods with one fiscal label ---------------------------
+# Quarter ends are every distinct Assets date (`select_quarter_ends`), so a
+# fiscal-calendar change can put two periods under one label. A label then
+# names two periods: series metrics (computed at the LAST period) resolve by
+# position, and any other metric at an ambiguous label cites nothing.
+
+
+def _relabelled():
+    ds = _ko()
+    periods = ds.sorted_periods()
+    twin = periods[-2]
+    ds.periods = [p.model_copy(update={"fiscal_label": periods[-1].fiscal_label})
+                  if p is twin else p for p in ds.periods]
+    return ds
+
+
+def test_a_series_metric_at_a_duplicated_label_cites_the_last_period():
+    ds = _relabelled()
+    bundle = compute_metrics(ds)
+    m = _ok(bundle.get_latest("incremental_revenue_per_capex"))
+    last = ds.sorted_periods()[-1]
+    found = sources_for(ds, m, bundle=bundle)
+    (end,) = found[f"revenue[{last.fiscal_label}]"]
+    assert end.value == pytest.approx(m.inputs["revenue_end"]) == last.revenue
+
+
+def test_a_pair_metric_at_a_duplicated_label_cites_nothing():
+    from app.schemas.metrics import MetricResult
+
+    ds = _relabelled()
+    label = ds.sorted_periods()[-1].fiscal_label
+    m = MetricResult(name="dso", formula="x", fiscal_label=label, status=MetricStatus.OK,
+                     value=1.0, inputs={"receivables": 1.0, "receivables_prior": 1.0})
+    assert sources_for(ds, m) == {}
+
+
+def test_the_ledger_says_why_an_ambiguous_label_is_unsourced():
+    from app.core.pipeline import analyze
+    from app.services.reporting.ledger import build_ledger
+
+    ds = _relabelled()
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="KO",
+                       report_date=ds.sorted_periods()[-1].period_end)
+    label = ds.sorted_periods()[-1].fiscal_label
+    reasons = {u.reason for u in doc.unsourced if label in u.claim}
+    assert any("names more than one period" in r for r in reasons), reasons
