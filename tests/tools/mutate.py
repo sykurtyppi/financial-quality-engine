@@ -75,6 +75,7 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_vintages.py", "tests/unit/test_vintage_composed.py",
         "tests/unit/test_vintage_diff_report.py", "tests/unit/test_replay.py",
         "tests/unit/test_pit_agreement.py", "tests/unit/test_vintage_capture_from_reports.py",
+        "tests/unit/test_vintage_amendment.py",
     )),
     Target("app/services/backtesting/pit.py", (
         "tests/unit/test_pit_agreement.py", "tests/unit/test_build_dataset_as_of.py",
