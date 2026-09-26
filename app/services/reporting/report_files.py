@@ -121,6 +121,10 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
 
     Report and ledger are two files, so between steps 2 and 3 the new ledger
     sits beside the earlier report for an instant; the report is never absent.
+
+    The staging directory is shared by every rebuild writing to ``<dir>`` and
+    is never removed: a rebuild that removed it once it looked empty pulled
+    it from under another still building there (round-9 audit F1).
     """
     staging = report.parent / STAGING_DIR
     staging.mkdir(parents=True, exist_ok=True)
@@ -147,10 +151,6 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
     finally:
         staged.report.unlink(missing_ok=True)
         staged.ledger.unlink(missing_ok=True)
-        try:
-            staging.rmdir()  # only when empty: a concurrent rebuild keeps its files
-        except OSError:
-            pass
 
 
 def is_live_report(path: Path) -> bool:

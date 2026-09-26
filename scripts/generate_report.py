@@ -75,7 +75,9 @@ def main() -> int:
                 report_day=args.as_of.isoformat(), fresh=args.fresh,
                 out_dir=ROOT / "reports", replay=True,
             )
-        except ValueError as e:
+        except journal_reporting.UnmappablePayload as e:
+            # Only the snapshot stage's own failure; any other ValueError is a
+            # defect in the build and surfaces as one (round-9 audit F3).
             return _unmappable(ticker, e)
         print(f"historical replay as of {args.as_of}: distress signals: {distress} -> {out}")
         return 0
