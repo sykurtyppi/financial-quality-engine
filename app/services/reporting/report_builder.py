@@ -144,16 +144,17 @@ def _derived_tier1_lines(derived, footprints=()) -> list[str]:
     the same rule as filed figures (amendments only), for the quarters the
     engine derives rather than reads (Hermes audit round 4, finding 2).
 
-    One line per restatement event: a derived Q4 moved by the 10-K/A that
-    also revised the year is that footprint's event, whose line
-    `_restatement_tier1_lines` already gives; its detail is in the
-    appendix."""
-    events = {(f.amendment_accession, f.period_end) for f in footprints if f.is_amendment}
+    Not repeated when an amended footprint of the same field already names
+    that period (`_restatement_tier1_lines`): a derived Q4 moved by the
+    amendment that revised the year is that restatement, whose detail is in
+    the appendix. Keyed on the field and period, not the accession: the
+    footprint names its latest material /A, the derived row the filing made
+    on the day it last moved, and a later /A that re-files the amended value
+    unchanged makes those differ for one restatement."""
+    amended = {(f.field_name, f.period_end) for f in footprints if f.is_amendment}
     lines = []
     for d in derived:
-        if not d.is_amendment:
-            continue
-        if any((accn, d.period_end) in events for form, accn in d.moved_by if form.endswith("/A")):
+        if not d.is_amendment or (d.field_name, d.period_end) in amended:
             continue
         forms = ", ".join(dict.fromkeys(form for form, _accn in d.moved_by if form.endswith("/A")))
         lines.append(

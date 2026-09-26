@@ -87,8 +87,9 @@ class ObservedFootprint:
     amended: bool
     accession: str  # the amendment's accession when amended, else the current value's
     # A derived quarter (a year-to-date or fiscal-year difference, or a sum)
-    # that moved between the filings behind it while no raw fact moved
-    # materially (`RestatementScan.derived`). Pinned like any footprint.
+    # that moved between the filings behind it (`RestatementScan.derived`):
+    # below materiality in every fact behind it, or beside a revised
+    # year-to-date or annual figure. Pinned like any footprint.
     derived: bool = False
 
 

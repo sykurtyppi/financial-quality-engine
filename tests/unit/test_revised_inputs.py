@@ -431,13 +431,48 @@ def _at(bundle, name, label):
 def test_a_period_longer_than_a_quarter_is_named_by_its_span():
     from datetime import timedelta
 
-    from app.services.ingestion.restatements import QUARTER_MAX_DAYS
     from app.services.reporting.revised_inputs import Revision, _span
 
     end = date(2026, 1, 31)
-    assert QUARTER_MAX_DAYS == 100  # a 13-week quarter is 91 days; a half year is 181
     assert _span(end - timedelta(days=100), end) is None
     assert _span(end - timedelta(days=101), end) == end - timedelta(days=101)
     assert _span(None, end) is None
     half = Revision("revenue", end, 1.0, 2.0, "x", end - timedelta(days=181))
     assert half.describe("FY2026Q4").startswith("revenue for the 6 months to FY2026Q4 ")
+
+
+def test_a_year_amended_before_a_later_move_of_its_quarter_is_still_named():
+    """A 10-K/A amends FY2023 revenue; a 10-Q/A later amends Q3; the FY2024
+    10-K re-files the year unchanged, re-deriving Q4 against the new Q3. The
+    derived Q4's last move is that ordinary 10-K: the 10-K/A is another
+    event, and a metric reading Q4 still names it (round-11 review)."""
+    from tests.fixtures.selection_cases import (
+        QUARTER_ENDS,
+        Payload,
+        annual,
+        duration,
+        instant,
+        quarter,
+    )
+
+    p = Payload("Q4 Co")
+    p.add("Assets", [instant(q, 10_000.0 + 10 * i) for i, q in enumerate(QUARTER_ENDS)])
+    p.add("AccountsReceivableNetCurrent", [instant(q, 500.0 + i) for i, q in enumerate(QUARTER_ENDS)])
+    rev = [quarter(q, 1000.0 + 10 * i) for i, q in enumerate(QUARTER_ENDS) if q.month != 12]
+    rev += [annual(y, 4200.0 + 100 * (y - 2022)) for y in (2022, 2023, 2024)]
+    fy = (date(2023, 1, 1), date(2023, 12, 31))
+    rev.append(duration(*fy, 4300.0 * 1.03, filed=date(2024, 5, 1), form="10-K/A"))
+    rev.append(quarter(QUARTER_ENDS[6], 1060.0 * 0.9, filed=date(2024, 6, 1), form="10-Q/A"))
+    rev.append(duration(*fy, 4300.0 * 1.03, filed=date(2025, 3, 1), form="10-K"))
+    p.add("RevenueFromContractWithCustomerExcludingAssessedTax", rev)
+    ds, diag = build_dataset(p.data, "T")
+    scan = scan_restatements(p.data, period_since=date(2023, 1, 1), as_of=date(2025, 6, 30),
+                             selected_tags=diag.selected_series())
+    (d,) = [d for d in scan.derived if d.period_end == fy[1]]
+    assert not d.is_amendment  # the quarter's last move was the ordinary 10-K
+    (year,) = [f for f in scan.footprints if f.period_start == fy[0]]
+    bundle = compute_metrics(ds)
+    m = next(x for x in bundle.history["dso"] if x.fiscal_label.endswith("2023Q4"))
+    hows = [r.how for r in revised_inputs(ds, bundle, m, revision_index(scan))]
+    assert hows[0].startswith("derived quarter moved by 10-K ")
+    assert f"amended by 10-K/A {year.amendment_accession}" in hows
