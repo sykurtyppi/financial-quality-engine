@@ -57,7 +57,28 @@ def _amended(ticker: str = "CRM", *, form: str = "10-Q/A", accn: str = ACCN):
 
 
 def _scan(facts):
-    return scan_restatements(facts, period_since=date(2023, 1, 1), as_of=date(2026, 9, 26))
+    """As `report_builder` runs it: on the series the mapper scored."""
+    _, diag = build_dataset(facts, "SCAN")
+    return scan_restatements(facts, period_since=date(2023, 1, 1), as_of=date(2026, 9, 26),
+                             selected_tags=diag.selected_series(), n_quarters=8)
+
+
+def _refile(facts, ref, *, factor: float, form: str, accn: str):
+    """`facts` with the filed fact behind `ref` re-filed at `factor` times
+    its value by `form` today."""
+    newer = copy.deepcopy(facts)
+    taxonomy, _, tag = ref.concept.partition(":")
+    rows = newer["facts"][taxonomy][tag]["units"]["USD"]
+    row = next(r for r in rows if r["accn"] == ref.accession and r["end"] == ref.end.isoformat()
+               and r.get("start") == (ref.start.isoformat() if ref.start else None))
+    new = {k: v for k, v in row.items() if k != "frame"}
+    new.update(val=round(row["val"] * factor), form=form, filed="2026-09-26", accn=accn)
+    rows.append(new)
+    return newer
+
+
+def _crm():
+    return json.loads((REAL / "companyfacts_CRM_trimmed.json").read_text())
 
 
 @pytest.fixture(scope="module")
@@ -164,6 +185,7 @@ def test_a_silent_change_is_matched_by_its_fact_and_an_explained_one_is_not(crm)
     class _Rep:
         compared = True
         previous, newest = _Obs("2026-09-19"), _Obs("2026-09-20")
+        baseline = changes_since_baseline = None
 
         def __init__(self, changes):
             self.changes_since_previous = changes
@@ -227,7 +249,7 @@ def test_the_note_lists_two_inputs_in_full_and_counts_the_rest():
     assert "more" not in note(revs[:1]) and note(revs[:1]).startswith("reads a revised figure:")
     two = note(revs[:2])
     assert "more" not in two
-    assert two.startswith("reads a revised figures: ") and two.count("revenue") == 2
+    assert two.startswith("reads revised figures: ") and two.count("revenue") == 2
     three = note(revs)
     assert three.endswith("; +1 more") and three.count("revenue") == 2
 
@@ -245,3 +267,152 @@ def test_a_change_line_needs_two_periods_and_marks_either(crm, keep, marked):
     b.history["dso"] = dso
     notes = card_notes(ds, b, [], idx)
     assert ("Days sales outstanding" in notes.changes) is marked
+
+
+# Round-10 audit: three ways a revised figure went unmarked or mislabelled,
+# each on the scan as the report runs it (on the scored series).
+
+
+def _readers(ds, bundle, accn):
+    """(metric, label) of every OK metric citing a fact filed as `accn`."""
+    return {(m.name, m.fiscal_label) for h in bundle.history.values() for m in h
+            if m.status is MetricStatus.OK
+            and any(r.accession == accn for g in sources_for(ds, m, bundle=bundle).values()
+                    for sv in g for r in sv.inputs)}
+
+
+def test_a_revised_component_of_a_summed_field_marks_its_readers():
+    """CRM sga_expense is S&M + G&A. The scan reports the SUM, tagged
+    "a+b", which matches no single filed concept."""
+    facts = _crm()
+    ds, _ = build_dataset(facts, "CRM")
+    latest = ds.sorted_periods()[-1]
+    assert len(latest.sources["sga_expense"].inputs) == 2
+    accn = "0001108524-26-990009"
+    newer = _refile(facts, latest.sources["sga_expense"].inputs[0], factor=1.3,
+                    form="10-Q/A", accn=accn)
+    scan = _scan(newer)
+    (fp,) = [f for f in scan.footprints if f.field_name == "sga_expense"]
+    assert "+" in fp.tag and not scan.derived
+    ds2, _ = build_dataset(newer, "CRM")
+    bundle = compute_metrics(ds2)
+    idx = revision_index(scan)
+    readers = _readers(ds2, bundle, accn)
+    assert readers
+    for name, label in readers:
+        (rev,) = revised_inputs(ds2, bundle, _at(bundle, name, label), idx)
+        assert rev.describe(latest.fiscal_label) == (
+            f"sga_expense {latest.fiscal_label} {fp.original_value:,.0f} → "
+            f"{fp.current_value:,.0f} (amended by 10-Q/A {accn})")
+    result = analyze(ds2)
+    notes = card_notes(ds2, bundle, [*result.red_flags, *result.green_flags], idx)
+    beneish = [k for k in notes.flags if k[0].startswith("Beneish")]
+    assert beneish and accn in notes.flags[beneish[0]]
+
+
+def test_a_revised_annual_figure_is_described_as_the_year_not_the_quarter():
+    """A derived Q4 reads the full year: its values are the year's."""
+    facts = _crm()
+    ds, _ = build_dataset(facts, "CRM")
+    q = [p for p in ds.sorted_periods() if p.sources["revenue"].method != "direct"][-1]
+    fy = next(r for r in q.sources["revenue"].inputs if r.sign == 1)
+    assert (fy.end - fy.start).days > 300
+    accn = "0001108524-26-990010"
+    newer = _refile(facts, fy, factor=1.02, form="10-K/A", accn=accn)
+    ds2, _ = build_dataset(newer, "CRM")
+    bundle = compute_metrics(ds2)
+    m = _at(bundle, "dso", q.fiscal_label)
+    (rev,) = revised_inputs(ds2, bundle, m, revision_index(_scan(newer)))
+    text = note([rev], {p.period_end: p.fiscal_label for p in ds2.periods})
+    assert text == (f"reads a revised figure: revenue for the 12 months to {q.fiscal_label} "
+                    f"{fy.value:,.0f} → {round(fy.value * 1.02):,.0f} (amended by 10-K/A {accn})")
+
+
+def test_a_quarter_revision_is_described_as_the_quarter(crm):
+    ds, bundle, cur, idx = crm
+    m = next(x for x in bundle.history["dso"] if x.fiscal_label == "FY2027Q1")
+    (rev,) = revised_inputs(ds, bundle, m, idx)
+    assert rev.period_start is None and "months" not in rev.describe("FY2027Q1")
+
+
+def test_a_derived_figure_two_fields_share_marks_the_readers_of_both():
+    """ebit and operating_income are one OperatingIncomeLoss; the scan
+    reports a derived move once, under one of them."""
+    facts = _crm()
+    ds, _ = build_dataset(facts, "CRM")
+    q = [p for p in ds.sorted_periods() if p.sources["ebit"].method == "ytd_diff"][-1]
+    fy = next(r for r in q.sources["ebit"].inputs if r.sign == 1)
+    newer = _refile(facts, fy, factor=1.009, form="10-K/A", accn="0001108524-26-990011")
+    scan = _scan(newer)
+    assert not scan.footprints and [d.field_name for d in scan.derived] == ["operating_income"]
+    ds2, _ = build_dataset(newer, "CRM")
+    bundle = compute_metrics(ds2)
+    idx = revision_index(scan)
+    ebit_only = [m for m in bundle.history["interest_coverage"]
+                 if m.fiscal_label == q.fiscal_label and m.status is MetricStatus.OK]
+    assert ebit_only
+    for m in ebit_only:
+        revs = revised_inputs(ds2, bundle, m, idx)
+        assert [r.field for r in revs] == ["ebit"]  # named as the field it read
+        assert revs[0].how == "derived quarter moved by 10-K/A 0001108524-26-990011"
+
+
+def test_only_twin_fields_share_a_concept():
+    """A revision matched by a filed concept is named by the field that read
+    it; that is only the same figure because the one concept two fields
+    share is read by both as a single tag."""
+    from collections import defaultdict
+
+    from app.services.ingestion.fields import FIELDS
+
+    by_tag: dict = defaultdict(set)
+    for spec in FIELDS:
+        for strategy in spec.strategies:
+            for tag in strategy.all_tags():
+                by_tag[tag].add((spec.name, strategy))
+    shared = {t: v for t, v in by_tag.items() if len({n for n, _ in v}) > 1}
+    for tag, users in shared.items():
+        assert all(s.tags == (tag,) and not s.roles for _n, s in users), tag
+
+
+def test_a_silent_change_since_the_thesis_day_marks_too(crm):
+    ds, bundle, cur, _ = crm
+    (ref,) = next(x for x in ds.sorted_periods()
+                  if x.period_end == cur.quarter).sources["revenue"].inputs
+    taxonomy, _, tag = ref.concept.partition(":")
+    change = VintageChange("revised", "revenue", FactKey(taxonomy, tag, "USD", ref.start, ref.end),
+                           1.0, None, ref.accession, ref.form, ref.value, None, ref.accession,
+                           ref.form, 0.5, tag)
+
+    class _Obs:
+        def __init__(self, captured):
+            self.captured = captured
+
+    class _Rep:
+        compared = True
+        baseline, previous, newest = _Obs("2026-09-01"), _Obs("2026-09-19"), _Obs("2026-09-20")
+        changes_since_baseline = [change]
+        changes_since_previous: list = []
+
+    (rev,) = revision_index(vintage=_Rep()).by_fact.values()
+    assert rev.how == "changed silently between snapshots 2026-09-01 → 2026-09-20"
+    m = next(x for x in bundle.history["dso"] if x.fiscal_label == "FY2027Q1")
+    assert revised_inputs(ds, bundle, m, revision_index(vintage=_Rep())) == [rev]
+
+
+def _at(bundle, name, label):
+    return next(m for m in bundle.history[name] if m.fiscal_label == label)
+
+
+def test_a_period_longer_than_a_quarter_is_named_by_its_span():
+    from datetime import timedelta
+
+    from app.services.reporting.revised_inputs import QUARTER_DAYS, Revision, _span
+
+    end = date(2026, 1, 31)
+    assert QUARTER_DAYS == 100  # a 13-week quarter is 91 days; a half year is 181
+    assert _span(end - timedelta(days=100), end) is None
+    assert _span(end - timedelta(days=101), end) == end - timedelta(days=101)
+    assert _span(None, end) is None
+    half = Revision("revenue", end, 1.0, 2.0, "x", end - timedelta(days=181))
+    assert half.describe("FY2026Q4").startswith("revenue for the 6 months to FY2026Q4 ")
