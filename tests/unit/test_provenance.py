@@ -134,8 +134,8 @@ def test_a_metrics_sources_reproduce_its_inputs(ticker):
         basis = BASIS[name]
         for m in history:
             found = sources_for(ds, m, bundle=bundle)
-            if basis in (Basis.SERIES, Basis.COMPOSITE):
-                continue
+            if basis in (Basis.SERIES, Basis.COMPOSITE, Basis.FIELDS):
+                continue  # reconciled in test_series_provenance.py
             for key, value in m.inputs.items():
                 field = key.removesuffix("_prior")
                 if value is None or field not in FIELD_NAMES:
@@ -190,10 +190,8 @@ def test_a_trend_resolves_through_its_base_metrics_history():
         label = m.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
         for key, values in sources_for(ds, m).items():
             assert found[f"total_accruals[{label}].{key}"] == values
-    windowed = sources_for(ds, bundle.get_latest("incremental_revenue_per_capex"), bundle=bundle)
-    last5 = [p.fiscal_label for p in ds.sorted_periods()][-5:]
-    assert {k.split("[", 1)[1].split("]", 1)[0] for k in windowed} <= set(last5)
-    assert any(last5[0] in k for k in windowed) and any(last5[-1] in k for k in windowed)
+    # Metrics read from period fields at fixed offsets are pinned exactly, and
+    # reconciled to their inputs, in test_series_provenance.py.
 
 
 @pytest.mark.parametrize("sign", [0, 2, -2])

@@ -32,7 +32,12 @@ from app.schemas.ledger import (
 from app.schemas.metrics import MetricResult
 from app.schemas.report import AnalysisResult, EvidenceEntry, NarrativeEvidence
 from app.services.formulas.registry import MetricsBundle, compute_metrics
-from app.services.metrics_registry import FINANCIAL_METRICS, NARRATIVE_METRICS
+from app.services.metrics_registry import (
+    BASIS,
+    FINANCIAL_METRICS,
+    NARRATIVE_METRICS,
+    Basis,
+)
 from app.services.provenance import sources_for
 from app.services.reporting.decision_card import tier_of
 
@@ -153,11 +158,14 @@ def _metric_items(
             note = None
             if incomplete:
                 note = f"{incomplete} input fact(s) name no filing and are not listed"
-            if found and "[" in next(iter(found)):
-                note = (note + "; " if note else "") + (
-                    "a statistic over its base metric's history: sources are that "
-                    "metric's in each period it may read"
-                )
+            series_note = {
+                Basis.SERIES: "a statistic over its base metric's history: sources are "
+                              "that metric's in exactly the periods it read",
+                Basis.FIELDS: "read from period fields: sources are exactly the "
+                              "values it read, by period",
+            }.get(BASIS[e.metric_name])
+            if found and series_note:
+                note = (note + "; " if note else "") + series_note
             added = b.add(
                 item_id, plane=Plane.ACCOUNTING, provenance=tuple(prov), note=note, **common,
                 why_unsourced="its inputs carry no per-value provenance "
