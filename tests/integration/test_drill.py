@@ -174,3 +174,28 @@ class TestScenarioEdits:
         dropped = drill.drop_concepts(facts, lambda tag: tag != "NetIncomeLoss")
         assert dropped == ["us-gaap:NetIncomeLoss"]
         assert "NetIncomeLoss" not in facts["facts"]["us-gaap"]
+
+
+class TestManifestCheck:
+    """Step 10's append-only check (seen failing on 2026-09-27): two snapshots
+    taken on one day sort by content hash, so the baseline need not stay first."""
+
+    A = {"captured": "2026-09-27", "file": "2026-09-27-1055f0a6220b.json.gz", "sha256": "a"}
+    B = {"captured": "2026-09-27", "file": "2026-09-27-01e16367e6c3.json.gz", "sha256": "b"}
+    KEY = "CIK0000320193/manifest.json"
+
+    def _files(self, *entries):
+        return {self.KEY: json.dumps({"snapshots": list(entries)}).encode()}
+
+    def test_a_later_snapshot_sorting_first_keeps_the_baseline(self):
+        assert drill._manifest_keeps(self._files(self.A), self._files(self.B, self.A))
+
+    def test_a_dropped_or_changed_entry_fails(self):
+        assert not drill._manifest_keeps(self._files(self.A), self._files(self.B))
+        assert not drill._manifest_keeps(self._files(self.A),
+                                         self._files({**self.A, "sha256": "x"}, self.B))
+
+    def test_a_missing_or_empty_manifest_fails(self):
+        assert not drill._manifest_keeps(self._files(self.A), {})
+        assert not drill._manifest_keeps(self._files(), self._files(self.A))
+        assert not drill._manifest_keeps({}, self._files(self.A))
