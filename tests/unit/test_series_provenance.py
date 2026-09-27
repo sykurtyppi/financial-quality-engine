@@ -20,6 +20,7 @@ inputs the metric recorded, so provenance cannot drift from the formula.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -254,6 +255,8 @@ def _reconcile(ds, bundle, m) -> None:
     prior = values[:-1]
     key = "same_quarter_prior_mean" if base in ("dso", "dio") else "prior_mean"
     assert sum(prior) / len(prior) == pytest.approx(m.inputs[key])
+    if base in ("dso", "dio"):
+        assert len(prior) == m.inputs["n_prior_years"]
 
 
 SERIES_METRICS = ("incremental_revenue_per_capex", "capex_intensity_regime_shift",
@@ -273,6 +276,95 @@ def test_every_series_metric_reconciles_on_every_payload(case, facts):
             assert m is None or sources_for(ds, m, bundle=bundle) == {}, (case, name)
             continue
         _reconcile(ds, bundle, m)
+
+
+# --- Hermes finding 5: a history missing a year ------------------------------------
+# The year-back formulas check dates now (`registry._year_ago`,
+# `working_capital.same_quarter_priors`, the capex window's span), so the
+# reconciliation runs again on each real fixture with a year taken out:
+#   "prefix" — four quarters two years before the first: the DSO/DIO stride
+#              reaches them, but the chain of years breaks first;
+#   "early"  — the first four quarters a year earlier: a missing year inside
+#              every year-back window at the latest period.
+
+
+def _shifted(p, years: int):
+    end = p.period_end
+    label = re.sub(r"FY(\d{4})", lambda g: f"FY{int(g[1]) - years}", p.fiscal_label)
+    return p.model_copy(update={"period_end": end.replace(year=end.year - years),
+                                "fiscal_label": label})
+
+
+def _gapped(ticker: str, kind: str):
+    facts = json.loads((REAL / f"companyfacts_{ticker}_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, ticker)
+    periods = ds.sorted_periods()
+    if kind == "prefix":
+        ds.periods = [_shifted(p, 2) for p in periods[:4]] + periods
+    else:
+        ds.periods = [_shifted(p, 1) for p in periods[:4]] + periods[4:]
+    return ds
+
+
+@pytest.mark.parametrize("ticker", TICKERS)
+@pytest.mark.parametrize("kind", ["prefix", "early"])
+def test_every_series_metric_reconciles_on_a_gapped_history(ticker, kind):
+    ds = _gapped(ticker, kind)
+    bundle = compute_metrics(ds)
+    for name in SERIES_METRICS:
+        m = bundle.get_latest(name)
+        if m.status is not MetricStatus.OK:
+            assert sources_for(ds, m, bundle=bundle) == {}, name
+            continue
+        _reconcile(ds, bundle, m)
+    dso = bundle.get_latest("dso_trend")
+    incremental = bundle.get_latest("incremental_revenue_per_capex")
+    if kind == "prefix":  # the positional stride also read the quarter two years back
+        assert dso.status is MetricStatus.OK and dso.inputs["n_prior_years"] == 1.0
+        assert incremental.status is MetricStatus.OK
+    else:
+        assert dso.status is MetricStatus.MISSING_DATA
+        assert incremental.status is MetricStatus.MISSING_DATA
+
+
+@pytest.mark.parametrize("ticker", TICKERS)
+@pytest.mark.parametrize("kind", ["prefix", "early"])
+def test_beneish_cites_a_prior_window_exactly_when_it_read_one(ticker, kind):
+    """Each Beneish index's cited values reproduce its inputs, current and
+    prior; across the missing year no prior is cited, as none was read."""
+    ds = _gapped(ticker, kind)
+    bundle = compute_metrics(ds)
+    periods = ds.sorted_periods()
+    priors = 0
+    for name in ("beneish_sgi", "beneish_dsri", "beneish_gmi", "beneish_lvgi"):
+        for m in bundle.history[name]:
+            found = sources_for(ds, m, bundle=bundle)
+            if m.status is not MetricStatus.OK:
+                assert not any(k.endswith("_prior") for k in found), (name, m.fiscal_label)
+                continue
+            for key, values in found.items():
+                assert sum(sv.value for sv in values) == pytest.approx(m.inputs[key]), key
+            priors += any(k.endswith("_prior") for k in found)
+    latest = bundle.get_latest("beneish_sgi")
+    assert latest.fiscal_label == f"TTM {periods[-1].fiscal_label}"
+    if kind == "prefix":
+        assert latest.status is MetricStatus.OK and "revenue_prior" in sources_for(
+            ds, latest, bundle=bundle)
+    else:
+        assert latest.status is MetricStatus.MISSING_DATA
+        assert latest.missing_fields == [ttm.PRIOR_YEAR_MISSING]
+    assert priors >= (4 if kind == "prefix" else 0)
+
+
+def test_a_seasonal_trend_over_another_datasets_history_cites_nothing():
+    """The same-quarter priors are dated by the dataset's periods; a history
+    that does not line up with them cannot be dated, so nothing is cited."""
+    ds = _ko()
+    bundle = compute_metrics(ds)
+    m = _ok(bundle.get_latest("dso_trend"))
+    assert sources_for(ds, m, bundle=bundle)
+    bundle.history["dso"] = bundle.history["dso"][1:]
+    assert sources_for(ds, m, bundle=bundle) == {}
 
 
 # --- round-9 review R5: two periods with one fiscal label ---------------------------

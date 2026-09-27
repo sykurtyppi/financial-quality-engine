@@ -496,3 +496,32 @@ def test_a_seasonal_change_line_is_marked_by_its_year_ago_value():
     notes = card_notes(ds2, bundle, [], revision_index(_scan(newer)))
     assert accn in notes.changes["Days sales outstanding"]
     assert "FY2026Q1" in notes.changes["Days sales outstanding"]
+
+
+def test_a_flag_at_a_label_naming_two_periods_is_not_marked():
+    """Hermes finding 4: two periods can share a fiscal label, and the flag
+    lookup takes the first result under it. A mark from that result could
+    name the wrong quarter's input, so an ambiguous label marks nothing —
+    `provenance.sources_for` names no period for it, as the ledger says."""
+    from types import SimpleNamespace
+
+    from app.services.reporting.revised_inputs import Revision, RevisionIndex
+
+    ds, _ = build_dataset(_crm(), "CRM")
+    periods = ds.sorted_periods()
+    last, twin = periods[-1], periods[-2]
+    idx = RevisionIndex(by_cell={("revenue", p.period_end): Revision(
+        "revenue", p.period_end, 1.0, 2.0, "test") for p in (last, twin)})
+    flag = SimpleNamespace(title="t", fiscal_label=last.fiscal_label,
+                           evidence_metrics=["receivables_growth_spread"])
+    notes = card_notes(ds, compute_metrics(ds), [flag], idx)
+    assert f"revenue {last.fiscal_label} 1 → 2" in notes.flags[("t", last.fiscal_label)]
+
+    ds.periods = [p.model_copy(update={"fiscal_label": last.fiscal_label}) if p is twin else p
+                  for p in ds.periods]
+    bundle = compute_metrics(ds)
+    at_label = [m for m in bundle.history["receivables_growth_spread"]
+                if m.fiscal_label == last.fiscal_label]
+    assert len(at_label) == 2 and all(m.status is MetricStatus.OK for m in at_label)
+    assert all(revised_inputs(ds, bundle, m, idx) == [] for m in at_label)
+    assert card_notes(ds, bundle, [flag], idx).flags == {}

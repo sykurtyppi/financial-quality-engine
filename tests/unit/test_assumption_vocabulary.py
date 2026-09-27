@@ -91,12 +91,12 @@ def test_malformed_windows_are_refused_at_lock(window):
 
 
 def test_a_refused_window_would_otherwise_have_resolved_pending_forever():
-    # The failure this guards: `_find_period` matches `fiscal_label` exactly,
+    # The failure this guards: `_find_periods` matches `fiscal_label` exactly,
     # so a branding-style window silently matches nothing rather than erroring.
-    from app.services.journal.resolver import _find_period
+    from app.services.journal.resolver import _find_periods
     ds = stretch_dataset()
-    assert _find_period(ds, "FQ3-27") is None
-    assert _find_period(ds, ds.periods[-1].fiscal_label) is not None
+    assert _find_periods(ds, "FQ3-27") == []
+    assert len(_find_periods(ds, ds.periods[-1].fiscal_label)) == 1
 
 
 def test_tightening_can_lock_does_not_invalidate_an_already_sealed_entry():

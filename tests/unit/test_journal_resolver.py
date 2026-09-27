@@ -417,3 +417,72 @@ def test_the_resolve_command_prints_the_filing_behind_each_proposal(monkeypatch,
     out = capsys.readouterr().out
     accession = period.sources["revenue"].inputs[0].accession
     assert "MET" in out and f"source: {accession}" in out
+
+
+# --- Hermes finding 4: one fiscal label naming two periods ---------------------------
+# The mapper labels a quarter by its effective period, so instants on
+# 2026-03-31 and 2026-04-01 can both be FY2026Q1. The resolver used to take
+# the first INPUT-order match, so reordering the dataset flipped a committed
+# outcome (violated at 1.0 -> met at 100.0). An ambiguous label names no
+# period, as `provenance._index` already treats it.
+
+
+def _twins(reverse: bool = False) -> CompanyDataset:
+    a = _p(period_end=date(2026, 3, 31), fiscal_label="FY2026Q1", revenue=1.0)
+    b = _p(period_end=date(2026, 4, 1), fiscal_label="FY2026Q1", revenue=100.0)
+    return _ds(*((b, a) if reverse else (a, b)))
+
+
+class TestAmbiguousWindow:
+    AMBIGUOUS = "FY2026Q1 names 2 periods (2026-03-31, 2026-04-01); refusing to pick one"
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_either_input_order_is_unresolvable_with_the_reason(self, reverse):
+        a = _a(metric="revenue", comparator=">", threshold=50.0, window="FY2026Q1")
+        r = propose_resolution(a, _twins(reverse))
+        assert r.state == "unresolvable"
+        assert r.note == self.AMBIGUOUS
+        assert r.observed is None and r.at is None and r.source_accession is None
+
+    def test_both_orders_propose_the_identical_resolution(self):
+        a = _a(metric="revenue", comparator=">", threshold=50.0, window="fy2026q1")
+        assert propose_resolution(a, _twins()) == propose_resolution(a, _twins(reverse=True))
+
+    def test_an_engine_metric_at_the_label_is_refused_too(self):
+        from app.services.formulas.registry import compute_metrics
+
+        ds = _twins()
+        ds.periods = [_p(period_end=date(2025, 12, 31), fiscal_label="FY2025Q4",
+                         revenue=10.0, capex=1.0), *(
+            p.model_copy(update={"capex": 1.0}) for p in ds.periods)]
+        bundle = compute_metrics(ds)
+        assert [m.fiscal_label for m in bundle.history["capex_to_revenue"]] == ["FY2026Q1"] * 2
+        a = _a(metric="capex_to_revenue", comparator=">", threshold=0.5, window="FY2026Q1")
+        r = propose_resolution(a, ds, bundle)
+        assert (r.state, r.note) == ("unresolvable", self.AMBIGUOUS)
+
+    def test_a_unique_label_beside_the_twins_resolves_as_before(self):
+        ds = _twins()
+        ds.periods.append(_p(revenue=172_000_000))  # FY2026Q2, 2026-06-30
+        r = propose_resolution(_a(), ds)
+        assert (r.state, r.observed, r.at) == ("met", 172_000_000, date(2026, 6, 30))
+        assert r.note == "XBRL field 'revenue' (FY2026Q2)"
+
+    def test_the_bundle_lookup_refuses_two_entries_under_the_period_label(self):
+        """`_lookup_metric_value` / `_engine_metric` apply the same rule to
+        the bundle's history: two results under one label name no result."""
+        from app.services.journal.resolver import _engine_metric, _lookup_metric_value
+
+        period = _p(fiscal_label="FY2026Q1")
+        one, two = (MetricResult(name="dso", formula="t", fiscal_label=label, value=v,
+                                 status=MetricStatus.OK)
+                    for label, v in (("FY2026Q1", 1.0), ("TTM FY2026Q1", 100.0)))
+        bundle = MetricsBundle(history={"dso": [one, two]})
+        value, note, structural = _lookup_metric_value("dso", period, bundle)
+        assert (value, structural) == (None, True)
+        assert note == "metric 'dso' has 2 results for FY2026Q1; refusing to pick one"
+        assert _engine_metric("dso", period, bundle) is None
+        single = MetricsBundle(history={"dso": [two]})
+        assert _lookup_metric_value("dso", period, single) == (
+            100.0, "engine metric 'dso' (TTM ending FY2026Q1)", False)
+        assert _engine_metric("dso", period, single) is two

@@ -5,6 +5,11 @@ from __future__ import annotations
 from app.schemas.financials import PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas.base import build_metric, growth, non_finite
+from app.services.formulas.working_capital import (
+    MAX_YEAR_GAP_DAYS,
+    MIN_YEAR_GAP_DAYS,
+    a_year_apart,
+)
 
 
 def capex_to_revenue(cur: PeriodFinancials) -> MetricResult:
@@ -143,6 +148,9 @@ def incremental_revenue_per_capex(series: list[PeriodFinancials], lookback: int 
 
     A coarse capital-efficiency proxy: capex often converts to revenue with a
     lag longer than the window, so LOW values are a review prompt, not a verdict.
+
+    The window is a year of quarters: its first and last period ends must be
+    a year apart by the registry's year-ago rule (330-400 days), else no value.
     """
     label = series[-1].fiscal_label if series else "n/a"
     if len(series) < lookback + 1:
@@ -154,6 +162,21 @@ def incremental_revenue_per_capex(series: list[PeriodFinancials], lookback: int 
             missing_fields=[f"period history (need >= {lookback + 1} periods)"],
         )
     window = series[-(lookback + 1):]
+    # Revenue "added over the year" needs its start a year back: counting
+    # periods is not enough, since across a missing year t-4 is two years
+    # earlier and the growth is two years' (Hermes finding 5).
+    if not a_year_apart(window[0].period_end, window[-1].period_end):
+        gap = (window[-1].period_end - window[0].period_end).days
+        return MetricResult(
+            name="incremental_revenue_per_capex",
+            formula=f"(Rev_t - Rev_t-{lookback}) / sum(Capex over last {lookback} periods)",
+            fiscal_label=label,
+            status=MetricStatus.MISSING_DATA,
+            missing_fields=[
+                f"revenue a year before {label} ({window[0].fiscal_label} ends {gap} days "
+                f"earlier; need {MIN_YEAR_GAP_DAYS}-{MAX_YEAR_GAP_DAYS})"
+            ],
+        )
     rev_start, rev_end = window[0].revenue, window[-1].revenue
     capex_values = [p.capex for p in window[1:]]
     missing = []

@@ -25,6 +25,7 @@ from app.schemas.financials import CompanyDataset, PeriodFinancials, SourcedValu
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas import ttm
 from app.services.formulas.registry import MetricsBundle, _year_ago
+from app.services.formulas.working_capital import same_quarter_priors
 from app.services.ingestion.fields import FIELDS
 from app.services.metrics_registry import (
     BASIS,
@@ -81,7 +82,9 @@ def _periods_for(
         year_ago = _year_ago(periods, i)
         return [year_ago] if year_ago is not None else []
     if basis is Basis.TTM_YOY and prior:
-        return _annual(periods, i - 4, field)
+        # The registry pairs the window four periods back only when it ends
+        # a year back (Hermes finding 5); otherwise Beneish read no prior.
+        return _annual(periods, i - 4, field) if _year_ago(periods, i) is not None else []
     if basis in (Basis.TTM, Basis.ACCRUALS, Basis.TTM_YOY):
         return _annual(periods, i, field)
     return []
@@ -162,8 +165,14 @@ def _series_sources(
         return {}
     history = full[: ends[-1] + 1]  # the last entry under the label: the final period
     if select is Select.SAME_QUARTER:
-        # `seasonal_trend_change`: the latest entry, then every 4th one back.
-        read = [history[-1]] + [history[k] for k in range(len(history) - 5, -1, -4)]
+        # `seasonal_trend_change`: the latest entry, then every 4th one back
+        # while each step is a year (`same_quarter_priors`), dated as the
+        # registry dates them — entry k is period k + 1. A history of another
+        # length is not this dataset's and cannot be dated.
+        dated = [p.period_end for p in dataset.sorted_periods()[1:]]
+        if len(full) != len(dated):
+            return {}
+        read = [history[-1]] + [history[k] for k in same_quarter_priors(dated[: len(history)])]
     else:
         read = history
     out: dict[str, list[SourcedValue]] = {}
