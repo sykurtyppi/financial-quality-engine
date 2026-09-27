@@ -51,9 +51,9 @@ Blocks carry no 0–100 number: the composite and its block scores measured non-
 - Total accruals: 0.055 (TTM FY2025Q3) -> 0.068 (TTM FY2025Q4)
 - CFO / Net income: 0.42 (TTM FY2025Q3) -> 0.27 (TTM FY2025Q4)
 - Receivables-vs-revenue growth spread: +251.3% (FY2025Q3) -> +251.3% (FY2025Q4)
-- Days sales outstanding: 275 (FY2025Q3) -> 372 (FY2025Q4)
-- SBC / Revenue: 12.0% (FY2025Q3) -> 13.0% (FY2025Q4)
-- Capex / Revenue: 10.0% (FY2025Q3) -> 11.0% (FY2025Q4)
+- Days sales outstanding: 112 (FY2024Q4) -> 372 (FY2025Q4), vs the same quarter a year earlier
+- SBC / Revenue: 9.0% (FY2024Q4) -> 13.0% (FY2025Q4), vs the same quarter a year earlier
+- Capex / Revenue: 7.0% (FY2024Q4) -> 11.0% (FY2025Q4), vs the same quarter a year earlier
 - FCF margin: -4.3% (TTM FY2025Q3) -> -6.8% (TTM FY2025Q4)
 
 ## 6. Narrative Drift Summary

@@ -219,25 +219,23 @@ class CardNotes:
 def card_notes(dataset: CompanyDataset, bundle: MetricsBundle, flags: Iterable[Any],
                index: RevisionIndex) -> CardNotes:
     """What the card must say about revised inputs. A change line compares a
-    metric at two periods (as `pipeline._what_changed` picks them); a flag
-    rests on its evidence metrics at its own period."""
-    from app.core.pipeline import _CHANGE_METRICS
+    metric at the two periods `pipeline.change_pairs` picks for it (a
+    seasonal line, the same quarter a year earlier); a flag rests on its
+    evidence metrics at its own period."""
+    from app.core.pipeline import change_pairs
 
     notes = CardNotes()
     if not index:
         return notes
     cells = _cells(dataset)
     labels = {p.period_end: p.fiscal_label for p in dataset.periods}
-    for name, line_label, _fmt in _CHANGE_METRICS:
-        series = [m for m in bundle.history.get(name, []) if m.status is MetricStatus.OK]
-        if len(series) < 2:
-            continue
+    for pair in change_pairs(bundle, dataset.sorted_periods()):
         revs: list[Revision] = []
-        for m in (series[-2], series[-1]):
+        for m in (pair.prev, pair.cur):
             revs += [r for r in revised_inputs(dataset, bundle, m, index, cells=cells)
                      if r not in revs]
         if revs:
-            notes.changes[line_label] = note(revs, labels)
+            notes.changes[pair.label] = note(revs, labels)
     for f in flags:
         revs = []
         for name in f.evidence_metrics:
