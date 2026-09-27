@@ -135,17 +135,22 @@ def publish_lock(report: Path, *, shared: bool = False) -> Iterator[None]:
     inode, and a lock on the old one would guard nothing. ``flock`` is
     advisory and unreliable over NFS, so the reports directory must be
     local, as the watchlist's lock already assumes."""
-    staging = report.parent / STAGING_DIR
-    try:
-        staging.mkdir(parents=True, exist_ok=True)
-        fd = os.open(staging / f"{_base(report)}.lock", os.O_RDWR | os.O_CREAT, 0o644)
-    except OSError:
-        if not shared:
-            raise
-        # A reader of a directory it cannot write (a copied-out report) has
-        # no publisher to exclude.
-        yield
-        return
+    lock = report.parent / STAGING_DIR / f"{_base(report)}.lock"
+    if shared:
+        # A reader creates nothing (reading an archived run must not add a
+        # staging directory beside it), and needs only read access: a
+        # publisher running as another user owns the lock file.
+        try:
+            fd = os.open(lock, os.O_RDONLY)
+        except OSError:
+            # No lock file: nothing has ever been published there (the first
+            # publish creates it before its report exists), or the directory
+            # is not ours to lock — a copied-out report has no publisher.
+            yield
+            return
+    else:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
         yield
@@ -192,15 +197,20 @@ def _seal(staged: Staged, name: str) -> None:
             raise NotPublished(f"{name}: {path.name} names generation {found}, not this "
                                f"rebuild's {gid}; nothing published")
     doc["generation_id"] = gid
-    _write_atomic(staged.ledger, json.dumps(doc, indent=1, ensure_ascii=False) + "\n")
+    write_atomic(staged.ledger, json.dumps(doc, indent=1, ensure_ascii=False) + "\n")
     if m is None:
-        # Appended, never rewritten into the text: what the builder wrote is
-        # the report, byte for byte, up to the stamp.
-        _write_atomic(staged.report, text + f"\n\n{GENERATION_LINE}{gid} "
-                      "(this report, its evidence ledger and its audit carry the same id)\n")
+        # Appended in place (the staged file is this rebuild's own), never
+        # rewritten: what the builder wrote is the report, byte for byte, up
+        # to the stamp.
+        with staged.report.open("a", newline="") as fh:
+            fh.write(f"\n\n{GENERATION_LINE}{gid} "
+                     "(this report, its evidence ledger and its audit carry the same id)\n")
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a temporary file beside it and
+    ``os.replace``: a reader sees the old file or the new one, and a failed
+    write leaves no temporary behind."""
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(text)

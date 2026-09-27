@@ -137,3 +137,36 @@ def test_a_report_rebuilt_during_the_audit_does_not_get_it(tmp_path, monkeypatch
     assert "rebuilt while it ran" in capsys.readouterr().err
     staging = tmp_path / ".staging"
     assert [p for p in staging.iterdir() if p.suffix != ".lock"] == []
+
+
+def test_a_failed_audit_write_leaves_no_temporary_file(tmp_path, monkeypatch):
+    """The audit was written to a staging file and replaced into place; a
+    failed replace left the staging file behind as unexplained staged work."""
+    import app.services.reporting.report_files as rf
+
+    report, gid = _published(tmp_path, "first")
+
+    def full(src, dst):
+        raise OSError("ENOSPC")
+
+    monkeypatch.setattr(rf.os, "replace", full)
+    try:
+        run_audit.publish_audit(report, gid, "AUDIT")
+    except OSError:
+        pass
+    monkeypatch.undo()
+    left = [p for p in tmp_path.rglob("*") if p.is_file() and p.suffix not in (".lock",)]
+    assert sorted(p.name for p in left) == ["KTOS_2026-07-31.ledger.json", "KTOS_2026-07-31.md"]
+
+
+def test_an_audit_of_a_report_set_aside_is_not_published(tmp_path, capsys):
+    """A report from before generations names none; set aside while its
+    audit ran, `None == None` published the audit beside no report."""
+    from app.services.reporting.report_files import archive_existing
+
+    report = tmp_path / "KTOS_2026-07-31.md"
+    report.write_text("# report from before generations")
+    archive_existing(report)
+    assert run_audit.publish_audit(report, None, "AUDIT") == 1
+    assert not (tmp_path / "KTOS_2026-07-31_audit.md").exists()
+    assert "no longer live" in capsys.readouterr().err

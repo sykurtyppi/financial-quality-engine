@@ -22,10 +22,8 @@ only while that generation is still live: a report rebuilt during the audit
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,9 +31,9 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.headless import claude_command  # noqa: E402
 from app.services.reporting.report_files import (  # noqa: E402
-    STAGING_DIR,
     generation_of,
     publish_lock,
+    write_atomic,
 )
 
 DEFAULT_TIMEOUT_S = 1800.0
@@ -91,15 +89,17 @@ def publish_audit(report_path: Path, generation: str | None, text: str) -> int:
     out = audit_output_path(report_path)
     body = (f"<!-- generation: {generation} -->\n\n" if generation else "") + text
     with publish_lock(report_path):
+        if not report_path.is_file():
+            print(f"Audit discarded: {report_path.name} is no longer live (set aside while "
+                  "the audit ran).", file=sys.stderr)
+            return 1
         now = generation_of(report_path)
         if now != generation:
             print(f"Audit discarded: {report_path.name} was rebuilt while it ran "
                   f"(audited generation {generation}, live {now}). Rerun the audit.",
                   file=sys.stderr)
             return 1
-        tmp = report_path.parent / STAGING_DIR / f"{uuid.uuid4().hex}_audit.md"
-        tmp.write_text(body)
-        os.replace(tmp, out)
+        write_atomic(out, body)
     print(f"audit -> {out}")
     return 0
 
