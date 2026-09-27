@@ -56,6 +56,10 @@ _STATUS = {
 }
 # "derived from FY2025Q1 documents: " / "compared with FY2024Q1 documents: "
 _DERIVED_PREFIX = re.compile(r"^(?:derived from |compared with )?\S+ documents(?:: | \(.*\))?")
+# A part of a row's source that names no document: `evidence.NO_SOURCE_RECORDED`,
+# `NOT_LOCATED`, or a derived row's period "(no source recorded)".
+_UNNAMED = re.compile(r"^(?:derived from |compared with )?\S+ documents \((?:no source recorded"
+                      r"|excerpt not located[^)]*)\)$")
 
 
 def _status(names: Iterable[str]) -> ValidationStatus:
@@ -238,7 +242,16 @@ def _narrative_items(
             if (p := _document(d, role=d.doc_type.value, excerpt=row.excerpt if quoted else None))
             is not None
         ]
-        if cited:
+        unnamed = [re.sub(r"^(?:derived from |compared with )", "", part)
+                   for part in row.source.split("; ") if _UNNAMED.match(part)]
+        if cited and unnamed:
+            # A derived row whose own period (or a compared one) recorded no
+            # source: the filings it does name are part of its evidence, and
+            # citing them alone would read as the whole of it.
+            prov = []
+            why = (f"source recorded as {row.source!r}; {unnamed[0]!r} names no document, "
+                   "so the documents it does name are part of its source, not all")
+        elif cited:
             why = f"source recorded as {row.source!r} and no document names its filing"
         else:
             # Not located in one document, or no source recorded: the

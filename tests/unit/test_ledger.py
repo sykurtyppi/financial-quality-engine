@@ -205,6 +205,29 @@ def test_a_row_naming_no_document_in_a_period_without_documents_says_none():
                         "(period documents: none)")
 
 
+@pytest.mark.parametrize("own_named", [False, True])
+def test_a_derived_row_with_a_period_it_names_no_document_for_is_unsourced(own_named):
+    """Audit of this PR: a derived row whose own period recorded no source
+    cited its comparison period's filings alone, as if they were its source
+    (and the reverse). Part of a claim sourced is not the claim sourced."""
+    ds = _stretch_with_sources()
+    [row] = _with_row_source(ds, "x")[1].narrative_evidence
+    other = next(d for d in ds.documents if d.fiscal_label != row.fiscal_label and d.source)
+    own = next(d for d in ds.documents if d.fiscal_label == row.fiscal_label and d.source)
+    named = f"{row.fiscal_label} documents: {own.source}"
+    unnamed = f"{other.fiscal_label} documents (no source recorded)"
+    source = (f"derived from {named}; compared with {unnamed}" if own_named else
+              f"derived from {row.fiscal_label} documents (no source recorded); "
+              f"compared with {other.fiscal_label} documents: {other.source}")
+    _row, result = _with_row_source(ds, source)
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    assert [i for i in doc.items if i.kind == "narrative_evidence"] == []
+    [u] = [u for u in doc.unsourced if u.kind == "narrative_evidence"]
+    gap = unnamed if own_named else f"{row.fiscal_label} documents (no source recorded)"
+    assert u.reason == (f"source recorded as {source!r}; {gap!r} names no document, "
+                        "so the documents it does name are part of its source, not all")
+
+
 def test_a_row_that_names_one_of_its_periods_documents_cites_only_that_one():
     ds = _two_documents_in_one_period()
     row, result = _with_row_source(ds, "10-Q ACC-B")
