@@ -108,7 +108,7 @@ def _lookup_metric_value(
         return None, (
             f"metric '{metric_name}' has {len(entries)} results for "
             f"{period.fiscal_label}; refusing to pick one"
-        ), True
+        ), False
     if entries:
         (m,) = entries
         basis = "" if m.fiscal_label == period.fiscal_label else "TTM ending "
@@ -259,8 +259,11 @@ def propose_resolution(
     `resolve --commit` step); this function never mutates state.
 
     States (round-10 findings 4 & 5):
-      pending       — data not yet available OR source not auto-verifiable;
-                      RETRY LATER; not committed by `resolve --commit`.
+      pending       — data not yet available OR source not auto-verifiable,
+                      OR the window names more than one period (the data's
+                      ambiguity, not the assumption's: a later fetch may
+                      name one); RETRY LATER; not committed by
+                      `resolve --commit`.
       met/violated  — terminal; committed.
       unresolvable  — the assumption spec is structurally undecidable given
                       this resolver (unknown metric name, unsupported
@@ -272,10 +275,12 @@ def propose_resolution(
         # (Hermes finding 4: violated at 1.0 one way, met at 100.0 the
         # other). Refused here, where the label is used, rather than at the
         # schema: callers swallow a schema error, which would turn the
-        # refusal into a silent gap.
+        # refusal into a silent gap. Pending, not unresolvable: the
+        # assumption is sound, the data is ambiguous, and a terminal state
+        # would close it for good on a mapper artifact.
         return Resolution(
             assumption_index=assumption_index,
-            state="unresolvable",
+            state="pending",
             note=_ambiguous(matches[0].fiscal_label, matches),
         )
     period = matches[0] if matches else None

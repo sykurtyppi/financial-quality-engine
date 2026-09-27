@@ -437,10 +437,12 @@ class TestAmbiguousWindow:
     AMBIGUOUS = "FY2026Q1 names 2 periods (2026-03-31, 2026-04-01); refusing to pick one"
 
     @pytest.mark.parametrize("reverse", [False, True])
-    def test_either_input_order_is_unresolvable_with_the_reason(self, reverse):
+    def test_either_input_order_is_pending_with_the_reason(self, reverse):
+        """Pending, never met/violated, and not unresolvable either: that is
+        terminal, and would close a sound assumption on a data artifact."""
         a = _a(metric="revenue", comparator=">", threshold=50.0, window="FY2026Q1")
         r = propose_resolution(a, _twins(reverse))
-        assert r.state == "unresolvable"
+        assert r.state == "pending"
         assert r.note == self.AMBIGUOUS
         assert r.observed is None and r.at is None and r.source_accession is None
 
@@ -459,7 +461,7 @@ class TestAmbiguousWindow:
         assert [m.fiscal_label for m in bundle.history["capex_to_revenue"]] == ["FY2026Q1"] * 2
         a = _a(metric="capex_to_revenue", comparator=">", threshold=0.5, window="FY2026Q1")
         r = propose_resolution(a, ds, bundle)
-        assert (r.state, r.note) == ("unresolvable", self.AMBIGUOUS)
+        assert (r.state, r.note) == ("pending", self.AMBIGUOUS)
 
     def test_a_unique_label_beside_the_twins_resolves_as_before(self):
         ds = _twins()
@@ -479,7 +481,7 @@ class TestAmbiguousWindow:
                     for label, v in (("FY2026Q1", 1.0), ("TTM FY2026Q1", 100.0)))
         bundle = MetricsBundle(history={"dso": [one, two]})
         value, note, structural = _lookup_metric_value("dso", period, bundle)
-        assert (value, structural) == (None, True)
+        assert (value, structural) == (None, False)  # retryable, not terminal
         assert note == "metric 'dso' has 2 results for FY2026Q1; refusing to pick one"
         assert _engine_metric("dso", period, bundle) is None
         single = MetricsBundle(history={"dso": [two]})
