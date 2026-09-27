@@ -18,6 +18,7 @@ from app.schemas.ledger import (
     Provenance,
     ValidationStatus,
 )
+from app.schemas.report import MetricNarrativeMismatch, NarrativeEvidence
 from app.services.backtesting.events import fetch_entity_events
 from app.services.ingestion.fields import FIELDS
 from app.services.metrics_registry import (
@@ -28,7 +29,7 @@ from app.services.metrics_registry import (
     USABLE_CAPEX_INTENSITY,
     Basis,
 )
-from app.services.narrative.evidence import NOT_LOCATED
+from app.services.narrative.evidence import NO_SOURCE_RECORDED, NOT_LOCATED
 from app.services.reporting.ledger import _cited, _id, build_ledger
 from tests.fixtures.companies import stretch_dataset
 
@@ -151,17 +152,130 @@ def test_validation_follows_the_cards_tiers():
     assert status[("narrative_evidence", "adjustment_recurrence")] is ValidationStatus.DIRECTIONAL
 
 
-def test_a_row_not_located_cites_its_periods_documents_and_says_so():
+def _two_documents_in_one_period():
+    """The golden run with a second document (B) in the FY2025Q4 period
+    beside its own (A): a row that names neither must not inherit either."""
     ds = _stretch_with_sources()
+    [a] = [d for d in ds.documents if d.fiscal_label == "FY2025Q4"]
+    a = a.model_copy(update=dict(source="8-K ACC-A EX-99.1", accession="ACC-A"))
+    b = a.model_copy(update=dict(source="10-Q ACC-B", accession="ACC-B", form="10-Q"))
+    ds.documents = [d for d in ds.documents if d.fiscal_label != "FY2025Q4"] + [a, b]
+    return ds
+
+
+def _with_row_source(ds, source: str, evidence_id: str = "NE-010"):
+    """The run's `evidence_id` row, alone and with `source`, and no mismatch."""
     result = analyze(ds)
-    row = result.narrative_evidence[0].model_copy(update=dict(source=NOT_LOCATED))
-    result = result.model_copy(update=dict(narrative_evidence=[row], mismatches=[]))
+    [row] = [r for r in result.narrative_evidence if r.evidence_id == evidence_id]
+    row = row.model_copy(update=dict(source=source))
+    return row, result.model_copy(update=dict(narrative_evidence=[row], mismatches=[]))
+
+
+@pytest.mark.parametrize("source", [
+    "missing source",
+    NOT_LOCATED,
+    NO_SOURCE_RECORDED,
+    "derived from FY2025Q4 documents (no source recorded)",
+])
+def test_a_row_naming_no_document_is_unsourced_not_given_its_periods_documents(source):
+    """Hermes deep audit: a row whose source names no document used to cite
+    every document of its period as ordinary filing provenance. It is now
+    listed as unsourced; the period's accessions appear only in the reason."""
+    ds = _two_documents_in_one_period()
+    row, result = _with_row_source(ds, source)
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    assert [i for i in doc.items if i.kind == "narrative_evidence"] == []
+    [u] = [u for u in doc.unsourced if u.kind == "narrative_evidence"]
+    assert (u.plane, u.subject, u.claim) == (Plane.NARRATIVE, row.detector, row.detail)
+    assert u.reason == (f"source recorded as {source!r}; no single document identified "
+                        "(period documents: ACC-A, ACC-B)")
+    # The narrative metrics of the period still list its documents (they are
+    # computed from all of them); nothing else may.
+    cited = {p.accession for i in doc.items if i.kind != "metric" for p in i.provenance}
+    assert not cited & {"ACC-A", "ACC-B"}
+
+
+def test_a_row_naming_no_document_in_a_period_without_documents_says_none():
+    ds = _stretch_with_sources()
+    _row, result = _with_row_source(ds, NOT_LOCATED)
+    ds.documents = [d for d in ds.documents if d.fiscal_label != "FY2025Q4"]
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    [u] = [u for u in doc.unsourced if u.kind == "narrative_evidence"]
+    assert u.reason == (f"source recorded as {NOT_LOCATED!r}; no single document identified "
+                        "(period documents: none)")
+
+
+def test_a_row_that_names_one_of_its_periods_documents_cites_only_that_one():
+    ds = _two_documents_in_one_period()
+    row, result = _with_row_source(ds, "10-Q ACC-B")
     doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
     [item] = [i for i in doc.items if i.kind == "narrative_evidence"]
-    period = {d.accession for d in ds.documents if d.fiscal_label == row.fiscal_label}
-    assert set(item.accessions()) == period
-    assert "provenance lists the period's documents" in item.note
-    assert all(p.excerpt is None for p in item.provenance)  # not claimed as the quote's home
+    assert item.accessions() == ["ACC-B"] and item.note is None
+    assert [p.excerpt for p in item.provenance] == [row.excerpt]
+    assert [u for u in doc.unsourced if u.kind == "narrative_evidence"] == []
+
+
+def test_a_mismatch_whose_narrative_row_is_unsourced_is_unsourced_too():
+    """The golden mismatch rests on its narrative row alone (its metrics
+    carry no per-value provenance). With the row unsourced it has nothing to
+    derive from: it is listed with the reason, never pointing at an id the
+    ledger does not hold."""
+    ds = _two_documents_in_one_period()
+    result = analyze(ds)
+    [mismatch] = result.mismatches
+    rows = [r.model_copy(update=dict(source=NOT_LOCATED))
+            if r.evidence_id == mismatch.narrative_evidence_id else r
+            for r in result.narrative_evidence]
+    result = result.model_copy(update=dict(narrative_evidence=rows))
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    assert [i for i in doc.items if i.kind == "mismatch"] == []
+    [u] = [u for u in doc.unsourced if u.kind == "mismatch"]
+    assert (u.plane, u.subject, u.claim) == (Plane.CONSISTENCY, mismatch.kind, mismatch.detail)
+    assert u.reason == (
+        f"its narrative row {mismatch.narrative_evidence_id} is not in the ledger, "
+        f"nor are its metrics ({', '.join(mismatch.metric_names)})"
+    )
+    LedgerDocument.model_validate_json(doc.model_dump_json())  # no dangling derivation
+    # A mismatch naming no metric says so rather than listing nothing.
+    bare = result.model_copy(update=dict(
+        mismatches=[mismatch.model_copy(update=dict(metric_names=[]))]))
+    doc = build_ledger(result=bare, dataset=ds, ticker="stretch", report_date=DAY)
+    [u] = [u for u in doc.unsourced if u.kind == "mismatch"]
+    assert u.reason.endswith("nor are its metrics (none named)")
+
+
+def test_a_mismatch_whose_narrative_row_is_unsourced_derives_from_its_metrics_and_says_so():
+    import json
+    from pathlib import Path
+
+    from app.services.ingestion.companyfacts_mapper import build_dataset
+
+    facts = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "real"
+                        / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    result = analyze(ds)
+    metric_ids = {i.subject: i.id for i in build_ledger(
+        result=result, dataset=ds, ticker="KO", report_date=DAY).items if i.kind == "metric"}
+    names = [n for n in metric_ids if n in FINANCIAL_METRICS][:2]
+    assert len(names) == 2
+    rows = [NarrativeEvidence(
+        evidence_id="NE-900", detector="demand_narrative",
+        fiscal_label=result.evidence[0].fiscal_label, comparison="point", source=NOT_LOCATED,
+        excerpt="demand remains robust", confidence="medium", detail="narrative says demand up",
+    )]
+    mismatch = MetricNarrativeMismatch(
+        kind="demand_narrative_vs_working_capital", detail="narrative up, metrics down",
+        fiscal_label=result.evidence[0].fiscal_label, narrative_evidence_id="NE-900",
+        metric_names=[*names, "not_in_this_run"], confidence="medium",
+    )
+    result = result.model_copy(update=dict(narrative_evidence=rows, mismatches=[mismatch]))
+    doc = build_ledger(result=result, dataset=ds, ticker="KO", report_date=DAY)
+    [item] = [i for i in doc.items if i.kind == "mismatch"]
+    assert item.derived_from == tuple(metric_ids[n] for n in names)
+    assert item.note == ("its narrative row NE-900 is not in the ledger: "
+                         "it derives from its metrics only")
+    assert [u.kind for u in doc.unsourced if u.kind in ("mismatch", "narrative_evidence")] == [
+        "narrative_evidence"]
 
 
 # --- inputs the ledger needs ----------------------------------------------------

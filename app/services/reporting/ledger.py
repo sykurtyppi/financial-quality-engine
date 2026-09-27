@@ -232,26 +232,28 @@ def _narrative_items(
     ids: dict[str, str] = {}
     for row in rows:
         cited = _cited(row.source, documents)
-        note = None
         quoted = not row.source.startswith("derived from")
-        if not cited:
-            # Not located in one document, or no source recorded: the
-            # period's documents are where it came from — say so.
-            cited = [d for d in documents if d.fiscal_label == row.fiscal_label]
-            note = f"source recorded as {row.source!r}; provenance lists the period's documents"
-            quoted = False
         prov = [
             p for d in cited
             if (p := _document(d, role=d.doc_type.value, excerpt=row.excerpt if quoted else None))
             is not None
         ]
+        if cited:
+            why = f"source recorded as {row.source!r} and no document names its filing"
+        else:
+            # Not located in one document, or no source recorded: the
+            # period's documents are candidates, not its source — named in
+            # the reason only, never cited.
+            period = [d.accession for d in documents
+                      if d.fiscal_label == row.fiscal_label and d.accession]
+            why = (f"source recorded as {row.source!r}; no single document identified "
+                   f"(period documents: {', '.join(period) or 'none'})")
         item_id = _id("narrative_evidence", row.detector, row.fiscal_label, row.comparison,
                       row.excerpt)
         added = b.add(
             item_id, plane=Plane.NARRATIVE, kind="narrative_evidence", subject=row.detector,
             claim=row.detail, fiscal_label=row.fiscal_label, provenance=tuple(prov),
-            validation_status=_status({row.detector}), note=note,
-            why_unsourced=f"source recorded as {row.source!r} and no document names its filing",
+            validation_status=_status({row.detector}), why_unsourced=why,
         )
         if added is not None:
             ids[row.evidence_id] = added
@@ -261,16 +263,27 @@ def _narrative_items(
 def _mismatch_items(
     b: _Builder, result: AnalysisResult, ne_ids: dict[str, str], metric_ids: dict[str, str]
 ) -> None:
+    """One item per mismatch, derived from the ledger items of its narrative
+    row and its metrics. A row that is not in the ledger (listed as
+    unsourced) is not derived from — the item says so, and with nothing
+    left to rest on it is itself unsourced."""
     for m in result.mismatches:
-        derived = [ne_ids[m.narrative_evidence_id]] if m.narrative_evidence_id in ne_ids else []
+        row = ne_ids.get(m.narrative_evidence_id)
+        derived = [row] if row else []
         derived += [metric_ids[n] for n in m.metric_names if n in metric_ids]
+        note = None
+        if row is None:
+            note = (f"its narrative row {m.narrative_evidence_id} is not in the ledger: "
+                    "it derives from its metrics only")
+        metrics = ", ".join(m.metric_names) or "none named"
+        why = (f"its narrative row {m.narrative_evidence_id} is not in the ledger, "
+               f"nor are its metrics ({metrics})")
         b.add(
             _id("mismatch", m.kind, m.fiscal_label, m.narrative_evidence_id),
             plane=Plane.CONSISTENCY, kind="mismatch", subject=m.kind, claim=m.detail,
             fiscal_label=m.fiscal_label, inputs=dict(m.metric_values),
-            derived_from=tuple(dict.fromkeys(derived)),
-            validation_status=_status(m.metric_names),
-            why_unsourced="neither its narrative row nor its metrics are in the ledger",
+            derived_from=tuple(dict.fromkeys(derived)), note=note,
+            validation_status=_status(m.metric_names), why_unsourced=why,
         )
 
 
