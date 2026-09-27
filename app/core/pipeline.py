@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import scoring_config as cfg
-from app.schemas.financials import CompanyDataset, PeriodFinancials
+from app.schemas.financials import CompanyDataset, PeriodFinancials, PeriodType
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.schemas.report import AnalysisResult, EvidenceEntry, Flag
 from app.services.formulas.registry import MetricsBundle, _year_ago, compute_metrics
@@ -173,9 +173,11 @@ _CHANGE_METRICS = [
 
 YEAR_AGO = "year"  # the same fiscal quarter a year earlier
 SEQUENTIAL = "sequential"  # the previous period; for a seasonal line, a fallback
+EARLIER = "earlier"  # a seasonal fallback across a gap: neither adjacent nor a year back
 _BASIS_NOTE = {
     YEAR_AGO: ", vs the same quarter a year earlier",
     SEQUENTIAL: ", sequential quarters: may be seasonal",
+    EARLIER: ", not the same quarter a year earlier: may be seasonal",
 }
 
 
@@ -220,16 +222,25 @@ def _year_ago_pair(
 def change_pairs(bundle: MetricsBundle, periods: list[PeriodFinancials]) -> list[ChangePair]:
     """What each "Changes since last period" line compares: the one place the
     card's text and its revised-input marks both read."""
+    kind = {p.fiscal_label: p.period_type for p in periods}
     pairs: list[ChangePair] = []
     for name, label, fmt, seasonal in _CHANGE_METRICS:
         history = bundle.history.get(name, [])
+        ok = [k for k, m in enumerate(history) if m.status is MetricStatus.OK]
+        if len(ok) < 2:
+            continue
+        prev, cur = history[ok[-2]], history[ok[-1]]
+        # Consecutive fiscal years already compare the same period a year
+        # earlier: only a quarterly value is seasonal.
+        seasonal = seasonal and kind.get(cur.fiscal_label) is PeriodType.QUARTER
         found = _year_ago_pair(history, periods) if seasonal else None
         if found is not None:
             pairs.append(ChangePair(name, label, fmt, *found, YEAR_AGO, seasonal))
             continue
-        series = [m for m in history if m.status is MetricStatus.OK]
-        if len(series) >= 2:
-            pairs.append(ChangePair(name, label, fmt, series[-2], series[-1], SEQUENTIAL, seasonal))
+        # The fallback compares the last two values; they are sequential only
+        # when no period between them went unmeasured.
+        basis = SEQUENTIAL if ok[-1] - ok[-2] == 1 else EARLIER
+        pairs.append(ChangePair(name, label, fmt, prev, cur, basis, seasonal))
     return pairs
 
 

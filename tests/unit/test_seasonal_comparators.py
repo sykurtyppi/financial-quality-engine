@@ -196,6 +196,31 @@ class TestChangeLines:
         assert "(FY2025Q3) -> " in dso
         assert dso.endswith(", sequential quarters: may be seasonal")
 
+    def test_a_fallback_across_a_gap_is_not_called_sequential(self):
+        """With no year-ago value and a quarter missing between the last two
+        values, they are neither a year apart nor adjacent."""
+        periods = _seasonal_retailer()
+        for i in (3, 6):  # FY2024Q4 (the year-ago quarter) and FY2025Q3
+            periods[i] = periods[i].model_copy(update={"receivables": None})
+        dso = self._lines(periods)["Days sales outstanding"]
+        assert "(FY2025Q2) -> " in dso and "(FY2025Q4)" in dso
+        assert dso.endswith(", not the same quarter a year earlier: may be seasonal")
+
+    def test_annual_periods_carry_no_seasonal_note(self):
+        """Consecutive fiscal years already compare the same period a year
+        earlier."""
+        periods = [
+            PeriodFinancials(period_end=date(y, 12, 31), period_type=PeriodType.ANNUAL,
+                             fiscal_label=f"FY{y}", revenue=400.0 + y - 2020,
+                             receivables=200.0, net_income=40.0, cfo=48.0, capex=20.0,
+                             total_assets=1600.0)
+            for y in range(2020, 2026)
+        ]
+        lines = self._lines(periods)
+        for label in ("Days sales outstanding", "Capex / Revenue"):
+            assert lines[label].endswith("(FY2025)"), lines[label]
+            assert "(FY2024) -> " in lines[label]
+
     def test_the_ttm_and_yoy_lines_are_unchanged(self):
         lines = self._lines(_seasonal_retailer())
         spread = lines["Receivables-vs-revenue growth spread"]
