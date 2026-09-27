@@ -60,31 +60,12 @@ function = "scan_restatements"
 reason = "With `material` empty, `material_amendments` is empty, `amendment` is None and `current not in material` holds, so the emit guard just below (`current not in material and amendment is None`) skips the period the same way."
 
 [[exclusion]]
-kind = "accepted"
-path = "app/services/ingestion/restatements.py"
-operator = "const"
-source = "_MAX_ROWS = 20  # spinoff/discontinued-ops re-presentation can produce many rows"
-reason = "A display cap, and NOT equivalent: with 21 rows, 21 render instead of 20 plus '+1 more'. Rows past the cap are counted in the table's '+N more' line (pinned at the cap, whatever its value, by test_long_tables_say_how_many_rows_were_left_out), so no footprint goes unreported; the value 20 is a readability choice, not a finding."
-owner = "repo owner"
-review_by = 2026-11-20
-
-[[exclusion]]
 kind = "equivalent"
 path = "app/services/ingestion/companyfacts_mapper.py"
 operator = "cmp"
 source = "f for f in self.by_key.values() if f.end == qend and f.days and f.days > QTD_DAYS[1]"
 change = "> -> >="
 reason = "A fact of exactly QTD_DAYS[1] days ending at the quarter end is a direct quarter: `_find(qend, *QTD_DAYS)` above is inclusive and takes it first, and this year-to-date branch runs only when no direct quarter exists, so no such fact ever reaches this filter."
-
-[[exclusion]]
-kind = "accepted"
-path = "app/services/ingestion/companyfacts_mapper.py"
-operator = "cmp"
-source = "if all(p in values and annual.start <= p for p in prior):"
-change = "<= -> <"
-reason = "NOT equivalent — unreachable on well-formed filings: it differs only when one of the three prior quarter ends falls ON the annual period's first day, i.e. a quarter ending the day the fiscal year starts. A fiscal year starts the day after the preceding quarter ends, so no filing we know of produces it. Revisit if a real payload does."
-owner = "repo owner"
-review_by = 2026-11-20
 
 [[exclusion]]
 kind = "equivalent"
@@ -100,16 +81,6 @@ operator = "continue"
 source = "except (KeyError, ValueError, TypeError): continue"
 function = "_collect"
 reason = "The `continue` is the last statement of the loop body: after the handler runs, `pass` falls through to the next iteration exactly as `continue` jumps to it."
-
-[[exclusion]]
-kind = "accepted"
-path = "app/services/ingestion/restatements.py"
-operator = "cmp"
-source = "if (end - row_end).days <= 400 and row_end <= end:"
-change = "<= -> < in `(end - row_end).days <= 400`"
-reason = "NOT equivalent: a fact ending exactly 400 days before a derived quarter no longer adds its filing date as a rebuild date. 400 is a lookback buffer, not a boundary of the method: the facts a derived quarter is built from (the year-to-date or annual minuend, the prior year-to-date, the three prior quarters, composite parts) end at most about 280 days before it. An extra rebuild date can change the result only if the mapper's tag choice flips on that date."
-owner = "repo owner"
-review_by = 2026-11-20
 
 [[exclusion]]
 kind = "equivalent"

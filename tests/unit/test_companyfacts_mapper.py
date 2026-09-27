@@ -489,3 +489,37 @@ class TestMutationBacklog:
         p.add("Assets", rows)
         ds, _diag = build_dataset(p.data, "MIX", n_quarters=8)
         assert {x.total_assets for x in ds.periods} == {1000.0}
+
+    @pytest.mark.parametrize("gap_days", [0, 1])
+    def test_a_prior_quarter_ending_on_the_annual_start_is_inside_the_year(self, gap_days):
+        # fy_minus_3q: `annual.start <= p` -> `<` (formerly an `accepted`
+        # survivor, Hermes audit item 8). With 2024-03-31 missing from the
+        # balance sheet, the three quarter ends before 2024-12-31 are
+        # 2023-12-31, 2024-06-30 and 2024-09-30, and the annual figure starts
+        # ON the first of them (gap_days=0) or the day before it (gap_days=1,
+        # the control). Either way the quarter end is on or after the start,
+        # so today Q4 is derived: 5000 - (300 + 200 + 100). This pins that
+        # current behaviour; it does not claim a quarter ending the day a
+        # fiscal year starts is well-formed.
+        from tests.fixtures.selection_cases import (
+            QUARTER_ENDS,
+            Payload,
+            duration,
+            instant,
+            quarter,
+        )
+
+        q4_23, q1_24, q2_24, q3_24, q4_24 = QUARTER_ENDS[7:12]
+        assert (q4_23, q1_24, q4_24) == (date(2023, 12, 31), date(2024, 3, 31), date(2024, 12, 31))
+        ends = [e for e in QUARTER_ENDS if e != q1_24]
+        p = Payload("Year Start Co")
+        p.add("Assets", [instant(e, 1.0) for e in ends])
+        rows = [quarter(e, 10.0) for e in ends if e not in (q4_23, q2_24, q3_24, q4_24)]
+        rows += [quarter(q4_23, 300.0), quarter(q2_24, 200.0), quarter(q3_24, 100.0)]
+        rows.append(duration(q4_23 - timedelta(days=gap_days), q4_24, 5000.0, form="10-K"))
+        p.add("Revenues", rows)
+        ds, diag = build_dataset(p.data, "YS", n_quarters=8)
+        (q4,) = [x for x in ds.periods if x.period_end == q4_24]
+        assert q4.revenue == pytest.approx(4400.0)
+        src = diag.field_by_name("revenue").period_sources[q4_24.isoformat()]
+        assert src.method == "fy_minus_3q"
