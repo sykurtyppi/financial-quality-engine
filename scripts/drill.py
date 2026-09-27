@@ -352,15 +352,21 @@ def _vintage_files(ws: Workspace) -> dict[str, bytes]:
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _manifest_prefix(before: dict[str, bytes], after: dict[str, bytes]) -> bool:
-    """Every manifest's snapshot list after is the list before, extended."""
+def _manifest_keeps(before: dict[str, bytes], after: dict[str, bytes]) -> bool:
+    """Every manifest still lists each snapshot it listed before, unchanged.
+
+    Not "first": the manifest orders snapshots by (captured, file), and a
+    file is named by its date and content hash, so two taken on one day sort
+    by hash. The amendment's payload carries today's date, so on some days
+    it sorted before the baseline and the old prefix check failed while the
+    store was intact (seen on 2026-09-27)."""
     names = [k for k in before if k.endswith("manifest.json")]
     for k in names:
         if k not in after:
             return False
         old = json.loads(before[k]).get("snapshots", [])
         new = json.loads(after[k]).get("snapshots", [])
-        if new[:len(old)] != old:
+        if not old or any(entry not in new for entry in old):
             return False
     return bool(names)
 
@@ -622,8 +628,8 @@ class Drill:
         step.check("vintage store is append-only: step-1 snapshots byte-identical",
                    bool(snaps_before) and all(snaps_after.get(k) == v for k, v in snaps_before.items()),
                    f"{len(snaps_before)} -> {len(snaps_after)} snapshot(s)")
-        step.check("the manifest's step-1 entries are unchanged and first",
-                   _manifest_prefix(before, after))
+        step.check("the manifest keeps every step-1 entry unchanged",
+                   _manifest_keeps(before, after))
         step.check("the amendment's snapshot is kept after the rollback",
                    len(snaps_after) > len(snaps_before))
 
