@@ -284,6 +284,18 @@ def _observe(man: dict, day: date, sha: str) -> None:
     obs.append({"date": day.isoformat(), "sha256": sha})
 
 
+def _last_seen(man: dict) -> str:
+    """The document as it stood at the last check: the last observation.
+    Not the manifest's last snapshot, which is ordered by (captured, file):
+    two snapshots taken on one day sort by content hash, not by when they
+    were seen. A store older than observations falls back to that order,
+    the only one it has."""
+    observed = man.get("observations") or []
+    if observed and observed[-1].get("sha256"):
+        return str(observed[-1]["sha256"])
+    return man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
+
+
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -420,7 +432,7 @@ def _store(
         _sweep_orphans(cik_dir(cik, root))
         man = read_manifest(cik, root)
         if not force and man.get("last_checked") == today.isoformat():
-            newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
+            newest = _last_seen(man)
             if _problem_days(cik, root):
                 # Today's attempt archived nothing (any success today would
                 # have cleared the marker). The gate stays closed — a broken
