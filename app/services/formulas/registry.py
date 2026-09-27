@@ -242,8 +242,9 @@ def compute_metrics(dataset: CompanyDataset) -> MetricsBundle:
             latest.extend(pair)
 
     # Series-level metrics computed on full history. A per-period history
-    # entry j is periods[j + 1] (the loop starts at the second period).
-    ends = [p.period_end for p in periods[1:]]
+    # entry j is periods[j + 1] (the loop starts at the second period). The
+    # same-quarter walk is dated for quarters; annual periods keep the stride.
+    ends = [p.period_end for p in periods[1:]] if working_capital.quarterly(periods) else None
     series_metrics = [
         accruals.accrual_trend(history.get("total_accruals", [])),
         working_capital.seasonal_trend_change("dso_trend", history.get("dso", []), ends),

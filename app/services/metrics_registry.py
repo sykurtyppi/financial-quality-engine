@@ -114,7 +114,8 @@ class Select(StrEnum):
     # (`accruals.accrual_trend`, `working_capital.trend_change`)
     ALL_OK = "all_ok"
     # the latest entry and the same fiscal quarter in prior years, OK only:
-    # `working_capital.seasonal_trend_change` (positional stride of 4)
+    # `working_capital.seasonal_trend_change` (every 4th entry back while each
+    # step is a year, `same_quarter_priors`; annual periods: every 4th)
     SAME_QUARTER = "same_quarter"
 
 

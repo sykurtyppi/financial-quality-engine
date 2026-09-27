@@ -25,7 +25,7 @@ from app.schemas.financials import CompanyDataset, PeriodFinancials, SourcedValu
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas import ttm
 from app.services.formulas.registry import MetricsBundle, _year_ago
-from app.services.formulas.working_capital import same_quarter_priors
+from app.services.formulas.working_capital import quarterly, same_quarter_priors
 from app.services.ingestion.fields import FIELDS
 from app.services.metrics_registry import (
     BASIS,
@@ -167,12 +167,16 @@ def _series_sources(
     if select is Select.SAME_QUARTER:
         # `seasonal_trend_change`: the latest entry, then every 4th one back
         # while each step is a year (`same_quarter_priors`), dated as the
-        # registry dates them — entry k is period k + 1. A history of another
-        # length is not this dataset's and cannot be dated.
-        dated = [p.period_end for p in dataset.sorted_periods()[1:]]
+        # registry dates them — entry k is period k + 1; annual periods keep
+        # the plain stride. A history of another length is not this dataset's
+        # and cannot be dated.
+        periods = dataset.sorted_periods()
+        dated = [p.period_end for p in periods[1:]]
         if len(full) != len(dated):
             return {}
-        read = [history[-1]] + [history[k] for k in same_quarter_priors(dated[: len(history)])]
+        back = (same_quarter_priors(dated[: len(history)]) if quarterly(periods)
+                else range(len(history) - 5, -1, -4))
+        read = [history[-1]] + [history[k] for k in back]
     else:
         read = history
     out: dict[str, list[SourcedValue]] = {}

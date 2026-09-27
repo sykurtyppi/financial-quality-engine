@@ -30,6 +30,13 @@ def a_year_apart(earlier: date, later: date) -> bool:
     return MIN_YEAR_GAP_DAYS <= (later - earlier).days <= MAX_YEAR_GAP_DAYS
 
 
+def quarterly(periods: Sequence[PeriodFinancials]) -> bool:
+    """Whether "four periods back" should mean "a year back": only for
+    quarters. Four fiscal years back is four years back, and the day rule
+    would refuse every annual comparison."""
+    return bool(periods) and all(p.period_type is PeriodType.QUARTER for p in periods)
+
+
 def same_quarter_priors(ends: Sequence[date]) -> list[int]:
     """Indices of the same fiscal quarter in prior years, newest first: every
     4th entry back from the last, while each step spans a year. The walk

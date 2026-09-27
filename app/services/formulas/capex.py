@@ -9,6 +9,7 @@ from app.services.formulas.working_capital import (
     MAX_YEAR_GAP_DAYS,
     MIN_YEAR_GAP_DAYS,
     a_year_apart,
+    quarterly,
 )
 
 
@@ -149,8 +150,9 @@ def incremental_revenue_per_capex(series: list[PeriodFinancials], lookback: int 
     A coarse capital-efficiency proxy: capex often converts to revenue with a
     lag longer than the window, so LOW values are a review prompt, not a verdict.
 
-    The window is a year of quarters: its first and last period ends must be
-    a year apart by the registry's year-ago rule (330-400 days), else no value.
+    A window of quarters is a year: its first and last period ends must be a
+    year apart by the registry's year-ago rule (330-400 days), else no value.
+    A window of fiscal years spans `lookback` years, as it always has.
     """
     label = series[-1].fiscal_label if series else "n/a"
     if len(series) < lookback + 1:
@@ -165,7 +167,7 @@ def incremental_revenue_per_capex(series: list[PeriodFinancials], lookback: int 
     # Revenue "added over the year" needs its start a year back: counting
     # periods is not enough, since across a missing year t-4 is two years
     # earlier and the growth is two years' (Hermes finding 5).
-    if not a_year_apart(window[0].period_end, window[-1].period_end):
+    if quarterly(window) and not a_year_apart(window[0].period_end, window[-1].period_end):
         gap = (window[-1].period_end - window[0].period_end).days
         return MetricResult(
             name="incremental_revenue_per_capex",

@@ -232,3 +232,60 @@ def test_incremental_revenue_per_capex_refused_cites_nothing():
     m = bundle.get_latest("incremental_revenue_per_capex")
     assert m.status is MetricStatus.MISSING_DATA
     assert sources_for(ds, m, bundle=bundle) == {}
+
+
+# --- the rule is about quarters: annual periods keep their stride ---------------
+
+
+def _annual_stretch() -> CompanyDataset:
+    """The golden dataset as eight fiscal years (the API accepts annual
+    periods): consecutive years are a year apart by construction."""
+    from tests.fixtures.companies import stretch_dataset
+
+    ds = stretch_dataset()
+    ds.periods = [
+        p.model_copy(update=dict(period_end=date(2015 + k, 12, 31), fiscal_label=f"FY{2015 + k}",
+                                 period_type=PeriodType.ANNUAL))
+        for k, p in enumerate(ds.sorted_periods())
+    ]
+    return ds
+
+
+def test_annual_periods_are_not_refused_by_the_quarterly_year_rule():
+    """Review of this PR: the 330-400-day check between entries four apart
+    switched off DSO/DIO trends and incremental revenue per capex on every
+    annual dataset (FY2022 against FY2018 is 1461 days), and the overall
+    score with them. Four periods back is four years back there, as before."""
+    ds = _annual_stretch()
+    bundle = registry.compute_metrics(ds)
+    by = {m.name: m for m in bundle.latest}
+    for name in ("dso_trend", "dio_trend", "incremental_revenue_per_capex"):
+        assert by[name].status is MetricStatus.OK, (name, by[name].missing_fields)
+    # The positional stride, as on the base: history entries 6 and 2.
+    assert by["dso_trend"].inputs["n_prior_years"] == 1.0
+    from app.core.pipeline import analyze
+
+    assert analyze(ds).overall is not None
+
+
+def test_annual_provenance_cites_the_stride_the_formula_read():
+    """A real fixture's periods relabelled as fiscal years (their sourced
+    values kept): the ledger cites entries 4 apart, as the formula reads."""
+    import json
+    from pathlib import Path
+
+    from app.services.ingestion.companyfacts_mapper import build_dataset
+
+    real = Path(__file__).resolve().parents[1] / "fixtures" / "real"
+    ds, _ = build_dataset(json.loads((real / "companyfacts_KO_trimmed.json").read_text()), "KO")
+    ds.periods = [
+        p.model_copy(update=dict(period_end=date(2015 + k, 12, 31), fiscal_label=f"FY{2015 + k}",
+                                 period_type=PeriodType.ANNUAL))
+        for k, p in enumerate(ds.sorted_periods())
+    ]
+    bundle = registry.compute_metrics(ds)
+    dso = next(m for m in bundle.latest if m.name == "dso_trend")
+    assert dso.status is MetricStatus.OK
+    labels = {key.split("[")[1].split("]")[0] for key in sources_for(ds, dso, bundle=bundle)}
+    last = len(ds.periods) - 1
+    assert labels == {f"FY{2015 + k}" for k in range(last, 0, -4)}
