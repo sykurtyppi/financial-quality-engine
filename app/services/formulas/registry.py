@@ -33,8 +33,13 @@ YOY_NOTE = "YoY basis: compared to the same fiscal quarter one year earlier."
 YOY_BASELINE_MISSING = "yoy_baseline (same quarter last year)"
 
 # Accepts 52/53-week fiscal years; rejects a mislabeled or skipped year.
-MIN_YEAR_GAP_DAYS = 330
-MAX_YEAR_GAP_DAYS = 400
+# Defined beside `working_capital.same_quarter_priors`, which shares the rule.
+MIN_YEAR_GAP_DAYS = working_capital.MIN_YEAR_GAP_DAYS
+MAX_YEAR_GAP_DAYS = working_capital.MAX_YEAR_GAP_DAYS
+YEAR_AGO_NOTE = (
+    f"No year-ago quarter within {MIN_YEAR_GAP_DAYS}-{MAX_YEAR_GAP_DAYS} days: "
+    "the TTM window four periods back is not the prior year."
+)
 
 #: Metrics that must never be computed on a single quarter's flow. The
 #: basis-lint test asserts registry wiring routes these through ttm.annualize.
@@ -103,8 +108,7 @@ def _year_ago(periods: list[PeriodFinancials], i: int) -> PeriodFinancials | Non
     if i < 4:
         return None
     prior = periods[i - 4]
-    gap = (periods[i].period_end - prior.period_end).days
-    return prior if MIN_YEAR_GAP_DAYS <= gap <= MAX_YEAR_GAP_DAYS else None
+    return prior if working_capital.a_year_apart(prior.period_end, periods[i].period_end) else None
 
 
 def _yoy_metrics(periods: list[PeriodFinancials], i: int) -> list[MetricResult]:
@@ -192,12 +196,22 @@ def _ttm_metrics(periods: list[PeriodFinancials], i: int) -> list[MetricResult]:
         accruals_m,
     ]
 
+    # Beneish compares with the TTM window ending a year earlier. Position
+    # i-4 is that only when the quarter there is a year back: `annualize`
+    # checks the gaps inside each window, never between the two, so across a
+    # missing year SGI compared TTM FY2025Q4 with TTM FY2023Q4 (Hermes
+    # finding 5). Same date rule as the Sloan base above.
     ttm_prev = ttm.annualize(periods, i - 4)
-    if ttm_prev is not None:
+    if ttm_prev is not None and prior_year_q is not None:
         out += beneish.compute_all(ttm_cur, ttm_prev)
     else:
         stub = _empty_all(cur)
-        out += [_mark_window_missing(m) for m in beneish.compute_all(stub, stub)]
+        stubs = beneish.compute_all(stub, stub)
+        if ttm_prev is None:
+            out += [_mark_window_missing(m) for m in stubs]
+        else:  # a window four periods back, but it does not end a year back
+            out += [_with_note(m.model_copy(update={"missing_fields": [ttm.PRIOR_YEAR_MISSING]}),
+                               YEAR_AGO_NOTE) for m in stubs]
 
     return [_with_note(m, TTM_NOTE) for m in out]
 
@@ -227,11 +241,13 @@ def compute_metrics(dataset: CompanyDataset) -> MetricsBundle:
         if i == len(periods) - 1:
             latest.extend(pair)
 
-    # Series-level metrics computed on full history
+    # Series-level metrics computed on full history. A per-period history
+    # entry j is periods[j + 1] (the loop starts at the second period).
+    ends = [p.period_end for p in periods[1:]]
     series_metrics = [
         accruals.accrual_trend(history.get("total_accruals", [])),
-        working_capital.seasonal_trend_change("dso_trend", history.get("dso", [])),
-        working_capital.seasonal_trend_change("dio_trend", history.get("dio", [])),
+        working_capital.seasonal_trend_change("dso_trend", history.get("dso", []), ends),
+        working_capital.seasonal_trend_change("dio_trend", history.get("dio", []), ends),
         working_capital.trend_change("fcf_margin_trend", history.get("fcf_margin", [])),
         capex.capex_intensity_regime_shift(periods),
         capex.incremental_revenue_per_capex(periods),

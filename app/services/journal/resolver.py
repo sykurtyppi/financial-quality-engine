@@ -49,14 +49,30 @@ from app.services.journal.schema_v2 import (
 from app.services.provenance import sources_for
 
 
-def _find_period(dataset: CompanyDataset, window: str) -> PeriodFinancials | None:
-    """Match `window` against `fiscal_label`. Case-insensitive exact match; the
-    fiscal labels the mapper produces are structural (e.g. FY2026Q2)."""
+def _find_periods(dataset: CompanyDataset, window: str) -> list[PeriodFinancials]:
+    """Every period `window` names, by date. Case-insensitive exact match on
+    `fiscal_label`; the labels the mapper produces are structural (e.g.
+    FY2026Q2) but not unique: a quarter is labelled by its effective period,
+    so instants on 03-31 and 04-01 can both be FY2026Q1 (Hermes finding 4)."""
     target = window.strip().upper()
-    for p in dataset.periods:
-        if p.fiscal_label.upper() == target:
-            return p
-    return None
+    hits = [p for p in dataset.periods if p.fiscal_label.upper() == target]
+    return sorted(hits, key=lambda p: p.period_end)
+
+
+def _ambiguous(label: str, periods: list[PeriodFinancials]) -> str:
+    ends = ", ".join(p.period_end.isoformat() for p in periods)
+    return f"{label} names {len(periods)} periods ({ends}); refusing to pick one"
+
+
+def _bundle_entries(
+    metric_name: str, period: PeriodFinancials, bundle: MetricsBundle | None
+) -> list[MetricResult]:
+    """The bundle's results for this metric in this period, under either
+    label spelling (the quarter's own, or the TTM window ending there)."""
+    if bundle is None:
+        return []
+    labels = (period.fiscal_label, f"{TTM_LABEL_PREFIX}{period.fiscal_label}")
+    return [m for m in bundle.history.get(metric_name, []) if m.fiscal_label in labels]
 
 
 def _lookup_metric_value(
@@ -83,25 +99,33 @@ def _lookup_metric_value(
     #    quarter" — so both are accepted, and the note says which basis
     #    answered so the reader knows a twelve-month window was measured
     #    rather than the quarter alone.
-    if bundle is not None:
-        ttm_label = f"{TTM_LABEL_PREFIX}{period.fiscal_label}"
-        for m in bundle.history.get(metric_name, []):
-            if m.fiscal_label in (period.fiscal_label, ttm_label):
-                basis = "TTM ending " if m.fiscal_label == ttm_label else ""
-                if m.status is not MetricStatus.OK or m.value is None:
-                    # NOT_MEANINGFUL is a structural output (denominator=0 etc.)
-                    # — it is deterministic for the current inputs. Anything
-                    # else (missing, error) may resolve when later data arrives.
-                    structural = m.status is MetricStatus.NOT_MEANINGFUL
-                    return None, (
-                        f"metric '{metric_name}' is {m.status.value} in "
-                        f"{basis}{period.fiscal_label}"
-                    ), structural
-                return (
-                    float(m.value),
-                    f"engine metric '{metric_name}' ({basis}{period.fiscal_label})",
-                    False,
-                )
+    #
+    #    Two results under the label are the duplicate-label case again
+    #    (`_find_periods`): the history is in date order, so the first would
+    #    be an arbitrary pick, not this period's. Refused like the period.
+    entries = _bundle_entries(metric_name, period, bundle)
+    if len(entries) > 1:
+        return None, (
+            f"metric '{metric_name}' has {len(entries)} results for "
+            f"{period.fiscal_label}; refusing to pick one"
+        ), True
+    if entries:
+        (m,) = entries
+        basis = "" if m.fiscal_label == period.fiscal_label else "TTM ending "
+        if m.status is not MetricStatus.OK or m.value is None:
+            # NOT_MEANINGFUL is a structural output (denominator=0 etc.)
+            # — it is deterministic for the current inputs. Anything
+            # else (missing, error) may resolve when later data arrives.
+            structural = m.status is MetricStatus.NOT_MEANINGFUL
+            return None, (
+                f"metric '{metric_name}' is {m.status.value} in "
+                f"{basis}{period.fiscal_label}"
+            ), structural
+        return (
+            float(m.value),
+            f"engine metric '{metric_name}' ({basis}{period.fiscal_label})",
+            False,
+        )
 
     # 2. Raw XBRL-mapped field on PeriodFinancials.
     if hasattr(period, metric_name):
@@ -120,11 +144,10 @@ def _engine_metric(
     metric_name: str, period: PeriodFinancials, bundle: MetricsBundle | None
 ) -> MetricResult | None:
     """The bundle's result for this metric in this period (either label
-    spelling, as `_lookup_metric_value` accepts), or None."""
-    if bundle is None:
-        return None
-    labels = (period.fiscal_label, f"{TTM_LABEL_PREFIX}{period.fiscal_label}")
-    return next((m for m in bundle.history.get(metric_name, []) if m.fiscal_label in labels), None)
+    spelling, as `_lookup_metric_value` accepts), or None — also when two
+    results carry the label, which name no one period."""
+    entries = _bundle_entries(metric_name, period, bundle)
+    return entries[0] if len(entries) == 1 else None
 
 
 def _sourced_values(
@@ -243,7 +266,19 @@ def propose_resolution(
                       this resolver (unknown metric name, unsupported
                       comparator, unknown symbolic threshold). Terminal.
     """
-    period = _find_period(dataset, assumption.window)
+    matches = _find_periods(dataset, assumption.window)
+    if len(matches) > 1:
+        # Taking the first match made the outcome depend on input order
+        # (Hermes finding 4: violated at 1.0 one way, met at 100.0 the
+        # other). Refused here, where the label is used, rather than at the
+        # schema: callers swallow a schema error, which would turn the
+        # refusal into a silent gap.
+        return Resolution(
+            assumption_index=assumption_index,
+            state="unresolvable",
+            note=_ambiguous(matches[0].fiscal_label, matches),
+        )
+    period = matches[0] if matches else None
     if period is None:
         # Window not present — filing may simply not have arrived; retryable.
         return Resolution(
