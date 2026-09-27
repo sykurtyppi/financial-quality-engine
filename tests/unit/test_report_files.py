@@ -363,6 +363,29 @@ class TestReadLive:
     def test_no_report_reads_as_none(self, tmp_path):
         assert read_live(tmp_path / "AAPL_2026-09-26.md") is None
 
+    def test_a_directory_without_a_lock_is_read_but_never_published(self, tmp_path, monkeypatch):
+        """A reader of a copied-out report (a directory it cannot write) has
+        no publisher to exclude; a publisher that cannot take the lock must
+        not publish unlocked."""
+        import app.services.reporting.report_files as rf
+
+        report = _run(tmp_path, audit=False)
+        real_open = rf.os.open
+
+        def no_lock(path, *a, **k):
+            if str(path).endswith(".lock"):
+                raise PermissionError("read-only")
+            return real_open(path, *a, **k)
+
+        monkeypatch.setattr(rf.os, "open", no_lock)
+        live = read_live(report)
+        assert live is not None and live.text == "# first report"
+        before = _live(tmp_path)
+        with pytest.raises(PermissionError, match="read-only"):
+            with replacing(report, now=NOW) as staged:
+                _stage(staged, "second")
+        assert _live(tmp_path) == before
+
 
 # --- round-9 independent review: the commit phase itself fails --------------------
 
