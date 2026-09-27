@@ -57,6 +57,7 @@ others each start from a clean copy of the inputs.
 | 9 | Journal path | `openv2`, then `report --no-fresh --no-docs`. A second `report` is refused. `after --disagreed` records the analyst override, and `verify` still passes. |
 | 10 | Rollback | Step 1's run is restored from the archive: report and ledger byte-identical to step 1. The vintage store is append-only (step 1's snapshots are unchanged, and the /A's snapshot is kept). |
 | 11 | A rebuild that fails | After a good report, a rerun whose report build raises once the data is in hand (injected by the drill's shim, `FQE_DRILL_FAIL_BUILD=1`, in the workspace's copy only). It exits nonzero, and the live report and ledger are **byte-identical** to before. Nothing is archived, and no staged file is left. The next rerun succeeds and archives the first run. |
+| 12 | A ledger that cannot be built | After a good report, a rerun whose evidence ledger build raises (`FQE_DRILL_FAIL_LEDGER=1`, in the workspace's copy only). It exits nonzero and says no report was published. The live report and ledger are **byte-identical** to before, nothing is archived, and no staged file is left. Before the fix, the report went live without its ledger and the earlier complete run was archived. |
 
 ### Known issues
 
@@ -103,6 +104,18 @@ Found while the drill was being built. Fixed alongside it:
   checks this. Hermes round 8 found that the first version archived
   *before* building, so a failed rebuild left no live report. An archived
   run keeps its own companions by name, and the archive never overwrites.
+- **A run is published whole, or not at all** (Hermes deep audit, findings
+  1-2). A ledger that could not be built used to be logged, and the report
+  went live without it; the rebuild now fails (`generate_report.py` exits 3,
+  "no report published") and the earlier run stays live, which step 12
+  checks. Every publish stamps the report (its last line, `- Generation:
+  <id>`) and the ledger (`generation_id`) with one id, and holds a
+  cross-process lock on the report (`reports/.staging/<base>.lock`), so two
+  rebuilds of one report publish one after the other, never one's report
+  beside the other's ledger. `run_audit.py` writes the audit with the id it
+  read (`<!-- generation: <id> -->`) and only while that generation is
+  still live; `earnings_brief.audit_for` pairs an audit with its report by
+  that id, not by name alone.
 - **A payload that cannot be mapped crashed.** Too little history raised a
   `ValueError` traceback (exit 1). Now `generate_report.py` prints
   `error: <T>: …` and `no report written: …`, and exits 2, the same
@@ -113,8 +126,9 @@ Found while the drill was being built. Fixed alongside it:
   excluded, as audits already were.
 
 Not changed: there is no clock pin. `fetched_at` and `Data fetched:` carry
-the wall clock, so the determinism check masks exactly those lines and the
-ledger's `fetched_at`. Everything else must match byte for byte.
+the wall clock, and every run is its own generation, so the determinism
+check masks exactly those lines, the `- Generation:` line and the ledger's
+`fetched_at` and `generation_id`. Everything else must match byte for byte.
 
 ## Restoring an earlier run
 
@@ -127,8 +141,10 @@ cp reports/archive/NVDA_2026-11-18.210507.md          reports/NVDA_2026-11-18.md
 cp reports/archive/NVDA_2026-11-18.210507.ledger.json reports/NVDA_2026-11-18.ledger.json
 ```
 
-Copy the archived `_audit.md` back too if the run had one. Step 10 does
-exactly this and checks the restored report and ledger byte for byte. The vintage store is never rolled
+Copy the archived `_audit.md` back too if the run had one. The three files
+name one generation, so they still pair after the copy. Step 10 does
+exactly this and checks the restored report and ledger byte for byte, and
+that they are one generation. The vintage store is never rolled
 back: it is the record of what SEC served, and a rollback of the report does
 not change that.
 

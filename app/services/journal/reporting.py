@@ -89,8 +89,9 @@ def build_report(
     replay): fundamentals from the newest vintage snapshot captured by then,
     else today's payload cut there; documents filed by then; every evidence
     stream cut there (they all anchor on ``generated_on``, which a replay sets
-    to that day). Nothing is archived, the report opens with a replay banner
-    and is written to ``<TICKER>_<day>.replay.md``, never over a real report.
+    to that day). The report opens with a replay banner and is written to
+    ``<TICKER>_<day>.replay.md``, never over a real report; a replay rerun
+    archives the earlier replay as any rebuild does.
     """
     ticker = ticker.upper()
     as_of: date | None = None

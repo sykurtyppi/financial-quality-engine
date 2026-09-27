@@ -699,3 +699,20 @@ class TestCliBuild:
                             lambda prompt, timeout: pytest.fail("must not run"))
         assert brief_cli.cmd_build(self._args(report=str(env / "nope.md"))) == 1
         assert "does not exist" in capsys.readouterr().err
+
+
+def test_an_audit_of_an_earlier_generation_is_not_paired(tmp_path, capsys):
+    """Hermes deep audit, finding 1: `audit_for` paired by file name, so an
+    audit finished after a rebuild was read as the new report's audit."""
+    from app.services.reporting.report_files import replacing
+
+    report = tmp_path / "NVDA_2026-08-26.md"
+    with replacing(report) as staged:
+        staged.ledger.write_text("{}")
+        staged.report.write_text("# report")
+    audit = tmp_path / "NVDA_2026-08-26_audit.md"
+    audit.write_text(f"<!-- generation: {'e' * 32} -->\n\n# audit of an earlier run")
+    assert brief_cli.audit_for(report) is None
+    assert "audited an earlier generation" in capsys.readouterr().err
+    audit.write_text(f"<!-- generation: {staged.generation_id} -->\n\n# its audit")
+    assert brief_cli.audit_for(report) == audit

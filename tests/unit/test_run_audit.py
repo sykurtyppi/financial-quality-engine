@@ -93,3 +93,47 @@ def test_missing_claude_cli_fails_cleanly(tmp_path, monkeypatch):
 
 def test_missing_report_refuses(tmp_path):
     assert run_audit.run_audit(tmp_path / "nope.md") == 1
+
+
+# --- Hermes deep audit, finding 1: an audit belongs to one report generation ------
+
+
+def _published(tmp_path, tag):
+    from app.services.reporting.report_files import replacing
+
+    report = tmp_path / "KTOS_2026-07-31.md"
+    with replacing(report) as staged:
+        staged.ledger.write_text("{}")
+        staged.report.write_text(f"# {tag} report")
+    return report, staged.generation_id
+
+
+def test_the_audit_names_the_generation_it_read(tmp_path, monkeypatch):
+    from app.services.reporting.report_files import read_live
+
+    report, gid = _published(tmp_path, "first")
+    monkeypatch.setattr(
+        run_audit.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="AUDIT TEXT", stderr=""),
+    )
+    assert run_audit.run_audit(report) == 0
+    audit = tmp_path / "KTOS_2026-07-31_audit.md"
+    assert audit.read_text() == f"<!-- generation: {gid} -->\n\nAUDIT TEXT"
+    assert read_live(report).audit == audit
+
+
+def test_a_report_rebuilt_during_the_audit_does_not_get_it(tmp_path, monkeypatch, capsys):
+    """The audit (up to 30 minutes) read one run; a rebuild published another
+    meanwhile, and the audit was written beside it, as its audit."""
+    report, _gid = _published(tmp_path, "first")
+
+    def audit_while_rebuilt(*a, **k):
+        _published(tmp_path, "second")
+        return SimpleNamespace(returncode=0, stdout="AUDIT OF THE FIRST RUN", stderr="")
+
+    monkeypatch.setattr(run_audit.subprocess, "run", audit_while_rebuilt)
+    assert run_audit.run_audit(report) == 1
+    assert not (tmp_path / "KTOS_2026-07-31_audit.md").exists()
+    assert "rebuilt while it ran" in capsys.readouterr().err
+    staging = tmp_path / ".staging"
+    assert [p for p in staging.iterdir() if p.suffix != ".lock"] == []

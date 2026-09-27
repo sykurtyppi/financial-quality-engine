@@ -125,6 +125,10 @@ class LedgerDocument(BaseModel):
     """The ledger of one report run."""
 
     schema_version: str = LEDGER_SCHEMA_VERSION
+    # The run this ledger belongs to, stamped when it is published
+    # (`report_files.replacing`): the report beside it names the same id on
+    # its last line. None for a ledger never published (the API, tests).
+    generation_id: str | None = None
     ticker: str
     generated_on: date
     fetched_at: str | None = None

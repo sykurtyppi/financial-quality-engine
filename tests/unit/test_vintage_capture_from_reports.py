@@ -36,6 +36,7 @@ from app.services.journal import reporting as journal_reporting
 from app.services.reporting.report_builder import data_quality_section
 from scripts import generate_report
 from tests.fixtures.companies import stretch_dataset
+from tests.fixtures.staged import write_ledger
 
 CIK = 320193
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
@@ -191,6 +192,7 @@ def test_cli_archives_exactly_the_scored_payload(monkeypatch, tmp_path):
         return "captured 2026-09-22-abcdef012345.json.gz (100 KB)"
 
     def fake_build(*args, **kwargs):
+        write_ledger(kwargs)
         observed["vintage_note"] = kwargs["vintage_note"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
 
@@ -215,7 +217,7 @@ def test_cli_no_vintage_flag_disables_capture(monkeypatch, tmp_path):
     monkeypatch.setattr(generate_report, "store_vintage_snapshot",
                         lambda client, ticker, payload, *, enabled=True: observed.setdefault("enabled", enabled) and None)
     monkeypatch.setattr(generate_report, "build_report",
-                        lambda *a, **k: ("report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)))
+                        lambda *a, **k: (write_ledger(k), "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None))[1:])
     monkeypatch.setattr(generate_report.sys, "argv", ["generate_report.py", "AAPL", "--no-docs", "--no-vintage"])
     assert generate_report.main() == 0
     assert observed["enabled"] is False
@@ -238,6 +240,7 @@ def test_journal_archives_exactly_the_scored_payload(monkeypatch, tmp_path):
         return "unchanged since the last snapshot (sha abcdef012345)"
 
     def fake_build(*args, **kwargs):
+        write_ledger(kwargs)
         observed["vintage_note"] = kwargs["vintage_note"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.services.journal import reporting
+from tests.fixtures.staged import write_ledger
 
 
 def test_fresh_reaches_the_report_builder(monkeypatch, tmp_path):
@@ -23,6 +24,7 @@ def test_fresh_reaches_the_report_builder(monkeypatch, tmp_path):
     monkeypatch.setattr(reporting, "describe", lambda t: "ok")
 
     def full(result, dataset, **kw):
+        write_ledger(kw)
         seen.update(kw)
         return "# report", SimpleNamespace()
     monkeypatch.setattr(reporting, "build_full_report", full)

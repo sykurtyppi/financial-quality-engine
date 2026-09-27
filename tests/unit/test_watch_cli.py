@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.watch.poller import Decision
+from tests.fixtures.staged import without_generation, write_ledger
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -328,7 +329,8 @@ class TestFreshPropagation:
             reporting, "analyze", lambda ds: SimpleNamespace(overall=None)
         )
         monkeypatch.setattr(
-            reporting, "build_full_report", lambda *a, **k: ("ENGINE REPORT BODY", None)
+            reporting, "build_full_report",
+            lambda *a, **k: (write_ledger(k), "ENGINE REPORT BODY", None)[1:]
         )
 
         out, distress = reporting.build_report(
@@ -364,13 +366,14 @@ class TestFreshPropagation:
         monkeypatch.setattr(reporting, "fetch_dataset_snapshot",
                             lambda t, n_quarters, client: snapshot)
         monkeypatch.setattr(reporting, "analyze", lambda ds: SimpleNamespace(overall=None))
-        monkeypatch.setattr(reporting, "build_full_report", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(reporting, "build_full_report",
+                            lambda *a, **k: (write_ledger(k), "BODY", None)[1:])
         monkeypatch.setattr(reporting, "REPORTS", tmp_path)
 
         out, _ = reporting.build_report("nvda", with_docs=False)
         assert client_kwargs.get("fresh") is False
         assert out.parent == tmp_path
-        assert out.read_text() == "BODY"
+        assert without_generation(out.read_text()) == "BODY"
 
 
 class TestPollRearm:

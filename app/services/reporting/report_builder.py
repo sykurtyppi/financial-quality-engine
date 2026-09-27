@@ -31,6 +31,7 @@ from app.services.ingestion.payloads import ExternalPayloadError
 from app.services.ingestion.sec_client import SecClientError
 from app.services.reporting.decision_card import render_decision_card
 from app.services.reporting.markdown_report import render
+from app.services.reporting.report_files import NotPublished
 from app.services.scoring.thermometer import DistressThermometer, compute_thermometer
 
 if TYPE_CHECKING:
@@ -570,8 +571,9 @@ def build_report(
     `baseline_day` is the pinned thesis day (journal track): the silent-revision
     check also diffs the newest snapshot against the one at or before it.
     `ledger_out`: where to write the run's evidence ledger (JSON), the same
-    claims as data with the filings behind each. The report never depends on
-    it: a ledger that cannot be built is logged and not written.
+    claims as data with the filings behind each. A ledger that cannot be built
+    fails the build (`NotPublished`): a report published without its evidence
+    is not a complete run (Hermes deep audit, finding 2).
     """
     try:
         report_date = date.fromisoformat(generated_on)
@@ -720,10 +722,11 @@ def ledger_path(report_path: Path) -> Path:
     return report_path.with_suffix(".ledger.json")
 
 
-def write_ledger(path: Path, **kw) -> Path | None:
-    """Build and atomically write the evidence ledger. Returns the path, or
-    None when it could not be built — logged, and re-raised in strict mode
-    (tests), exactly as an evidence stream's defect is."""
+def write_ledger(path: Path, **kw) -> Path:
+    """Build and atomically write the evidence ledger. A ledger that cannot
+    be built or written raises `NotPublished` (logged first): the run it
+    belongs to must not go live without it, and `replacing` then leaves the
+    earlier run live."""
     import tempfile
 
     from app.services.reporting.ledger import build_ledger
@@ -740,16 +743,15 @@ def write_ledger(path: Path, **kw) -> Path | None:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
-    except Exception:
-        if _strict():
-            raise
+    except Exception as e:
         # The live name, not a staging token: say which report lost its ledger.
         logger.exception("evidence ledger for %s %s not written (%s)",
                          kw.get("ticker"), kw.get("report_date"), path.name)
-        # An earlier run's ledger must not sit beside this run's report.
         with contextlib.suppress(OSError):
             path.unlink()
-        return None
+        raise NotPublished(
+            f"the evidence ledger for {kw.get('ticker')} {kw.get('report_date')} could not "
+            f"be built ({type(e).__name__}: {e}); nothing published") from e
     return path
 
 
