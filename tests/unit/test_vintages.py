@@ -529,6 +529,29 @@ class TestObservedVintageOrder:
         states = v.observed_vintages(1045810, tmp_path)
         assert [state.path for state in states] == [first.path, second.path]
 
+    def test_already_checked_today_names_the_latest_state_not_the_last_hash(self, tmp_path):
+        """Two snapshots on one day sort by hash in the manifest. The capture
+        that finds the day already checked reports the document as it last
+        stood: the later one, whatever its hash."""
+        earlier = _facts([("2026-06-30", "2026-08-01", 1200.0, "10-Q", "a")])
+        later = _facts([("2026-06-30", "2026-09-19", 1000.0, "10-Q", "b")])
+        client = _Client(earlier, later)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        second = v.capture(client, "NVDA", now=AT.replace(hour=17), root=tmp_path, force=True)
+        assert v.read_manifest(1045810, tmp_path)["snapshots"][-1]["sha256"] == first.sha256
+        again = v.capture(client, "NVDA", now=AT.replace(hour=18), root=tmp_path)
+        assert again.reason == "already checked today" and again.sha256 == second.sha256
+
+    def test_a_store_without_observations_falls_back_to_the_last_snapshot(self, tmp_path):
+        payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        client = _Client(payload)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        man = v.read_manifest(1045810, tmp_path)
+        man.pop("observations")
+        v._write_json_atomic(v._manifest_path(1045810, tmp_path), man)
+        again = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        assert again.reason == "already checked today" and again.sha256 == first.sha256
+
     def test_a_revert_remains_a_later_state(self, tmp_path):
         a = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
         b = _facts([("2026-06-30", "2026-09-19", 1200.0, "10-K", "b")])
