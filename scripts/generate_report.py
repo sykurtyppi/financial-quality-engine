@@ -30,7 +30,7 @@ from app.services.ingestion.edgar_adapter import (
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.reporting.report_builder import build_report, ledger_path
-from app.services.reporting.report_files import replacing
+from app.services.reporting.report_files import NotPublished, replacing
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -145,8 +145,7 @@ def main() -> int:
         staged.report.write_text(report)
     for moved in staged.archived:
         print(f"previous run archived: {moved}")
-    ledger = ledger_path(out)
-    print(f"evidence ledger: {ledger if ledger.exists() else 'NOT written (see log)'}")
+    print(f"evidence ledger: {ledger_path(out)}")
 
     # Review finding 8: no 0-100 number on any surface, stdout included.
     from app.services.scoring.thermometer import describe
@@ -162,6 +161,12 @@ def _main() -> int:
     build, and a traceback told the operator less than the one line below."""
     try:
         return main()
+    except NotPublished as e:
+        # A run that is not whole (no evidence ledger) is not published: the
+        # earlier report, ledger and audit are still live, untouched.
+        print(f"error: {e}", file=sys.stderr)
+        print("no report published; the previous run (if any) stays live.", file=sys.stderr)
+        return 3
     except SecClientError as e:
         print(f"error: {e}", file=sys.stderr)
         print("no report written: the fundamentals could not be acquired. Retry, or "

@@ -4,6 +4,7 @@ dropped; the report's entry points write the ledger beside the report."""
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -31,6 +32,7 @@ from app.services.metrics_registry import (
 )
 from app.services.narrative.evidence import NO_SOURCE_RECORDED, NOT_LOCATED
 from app.services.reporting.ledger import _cited, _id, build_ledger
+from app.services.reporting.report_files import generation_of
 from tests.fixtures.companies import stretch_dataset
 
 DAY = date(2026, 9, 22)
@@ -368,8 +370,11 @@ def test_both_entry_points_write_the_ledger_beside_the_report(monkeypatch, tmp_p
     assert cli.parent == tmp_path / "reports" / ".staging" and cli.name.endswith(".ledger.json")
     assert journal.parent == tmp_path / "j" / ".staging"
     (cli_report,) = (tmp_path / "reports").glob("AAPL_*.md")
-    assert cli_report.with_suffix(".ledger.json").read_text() == '{"ledger": true}'
-    assert out.with_suffix(".ledger.json").read_text() == '{"ledger": true}'
+    for report in (cli_report, out):
+        # One generation: the ledger published beside the report is its own.
+        ledger = json.loads(report.with_suffix(".ledger.json").read_text())
+        assert ledger["ledger"] is True
+        assert ledger["generation_id"] == generation_of(report) is not None
     assert not cli.exists() and not journal.exists()
 
 

@@ -30,6 +30,7 @@ from app.services.ingestion.vintages import (
 )
 from app.services.reporting.report_builder import _collect_streams, build_report
 from tests.fixtures.companies import stretch_dataset
+from tests.fixtures.staged import write_ledger
 
 CIK = 1045810
 D19, D20, D21 = (datetime(2026, 9, d, 12, 0, tzinfo=UTC) for d in (19, 20, 21))
@@ -356,6 +357,7 @@ def test_journal_threads_the_entry_day_and_the_cli_passes_nothing(monkeypatch, t
         company_facts = {"facts": {}}
 
     def fake_build(result, dataset, **kw):
+        write_ledger(kw)
         seen[kw["ticker"]] = kw.get("baseline_day", "absent")
         from app.services.scoring.thermometer import compute_thermometer
         return "report", compute_thermometer(result.block_scores, dataset.periods)

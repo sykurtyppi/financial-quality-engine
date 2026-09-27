@@ -49,8 +49,9 @@ FIXTURE_CIK = 320193
 # The lines a rerun may change without the report changing: when the data was
 # fetched, and whether the vintage store already held this payload. Everything
 # else in a same-day rerun on the same inputs must be byte-identical.
-VOLATILE_LINES = ("- Data fetched:", "- Vintage snapshot:")
-VOLATILE_LEDGER_KEYS = frozenset({"fetched_at"})
+# Each run is its own generation: the id is volatile by design.
+VOLATILE_LINES = ("- Data fetched:", "- Vintage snapshot:", "- Generation:")
+VOLATILE_LEDGER_KEYS = frozenset({"fetched_at", "generation_id"})
 
 _TENQ_HTML = """<html><body>
 <p>Item 2. Management's Discussion and Analysis of Financial Condition and Results of Operations</p>
@@ -347,6 +348,12 @@ def _archived(cmd: Command) -> list[Path]:
     return [Path(m) for m in re.findall(r"^previous run archived: (.+)$", cmd.stdout, re.M)]
 
 
+def _staged_left(ws: Workspace) -> list[Path]:
+    """Files a rebuild left in staging; the publish locks there stay."""
+    staging = ws.reports / ".staging"
+    return [p for p in staging.iterdir() if p.suffix != ".lock"] if staging.is_dir() else []
+
+
 def _vintage_files(ws: Workspace) -> dict[str, bytes]:
     root = ws.path / "data" / "vintages"
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
@@ -442,7 +449,8 @@ class Drill:
                    bool(report) and a == b, "" if a == b else first_difference(a, b))
         la = normalise_ledger(json.loads(self.state.get("s1_ledger") or "null"))
         lb = normalise_ledger(json.loads(ws.live(".ledger.json").read_text())) if report else None
-        step.check("ledger identical to step 1 (fetched_at masked)", la is not None and la == lb)
+        step.check("ledger identical to step 1 (fetched_at and generation masked)",
+                   la is not None and la == lb)
         step.check("vintage unchanged (same payload)",
                    "unchanged since the last snapshot" in report)
 
@@ -603,7 +611,7 @@ class Drill:
     # 10 --------------------------------------------------------------------------
     def s10_rollback(self, step: Step) -> None:
         ws = self.main
-        from app.services.reporting.report_files import archive_existing
+        from app.services.reporting.report_files import archive_existing, read_live
 
         archived = [p for p in self.state.get("s1_archived", []) if p.name.endswith(".md")
                     and not p.name.endswith("_audit.md")]
@@ -622,6 +630,10 @@ class Drill:
                    live.read_text() == self.state.get("s1_report"))
         step.check("restored ledger is byte-identical to step 1",
                    live.with_suffix(".ledger.json").read_text() == self.state.get("s1_ledger"))
+        restored = read_live(live)
+        step.check("the restored report and ledger are one generation",
+                   restored is not None and restored.generation_id is not None
+                   and restored.ledger is not None and not restored.stale)
         before, after = self.state.get("s1_vintages", {}), _vintage_files(ws)
         snaps_before = {k: v for k, v in before.items() if k.endswith(".json.gz")}
         snaps_after = {k: v for k, v in after.items() if k.endswith(".json.gz")}
@@ -655,9 +667,7 @@ class Drill:
                                             for p, b in before.items()))
         step.check("nothing was archived by the failed rebuild",
                    (sorted(archive.iterdir()) if archive.is_dir() else []) == archived)
-        staging = ws.reports / ".staging"
-        step.check("no staged file is left behind",
-                   not staging.exists() or not any(staging.iterdir()))
+        step.check("no staged file is left behind", not _staged_left(ws))
         again = self.generate(step, ws, "--no-docs")
         moved = {p.name.split(".", 2)[-1]: p for p in _archived(again)}  # "md" / "ledger.json"
         step.check("the next rebuild succeeds", again.returncode == 0,
@@ -668,8 +678,34 @@ class Drill:
                    and moved["ledger.json"].read_bytes() == before.get(ledger),
                    ", ".join(map(str, moved.values())) or "nothing archived")
         step.check("the new report and ledger are live, and nothing is left staged",
-                   live.is_file() and ledger.is_file()
-                   and (not staging.exists() or not any(staging.iterdir())))
+                   live.is_file() and ledger.is_file() and not _staged_left(ws))
+
+    # 12 --------------------------------------------------------------------------
+    def s12_ledger_failure(self, step: Step) -> None:
+        """Hermes deep audit, finding 2: a ledger that could not be built was
+        logged, and the report went live without it (the earlier complete run
+        archived, its ledger deleted). A run is now published whole or not at
+        all."""
+        ws = self.workspace("ledger_failure")
+        first = self.generate(step, ws, "--no-docs")
+        self.wrote_report(step, ws, first)
+        live, ledger = ws.live(), ws.live(".ledger.json")
+        before = {p: p.read_bytes() for p in (live, ledger) if p.is_file()}
+        archive = ws.reports / "archive"
+        archived = sorted(archive.iterdir()) if archive.is_dir() else []
+        cmd = self.generate(step, ws, "--no-docs", env_extra={"FQE_DRILL_FAIL_LEDGER": "1"})
+        injected = "drill: injected ledger failure" in cmd.stderr
+        step.check("scenario: the evidence ledger cannot be built", injected,
+                   "" if injected else cmd.stderr[-400:])
+        step.check("the rebuild exits nonzero and says nothing was published",
+                   cmd.returncode != 0 and "no report published" in cmd.stderr,
+                   f"exit {cmd.returncode}: {cmd.stderr[-300:]}")
+        step.check("the live report and ledger are byte-identical to before",
+                   len(before) == 2 and all(p.is_file() and p.read_bytes() == b
+                                            for p, b in before.items()))
+        step.check("nothing was archived",
+                   (sorted(archive.iterdir()) if archive.is_dir() else []) == archived)
+        step.check("no staged file is left behind", not _staged_left(ws))
 
 
 STEPS: tuple[tuple[str, str, Callable[[Drill, Step], None]], ...] = (
@@ -684,12 +720,15 @@ STEPS: tuple[tuple[str, str, Callable[[Drill, Step], None]], ...] = (
     ("journal", "Journal path and analyst override", Drill.s9_journal),
     ("rollback", "Roll back to the first run", Drill.s10_rollback),
     ("failed_rebuild", "A rebuild that fails keeps the live report", Drill.s11_failed_rebuild),
+    ("ledger_failure", "A ledger that cannot be built publishes nothing",
+     Drill.s12_ledger_failure),
 )
 
 
-# The workspaces' `sitecustomize`: retry back-off sleeps become no-ops, and
+# The workspaces' `sitecustomize`: retry back-off sleeps become no-ops,
 # FQE_DRILL_FAIL_BUILD=1 makes the report build raise once the data is in
-# hand (step 11), in the workspace's copy of the code only.
+# hand (step 11), and FQE_DRILL_FAIL_LEDGER=1 makes the evidence ledger's
+# build raise (step 12), in the workspace's copy of the code only.
 _SHIM = """import time
 time.sleep = lambda seconds: None  # drill: retries fail fast
 
@@ -703,6 +742,16 @@ if os.environ.get("FQE_DRILL_FAIL_BUILD"):
         raise RuntimeError("drill: injected report-build failure")
 
     _rb.build_report = _fail
+
+if os.environ.get("FQE_DRILL_FAIL_LEDGER"):
+    import sys
+    sys.path.insert(0, os.getcwd())
+    import app.services.reporting.ledger as _ledger
+
+    def _fail_ledger(**kwargs):
+        raise RuntimeError("drill: injected ledger failure")
+
+    _ledger.build_ledger = _fail_ledger
 """
 
 

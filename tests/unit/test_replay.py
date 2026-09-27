@@ -26,6 +26,7 @@ from app.services.ingestion.companyfacts_mapper import build_dataset
 from app.services.ingestion.vintages import read_manifest, store_snapshot
 from app.services.journal import reporting as journal_reporting
 from app.services.reporting.report_builder import ledger_path
+from tests.fixtures.staged import without_generation
 from tests.integration.test_ledger_provenance import (
     AMENDMENT,
     CIK,
@@ -169,7 +170,7 @@ def test_the_replay_is_the_report_that_day_with_a_banner(monkeypatch, tmp_path):
         vintage_note="not captured (historical replay)", baseline_day=DAY,
     )
     banner = journal_reporting.replay_banner(DAY, source, date.today())
-    assert out.read_text() == f"{banner}\n\n{direct}"
+    assert without_generation(out.read_text()) == f"{banner}\n\n{direct}"
 
 
 def test_a_replay_archives_nothing(monkeypatch, tmp_path):

@@ -58,7 +58,7 @@ from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal.store import safe_ticker
-from app.services.reporting.report_files import is_live_report
+from app.services.reporting.report_files import is_live_report, read_live
 
 REPORT_DIRS = (ROOT / "reports" / "auto", ROOT / "reports")
 DEFAULT_TIMEOUT_S = 1800.0
@@ -85,10 +85,19 @@ def latest_report(ticker: str) -> Path | None:
 
 
 def audit_for(report: Path | None) -> Path | None:
+    """The report's own audit: one that names another generation (it
+    finished after a rebuild replaced the report it read) is not this
+    report's, and is left out with a warning rather than paired."""
     if report is None:
         return None
-    a = report.with_name(f"{report.stem}_audit.md")
-    return a if a.is_file() else None
+    live = read_live(report)
+    if live is None:
+        return None
+    for path in live.stale:
+        if path.name.endswith("_audit.md"):
+            print(f"warning: {path.name} audited an earlier generation of {report.name}; "
+                  "not used", file=sys.stderr)
+    return live.audit
 
 
 def prior_brief(ticker: str, before: date, root: Path | None = None) -> Path | None:
