@@ -387,6 +387,65 @@ class TestReadLive:
         assert _live(tmp_path) == before
 
 
+# --- audit of #97 ---------------------------------------------------------------------
+
+
+class TestAuditOfThePublishLock:
+    def test_a_reader_without_write_access_to_the_lock_still_waits_for_a_publish(
+            self, tmp_path, monkeypatch):
+        """A reader running as another user than the publisher could not open
+        the lock read-write, fell back to reading unlocked, and read mid-publish."""
+        import fcntl
+        import os
+        import threading
+        import time
+
+        import app.services.reporting.report_files as rf
+
+        report = tmp_path / "AAPL_2026-09-26.md"
+        with replacing(report, now=NOW) as staged:
+            _stage(staged, "first")
+        holder = os.open(tmp_path / STAGING_DIR / "AAPL_2026-09-26.lock", os.O_RDWR)
+        fcntl.flock(holder, fcntl.LOCK_EX)  # a publisher mid-publish
+        real_open = rf.os.open
+
+        def not_writable(path, flags, *a):
+            if str(path).endswith(".lock") and flags & (os.O_RDWR | os.O_WRONLY):
+                raise PermissionError("owned by the publisher")
+            return real_open(path, flags, *a)
+
+        monkeypatch.setattr(rf.os, "open", not_writable)
+        done = threading.Event()
+        reader = threading.Thread(target=lambda: (read_live(report), done.set()))
+        reader.start()
+        time.sleep(0.3)
+        assert not done.is_set()  # waits for the publish
+        os.close(holder)
+        reader.join(5)
+        assert done.is_set()
+
+    def test_reading_creates_nothing(self, tmp_path):
+        """Reading an archived run created `archive/.staging/`; reading a
+        path under a missing directory created the directory."""
+        arch = tmp_path / "archive"
+        arch.mkdir()
+        run = _run(arch, name="AAPL_2026-09-26.210507.md", audit=False)
+        assert read_live(run).text == "# first report"
+        assert sorted(p.name for p in arch.iterdir()) == [
+            "AAPL_2026-09-26.210507.ledger.json", "AAPL_2026-09-26.210507.md"]
+        assert read_live(tmp_path / "nowhere" / "AAPL_2026-09-26.md") is None
+        assert not (tmp_path / "nowhere").exists()
+
+    def test_the_stamp_is_appended_to_the_builders_bytes(self, tmp_path):
+        """`_seal` read the report as text and wrote it back: CR and CRLF
+        line ends became LF."""
+        report = tmp_path / "AAPL_2026-09-26.md"
+        with replacing(report, now=NOW) as staged:
+            _stage(staged, "first")
+            staged.report.write_bytes(b"line1\r\nline2\rline3\n")
+        assert report.read_bytes().startswith(b"line1\r\nline2\rline3\n\n\n- Generation: ")
+
+
 # --- round-9 independent review: the commit phase itself fails --------------------
 
 
