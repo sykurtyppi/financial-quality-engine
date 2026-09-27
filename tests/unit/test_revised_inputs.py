@@ -476,3 +476,23 @@ def test_a_year_amended_before_a_later_move_of_its_quarter_is_still_named():
     hows = [r.how for r in revised_inputs(ds, bundle, m, revision_index(scan))]
     assert hows[0].startswith("derived quarter moved by 10-K ")
     assert f"amended by 10-K/A {year.amendment_accession}" in hows
+
+
+def test_a_seasonal_change_line_is_marked_by_its_year_ago_value():
+    """The DSO line compares fiscal Q1 with the prior fiscal Q1: a revision
+    to that quarter's revenue marks it, though it is not the sequential
+    quarter."""
+    facts = _crm()
+    ds, _ = build_dataset(facts, "CRM")
+    year_ago = next(p for p in ds.periods if p.fiscal_label == "FY2026Q1")
+    (ref,) = year_ago.sources["revenue"].inputs
+    accn = "0001108524-26-990012"
+    newer = _refile(facts, ref, factor=1.10, form="10-Q/A", accn=accn)
+    ds2, _ = build_dataset(newer, "CRM")
+    bundle = compute_metrics(ds2)
+    result = analyze(ds2)
+    dso_line = next(c for c in result.changes if c.startswith("Days sales outstanding"))
+    assert "(FY2026Q1) -> " in dso_line
+    notes = card_notes(ds2, bundle, [], revision_index(_scan(newer)))
+    assert accn in notes.changes["Days sales outstanding"]
+    assert "FY2026Q1" in notes.changes["Days sales outstanding"]

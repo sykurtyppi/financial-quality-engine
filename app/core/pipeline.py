@@ -7,11 +7,13 @@ statement references the metrics that back it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from app.config import scoring_config as cfg
-from app.schemas.financials import CompanyDataset
+from app.schemas.financials import CompanyDataset, PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.schemas.report import AnalysisResult, EvidenceEntry, Flag
-from app.services.formulas.registry import MetricsBundle, compute_metrics
+from app.services.formulas.registry import MetricsBundle, _year_ago, compute_metrics
 from app.services.narrative.narrative_metrics import compute_narrative_layer
 from app.services.scoring.engine import interpolate_concern, score_all
 
@@ -153,29 +155,86 @@ def _generate_flags(block_components, metrics_by_name: dict[str, MetricResult]) 
     return [f for _, f in red[:10]], [f for _, f in green[:10]]
 
 
+# (metric, line label, format, seasonal). A seasonal line is a quarterly ratio
+# of a seasonal balance or flow (receivables over the quarter's revenue, SBC
+# and capex over it): Q4 against Q3 moves with the calendar, not the business
+# (Hermes: CRM's DSO from fiscal Q4 to Q1). It compares the same fiscal
+# quarter a year earlier, as the YoY spreads and the day-count trends do. The
+# others are TTM or already year-over-year, and compare sequentially.
 _CHANGE_METRICS = [
-    ("total_accruals", "Total accruals", "{:.3f}"),
-    ("cfo_to_net_income", "CFO / Net income", "{:.2f}"),
-    ("receivables_growth_spread", "Receivables-vs-revenue growth spread", "{:+.1%}"),
-    ("dso", "Days sales outstanding", "{:.0f}"),
-    ("sbc_to_revenue", "SBC / Revenue", "{:.1%}"),
-    ("capex_to_revenue", "Capex / Revenue", "{:.1%}"),
-    ("fcf_margin", "FCF margin", "{:.1%}"),
+    ("total_accruals", "Total accruals", "{:.3f}", False),
+    ("cfo_to_net_income", "CFO / Net income", "{:.2f}", False),
+    ("receivables_growth_spread", "Receivables-vs-revenue growth spread", "{:+.1%}", False),
+    ("dso", "Days sales outstanding", "{:.0f}", True),
+    ("sbc_to_revenue", "SBC / Revenue", "{:.1%}", True),
+    ("capex_to_revenue", "Capex / Revenue", "{:.1%}", True),
+    ("fcf_margin", "FCF margin", "{:.1%}", False),
 ]
 
+YEAR_AGO = "year"  # the same fiscal quarter a year earlier
+SEQUENTIAL = "sequential"  # the previous period; for a seasonal line, a fallback
+_BASIS_NOTE = {
+    YEAR_AGO: ", vs the same quarter a year earlier",
+    SEQUENTIAL: ", sequential quarters: may be seasonal",
+}
 
-def _what_changed(bundle: MetricsBundle) -> list[str]:
-    changes: list[str] = []
-    for name, label, fmt in _CHANGE_METRICS:
-        series = [m for m in bundle.history.get(name, []) if m.status is MetricStatus.OK]
-        if len(series) < 2:
-            continue
-        cur, prev = series[-1], series[-2]
-        changes.append(
-            f"{label}: {fmt.format(prev.value)} ({prev.fiscal_label}) -> "
-            f"{fmt.format(cur.value)} ({cur.fiscal_label})"
+
+@dataclass(frozen=True)
+class ChangePair:
+    name: str
+    label: str
+    fmt: str
+    prev: MetricResult
+    cur: MetricResult
+    basis: str
+    seasonal: bool
+
+    def line(self) -> str:
+        return (
+            f"{self.label}: {self.fmt.format(self.prev.value)} ({self.prev.fiscal_label}) -> "
+            f"{self.fmt.format(self.cur.value)} ({self.cur.fiscal_label})"
+            + (_BASIS_NOTE[self.basis] if self.seasonal else "")
         )
-    return changes
+
+
+def _ok(m: MetricResult) -> bool:
+    return m.status is MetricStatus.OK and m.value is not None
+
+
+def _year_ago_pair(
+    history: list[MetricResult], periods: list[PeriodFinancials]
+) -> tuple[MetricResult, MetricResult] | None:
+    """The latest OK value and the same fiscal quarter's a year earlier. A
+    quarterly metric's history entry j is `periods[j + 1]` (`compute_metrics`
+    starts at the second period), so the year-ago entry is j - 4, valid only
+    where `registry._year_ago` accepts the gap (330-400 days), as for the YoY
+    spreads."""
+    if len(history) != len(periods) - 1:
+        return None
+    j = next((k for k in range(len(history) - 1, -1, -1) if _ok(history[k])), None)
+    if j is None or j < 4 or not _ok(history[j - 4]) or _year_ago(periods, j + 1) is None:
+        return None
+    return history[j - 4], history[j]
+
+
+def change_pairs(bundle: MetricsBundle, periods: list[PeriodFinancials]) -> list[ChangePair]:
+    """What each "Changes since last period" line compares: the one place the
+    card's text and its revised-input marks both read."""
+    pairs: list[ChangePair] = []
+    for name, label, fmt, seasonal in _CHANGE_METRICS:
+        history = bundle.history.get(name, [])
+        found = _year_ago_pair(history, periods) if seasonal else None
+        if found is not None:
+            pairs.append(ChangePair(name, label, fmt, *found, YEAR_AGO, seasonal))
+            continue
+        series = [m for m in history if m.status is MetricStatus.OK]
+        if len(series) >= 2:
+            pairs.append(ChangePair(name, label, fmt, series[-2], series[-1], SEQUENTIAL, seasonal))
+    return pairs
+
+
+def _what_changed(bundle: MetricsBundle, periods: list[PeriodFinancials]) -> list[str]:
+    return [pair.line() for pair in change_pairs(bundle, periods)]
 
 
 def _evidence_ledger(metrics: list[MetricResult]) -> list[EvidenceEntry]:
@@ -325,7 +384,7 @@ def analyze(dataset: CompanyDataset) -> AnalysisResult:
         overall=overall,
         red_flags=red,
         green_flags=green,
-        changes=_what_changed(bundle),
+        changes=_what_changed(bundle, periods),
         evidence=_evidence_ledger(all_metrics),
         narrative_findings=narrative_findings,
         narrative_evidence=narrative.evidence,
