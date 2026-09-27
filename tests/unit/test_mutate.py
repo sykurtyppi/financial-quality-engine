@@ -333,9 +333,11 @@ def test_the_committed_exclusions_are_valid_and_honestly_classified():
     exclusions = mutate.load_exclusions()
     assert mutate.invalid_exclusions(exclusions) == []
     # The display cap changes what renders (21 rows show instead of 20 plus
-    # "+1 more"): it is accepted policy, never called equivalent (round 6).
-    (cap,) = [e for e in exclusions if e.source.startswith("_MAX_ROWS")]
-    assert cap.kind == "accepted"
+    # "+1 more"), so it is never called equivalent (round 6). It was accepted
+    # policy until Hermes audit item 8 pinned its value with a test
+    # (test_long_tables_show_exactly_20_rows_and_count_the_rest): no
+    # exclusion covers it now.
+    assert not [e for e in exclusions if e.source.startswith("_MAX_ROWS")]
     for e in exclusions:
         if e.kind == "equivalent":
             assert "NOT" not in e.reason, e.source

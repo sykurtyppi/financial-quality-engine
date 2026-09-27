@@ -630,3 +630,82 @@ class TestRoundElevenReview:
         (fp,) = [f for f in scan.footprints if f.field_name == "total_debt"]
         assert fp.period_start is None and fp.is_amendment
         assert not [d for d in scan.derived if d.field_name == "total_debt"]
+
+
+# Formerly `accepted` mutation survivors (Hermes audit item 8): each boundary
+# is now pinned by a test that fails under its mutant.
+
+
+def test_a_fact_400_days_before_a_derived_quarter_is_a_rebuild_date(monkeypatch):
+    """`(end - row_end).days <= 400` -> `< 400`. The derived Q2 is rebuilt as
+    of every date a fact of its concept, ending up to 400 days before it, was
+    filed. A fact ending exactly 400 days before Q2 adds its filing date as a
+    rebuild date; one ending 401 days before does not. The rebuild dates are
+    read off the cutoffs `derived_revisions` re-reads the payload at."""
+    from datetime import timedelta
+
+    from app.services.ingestion import restatements
+    from app.services.ingestion.restatements import derived_revisions
+
+    at_400, at_401 = date(2024, 1, 17), date(2024, 1, 18)
+    facts = _ytd_filer(None)
+    filed_before = {
+        row["filed"] for concept in facts["facts"]["us-gaap"].values()
+        for rows in concept["units"].values() for row in rows
+    }
+    assert {at_400.isoformat(), at_401.isoformat()}.isdisjoint(filed_before)
+    rows = facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["USD"]
+    for days, filed in ((400, at_400), (401, at_401)):
+        end = Q2 - timedelta(days=days)
+        rows.append(duration(end - timedelta(days=90), end, 7.0, filed=filed))
+
+    cutoffs: list[date | None] = []
+    real = restatements._dated_copy
+
+    def spy(facts_json, cutoff):
+        cutoffs.append(cutoff)
+        return real(facts_json, cutoff)
+
+    monkeypatch.setattr(restatements, "_dated_copy", spy)
+    assert derived_revisions(facts, as_of=AS_OF, period_since=None) == []
+    assert cutoffs[0] == AS_OF  # the payload as of the scan; the rest are rebuilds
+    rebuilds = set(cutoffs[1:])
+    assert date(2024, 8, 9) in rebuilds  # the H1 year-to-date figure Q2 is derived from
+    assert at_400 in rebuilds
+    assert at_401 not in rebuilds
+
+
+def test_long_tables_show_exactly_20_rows_and_count_the_rest():
+    """`_MAX_ROWS = 20` -> 21. `test_long_tables_say_how_many_rows_were_left_out`
+    pins the cap by the constant, whatever its value; this pins the value:
+    20 rows render all 20 and no "more" line, 21 render 20 and "+1 more"."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from app.services.ingestion.restatements import (
+        _conflict_lines,
+        _derived_lines,
+        _table,
+    )
+
+    fp = SimpleNamespace(period_end=Q2, field_name="revenue", original_value=1.0,
+                         current_value=2.0, pct_change=1.0, amendment_value=None)
+    header = 2
+    twenty = _table([fp] * 20)
+    assert len(twenty) == header + 20
+    assert not any("more |" in row for row in twenty)
+    twenty_one = _table([fp] * 21)
+    assert len(twenty_one) == header + 20 + 1
+    assert sum(row.startswith("| 2024-06-30 | revenue |") for row in twenty_one) == 20
+    assert twenty_one[-1] == "| … | +1 more | | | | |"
+
+    c = SimpleNamespace(period_start=None, period_end=Q2, field_name="revenue",
+                        tag="us-gaap:Revenues", filed=Q2, amended=False, values=(1.0, 2.0),
+                        accessions=("a", "b"))
+    assert not any("more |" in line for line in _conflict_lines((c,) * 20))
+    assert _conflict_lines((c,) * 21)[-1].startswith("| … | 1 more |")
+
+    (d,) = [x for x in _scan(_ytd_filer(101.9)).derived if x.field_name == "operating_income"]
+    full = tuple(replace(d, field_name=f"f{i}") for i in range(20))
+    assert not any("more |" in line for line in _derived_lines(full))
+    assert any("| 1 more |" in line for line in _derived_lines(full + (d,)))
