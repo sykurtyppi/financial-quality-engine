@@ -41,7 +41,7 @@ class Kind(str, Enum):
 class Composition(str, Enum):
     # One tag. Never mixed where the selected tag has a value; a quarter it
     # does not report is filled only from another candidate proven equal to
-    # it on every shared quarter, and the diagnostics say so (the mapper's
+    # it on every shared quarter (one of them a non-zero reported quarter), and the diagnostics say so (the mapper's
     # `_fill_gaps`: a filer's tag switch).
     SINGLE = "single"
     SUM_ALL_REQUIRED = "sum_all_required"  # sum only where every component exists

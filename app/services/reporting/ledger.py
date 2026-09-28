@@ -541,7 +541,10 @@ def build_ledger(
 
     selections: dict[str, str] = {}
     for name, sel in (field_tags or {}).items():
-        tag = getattr(sel, "tag_used", sel)
+        # `SeriesSelection.label`: the selected concept, plus each quarter a
+        # tag switch filled from another concept — `tag_used` alone named
+        # the selected concept for quarters it did not supply.
+        tag = getattr(sel, "label", None) or getattr(sel, "tag_used", sel)
         if tag:
             selections[name] = str(tag)
 

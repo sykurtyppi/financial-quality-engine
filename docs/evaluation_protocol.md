@@ -389,7 +389,8 @@ Mid-window changes (0.4.0 window):
     (`companyfacts_mapper._fill_gaps`) a reported quarter the selected
     concept has no value for is filled from the first other candidate, in
     registry order, that agrees with it within 0.5% on every quarter both
-    report, and on at least one. Where the selected concept has a value it
+    report (buffer included), at least one of them a reported-window
+    quarter where the selected value is not zero. Where the selected concept has a value it
     is never replaced. The candidate is read through the same point-in-time
     view and derivation rules; the quarter's provenance, a field note and
     `SeriesSelection.fallbacks` name the concept; a candidate not proven
@@ -409,7 +410,16 @@ Mid-window changes (0.4.0 window):
     existing cell unchanged; one synthetic case added
     (`tag_switch_fallback`: a fill and both rejection notes). Golden report
     byte-identical. `tests/corpus_drafts/crm_january_fye/REVIEW.md` updated
-    by hand (its `case.json` expectations were unchanged). Proof:
+    by hand. The ledger's `selections` and the corpus observation record
+    `SeriesSelection.label` — `tag_used`, then `|<period end>:<concept>` per
+    filled quarter — so CRM's reads
+    `us-gaap:InterestExpenseDebt|2026-04-30:us-gaap:InterestExpenseNonoperating`
+    and the draft's `case.json` records that (still unreviewed); every other
+    field, pinned case and draft reads as before. Independent review of the
+    first cut (7a65130) found two proofs that proved nothing — agreement
+    only on zeros, and agreement only in the derivation buffer — both now
+    rejected with a note; the CRM and KO fills stand, snapshots unchanged.
+    Proof:
     `tests/unit/test_tag_switch_fallback.py`,
     `test_companyfacts_mapper.py::test_tags_are_mixed_only_into_gaps_and_only_when_proven_equal`,
     `test_selection_snapshot.py`. Operator note: one shared quarter is thin

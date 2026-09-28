@@ -45,7 +45,9 @@ values; every gap surfaces as `missing_data` in the report.
    reported quarter the selected tag has no value for is filled from another
    candidate of the field, in candidate order, only when that candidate
    agrees with the selected tag (within 0.5%) on every quarter both report,
-   and on at least one. It is read through the same point-in-time view and
+   at least one of them a reported quarter (not the derivation buffer) where
+   the selected value is not zero: two tags that are both 0, or that agree
+   only before the window, prove nothing. It is read through the same point-in-time view and
    derivation rules as the selected tag; the quarter's provenance names the
    concept, and a field note says which quarter came from which concept and
    on which quarters it was proven equal. A candidate that could fill the gap

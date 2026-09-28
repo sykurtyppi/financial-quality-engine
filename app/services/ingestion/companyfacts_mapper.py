@@ -25,7 +25,8 @@ docs/real_data_validation.md — and covered by tests):
    reported quarter it has NO value for — the newest quarter, after a
    filer moved the figure to a new concept (CRM's FY2027Q1 interest) — is
    filled from another candidate only when that candidate is proven equal
-   to the selected tag on every quarter both report (`_fill_gaps`), and
+   to the selected tag on every quarter both report, one of them a non-zero
+   reported quarter (`_fill_gaps`), and
    the field notes, per-quarter provenance and `SeriesSelection.fallbacks`
    say so; a candidate not proven equal is named, never used. Total debt is the
    exception: it is composed per balance-sheet date from what was reported
@@ -233,6 +234,8 @@ class IngestionDiagnostics(BaseModel):
         import hashlib
 
         def pair(f: FieldDiagnostic) -> str:
+            # The suffix is `SeriesSelection.label`'s, so a digest and the
+            # ledger's `selections` spell a fallback the same way.
             filled = "".join(f"|{q}:{c}" for q, c in sorted(f.fallbacks.items()))
             return f"{f.field_name}={f.tag_used or ''}{filled}"
 
@@ -654,8 +657,9 @@ def _fill_gaps(
 ) -> tuple[_Series, dict[date, str], list[str]]:
     """Fill the reported quarters the selected concept has no value for,
     each from the first other candidate (in registry order) that is proven
-    equal to the selected concept: at least one quarter both report, and
-    agreement within FALLBACK_AGREEMENT_PCT on EVERY such quarter.
+    equal to the selected concept: agreement within FALLBACK_AGREEMENT_PCT
+    on EVERY quarter both report (buffer included), at least one of them a
+    reported-window quarter where the selected value is not zero.
 
     A filer that switches concepts leaves the newest quarters under the new
     tag only, while coverage keeps the old one selected (CRM's FY2027Q1
@@ -694,9 +698,17 @@ def _fill_gaps(
         offered = [q for q in open_gaps if alt is not None and q in alt.values]
         if alt is None or not offered:
             continue
+        # Disagreement is looked for on EVERY quarter both report, buffer
+        # included (conservative). Proof needs more than the absence of
+        # disagreement: a reported-window quarter where the selected value
+        # is not zero. Two tags that are both 0 agree on nothing about the
+        # figure, and a match only in the derivation buffer is not shown on
+        # any quarter the report uses (independent review of 7a65130).
         shared = [q for q in quarter_ends if q in series.values and q in alt.values]
         differ = [q for q in shared if not _agrees(alt.values[q], series.values[q])]
-        if shared and not differ:
+        in_window = [q for q in shared if q in window_ends]
+        proven = [q for q in in_window if series.values[q] != 0]
+        if proven and not differ:
             proof = ", ".join(labels[q] for q in shared)
             for q in offered:
                 out.values[q] = alt.values[q]
@@ -712,11 +724,23 @@ def _fill_gaps(
             continue
         if not shared:
             why = f"it shares no quarter with {used}, so agreement cannot be checked"
-        else:
+        elif differ:
             q0 = differ[0]
             why = (
                 f"it disagrees with {used} at {labels[q0]} "
                 f"({_amount(alt.values[q0])} vs {_amount(series.values[q0])})"
+            )
+        elif not in_window:
+            why = (
+                f"it agrees with {used} only before the reported window "
+                f"({', '.join(labels[q] for q in shared)}), so agreement is not shown on a "
+                "quarter the report uses"
+            )
+        else:
+            why = (
+                f"it agrees with {used} only where both report zero "
+                f"({', '.join(labels[q] for q in in_window)}), which does not show they "
+                "measure the same figure"
             )
         for q in offered:
             notes.append(
