@@ -199,3 +199,17 @@ class TestManifestCheck:
         assert not drill._manifest_keeps(self._files(self.A), {})
         assert not drill._manifest_keeps(self._files(), self._files(self.A))
         assert not drill._manifest_keeps({}, self._files(self.A))
+
+
+def test_a_relative_out_directory_works(tmp_path):
+    """Hermes re-audit F4: `--out` relative to the caller's directory failed
+    every step (0/12): the workspaces ran with that relative path as their
+    cwd and were also handed paths rooted in it, applying it twice."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "drill.py"), "--only", "1,2",
+         "--out", "evidence/drill-aapl"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    log = json.loads((tmp_path / "evidence" / "drill-aapl" / "drill_log.json").read_text())
+    assert log["passed"] is True and [s["slug"] for s in log["steps"]] == ["baseline", "rerun"]
