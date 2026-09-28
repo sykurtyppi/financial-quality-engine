@@ -536,6 +536,42 @@ class TestReviewOfTheGenerationLayout:
         assert [g.name for g in generations(dst / NAME)] == [
             g.name for g in generations(src / NAME)]
 
+    def test_live_name_maps_only_a_generations_own_path(self, tmp_path):
+        from app.services.reporting.report_files import live_name
+
+        report, _ = _publish(tmp_path, "first")
+        gen = current_generation(report)
+        assert live_name(gen / NAME) == report and live_name(report) == report
+        # Not under `.generations`, or under another report's: not a generation.
+        lookalike = tmp_path / "kept" / "AAPL_2026-09-26" / "x" / NAME
+        other = tmp_path / GENERATIONS_DIR / "NVDA_2026-09-26" / "x" / NAME
+        assert live_name(lookalike) == lookalike and live_name(other) == other
+
+    def test_reading_a_generations_own_path_reads_that_generation(self, tmp_path):
+        report, first = _publish(tmp_path, "first")
+        gen = current_generation(report)
+        _publish(tmp_path, "second")
+        live = read_live(gen / NAME)
+        assert live.generation_id == first.generation_id and live.generation_dir == gen
+        assert json.loads(live.ledger.read_text())["run"] == "first"
+
+    def test_only_a_generation_name_has_a_sequence_number(self):
+        import app.services.reporting.report_files as rf
+
+        assert rf._seq(Path("20260926T210507Z_0003_abc")) == 3
+        assert rf._seq(Path("20260926T210507Z_0003")) == -1  # no id: not one of ours
+        assert rf._seq(Path("current")) == -1
+
+    def test_a_kept_pre_generation_run_is_stamped_with_its_newest_file(self, tmp_path):
+        """Its files were written at different times; the run is as old as
+        the last of them, not the first."""
+        report = _plain_run(tmp_path, audit=False)
+        os.utime(report, (1_700_000_000, 1_700_000_000))  # 2023-11-14T22:13:20Z
+        os.utime(ledger_path(report), (1_800_000_000, 1_800_000_000))  # 2027-01-15T08:00:00Z
+        _publish(tmp_path, "second")
+        (adopted,) = [g for g in generations(report) if g.name.endswith("_adopted")]
+        assert adopted.name.startswith("20270115T080000Z_")
+
     def test_published_files_are_read_only(self, tmp_path):
         """A write to a live name (a hand `cp` over it) went through the link
         into the kept generation. Published files are read-only."""
