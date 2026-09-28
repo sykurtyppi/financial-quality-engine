@@ -34,12 +34,17 @@ import pytest
 from app.services.ingestion import sec_client as sc
 
 INTERVAL = 0.05  # small, so twelve paced requests take ~0.6 s
-# Slots are exactly INTERVAL apart, but a request the scheduler wakes late
-# shortens the gap to the next one by its lateness — tens of ms on a loaded CI
-# box — without any extra request being made. So one gap may fall short by
-# TOL, while the span of all starts may fall short by TOL in total, never per
-# request. The unfixed code's gaps were ~0.1 ms and its span ~1 ms.
-TOL = 0.02
+# What the limiter decides is each request's reserved start, and those are
+# asserted exactly (to RESERVE_TOL: a slot shared across processes is stored
+# as wall-clock time and read back on the monotonic clock, two clock reads
+# a descheduled process can straddle). When a request actually starts also
+# depends on when the OS wakes it: one woken late shortens the gap to the
+# next by its lateness — 29 ms was seen on a loaded box, with every slot
+# exactly 50 ms apart and no extra request made. So actual starts are only
+# held to what jitter cannot fake: on average at least half an interval
+# apart. The unfixed code's reservations did not exist and its twelve
+# starts spanned ~1 ms.
+RESERVE_TOL = 0.005
 
 
 class _Resp:
@@ -67,19 +72,42 @@ def _recording_urlopen(starts: list[float]):
     return fake
 
 
-def _assert_paced(starts: list[float], expected: int) -> None:
+def _gaps(times: list[float]) -> list[float]:
+    ordered = sorted(times)
+    return [b - a for a, b in itertools.pairwise(ordered)]
+
+
+def _assert_paced(starts: list[float], expected: int,
+                  reserved: list[float] | None = None) -> None:
+    """Every request reserved a slot at least INTERVAL after the previous
+    one, and the requests really were spread out in time."""
+    reserved = RESERVED if reserved is None else reserved
     assert len(starts) == expected
-    ordered = sorted(starts)
-    gaps = [b - a for a, b in itertools.pairwise(ordered)]
+    assert len(reserved) == expected, f"{len(reserved)} slots reserved for {expected} requests"
+    gaps = _gaps(reserved)
     # Sorted-adjacent gaps are the smallest pairwise gaps, so this is the
     # every-pair condition.
     shown = [round(g * 1000, 2) for g in gaps]
-    assert min(gaps) >= INTERVAL - TOL, (
-        f"requests started {min(gaps) * 1000:.2f} ms apart; the fair-access "
+    assert min(gaps) >= INTERVAL - RESERVE_TOL, (
+        f"slots reserved {min(gaps) * 1000:.2f} ms apart; the fair-access "
         f"interval is {INTERVAL * 1000:.0f} ms (all gaps: {shown})"
     )
-    # The rate over the whole run: n starts need n-1 whole intervals.
-    assert ordered[-1] - ordered[0] >= (expected - 1) * INTERVAL - TOL, shown
+    span = max(starts) - min(starts)
+    assert span >= (expected - 1) * INTERVAL / 2, (
+        f"{expected} requests started within {span * 1000:.1f} ms"
+    )
+
+
+# Slots reserved in this process (recorded by `fast_pacing`).
+RESERVED: list[float] = []
+
+
+def _recording_reserve(real, into: list[float]):
+    def reserve(cache_dir):
+        start = real(cache_dir)
+        into.append(start)
+        return start
+    return reserve
 
 
 @pytest.fixture
@@ -89,6 +117,9 @@ def fast_pacing(monkeypatch):
     must then FAIL on its assertion, not error in setup."""
     monkeypatch.setattr(sc, "_REQUEST_INTERVAL_S", INTERVAL)
     monkeypatch.setattr(sc, "_last_start", 0.0, raising=False)
+    RESERVED.clear()
+    if hasattr(sc, "_reserve_slot"):
+        monkeypatch.setattr(sc, "_reserve_slot", _recording_reserve(sc._reserve_slot, RESERVED))
     monkeypatch.setenv("EDGAR_IDENTITY", "Test Suite test@example.com")
 
 
@@ -182,12 +213,15 @@ def _process_worker(cache_dir: str, interval: float, n: int, barrier, out) -> No
     after both processes are up. Module-level so `spawn` can import it."""
     sc._REQUEST_INTERVAL_S = interval
     starts: list[float] = []
+    reserved: list[float] = []
     sc.urllib.request.urlopen = _recording_urlopen(starts)  # type: ignore[assignment]
+    if hasattr(sc, "_reserve_slot"):
+        sc._reserve_slot = _recording_reserve(sc._reserve_slot, reserved)  # type: ignore[assignment]
     client = sc.SecClient(cache_dir=cache_dir, identity="Test Suite test@example.com")
     barrier.wait()
     for i in range(n):
         client._get(f"https://example/{os.getpid()}/{i}")
-    out.put(starts)
+    out.put((starts, reserved))
 
 
 class TestCrossProcessPacing:
@@ -207,7 +241,8 @@ class TestCrossProcessPacing:
         for p in procs:
             p.join(timeout=60)
             assert p.exitcode == 0
-        _assert_paced([s for r in results for s in r], 12)
+        _assert_paced([s for r, _ in results for s in r], 12,
+                      [s for _, r in results for s in r])
         assert (tmp_path / ".sec_rate").is_file()
 
     def test_a_reservation_far_in_the_future_is_not_trusted(self, fast_pacing, tmp_path):
