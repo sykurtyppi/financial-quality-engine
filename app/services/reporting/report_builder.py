@@ -280,6 +280,8 @@ def _collect_streams(
     vintage_root: Path | None = None,
     n_quarters: int = 8,
     evidence: dict | None = None,
+    uncut_fundamentals: bool = False,
+    scored_quarters: tuple[date, ...] | None = None,
 ):
     """Fetch offerings, restatements, 8-K 4.02 events and the silent-revision
     diff. Returns (body_sections, event_lines, tier1_events, errors,
@@ -296,7 +298,9 @@ def _collect_streams(
     and `vintage_root` overrides the store location (tests). `n_quarters` is
     the window the report scored, over which derived quarters are rebuilt.
     `evidence`, when given, receives the raw stream objects (the evidence
-    ledger's input)."""
+    ledger's input). `uncut_fundamentals` says the score was mapped from the
+    whole payload (no as-of), and `scored_quarters` names the quarter ends it
+    scored; both are the restatement scan's (see `build_report`)."""
     evidence = evidence if evidence is not None else {}
     evidence["ran"] = True
     body_sections: list[str] = []
@@ -352,15 +356,31 @@ def _collect_streams(
 
     def restatements() -> _Staged:
         from app.services.ingestion.restatements import (
+            newest_filed,
             render_restatements_section,
             scan_restatements,
         )
 
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
+        # The scan must read the facts the SCORE read. A replay (and the
+        # corpus) maps as of the report's own day, so `report_date` is that
+        # cut exactly. The live report maps the whole payload, and EDGAR dates
+        # a filing accepted after 5:30pm ET the NEXT business day: a report
+        # written the evening a 10-Q lands, dated today, scored that 10-Q
+        # while a scan as of today dropped it — the newest quarter's revisions
+        # unread, and the derived check rebuilt on a different series. So the
+        # live scan runs through the payload's newest filing, which admits
+        # every dated fact and so never less than the score. Only that: a
+        # replay handed today's payload must never see past its day.
+        scan_as_of = report_date
+        if uncut_fundamentals:
+            newest = newest_filed(facts)
+            if newest is not None and newest > report_date:
+                scan_as_of = newest
         scan = scan_restatements(
-            facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags,
-            n_quarters=n_quarters,
+            facts, period_since=cutoff, as_of=scan_as_of, selected_tags=field_tags,
+            n_quarters=n_quarters, scored_quarters=scored_quarters,
         )
         out = _Staged(result=scan)
         out.evidence["restatements"] = scan
@@ -560,6 +580,7 @@ def build_report(
     baseline_day: date | None = None,
     vintage_root: Path | None = None,
     ledger_out: Path | None = None,
+    uncut_fundamentals: bool = False,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -574,6 +595,14 @@ def build_report(
     claims as data with the filings behind each. A ledger that cannot be built
     fails the build (`NotPublished`): a report published without its evidence
     is not a complete run (Hermes deep audit, finding 2).
+    `uncut_fundamentals`: the caller mapped `dataset` from the whole payload,
+    with no as-of (the live report). The restatement scan then reads every
+    dated fact rather than stopping at `generated_on` — an evening filing is
+    dated by EDGAR the next business day, and the scan must not see less than
+    the score. It defaults to False, the cut: a caller that forgets it scans
+    less than it scored — the derived check then names the drift on the
+    coverage line, the raw-fact check cannot know what it missed — but a
+    replay can never read past its day by omission.
     """
     try:
         report_date = date.fromisoformat(generated_on)
@@ -609,6 +638,10 @@ def build_report(
                 # series the report scored, never a wider window's choice.
                 n_quarters=len(dataset.periods),
                 evidence=stream_objects,
+                uncut_fundamentals=uncut_fundamentals,
+                # What the score covered, so the derived check can refuse a
+                # rebuild that covered something else.
+                scored_quarters=tuple(p.period_end for p in dataset.periods),
             )
         )
         for section in sections:
@@ -696,6 +729,7 @@ def build_report(
         # and clean" over a partial inspection is the false clean bill.
         restatement_scan=scan.coverage_line() if scan is not None else None,
         restatement_gaps=len(scan.uninspected) if scan is not None else 0,
+        restatement_derived_gap=scan is not None and scan.derived_gap is not None,
         change_notes=marks.changes if marks else None,
         flag_notes=marks.flags if marks else None,
     )

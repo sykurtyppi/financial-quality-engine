@@ -152,6 +152,11 @@ def build_report(
             coverage=diag.coverage(),
             # The evidence must name the same series the score came from.
             field_tags=diag.selected_series(),
+            # ...and read the same facts. A report of today mapped the whole
+            # payload, so its scan runs through the newest filing (an evening
+            # 10-Q is dated tomorrow by EDGAR); a replay mapped as of its
+            # day, and its scan stops there.
+            uncut_fundamentals=as_of is None,
             client=client,
             ticker=ticker,
             fetched_at=fetched_at,

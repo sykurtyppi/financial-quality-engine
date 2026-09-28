@@ -102,6 +102,7 @@ def render_decision_card(
     integrity_notes: list[str] | None = None,
     restatement_scan: str | None = None,
     restatement_gaps: int = 0,
+    restatement_derived_gap: bool = False,
     change_notes: dict[str, str] | None = None,
     flag_notes: dict[tuple[str, str], str] | None = None,
 ) -> str:
@@ -122,7 +123,9 @@ def render_decision_card(
     `restatement_gaps` the number of fields it could NOT inspect: the
     checked-and-clean header is qualified `(incomplete: ...)` whenever that is
     non-zero, because "clean" over a partial inspection is the false clean
-    bill the scan exists to prevent.
+    bill the scan exists to prevent. `restatement_derived_gap` qualifies it
+    the same way when the derived-quarter check was not inspected (the scan's
+    rebuild drifted from what the report scored).
 
     `change_notes` (by change-line label) and `flag_notes` (by flag title and
     fiscal label) mark a line whose metric read a revised figure
@@ -200,11 +203,13 @@ def render_decision_card(
 
     # 5. Checked and clean — qualified whenever the revision check had holes.
     header = "## Checked and clean"
+    holes = []
     if restatement_gaps:
-        header += (
-            f" (incomplete: {restatement_gaps} field(s) not inspectable for "
-            "revisions — see data quality)"
-        )
+        holes.append(f"{restatement_gaps} field(s) not inspectable for revisions")
+    if restatement_derived_gap:
+        holes.append("derived quarters not checked for revisions")
+    if holes:
+        header += f" (incomplete: {'; '.join(holes)} — see data quality)"
     out += [header, ""]
     if result.green_flags:
         out += [f"- {_flagged(f)}" for f in result.green_flags]
