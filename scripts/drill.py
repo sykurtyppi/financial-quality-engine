@@ -841,7 +841,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     started = datetime.now(UTC)
-    out = args.out or ROOT / "drills" / started.strftime("%Y%m%dT%H%M%SZ")
+    # Absolute once, here: the workspaces run with their own directory as cwd
+    # and are handed paths under it, so a relative `--out` was applied twice
+    # (Hermes re-audit F4: 0/12 with a relative path, 12/12 absolute).
+    out = (args.out or ROOT / "drills" / started.strftime("%Y%m%dT%H%M%SZ")).expanduser().resolve()
     if out.exists() and any(out.iterdir()):
         print(f"error: {out} is not empty", file=sys.stderr)
         return 2
@@ -861,7 +864,8 @@ def main(argv: list[str] | None = None) -> int:
     (code / "_shim").mkdir()
     (code / "_shim" / "sitecustomize.py").write_text(_SHIM)
 
-    inputs = Inputs(args.ticker, args.cache, out / "work" / "_inputs")
+    cache = args.cache.expanduser().resolve() if args.cache else None
+    inputs = Inputs(args.ticker, cache, out / "work" / "_inputs")
     drill = Drill(inputs, out, code)
     steps: list[Step] = []
     t_all = time.monotonic()
