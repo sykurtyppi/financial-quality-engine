@@ -153,15 +153,21 @@ def check_journal(root: Path, now: datetime | None = None) -> list[Result]:
     try:
         held = watchlist.read_portfolio(portfolio)
         out.append(Result("portfolio", "PASS", f"{len(held)} names in {portfolio.name}"))
-    except watchlist.WatchlistError:
-        out.append(Result("portfolio", "WARN",
-                          f"no {portfolio.relative_to(root)}: `sweep --portfolio` needs it; "
-                          "without it only names already on the watchlist are swept"))
+    except Exception as e:  # noqa: BLE001 - a check reports; it never takes the others down
+        if not portfolio.is_file():
+            out.append(Result("portfolio", "WARN",
+                              f"no {portfolio.relative_to(root)}: `sweep --portfolio` needs it; "
+                              "without it only names already on the watchlist are swept"))
+        else:
+            out.append(Result("portfolio", "FAIL",
+                              f"{portfolio.relative_to(root)} cannot be read "
+                              f"({type(e).__name__}: {e}); save it as UTF-8 text, one ticker "
+                              "per line"))
     path = root / "journal" / "watchlist.json"
     try:
         watches = watchlist.load(path)
-    except (watchlist.WatchlistError, ValueError) as e:
-        return [*out, Result("watchlist", "FAIL", str(e))]
+    except Exception as e:  # noqa: BLE001 - a malformed row must be a FAIL, not a traceback
+        return [*out, Result("watchlist", "FAIL", f"{type(e).__name__}: {e}")]
     if not watches:
         return [*out, Result("watchlist", "WARN", f"{path.relative_to(root)} watches nothing")]
     unarmed = [w.ticker for w in watches if not w.event_armed]

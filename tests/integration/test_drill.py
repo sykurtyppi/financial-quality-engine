@@ -239,3 +239,28 @@ def test_bad_arguments_are_refused_before_anything_is_written(tmp_path, case):
     assert proc.returncode == 2, proc.stderr[-1500:]
     assert proc.stderr.startswith("error: ") and "Traceback" not in proc.stderr
     assert sorted(p.name for p in tmp_path.rglob("*")) == before
+
+
+def test_the_stated_commit_says_when_the_engine_code_was_edited(tmp_path, monkeypatch):
+    """Review of #102: the drill's workspaces stated the bare HEAD sha, so a
+    drill of an edited checkout reported a clean commit and step 1 passed."""
+    root = tmp_path / "engine"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "mod.py").write_text("X = 1\n")
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                               *args], cwd=root, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-q", "-m", "engine")
+    sha = git("rev-parse", "--short", "HEAD")
+    monkeypatch.setattr(drill, "ROOT", root)
+    drill._git_head.cache_clear()
+    assert drill._git_head() == sha
+    (root / "app" / "mod.py").write_text("X = 2\n")
+    drill._git_head.cache_clear()
+    assert drill._git_head() == f"{sha}+uncommitted"
+    drill._git_head.cache_clear()

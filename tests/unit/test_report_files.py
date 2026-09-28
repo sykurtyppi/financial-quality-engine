@@ -716,3 +716,53 @@ class TestEngineCommit:
         monkeypatch.setenv(ENGINE_ENV, "   ")
         engine_commit.cache_clear()
         assert engine_commit() == f"{sha} (clean checkout)"
+
+
+class TestEngineCommitNeverBlocksAPublish:
+    """Review of #102: the stamp is metadata about the run, so reading it can
+    never be the reason a finished rebuild is not published."""
+
+    def test_a_path_git_prints_undecodably_is_read_not_raised(self, tmp_path, monkeypatch):
+        """With core.quotePath=false git prints a Latin-1 file name raw;
+        decoding it as UTF-8 raised UnicodeDecodeError out of every publish."""
+        monkeypatch.delenv(ENGINE_ENV, raising=False)
+        root = tmp_path / "engine"
+        (root / "app").mkdir(parents=True)
+        (root / "app" / "mod.py").write_text("X = 1\n")
+
+        def git(*args):
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            *args], cwd=root, check=True, capture_output=True)
+
+        git("init", "-q")
+        git("add", ".")
+        git("commit", "-q", "-m", "engine")
+        git("config", "core.quotePath", "false")
+        (root / "app" / os.fsdecode(b"caf\xe9.py")).write_text("Y = 1\n")
+        monkeypatch.setattr(report_files, "_ENGINE_ROOT", root)
+        engine_commit.cache_clear()
+        assert "uncommitted changes" in engine_commit()
+
+    def test_a_stamp_that_cannot_be_read_still_publishes(self, tmp_path, monkeypatch):
+        def broken():
+            raise RuntimeError("no stamp today")
+        monkeypatch.setattr(report_files, "engine_commit", broken)
+        report, staged = _publish(tmp_path, "first")
+        live = read_live(report)
+        assert live is not None and live.generation_id == staged.generation_id
+        line = live.text.splitlines()[-2]
+        assert line.startswith(f"{ENGINE_LINE}unknown (")
+        assert "RuntimeError: no stamp today" in line
+        assert json.loads(ledger_path(report).read_text())["engine_commit"] == line[len(ENGINE_LINE):]
+
+    def test_the_commit_is_read_when_the_module_loads_not_at_the_first_publish(self):
+        """A long-lived process (the web UI) that publishes after a `git pull`
+        must name the code it loaded, not the checkout's new HEAD."""
+        probe = (
+            "from app.services.reporting import report_files as r; "
+            "print(r.engine_commit.cache_info().currsize)"
+        )
+        out = subprocess.run([sys.executable, "-c", probe], cwd=ROOT, capture_output=True,
+                             text=True, timeout=60, env={**os.environ, ENGINE_ENV: "abc1234"})
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "1"

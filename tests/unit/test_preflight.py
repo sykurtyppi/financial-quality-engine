@@ -177,6 +177,20 @@ class TestJournal:
         (tmp_path / "journal" / "watchlist.json").write_text("{not json")
         assert _by_name(preflight.check_journal(tmp_path, NOW))["watchlist"].status == "FAIL"
 
+    def test_a_portfolio_that_is_not_utf8_fails_not_crashes(self, tmp_path):
+        """Review of #102: an Excel "Unicode Text" export (UTF-16) raised
+        UnicodeDecodeError out of every check."""
+        _journal(tmp_path, [_row("AAPL", "2026-10-29T20:25:00Z")], portfolio=None)
+        (tmp_path / "journal" / "portfolio.txt").write_bytes("AAPL\n".encode("utf-16"))
+        r = _by_name(preflight.check_journal(tmp_path, NOW))
+        assert r["portfolio"].status == "FAIL" and "UnicodeDecodeError" in r["portfolio"].detail
+        assert r["watchlist"].status == "PASS"
+
+    @pytest.mark.parametrize("bad", [{"forms": 5}, {"forms": None}, {"ticker": 5}])
+    def test_a_malformed_watchlist_row_fails_not_crashes(self, tmp_path, bad):
+        _journal(tmp_path, [{**_row("AAPL", "2026-10-29T20:25:00Z"), **bad}])
+        assert _by_name(preflight.check_journal(tmp_path, NOW))["watchlist"].status == "FAIL"
+
     def test_an_empty_watchlist_warns(self, tmp_path):
         _journal(tmp_path, [])
         assert _by_name(preflight.check_journal(tmp_path, NOW))["watchlist"].status == "WARN"
