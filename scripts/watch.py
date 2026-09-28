@@ -37,7 +37,9 @@ Exit codes (for cron/alerting):
        queued under reports/briefs/.pending/ and retried by every later
        sweep pass until it succeeds; the print is never silently brief-less.
        Also: a PRINT-NIGHT brief (8-K-triggered, see below) failed and is
-       queued the same way.
+       queued the same way; or a queue marker that does not parse (a torn
+       write, a hand edit) was found and removed — the brief it held is no
+       longer queued, and the log names the file.
     6  the companyfacts vintage capture has been failing for days for a
        watched name. Ranked below every code above it — a print that did not
        complete is more urgent — but non-zero, because an archive nobody is
@@ -75,6 +77,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import re
 import subprocess
 import sys
 import time
@@ -85,13 +88,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.brief.sources import BRIEFS, BriefSourceError, latest_earnings_8k
+from app.services.brief.sources import (
+    BRIEFS,
+    BriefSourceError,
+    latest_earnings_8k,
+    read_build_record,
+)
 from app.services.delivery import notify
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.ingestion.vintages import capture as capture_vintage
 from app.services.journal import store
 from app.services.journal.schema_v2 import verify_lock
-from app.services.reporting.report_files import is_live_report
+from app.services.reporting.report_files import is_live_report, write_atomic
 from app.services.watch import watchlist as wl
 from app.services.watch.infer import infer_print_at
 from app.services.watch.poller import (
@@ -107,9 +115,18 @@ POLITE_INTERVAL_S = 300
 AUTO_DIR = ROOT / "reports" / "auto"
 PORTFOLIO = ROOT / "journal" / "portfolio.txt"
 SWEEP_LOCK = ROOT / "journal" / "sweep.lock"
-BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"  # <TICKER>: target line + attempts line
+# The brief queue: one marker per EVENT, `<TICKER>__<key>` (see `_queue_path`),
+# holding a target line, `attempts=` and `alerted=`. It was one marker per
+# TICKER, so a success for one quarter deleted another quarter's entry, a
+# failure overwrote it, and a kept (exhausted) entry blocked the next
+# quarter's print-night brief (round-24 audit). A bare `<TICKER>` marker is
+# that older format; it is still read and moves to its per-event name on its
+# first write.
+BRIEF_PENDING = ROOT / "reports" / "briefs" / ".pending"
 BRIEF_PENDING_RC = 5
 NO_REPORT_MARK = "-"  # queue target for a print-night brief (no engine report yet)
+PRINT_NIGHT_KEY = "print-night"  # the event key of NO_REPORT_MARK's marker
+QUEUE_SEP = "__"  # between ticker and event key; no ticker contains it
 PRINT_BRIEF_WINDOW_DAYS = 14  # an earnings 8-K older than this is last quarter's, not news
 # A brief that keeps failing is retried this many times (hourly passes), then
 # left alone: each retry is a paid headless run, and a DETERMINISTIC failure
@@ -329,90 +346,249 @@ def _run_brief(ticker: str, report: Path | None) -> int:
 
     The report and audit already exist, so a failed brief does not un-complete
     the case (the row is still re-armed). But it is not just a warning either:
-    the failure is QUEUED (reports/briefs/.pending/<TICKER> names the report)
-    and every later sweep pass retries it first, so a season-long fault — the
-    CLI missing from a scheduler's PATH, an expired login — cannot quietly
-    leave every print brief-less behind a green exit code."""
+    the failure is QUEUED (reports/briefs/.pending/<TICKER>__<event>, see
+    `_queue_path`) and every later sweep pass retries it first, so a
+    season-long fault — the CLI missing from a scheduler's PATH, an expired
+    login — cannot quietly leave every print brief-less behind a green exit
+    code.
+
+    The queue is touched only for THIS build's event. A failure writes this
+    event's marker and never another's; a success clears this event's marker
+    and, for a full build, the print-night one as well — both build the
+    newest earnings 8-K's brief file, so the full brief is the print-night
+    brief's second chance, taken. A full brief of another quarter queued
+    (kept past its cap, on purpose: nothing else rebuilds it) is another
+    event and is left alone; before, any success deleted it without a word
+    (round-24 audit)."""
     cmd = [sys.executable, str(ROOT / "scripts" / "earnings_brief.py"), "build", ticker]
     cmd += ["--no-report"] if report is None else ["--report", str(report)]
     print(f"  -> {' '.join(cmd[1:])}")
     rc = subprocess.run(cmd, cwd=ROOT).returncode
-    marker = BRIEF_PENDING / ticker
+    target = NO_REPORT_MARK if report is None else str(report)
     if rc != 0:
-        target = NO_REPORT_MARK if report is None else str(report)
-        prior = _queue_read(ticker)
+        prior = _queue_read(ticker, target)
         attempts = (prior[1] + 1) if prior and prior[0] == target else 1
         _queue_write(ticker, target, attempts)  # a new failure re-arms the alert
-        print(f"  brief FAILED (exit {rc}) — queued at {marker} (attempt {attempts}) and "
-              f"retried on the next sweep pass (or run "
+        print(f"  brief FAILED (exit {rc}) — queued at {_queue_path(ticker, target)} "
+              f"(attempt {attempts}) and retried on the next sweep pass (or run "
               f"`earnings_brief.py {' '.join(cmd[2:])}` by hand).", file=sys.stderr)
-    elif marker.exists():
-        marker.unlink()
+    else:
+        _queue_clear(ticker, target)
+        if report is not None:
+            _queue_clear(ticker, NO_REPORT_MARK)
     return rc
 
 
-def _queue_read(ticker: str) -> tuple[str, int, str] | None:
-    """(target, attempts, alerted) from the queue marker: target is a report
-    path or NO_REPORT_MARK, `alerted` is the YYYY-MM-DD an exhausted entry
-    last raised a notification (empty when it never has). None when nothing
-    is queued. A marker written before `alerted` existed reads as ""."""
-    marker = BRIEF_PENDING / ticker
-    if not marker.is_file():
+def _queue_path(ticker: str, target: str) -> Path:
+    """The marker of ``target``'s event: ``<TICKER>__print-night`` for the
+    print-night brief, ``<TICKER>__<report stem>`` for a full one.
+
+    The key is the report's STEM, not its whole path: two paths sharing a
+    stem (``reports/`` and ``reports/auto/`` on one day) are one ticker-day's
+    report and build the same brief file, so they are one event, and the
+    second's failure restarting the count is right. Tickers carry no ``_``
+    (``safe_ticker``), so ``<TICKER>__*`` never matches another ticker's
+    markers, nor the legacy bare ``<TICKER>`` one."""
+    key = PRINT_NIGHT_KEY if target == NO_REPORT_MARK else Path(target).stem
+    return BRIEF_PENDING / f"{ticker}{QUEUE_SEP}{key}"
+
+
+def _legacy_path(ticker: str) -> Path:
+    """The ticker-keyed marker written before the queue was per event."""
+    return BRIEF_PENDING / ticker
+
+
+def _parse_marker(path: Path) -> tuple[str, int, str] | None:
+    """(target, attempts, alerted) from one marker, or None when it is
+    missing or does not parse.
+
+    Parses means: a first line that is NO_REPORT_MARK or a ``.md`` path, then
+    only ``attempts=<int>`` and ``alerted=<day>`` lines (blank lines aside).
+    Anything else is a torn write — the writer before this change was a
+    plain ``write_text`` — or a hand edit, and is None, never a guess: a
+    truncated path taken as a target is retried as a report that never
+    existed, and an empty first line was read as "nothing queued" by the
+    retry while the print-night trigger read the same file as "queued"
+    (round-24 audit). A marker from before ``attempts`` existed (target line
+    only) reads as attempt 1, one from before ``alerted`` as ""."""
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, ValueError):  # missing, unreadable, or not text
         return None
-    lines = marker.read_text().splitlines()
     target = lines[0].strip() if lines else ""
+    if target != NO_REPORT_MARK and not target.endswith(".md"):
+        return None
     attempts, alerted = 1, ""
     for line in lines[1:]:
-        if line.startswith("attempts="):
+        name, sep, value = line.partition("=")
+        if sep and name == "attempts":
             try:
-                attempts = int(line.split("=", 1)[1])
+                attempts = int(value)
             except ValueError:
-                pass
-        elif line.startswith("alerted="):
-            alerted = line.split("=", 1)[1].strip()
-    return (target, attempts, alerted) if target else None
+                return None
+        elif sep and name == "alerted":
+            alerted = value.strip()
+        elif line.strip():
+            return None
+    return target, attempts, alerted
+
+
+def _queue_markers(ticker: str) -> list[Path]:
+    """Every marker file of ``ticker``: its per-event markers, then a legacy
+    ticker-only one if one is still on disk. Parseable or not — the retry
+    must see an unreadable marker to remove it. Never a write_atomic
+    temporary (``.<name>.<hex>.tmp``), which starts with a dot."""
+    found = sorted(p for p in BRIEF_PENDING.glob(f"{ticker}{QUEUE_SEP}*") if p.is_file())
+    legacy = _legacy_path(ticker)
+    return found + ([legacy] if legacy.is_file() else [])
+
+
+def _queue_read(ticker: str, target: str) -> tuple[str, int, str] | None:
+    """(target, attempts, alerted) queued for ``target``'s event: target is
+    a report path or NO_REPORT_MARK, ``alerted`` the YYYY-MM-DD an exhausted
+    entry last raised a notification ("" when it never has). None when
+    nothing that parses is queued for that event.
+
+    A legacy ticker-only marker still counts, when the entry in it is this
+    event's: an operator's queue from before the per-event scheme keeps
+    working, and moves to its per-event name on its first write
+    (``_queue_write``) or goes with its event's success (``_queue_clear``)."""
+    entry = _parse_marker(_queue_path(ticker, target))
+    if entry is None:
+        legacy = _parse_marker(_legacy_path(ticker))
+        if legacy is not None and _queue_path(ticker, legacy[0]) == _queue_path(ticker, target):
+            entry = legacy
+    return entry
 
 
 def _queue_write(ticker: str, target: str, attempts: int, alerted: str = "") -> None:
+    """Queue ``target``'s event, whole or not at all: a temporary file,
+    fsynced and renamed over the marker, so a kill mid-write leaves the old
+    marker or the new one, never the torn one a plain write left."""
     BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
     body = f"{target}\nattempts={attempts}\n" + (f"alerted={alerted}\n" if alerted else "")
-    (BRIEF_PENDING / ticker).write_text(body)
+    write_atomic(_queue_path(ticker, target), body)
+    _drop_legacy(ticker, target)  # migrated: the per-event marker now holds it
+
+
+def _queue_clear(ticker: str, target: str) -> None:
+    """Nothing queued any more for ``target``'s event."""
+    _queue_path(ticker, target).unlink(missing_ok=True)
+    _drop_legacy(ticker, target)
+
+
+def _drop_legacy(ticker: str, target: str) -> None:
+    """Remove the legacy marker, only when it holds ``target``'s event: a
+    legacy entry for another event is still the only record of it."""
+    legacy = _legacy_path(ticker)
+    entry = _parse_marker(legacy)
+    if entry is not None and _queue_path(ticker, entry[0]) == _queue_path(ticker, target):
+        legacy.unlink(missing_ok=True)
+
+
+_REPORT_DAY_RE = re.compile(r"_(\d{4}-\d{2}-\d{2})$")
+
+
+def _report_day(target: str) -> date | None:
+    """The day in an engine report's name (``<T>_<YYYY-MM-DD>.md``, the day
+    it was generated), or None for any other name."""
+    m = _REPORT_DAY_RE.search(Path(target).stem)
+    try:
+        return date.fromisoformat(m.group(1)) if m else None
+    except ValueError:
+        return None
+
+
+def _event_queued(ticker: str, filed: date) -> bool:
+    """Is a brief of the print whose 8-K was filed on ``filed`` already
+    queued? Then its retry owns it and the print-night trigger adds no
+    second run.
+
+    Only a marker that PARSES counts: an unreadable one queues nothing, and
+    counting it (the old ``marker.exists()``) blocked the print-night brief
+    for as long as it sat there. And only one for THIS print: the
+    print-night entry, or a full brief whose report was generated on or
+    after this 8-K — this quarter's 10-Q track, whose retry writes this very
+    brief with the engine findings in it. An older quarter's full brief,
+    kept past its cap on purpose and alerting daily, is another event: it
+    blocked the next quarter's print-night brief for as long as it was kept
+    (round-24 audit)."""
+    if _queue_read(ticker, NO_REPORT_MARK) is not None:
+        return True
+    for path in _queue_markers(ticker):
+        entry = _parse_marker(path)
+        if entry is None or entry[0] == NO_REPORT_MARK:
+            continue
+        day = _report_day(entry[0])
+        if day is not None and day >= filed:
+            return True
+    return False
 
 
 def _retry_pending_brief(ticker: str) -> int:
-    """Re-run a brief queued by an earlier failure. 0 when nothing is queued
-    or the retry succeeded; BRIEF_PENDING_RC when it failed again."""
-    marker = BRIEF_PENDING / ticker
-    queued = _queue_read(ticker)
-    if queued is None:
-        return 0
-    target, attempts, alerted = queued
+    """Re-run the briefs queued for ``ticker`` by earlier failures, one per
+    event. 0 when nothing is queued or every retry succeeded;
+    BRIEF_PENDING_RC when one failed again, is kept past its cap (once a
+    day), or its marker was unreadable.
+
+    An unreadable marker is said on stderr, removed, and makes this pass 5:
+    it names nothing that can be retried, so the job it held is lost, and a
+    lost brief job is exactly what the queue exists to make loud. Removing
+    it means it is said once, not every hour; a print-night brief it may
+    have held is rebuilt by the trigger, which never counted it."""
+    rc = 0
+    queued = []
+    for path in _queue_markers(ticker):
+        entry = _parse_marker(path)
+        if entry is None:
+            print(f"  {ticker}: unreadable queue marker {path} (a torn write or a hand "
+                  f"edit) — removing it. Whatever brief it held is no longer queued: check "
+                  f"that {ticker}'s latest brief exists, or run `earnings_brief.py build "
+                  f"{ticker}` by hand.", file=sys.stderr)
+            path.unlink(missing_ok=True)
+            rc = BRIEF_PENDING_RC
+        else:
+            queued.append((path, entry))
+    # Full briefs first: one that succeeds also clears the print-night entry
+    # (`_run_brief`), so the pass spends one headless run, not two.
+    queued.sort(key=lambda q: q[1][0] == NO_REPORT_MARK)
+    for path, entry in queued:
+        if not path.is_file():
+            continue  # cleared by a success earlier in this pass
+        rc = _retry_one(ticker, path, entry) or rc
+    return rc
+
+
+def _retry_one(ticker: str, marker: Path, entry: tuple[str, int, str]) -> int:
+    """One queued event: 0 or BRIEF_PENDING_RC, as `_retry_pending_brief`."""
+    target, attempts, alerted = entry
     report: Path | None = None if target == NO_REPORT_MARK else Path(target)
     if report is not None and not report.is_file():
         print(f"  {ticker}: queued brief names a report that no longer exists "
               f"({report}) — dropping the queue entry.", file=sys.stderr)
-        marker.unlink()
+        _queue_clear(ticker, target)
         return 0
     if attempts >= BRIEF_MAX_ATTEMPTS:
         if report is None:
             print(f"  {ticker}: print-night brief failed {attempts} times — giving up on it; "
                   f"the brief is built with the engine findings when the 10-Q lands, or run "
                   f"`earnings_brief.py build {ticker} --no-report` by hand.", file=sys.stderr)
-            marker.unlink()
-        else:
-            # Kept, not retried: nothing else will produce this brief. It is
-            # logged every pass, but it only ALERTS once a day — an hourly
-            # notification about a state that cannot change on its own is
-            # noise, and noise is how a real alert gets ignored.
-            print(f"  {ticker}: brief for {report.name} failed {attempts} times — no longer "
-                  f"retrying (a repeated failure is deterministic: run "
-                  f"`earnings_brief.py build {ticker} --report {report}` to see the error). "
-                  f"Queued at {marker}; delete it to silence this.", file=sys.stderr)
-            today = _utcnow().date().isoformat()
-            if alerted == today:
-                return 0  # already raised today; the log line above is the record
+            _queue_clear(ticker, target)
+            return BRIEF_PENDING_RC
+        # Kept, not retried: nothing else will produce this brief. It is
+        # logged every pass, but it only ALERTS once a day — an hourly
+        # notification about a state that cannot change on its own is
+        # noise, and noise is how a real alert gets ignored.
+        today = _utcnow().date().isoformat()
+        if alerted != today:
             _queue_write(ticker, target, attempts, alerted=today)
-        return BRIEF_PENDING_RC
+            marker = _queue_path(ticker, target)  # a legacy marker has moved there
+        print(f"  {ticker}: brief for {report.name} failed {attempts} times — no longer "
+              f"retrying (a repeated failure is deterministic: run "
+              f"`earnings_brief.py build {ticker} --report {report}` to see the error). "
+              f"Queued at {marker}; delete it to silence this.", file=sys.stderr)
+        # Already raised today: the log line above is the record.
+        return 0 if alerted == today else BRIEF_PENDING_RC
     print(f"  {ticker}: retrying the queued "
           f"{'print-night brief' if report is None else 'brief for ' + report.name}"
           f" (attempt {attempts + 1})")
@@ -425,8 +601,9 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
 
     Fires once per print: the newest Item 2.02 8-K, filed within
     PRINT_BRIEF_WINDOW_DAYS, with no brief on disk for its date and nothing
-    queued. The brief's filename IS the idempotency key — `<TICKER>_<8-K
-    filing date>.md` — so no watchlist state is added; when the 10-Q hook
+    queued for this print (`_event_queued`). The brief's filename IS the
+    idempotency key — `<TICKER>_<8-K filing date>.md` — so no watchlist
+    state is added; when the 10-Q hook
     later rebuilds the same file with the engine findings, this pass sees it
     exists and stays quiet. 0, or BRIEF_PENDING_RC when the run failed
     (queued). Never raises."""
@@ -456,7 +633,7 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
                 or meta.get("accession") == k.accession:
             return 0
         superseded = meta.get("accession")
-    if (BRIEF_PENDING / watch.ticker).exists():
+    if _event_queued(watch.ticker, k.filing_date):
         return 0  # already queued by an earlier failure; the retry owns it
     if superseded:
         print(f"[{stamp}] {watch.ticker}: a newer earnings 8-K {k.accession} superseded "
@@ -470,12 +647,14 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
 
 
 def _built_meta(ticker: str, day: str) -> dict | None:
-    """The brief's build record (reports/briefs/<T>/<day>/built.json), or None."""
-    try:
-        meta = json.loads((BRIEFS / ticker / day / "built.json").read_text())
-    except (OSError, ValueError):
-        return None
-    return meta if isinstance(meta, dict) else None
+    """The brief's build record (reports/briefs/<T>/<day>/built.json), or None
+    when there is none that vouches for the brief on disk: its
+    ``brief_sha256`` must match the brief's bytes (`read_build_record`). A
+    kill between the brief's write and the record's could pair a new FULL
+    brief with the old print-night record, and a same-day second 8-K would
+    then rebuild over the engine findings; None is never rebuilt here."""
+    return read_build_record(BRIEFS / ticker / day / "built.json",
+                             BRIEFS / f"{ticker}_{day}.md")
 
 
 def _print_night_guarded(watch, submissions, args, now) -> int:
@@ -486,7 +665,7 @@ def _print_night_guarded(watch, submissions, args, now) -> int:
               file=sys.stderr)
         try:
             # Keep the queue an honest record: the next pass retries it there.
-            if _queue_read(watch.ticker) is None:
+            if _queue_read(watch.ticker, NO_REPORT_MARK) is None:
                 _queue_write(watch.ticker, NO_REPORT_MARK, 1)
         except OSError:
             pass
@@ -840,9 +1019,13 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
                   file=sys.stderr)
         elif args.verbose:
             print(f"[{stamp}] {decision.message}")
-        # The 10-Q is not here yet — but the earnings 8-K may be.
-        pending = pending or _print_night_guarded(watch, submissions, args, now)
-        return pending or vintage_rc or 3
+        # The 10-Q is not here yet — but the earnings 8-K may be. Asked even
+        # when the retry above failed: the trigger already stays quiet for a
+        # print whose brief is queued (`_event_queued`), and a retry of ANOTHER
+        # event failing — an older quarter's kept entry alerting, once a day —
+        # is no reason to hold this print's brief back a pass.
+        night = _print_night_guarded(watch, submissions, args, now)
+        return pending or night or vintage_rc or 3
     print(f"[{stamp}] {decision.action} — {decision.message}")
     try:
         rc = _act(watch.ticker, watch, decision, args)

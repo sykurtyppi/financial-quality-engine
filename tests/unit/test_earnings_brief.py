@@ -6,7 +6,9 @@ and the post-processing around it are.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 from argparse import Namespace
 from datetime import date
 from pathlib import Path
@@ -645,6 +647,97 @@ class TestCliBuild:
         assert brief_cli.cmd_build(self._args()) == 0
         assert (env / "NVDA_2026-08-26.md").exists()
         assert "build record not written" in capsys.readouterr().err
+
+    def test_a_record_that_does_not_match_the_brief_is_no_record(self, env, monkeypatch, capsys):
+        # built.json and the brief were separate plain writes: a new full
+        # brief could sit beside the OLD print-night record, which let a
+        # later --no-report run overwrite the engine findings. The record
+        # now carries the brief's sha256; a mismatch is "no record", which
+        # is treated as full.
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("print night"), ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        meta = brief_cli.read_built_meta("NVDA", "2026-08-26")
+        out = env / "NVDA_2026-08-26.md"
+        assert meta["kind"] == "print-night"
+        assert meta["brief_sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+        out.write_text(out.read_text().replace("print night", "full findings"))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "full findings" in out.read_text()
+        assert "no build record" in capsys.readouterr().out
+
+    def test_a_record_without_a_hash_is_no_record(self, env):
+        # A record from before the hash, or one hand-edited: nothing ties it
+        # to the brief on disk, so it cannot vouch for it.
+        out = env / "NVDA_2026-08-26.md"
+        out.write_text("# brief\n")
+        record = brief_cli.built_meta_path("NVDA", "2026-08-26")
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"kind": "print-night", "accession": "k-new"}))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+        record.write_text(json.dumps({"kind": "print-night", "brief_sha256": 7}))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+        out.unlink()  # a record for a brief that is not there vouches for nothing either
+        record.write_text(json.dumps({"kind": "print-night", "brief_sha256": "0" * 64}))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+
+    def test_a_kill_between_the_brief_and_its_record_is_safe(self, env, monkeypatch, capsys):
+        # The process dies after the new FULL brief lands but before
+        # built.json does (simulated: every write after the first raises a
+        # BaseException, which no handler in cmd_build catches). The old
+        # print-night record is still on disk; a later --no-report run must
+        # read it as no record and leave the full brief alone.
+        class Killed(BaseException):
+            pass
+
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("print night"), ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        out = env / "NVDA_2026-08-26.md"
+        record = brief_cli.built_meta_path("NVDA", "2026-08-26")
+        old_record = record.read_text()
+        real = brief_cli.write_atomic
+        calls = []
+
+        def dies_after_the_first(path, text, **kw):
+            calls.append(path)
+            if len(calls) > 1:
+                raise Killed
+            real(path, text, **kw)
+        monkeypatch.setattr(brief_cli, "write_atomic", dies_after_the_first)
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("full findings"), ""))
+        with pytest.raises(Killed):
+            brief_cli.cmd_build(self._args())
+        assert calls[0] == out  # the brief first; the record is never before it
+        assert "full findings" in out.read_text()
+        assert record.read_text() == old_record  # the torn state: new brief, old record
+        assert not [p for p in out.parent.iterdir() if p.name.endswith(".tmp")]
+        monkeypatch.setattr(brief_cli, "write_atomic", real)
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "full findings" in out.read_text()
+        assert "could downgrade it" in capsys.readouterr().out
+        # A full rebuild repairs the record.
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("full findings"), ""))
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26")["kind"] == "full"
+
+    def test_the_brief_and_its_sidecars_are_written_atomically_record_last(
+            self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief(), ""))
+        real = brief_cli.write_atomic
+        order = []
+        monkeypatch.setattr(brief_cli, "write_atomic",
+                            lambda path, text, **kw: order.append(path.name) or real(path, text, **kw))
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert order == ["NVDA_2026-08-26.md", "assessment.json", "built.json"]
 
     def test_no_report_wins_over_an_explicit_report(self, env, monkeypatch):
         prompts = []

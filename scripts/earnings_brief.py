@@ -51,14 +51,21 @@ from app.services.brief.sources import (
     BriefSourceError,
     BriefSources,
     SourceFile,
+    brief_sha256,
     collect_sources,
+    read_build_record,
 )
 from app.services.brief.validation import validate_brief
 from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal.store import safe_ticker
-from app.services.reporting.report_files import LiveRun, is_live_report, read_live
+from app.services.reporting.report_files import (
+    LiveRun,
+    is_live_report,
+    read_live,
+    write_atomic,
+)
 
 REPORT_DIRS = (ROOT / "reports" / "auto", ROOT / "reports")
 DEFAULT_TIMEOUT_S = 1800.0
@@ -128,25 +135,30 @@ def built_meta_path(ticker: str, event_day: str, root: Path | None = None) -> Pa
 
 
 def read_built_meta(ticker: str, event_day: str, root: Path | None = None) -> dict | None:
-    """{"kind": "full"|"print-night", "accession": ..., "report": ..., "at": ...}
-    for the brief on disk, or None when there is no record (a brief from
-    before the sidecar existed, or none at all)."""
-    p = built_meta_path(ticker, event_day, root)
-    try:
-        meta = json.loads(p.read_text())
-    except (OSError, ValueError):
-        return None
-    return meta if isinstance(meta, dict) else None
+    """{"kind": "full"|"print-night", "accession": ..., "report": ..., "at": ...,
+    "brief_sha256": ...} for the brief on disk, or None when there is no
+    record that matches it: none at all, one from before the sidecar or its
+    hash existed, or one left beside a brief it does not describe (a build
+    killed between the two writes). `read_build_record` says why None is
+    the safe direction."""
+    return read_build_record(built_meta_path(ticker, event_day, root),
+                             brief_path(ticker, event_day, root))
 
 
 def write_built_meta(ticker: str, event_day: str, *, kind: str, accession: str,
                      report: Path | None, root: Path | None = None) -> None:
+    """Record how the brief now on disk was built, with the sha256 of its
+    bytes as read back here: the record vouches for that brief only. Written
+    atomically and LAST, after the brief and its assessment, so a kill at
+    any point leaves either this build's record beside this build's brief,
+    or an older record whose hash no longer matches, which reads as none."""
     p = built_meta_path(ticker, event_day, root)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({
+    write_atomic(p, json.dumps({
         "kind": kind, "accession": accession,
         "report": str(report) if report else None,
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "brief_sha256": brief_sha256(brief_path(ticker, event_day, root)),
     }, indent=2) + "\n")
 
 
@@ -258,9 +270,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         # A print-night build must never downgrade a brief that already
         # carries the engine findings (a queued retry racing a hand-built
         # full brief, or a stray --no-report by hand). No record at all is
-        # treated the same way — a brief from before the sidecar existed, or
-        # one whose record failed to write, is assumed full. Nothing to do:
-        # exit 0 so a queue entry for it is cleared.
+        # treated the same way — a brief from before the sidecar existed, one
+        # whose record failed to write, or one beside a record whose hash does
+        # not match it (a build killed after the brief but before the record)
+        # is assumed full. Nothing to do: exit 0 so a queue entry for it is
+        # cleared.
         built = f"built {existing.get('at')}" if existing else "no build record"
         print(f"{ticker}: {out.name} already exists ({built}) — a print-night rebuild "
               "could downgrade it; nothing to do (the 10-Q rebuild still refreshes it).")
@@ -294,14 +308,21 @@ def cmd_build(args: argparse.Namespace) -> int:
               f"{src.workdir}", file=sys.stderr)
         return 2
     keep = useful_value(out.read_text()) if out.exists() else "unset"
-    out.write_text(finalize(stdout, keep))
+    # Three files, each written whole (temporary file, fsync, rename) and in
+    # this order: the brief, its assessment, then the build record LAST. A
+    # plain write killed part way left a torn file; and a kill after the
+    # brief but before the record left a new full brief beside the old
+    # print-night record, which let a later --no-report run overwrite the
+    # engine findings (round-24 audit). The record names the brief's hash,
+    # so any record a kill leaves behind either matches this brief or reads
+    # as none (`read_built_meta`).
+    write_atomic(out, finalize(stdout, keep))
     # Stable machine-readable contract for a later web/API surface. The human
     # brief remains the primary artifact; this sidecar avoids reparsing model
     # prose when a client only needs the five-dimensional print assessment.
     try:
-        (src.workdir / "assessment.json").write_text(
-            assessment.model_dump_json(indent=2) + "\n"
-        )
+        write_atomic(src.workdir / "assessment.json",
+                     assessment.model_dump_json(indent=2) + "\n")
     except OSError as e:
         # Best-effort, like the build record below: the brief is written and
         # valid; a missing sidecar must not fail the build or skip the record.
