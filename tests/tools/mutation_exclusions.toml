@@ -96,7 +96,7 @@ kind = "equivalent"
 path = "app/services/ingestion/restatements.py"
 operator = "continue"
 source = "if len(stable) < 2: continue"
-function = "derived_revisions"
+function = "_derived_check"
 reason = "A one-entry run makes `orig` and `cur` the same entry: `moved` is 0, so `moved / base < materiality_pct` (or `base == 0`) skips it on the next line."
 
 [[exclusion]]

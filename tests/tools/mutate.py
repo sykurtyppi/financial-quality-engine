@@ -65,6 +65,7 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_debt_composition.py", "tests/unit/test_series_selection.py",
         "tests/unit/test_restatement_scan_truth.py", "tests/unit/test_same_day_precedence.py",
         "tests/unit/test_payload_fuzz.py", "tests/unit/test_tag_switch_fallback.py",
+        "tests/unit/test_restatement_scan_reads_what_was_scored.py",
     )),
     Target("app/services/ingestion/companyfacts_mapper.py", (
         "tests/unit/test_companyfacts_mapper.py", "tests/unit/test_coherent_derivation.py",

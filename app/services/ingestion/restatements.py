@@ -31,7 +31,7 @@ timeline rendered as a report section (matches ROADMAP_2026Q3 P1-F done-when).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -39,6 +39,7 @@ from app.services.ingestion.companyfacts_mapper import (
     FLOW_FIELDS,
     INSTANT_FIELDS,
     QTD_DAYS,
+    IngestionDiagnostics,
     _parse_date,
     _unit_for,
 )
@@ -189,6 +190,14 @@ class RestatementScan:
 
     Only `uninspected` makes the scan `incomplete`; a by-design exclusion is
     disclosed but is not a hole.
+
+    `derived_gap` is the one hole that is not a field's: why the derived-quarter
+    check (the mapper re-run as of each filing, `derived_revisions`) returned
+    nothing to trust. Its rebuild is a second mapper run; when that run chose
+    other series or quarters than the report scored, its "moved" quarters
+    are some other figure's, and an empty result would read as "no derived
+    quarter moved" over a check that never looked at the scored one. It also
+    makes the scan `incomplete`.
     """
 
     footprints: list[RestatementFootprint]
@@ -200,6 +209,7 @@ class RestatementScan:
     materiality_pct: float
     conflicts: tuple[SameDayConflict, ...] = ()
     derived: tuple[DerivedRevision, ...] = ()
+    derived_gap: str | None = None  # why the derived-quarter check was NOT inspected
 
     @property
     def total(self) -> int:
@@ -207,7 +217,7 @@ class RestatementScan:
 
     @property
     def incomplete(self) -> bool:
-        return bool(self.uninspected)
+        return bool(self.uninspected) or self.derived_gap is not None
 
     def coverage_line(self) -> str:
         """One sentence naming the coverage, for the card and the appendix."""
@@ -217,6 +227,8 @@ class RestatementScan:
             line += f"; NOT inspected: {gaps}"
         if self.excluded:
             line += "; excluded by design: " + ", ".join(sorted(self.excluded))
+        if self.derived_gap is not None:
+            line += f"; derived-quarter check NOT inspected ({self.derived_gap})"
         return line
 
 
@@ -533,6 +545,7 @@ def scan_restatements(
     as_of: date | None = None,
     selected_tags: Selected | None = None,
     n_quarters: int = 8,
+    scored_quarters: Sequence[date] | None = None,
 ) -> RestatementScan:
     """Find same-period figures a later filing revised beyond `materiality_pct`,
     and account for every field the check could or could not cover.
@@ -566,6 +579,18 @@ def scan_restatements(
     is 8). Derived quarters are rebuilt over exactly that window: the mapper
     ranks candidate tags on the window it is given, so a wider rebuild can
     follow a series the report does not score.
+
+    The raw-fact check reads `selected_tags` directly; the derived check
+    cannot — it re-runs the mapper on the facts filed by `as_of` and reads
+    that run's own choice. The two agree only when `as_of` admits exactly
+    the facts the report's mapper saw. So when the caller supplies its
+    selection (and `scored_quarters`, the quarter ends it scored), the
+    rebuild is checked against them first, and a rebuild that chose other
+    series or quarters yields no derived rows and a `derived_gap` naming the
+    drift. A report dated the evening a 10-Q was accepted, scored on the
+    whole payload but scanned as of that day, dropped the 10-Q (EDGAR dates
+    it the next business day): its rebuild lost the newest quarter and, for
+    AAPL, the intangible-assets series the score was built from.
     """
     footprints: list[RestatementFootprint] = []
     seen: set[tuple[str, date | None, date]] = set()  # (tag, start, end) dedupe
@@ -771,13 +796,12 @@ def scan_restatements(
         (f.field_name, f.period_end) for f in footprints
         if quarters_own(f.period_start, f.period_end)
     }
-    derived = [
-        d for d in derived_revisions(
-            facts_json, as_of=as_of, period_since=period_since,
-            materiality_pct=materiality_pct, n_quarters=n_quarters,
-        )
-        if (d.field_name, d.period_end) not in reported
-    ]
+    found, derived_gap = _derived_check(
+        facts_json, as_of=as_of, period_since=period_since,
+        materiality_pct=materiality_pct, n_quarters=n_quarters,
+        selected_tags=selected_tags, scored_quarters=scored_quarters,
+    )
+    derived = [d for d in found if (d.field_name, d.period_end) not in reported]
     return RestatementScan(
         footprints=footprints,
         inspected=tuple(inspected),
@@ -790,7 +814,37 @@ def scan_restatements(
             same_day, key=lambda c: (c.period_end, c.field_name, c.tag, c.filed), reverse=True
         )),
         derived=tuple(derived),
+        derived_gap=derived_gap,
     )
+
+
+def newest_filed(facts_json: dict) -> date | None:
+    """The latest `filed` date on any fact in the payload, or None when no
+    fact carries a usable one. A scan dated this day (or later) admits every
+    dated fact: exactly what a mapper run with no `as_of` scored from, bar
+    undated rows, which no dated scan admits. Same tolerance as
+    `_dated_copy`: a malformed level or row is skipped, never raised on."""
+    newest: date | None = None
+    taxonomies = facts_json.get("facts")
+    if not isinstance(taxonomies, dict):
+        return None
+    for tags in taxonomies.values():
+        if not isinstance(tags, dict):
+            continue
+        for concept in tags.values():
+            units = concept.get("units") if isinstance(concept, dict) else None
+            if not isinstance(units, dict):
+                continue
+            for rows in units.values():
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    try:
+                        filed = _parse_date(row["filed"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    newest = filed if newest is None else max(newest, filed)
+    return newest
 
 
 def _dated_copy(facts_json: dict, cutoff: date | None) -> dict:
@@ -865,14 +919,103 @@ def derived_revisions(
     a fact behind such a quarter was filed; each quarter's trail of scored
     values is compared like a filed figure's. Only the trailing run built
     from the same components is compared: a component appearing is a change
-    in how the figure is composed, not a revision of it."""
+    in how the figure is composed, not a revision of it.
+
+    Unchecked against any report's selection: `scan_restatements` is what a
+    report calls, and it withholds a rebuild that drifted (`_derived_check`)."""
+    return _derived_check(
+        facts_json, as_of=as_of, period_since=period_since,
+        materiality_pct=materiality_pct, n_quarters=n_quarters,
+    )[0]
+
+
+def _label(selection: SeriesSelection | str | None) -> str:
+    if selection is None:
+        return "nothing"
+    return selection.tag_used if isinstance(selection, SeriesSelection) else selection
+
+
+def _rebuild_drift(
+    rebuilt: IngestionDiagnostics,
+    rebuilt_quarters: Sequence[date],
+    selected_tags: Selected | None,
+    scored_quarters: Sequence[date] | None,
+) -> str | None:
+    """Why the derived check's rebuild is not the report's mapper run, or
+    None when it is (as far as the caller said what it scored). A selection
+    is compared in the form the caller gave it: objects with the rebuild's
+    `selected_series()`, legacy strings with its `selected_tags()` —
+    parsing a string back would call a non-us-gaap component us-gaap and
+    see drift that is not there. The order of a sum's components is not a
+    choice (the composite is the same figure either way), so it is not
+    drift."""
+    series, tags = rebuilt.selected_series(), rebuilt.selected_tags()
+    drift: list[str] = []
+    for name, used in sorted((selected_tags or {}).items()):
+        got = series.get(name) if isinstance(used, SeriesSelection) else tags.get(name)
+        if _unordered(got) != _unordered(used):
+            drift.append(f"selected {_label(got)} for {name} where the report used {_label(used)}")
+    if drift:
+        return "selection drift: the scan's rebuild " + ", and ".join(drift)
+    scored = sorted(scored_quarters) if scored_quarters is not None else None
+    if scored is not None and scored != sorted(rebuilt_quarters):
+        return (
+            f"quarter drift: the scan's rebuild covers {_span(sorted(rebuilt_quarters))} "
+            f"where the report scored {_span(scored)}"
+        )
+    return None
+
+
+def _unordered(selection: SeriesSelection | str | None) -> tuple | None:
+    if isinstance(selection, SeriesSelection):
+        return (selection.composer, *sorted(selection.components))
+    return None if selection is None else tuple(sorted(selection.split("+")))
+
+
+def _span(quarters: Sequence[date]) -> str:
+    if not quarters:
+        return "no quarters"
+    return f"{len(quarters)} quarter(s) ending {quarters[0]} to {quarters[-1]}"
+
+
+def _derived_check(
+    facts_json: dict,
+    *,
+    as_of: date | None,
+    period_since: date | None,
+    materiality_pct: float = DEFAULT_MATERIALITY_PCT,
+    n_quarters: int = 8,
+    selected_tags: Selected | None = None,
+    scored_quarters: Sequence[date] | None = None,
+) -> tuple[list[DerivedRevision], str | None]:
+    """`derived_revisions`, and why it could not be inspected (None when it
+    was). The rebuild reads the facts filed by `as_of` and makes its OWN
+    series and quarter choice; the caller's `selected_tags` is never handed
+    to it. When the caller supplied one (or the `scored_quarters`), a
+    rebuild that chose differently is not the report's figure: its trail
+    would measure a move in a series the engine did not score, or miss the
+    scored quarter entirely, so nothing it found is returned."""
     from app.services.ingestion.companyfacts_mapper import build_dataset
 
     facts = _dated_copy(facts_json, as_of)
     try:
         current, diag = build_dataset(facts, "scan", n_quarters=n_quarters)
     except ValueError:
-        return []
+        # A caller that names the quarters it scored established them; a
+        # rebuild that cannot is not its run, and an empty result is not
+        # "nothing moved". Without them, a payload too thin to map has no
+        # derived quarter to check (as before).
+        return [], (
+            "quarter drift: the scan's rebuild could not establish the report's quarters"
+            if scored_quarters is not None else None
+        )
+    if selected_tags is not None or scored_quarters is not None:
+        drift = _rebuild_drift(
+            diag, [p.period_end for p in current.periods],
+            selected_tags, scored_quarters,
+        )
+        if drift is not None:
+            return [], drift
     targets: dict[tuple[str, date], tuple[str, tuple[str, ...], float, date | None]] = {}
     for i, period in enumerate(current.periods):
         if period_since is not None and period.period_end < period_since:
@@ -889,7 +1032,7 @@ def derived_revisions(
                 src.method, tuple(src.components), value, start,
             )
     if not targets:
-        return []
+        return [], None
 
     # Every date a fact behind a target quarter was filed: the vintages at
     # which its scored value could have changed.
@@ -957,7 +1100,7 @@ def derived_revisions(
             current_value=cur[1], current_filed=cur[0], moved_by=moved_by,
         ))
     found.sort(key=lambda d: (d.period_end, d.field_name), reverse=True)
-    return found
+    return found, None
 
 
 _MAX_ROWS = 20  # spinoff/discontinued-ops re-presentation can produce many rows
@@ -1006,10 +1149,15 @@ def render_restatements_section(scan: RestatementScan) -> str:
     )
     lines.append("")
     lines.append(f"- Coverage: {scan.coverage_line()}.")
-    if scan.incomplete:
+    if scan.uninspected:
         lines.append(
             f"- ⚠ Incomplete: {len(scan.uninspected)} field(s) could not be inspected. "
             "Their absence below is a data gap, not evidence of no revision."
+        )
+    if scan.derived_gap is not None:
+        lines.append(
+            "- ⚠ Incomplete: derived quarters were not checked "
+            f"({scan.derived_gap}). A derived quarter that moved would not appear below."
         )
     if scan.conflicts:
         lines.append(

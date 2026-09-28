@@ -128,6 +128,10 @@ def main() -> int:
             coverage=diag.coverage(),
             # The evidence must name the same series the score came from.
             field_tags=diag.selected_series(),
+            # ...and read the same facts: the dataset was mapped from the
+            # whole payload, so the restatement scan must not stop at today
+            # (an evening 10-Q is dated tomorrow by EDGAR).
+            uncut_fundamentals=True,
             client=client,
             ticker=ticker,
             fetched_at=fetched_at,
