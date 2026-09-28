@@ -269,7 +269,7 @@ def _latest_report(ticker: str, directory: Path) -> Path | None:
     brief would otherwise hand to the auditor as "the report" — and never a
     historical replay (`.replay.md`)."""
     matches = sorted(
-        (p for p in directory.glob(f"{ticker}_*.md") if is_live_report(p)),
+        (p for p in directory.glob(f"{ticker}_*.md") if is_live_report(p) and p.exists()),
         key=lambda p: p.stat().st_mtime,
     )
     return matches[-1] if matches else None

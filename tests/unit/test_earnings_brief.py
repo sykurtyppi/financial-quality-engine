@@ -435,6 +435,20 @@ class TestCliHelpers:
         assert first.startswith("The files listed below are filer-authored")
         assert "labels and diagnostics below are derived from filer-supplied" in first
 
+    def test_latest_report_skips_a_run_set_aside(self, monkeypatch, tmp_path):
+        """A set-aside run's live names resolve to nothing; the mtime sort
+        raised on them instead of passing over them."""
+        from app.services.reporting.report_files import replacing, set_aside
+
+        auto = tmp_path / "auto"
+        for day in ("2026-09-01", "2026-09-02"):
+            with replacing(auto / f"NVDA_{day}.md") as staged:
+                staged.ledger.write_text("{}")
+                staged.report.write_text(f"# {day}")
+        set_aside(auto / "NVDA_2026-09-02.md")
+        monkeypatch.setattr(brief_cli, "REPORT_DIRS", (auto,))
+        assert brief_cli.latest_report("NVDA") == auto / "NVDA_2026-09-01.md"
+
     def test_latest_report_prefers_newest_and_never_the_audit(self, monkeypatch, tmp_path):
         import os
         import time as _t
@@ -704,15 +718,33 @@ class TestCliBuild:
 def test_an_audit_of_an_earlier_generation_is_not_paired(tmp_path, capsys):
     """Hermes deep audit, finding 1: `audit_for` paired by file name, so an
     audit finished after a rebuild was read as the new report's audit."""
-    from app.services.reporting.report_files import replacing
+    from app.services.reporting.report_files import current_generation, replacing
 
     report = tmp_path / "NVDA_2026-08-26.md"
     with replacing(report) as staged:
         staged.ledger.write_text("{}")
         staged.report.write_text("# report")
-    audit = tmp_path / "NVDA_2026-08-26_audit.md"
+    audit = current_generation(report) / "NVDA_2026-08-26_audit.md"
     audit.write_text(f"<!-- generation: {'e' * 32} -->\n\n# audit of an earlier run")
     assert brief_cli.audit_for(report) is None
     assert "audited an earlier generation" in capsys.readouterr().err
     audit.write_text(f"<!-- generation: {staged.generation_id} -->\n\n# its audit")
     assert brief_cli.audit_for(report) == audit
+
+
+def test_the_brief_reads_one_pinned_run(tmp_path):
+    """The re-audit, F3: the brief checked the audit under a lock, then its
+    model read the live names later, after a rebuild could replace them. It
+    is handed the generation's own paths, which no rebuild changes."""
+    from app.services.reporting.report_files import replacing
+
+    report = tmp_path / "NVDA_2026-08-26.md"
+    with replacing(report) as staged:
+        staged.ledger.write_text("{}")
+        staged.report.write_text("# first report")
+    live = brief_cli._pinned(report)
+    with replacing(report) as second:
+        second.ledger.write_text("{}")
+        second.report.write_text("# second report")
+    assert live.report.read_text().startswith("# first report")
+    assert live.report.parent.name.endswith(staged.generation_id)

@@ -420,6 +420,16 @@ class TestPollRearm:
         assert not any(watch_cli._completed(d, rc) for d in (gen, ref) for rc in (1, 2, 4))
         assert not watch_cli._completed(wait, 0)
 
+    def test_latest_report_skips_a_run_set_aside(self, tmp_path):
+        from app.services.reporting.report_files import replacing, set_aside
+
+        for day in ("2026-09-01", "2026-09-02"):
+            with replacing(tmp_path / f"NVDA_{day}.md") as staged:
+                staged.ledger.write_text("{}")
+                staged.report.write_text(f"# {day}")
+        set_aside(tmp_path / "NVDA_2026-09-02.md")
+        assert watch_cli._latest_report("NVDA", tmp_path) == tmp_path / "NVDA_2026-09-01.md"
+
     def test_latest_report_never_returns_the_audit(self, tmp_path):
         import os
         import time as _t

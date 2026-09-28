@@ -47,7 +47,7 @@ others each start from a clean copy of the inputs.
 | # | Step | What must happen |
 |---|---|---|
 | 1 | Baseline report | Exits 0. Report and evidence ledger written, vintage captured. |
-| 2 | Rerun, same inputs | Step 1's report is **moved to `reports/archive/`**, not overwritten. The new report is byte-identical once the `Data fetched:` and `Vintage snapshot:` lines are masked, and so is the ledger once `fetched_at` is masked. |
+| 2 | Rerun, same inputs | Step 1's run is **kept whole in its own generation** (`reports/.generations/<T>_<day>/`), not overwritten. The new report is byte-identical once the `Data fetched:` and `Vintage snapshot:` lines are masked, and so is the ledger once `fetched_at` is masked. |
 | 3 | A 10-Q/A lands | The scored revenue fact for the newest directly reported quarter is re-filed +10% as a 10-Q/A filed today, and listed in the filing index. The card has `Restatement (10-Q/A) affecting <quarter>`, and **no** `Silent revision:` line. Every card line whose metric read the amended revenue carries `⚠ reads a revised figure: revenue <quarter> <was> → <now> (amended by 10-Q/A <accn>)`, and lines that do not read it (accruals, CFO / net income) carry none. The ledger cites the /A accession. The silent-revision check compares two snapshots and attributes the move to the /A. Step 2's report is archived. |
 | 4 | Same-day conflicting facts | A second value for that fact, same day and form. A field note names the conflict, and it is not called a restatement. |
 | 5 | Cash-flow statement missing | Every CFO concept is removed. `Critical field 'cfo' missing`, and the card is marked incomplete. |
@@ -55,9 +55,9 @@ others each start from a clean copy of the inputs.
 | 7 | SEC down except companyfacts | Filing index unavailable. Its streams say UNAVAILABLE, never "clean". |
 | 8 | Stale cache / `--fresh`, SEC unreachable | A 25 h-old companyfacts entry, and `--fresh`, both exit 2 with `SEC request failed`. No report is written. |
 | 9 | Journal path | `openv2`, then `report --no-fresh --no-docs`. A second `report` is refused. `after --disagreed` records the analyst override, and `verify` still passes. |
-| 10 | Rollback | Step 1's run is restored from the archive: report and ledger byte-identical to step 1. The vintage store is append-only (step 1's snapshots are unchanged, and the /A's snapshot is kept). |
-| 11 | A rebuild that fails | After a good report, a rerun whose report build raises once the data is in hand (injected by the drill's shim, `FQE_DRILL_FAIL_BUILD=1`, in the workspace's copy only). It exits nonzero, and the live report and ledger are **byte-identical** to before. Nothing is archived, and no staged file is left. The next rerun succeeds and archives the first run. |
-| 12 | A ledger that cannot be built | After a good report, a rerun whose evidence ledger build raises (`FQE_DRILL_FAIL_LEDGER=1`, in the workspace's copy only). It exits nonzero and says no report was published. The live report and ledger are **byte-identical** to before, nothing is archived, and no staged file is left. Before the fix, the report went live without its ledger and the earlier complete run was archived. |
+| 10 | Rollback | Step 1's generation is made live again in one step (`restore`): report and ledger byte-identical to step 1, and step 3's run still kept whole. The vintage store is append-only (step 1's snapshots are unchanged, and the /A's snapshot is kept). |
+| 11 | A rebuild that fails | After a good report, a rerun whose report build raises once the data is in hand (injected by the drill's shim, `FQE_DRILL_FAIL_BUILD=1`, in the workspace's copy only). It exits nonzero, and the live report and ledger are **byte-identical** to before. No generation is added, and no staged file is left. The next rerun succeeds and keeps the first run as the earlier generation. |
+| 12 | A ledger that cannot be built | After a good report, a rerun whose evidence ledger build raises (`FQE_DRILL_FAIL_LEDGER=1`, in the workspace's copy only). It exits nonzero and says no report was published. The live report and ledger are **byte-identical** to before, no generation is added, and no staged file is left. Before the fix, the report went live without its ledger and the earlier complete run was archived. |
 
 ### Known issues
 
@@ -96,26 +96,30 @@ Found while the drill was being built. Fixed alongside it:
   `generate_report.py` (or `journal.py report` / the auto track) replaced
   the earlier report with no copy. It also left the earlier run's
   `_audit.md` beside the new report, where `earnings_brief.audit_for` would
-  pair them. Now a rerun builds its report and ledger in
-  `reports/.staging/`. Only once both exist is the earlier report, ledger and
-  audit copied to `reports/archive/<T>_<day>.<HHMMSS>.md` (`.ledger.json`,
-  `_audit.md`) and the new pair moved into place (`report_files.replacing`).
-  A build that fails leaves the live report exactly as it was; step 11
-  checks this. Hermes round 8 found that the first version archived
-  *before* building, so a failed rebuild left no live report. An archived
-  run keeps its own companions by name, and the archive never overwrites.
+  pair them. Now every run is a generation, kept whole: the rerun is built
+  in `reports/.staging/<id>/`, and only once its report and ledger exist is
+  it moved, whole, to `reports/.generations/<T>_<day>/<stamp>_<id>/`. A build
+  that fails leaves the live report exactly as it was; step 11 checks this.
+  Earlier generations are never overwritten or moved: they are the archive.
 - **A run is published whole, or not at all** (Hermes deep audit, findings
-  1-2). A ledger that could not be built used to be logged, and the report
-  went live without it; the rebuild now fails (`generate_report.py` exits 3,
-  "no report published") and the earlier run stays live, which step 12
-  checks. Every publish stamps the report (its last line, `- Generation:
-  <id>`) and the ledger (`generation_id`) with one id, and holds a
-  cross-process lock on the report (`reports/.staging/<base>.lock`), so two
-  rebuilds of one report publish one after the other, never one's report
-  beside the other's ledger. `run_audit.py` writes the audit with the id it
-  read (`<!-- generation: <id> -->`) and only while that generation is
-  still live; `earnings_brief.audit_for` pairs an audit with its report by
-  that id, not by name alone.
+  1-2, and the re-audit, F1-F3). A ledger that could not be built used to be
+  logged, and the report went live without it; the rebuild now fails
+  (`generate_report.py` exits 3, "no report published") and the earlier run
+  stays live, which step 12 checks. Every publish stamps the report (its
+  last line, `- Generation: <id>`) and the ledger (`generation_id`) with one
+  id. The live names (`<T>_<day>.md`, `.ledger.json`, `_audit.md`) are fixed
+  symlinks through ONE pointer, `.generations/<T>_<day>/current`, and a
+  publish is a single atomic swap of that pointer, after the generation is
+  complete and fsynced: a publisher killed at any point (not only one that
+  raises) leaves the earlier run live or the new one, never one's report
+  beside the other's ledger. The re-audit found the version before this
+  replaced the ledger and the report in two steps, and a process killed
+  between them split them. Publishes of one report are serialized by a lock
+  (`reports/.staging/<base>.lock`); readers take none. `read_live` pins one
+  generation and returns its own paths, which no publish changes, so
+  `earnings_brief` hands its model the pinned report and audit, and
+  `run_audit.py` audits the pinned report and writes the audit into that
+  generation: a report rebuilt mid-audit never gets the earlier run's audit.
 - **A payload that cannot be mapped crashed.** Too little history raised a
   `ValueError` traceback (exit 1). Now `generate_report.py` prints
   `error: <T>: …` and `no report written: …`, and exits 2, the same
@@ -133,27 +137,31 @@ check masks exactly those lines, the `- Generation:` line and the ledger's
 ## Restoring an earlier run
 
 ```
-ls reports/archive/NVDA_2026-11-18.*           # pick the run: .<HHMMSS>.md
-# set the current run (report, ledger, audit) aside, archived like a rerun would:
+ls reports/.generations/NVDA_2026-11-18/      # the runs, oldest first: <stamp>_<id>
 .venv/bin/python -c "from pathlib import Path; from app.services.reporting.report_files \
-import archive_existing as a; print(a(Path('reports/NVDA_2026-11-18.md')))"
-cp reports/archive/NVDA_2026-11-18.210507.md          reports/NVDA_2026-11-18.md
-cp reports/archive/NVDA_2026-11-18.210507.ledger.json reports/NVDA_2026-11-18.ledger.json
+import restore; print(restore(Path('reports/NVDA_2026-11-18.md'), '20261118T210507Z'))"
 ```
 
-Copy the archived `_audit.md` back too if the run had one. The three files
-name one generation, so they still pair after the copy. Step 10 does
-exactly this and checks the restored report and ledger byte for byte, and
-that they are one generation. The vintage store is never rolled
-back: it is the record of what SEC served, and a rollback of the report does
-not change that.
+`restore` takes the generation's directory name or any unique part of it
+(its stamp or its id), and makes it live in one step: the report, ledger and
+audit (if it had one) all switch together, and the run it replaces stays
+kept. `set_aside` takes the live run off the live names without putting
+another in its place. Step 10 restores step 1's generation and checks the
+report and ledger byte for byte. The vintage store is never rolled back: it
+is the record of what SEC served, and a rollback of the report does not
+change that.
+
+Live files written before generations (plain files at the live names) are
+kept as a generation of their own by the first rebuild after this change. A
+plain file that is not the live generation's (a file copied back by hand)
+stops the rebuild, which says so, rather than being overwritten.
 
 ## The operator's part
 
 After a PASS, open `drill_log.md` and fill in **Operator notes**:
 
 1. Read step 1's report and step 3's report end to end, from
-   `work/night/reports/archive/` (every run of the night is there), and
+   `work/night/reports/.generations/` (every run of the night is there), and
    compare the card lines to the scenario each step says it applied.
 2. Note anything slow, surprising, or worded so that it could be misread.
 3. Record the decision, ready for the season or not, and why.

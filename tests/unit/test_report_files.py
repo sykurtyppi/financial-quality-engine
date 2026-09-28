@@ -1,136 +1,49 @@
-"""A same-day rerun keeps the earlier report (Hermes audit round 7, finding 3:
-rollback), and a replay is never "the latest report"."""
+"""A report run is one generation, published whole or not at all.
+
+- a same-day rerun keeps the earlier report (Hermes audit round 7, finding 3:
+  rollback): earlier generations stay on disk and ``restore`` brings one back;
+- a failed rebuild, or one without its ledger, changes nothing live (round 8,
+  finding 2; deep audit, finding 2);
+- two publishers never leave one's report beside the other's ledger (deep
+  audit, finding 1), and neither does a publisher killed at any point (the
+  re-audit, F1): the live names resolve through ONE pointer, swapped in one
+  rename;
+- a reader pins one generation (F3) and a lock or pointer it cannot read
+  fails, never reads as "nothing published" (F2);
+- a replay is never "the latest report".
+"""
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from app.services.reporting.report_builder import ledger_path
 from app.services.reporting.report_files import (
     GENERATION_LINE,
+    GENERATIONS_DIR,
     STAGING_DIR,
     NotPublished,
-    archive_existing,
+    current_generation,
     generation_of,
+    generations,
     is_live_report,
     read_live,
     replacing,
+    restore,
+    set_aside,
 )
 
 NOW = datetime(2026, 9, 26, 21, 5, 7, tzinfo=UTC)
-
-
-def _run(dirpath, name="AAPL_2026-09-26.md", *, tag="first", audit=True):
-    report = dirpath / name
-    report.write_text(f"# {tag} report")
-    ledger_path(report).write_text(f'{{"run": "{tag}"}}')
-    if audit:
-        report.with_name(f"{report.name.removesuffix('.md')}_audit.md").write_text(f"# {tag} audit")
-    return report
-
-
-class TestArchiveExisting:
-    def test_nothing_there_moves_nothing_and_creates_no_archive(self, tmp_path):
-        assert archive_existing(tmp_path / "AAPL_2026-09-26.md", now=NOW) == []
-        assert not (tmp_path / "archive").exists()
-
-    def test_the_whole_run_moves_together_under_one_stamp(self, tmp_path):
-        report = _run(tmp_path)
-        moved = archive_existing(report, now=NOW)
-        arch = tmp_path / "archive"
-        assert sorted(p.name for p in moved) == [
-            "AAPL_2026-09-26.210507.ledger.json",
-            "AAPL_2026-09-26.210507.md",
-            "AAPL_2026-09-26.210507_audit.md",
-        ]
-        assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
-        # The archived report still finds its own ledger and audit by name.
-        assert ledger_path(arch / "AAPL_2026-09-26.210507.md").read_text() == '{"run": "first"}'
-        # Nothing of the first run is left to sit beside the second.
-        assert sorted(p.name for p in tmp_path.iterdir()) == [STAGING_DIR, "archive"]
-
-    def test_a_second_archive_within_the_second_never_overwrites(self, tmp_path):
-        first = _run(tmp_path, tag="first")
-        archive_existing(first, now=NOW)
-        second = _run(tmp_path, tag="second", audit=False)
-        moved = archive_existing(second, now=NOW)
-        arch = tmp_path / "archive"
-        assert sorted(p.name for p in moved) == [
-            "AAPL_2026-09-26.210507-1.ledger.json", "AAPL_2026-09-26.210507-1.md"]
-        assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
-        assert (arch / "AAPL_2026-09-26.210507-1.md").read_text() == "# second report"
-
-    def test_when_every_stamp_is_taken_nothing_moves(self, tmp_path):
-        arch = tmp_path / "archive"
-        arch.mkdir()
-        for n in range(100):
-            tag = "210507" if n == 0 else f"210507-{n}"
-            (arch / f"AAPL_2026-09-26.{tag}.md").write_text("")
-        report = _run(tmp_path, audit=False)
-        with pytest.raises(FileExistsError, match="100 runs"):
-            archive_existing(report, now=NOW)
-        assert report.read_text() == "# first report" and ledger_path(report).exists()
-
-    def test_a_stamp_taken_by_any_companion_is_taken(self, tmp_path):
-        """Only the earlier run's AUDIT holds the stamp: the next run must still
-        not take it, or its audit would sit beside a report that is not its."""
-        arch = tmp_path / "archive"
-        arch.mkdir()
-        (arch / "AAPL_2026-09-26.210507_audit.md").write_text("# someone's audit")
-        report = _run(tmp_path, audit=False)
-        moved = archive_existing(report, now=NOW)
-        assert {p.name for p in moved} == {
-            "AAPL_2026-09-26.210507-1.md", "AAPL_2026-09-26.210507-1.ledger.json"}
-        assert (arch / "AAPL_2026-09-26.210507_audit.md").read_text() == "# someone's audit"
-
-    def test_a_ledger_alone_is_archived(self, tmp_path):
-        """A run that died after writing its ledger but before its report must
-        not leave that ledger to be read as the next report's."""
-        report = tmp_path / "AAPL_2026-09-26.md"
-        ledger_path(report).write_text("{}")
-        moved = archive_existing(report, now=NOW)
-        assert [p.name for p in moved] == ["AAPL_2026-09-26.210507.ledger.json"]
-        assert not ledger_path(report).exists()
-
-    def test_a_replay_keeps_its_replay_names(self, tmp_path):
-        report = _run(tmp_path, name="AAPL_2025-06-30.replay.md")
-        assert ledger_path(report).name == "AAPL_2025-06-30.replay.ledger.json"
-        moved = archive_existing(report, now=NOW)
-        assert sorted(p.name for p in moved) == [
-            "AAPL_2025-06-30.replay.210507.ledger.json",
-            "AAPL_2025-06-30.replay.210507.md",
-            "AAPL_2025-06-30.replay.210507_audit.md",
-        ]
-
-    def test_another_ticker_or_day_is_untouched(self, tmp_path):
-        other = _run(tmp_path, name="AAPL_2026-09-25.md")
-        nvda = _run(tmp_path, name="NVDA_2026-09-26.md")
-        archive_existing(tmp_path / "AAPL_2026-09-26.md", now=NOW)
-        assert other.exists() and nvda.exists()
-        assert not (tmp_path / "archive").exists()
-
-    def test_the_stamp_is_utc_hms(self, tmp_path):
-        report = _run(tmp_path, audit=False)
-        moved = archive_existing(report, now=datetime(2026, 9, 26, 0, 0, 9, tzinfo=UTC))
-        assert "AAPL_2026-09-26.000009.md" in {p.name for p in moved}
-
-
-class TestIsLiveReport:
-    def test_reports_are_live(self, tmp_path):
-        assert is_live_report(tmp_path / "AAPL_2026-09-26.md")
-
-    def test_audits_and_replays_are_not(self, tmp_path):
-        assert not is_live_report(tmp_path / "AAPL_2026-09-26_audit.md")
-        assert not is_live_report(tmp_path / "AAPL_2025-06-30.replay.md")
-        assert not is_live_report(tmp_path / "AAPL_2025-06-30.replay_audit.md")
-
-
-# --- replacing: build off to the side, publish only a finished rebuild ------------
-# Hermes audit round 8, finding 2: archiving BEFORE the build left no live
-# report or ledger behind a rebuild that failed.
+NAME = "AAPL_2026-09-26.md"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _stage(staged, tag, *, ledger=True, report=True):
@@ -141,126 +54,136 @@ def _stage(staged, tag, *, ledger=True, report=True):
         staged.report.write_text(f"# {tag} report\n")
 
 
+def _publish(dirpath, tag, name=NAME, now=NOW):
+    report = dirpath / name
+    with replacing(report, now=now) as staged:
+        _stage(staged, tag)
+    return report, staged
+
+
+def _plain_run(dirpath, name=NAME, *, tag="first", audit=True):
+    """Live files from before generations: plain files at the live names."""
+    report = dirpath / name
+    report.write_text(f"# {tag} report")
+    ledger_path(report).write_text(f'{{"run": "{tag}"}}')
+    if audit:
+        report.with_name(f"{report.name.removesuffix('.md')}_audit.md").write_text(f"# {tag} audit")
+    return report
+
+
 def _leftovers(dirpath):
-    """Staged files left behind; the publish locks are meant to stay."""
-    return [p for p in (dirpath / STAGING_DIR).glob("*") if p.suffix != ".lock"]
+    """What rebuilds left in staging; the publish locks are meant to stay."""
+    staging = dirpath / STAGING_DIR
+    return [p for p in staging.iterdir() if p.suffix != ".lock"] if staging.is_dir() else []
 
 
-def _live(dirpath, name="AAPL_2026-09-26.md"):
+def _live(dirpath, name=NAME):
+    """The live names' contents, as a reader following them sees them."""
     report = dirpath / name
     return {p.name: p.read_bytes() for p in (
         report, ledger_path(report),
         report.with_name(f"{name.removesuffix('.md')}_audit.md")) if p.exists()}
 
 
+def _one_generation(report):
+    """The live report and ledger name the same generation."""
+    gid = generation_of(report)
+    return gid is not None and generation_of(ledger_path(report)) == gid
+
+
+class TestIsLiveReport:
+    def test_reports_are_live(self, tmp_path):
+        assert is_live_report(tmp_path / NAME)
+
+    def test_audits_and_replays_are_not(self, tmp_path):
+        assert not is_live_report(tmp_path / "AAPL_2026-09-26_audit.md")
+        assert not is_live_report(tmp_path / "AAPL_2025-06-30.replay.md")
+        assert not is_live_report(tmp_path / "AAPL_2025-06-30.replay_audit.md")
+
+
 class TestReplacing:
-    def test_a_failed_rebuild_leaves_the_live_run_exactly_as_it_was(self, tmp_path):
-        report = _run(tmp_path)
-        before = _live(tmp_path)
+    def test_a_first_run_goes_live_through_the_pointer(self, tmp_path):
+        report, staged = _publish(tmp_path, "first")
+        gen = current_generation(report)
+        assert gen is not None and gen.parent == tmp_path / GENERATIONS_DIR / "AAPL_2026-09-26"
+        assert gen.name == f"20260926T210507Z_{staged.generation_id}"
+        assert report.is_symlink() and ledger_path(report).is_symlink()
+        assert report.read_text().startswith("# first report")
+        assert json.loads(ledger_path(report).read_text())["run"] == "first"
+        assert _one_generation(report) and staged.archived == []
+        # No audit yet: its live name is absent, not a link to nothing.
+        assert not report.with_name("AAPL_2026-09-26_audit.md").is_symlink()
+        assert not _leftovers(tmp_path)
+
+    def test_a_rebuild_keeps_the_earlier_generation_whole(self, tmp_path):
+        report, first = _publish(tmp_path, "first")
+        earlier = current_generation(report)
+        (earlier / "AAPL_2026-09-26_audit.md").write_text("# first audit")
+        report2, second = _publish(tmp_path, "second")
+        assert report.read_text().startswith("# second report") and _one_generation(report)
+        assert sorted(p.name for p in second.archived) == [
+            "AAPL_2026-09-26.ledger.json", "AAPL_2026-09-26.md", "AAPL_2026-09-26_audit.md"]
+        assert all(p.parent == earlier for p in second.archived)
+        assert (earlier / "AAPL_2026-09-26.md").read_text().startswith("# first report")
+        # The earlier run's audit is not left at the live name.
+        assert not report.with_name("AAPL_2026-09-26_audit.md").exists()
+        assert {g.name for g in generations(report)} == {
+            f"20260926T210507Z_{first.generation_id}", f"20260926T210507Z_{second.generation_id}"}
+
+    def test_a_failed_rebuild_changes_nothing(self, tmp_path):
+        report, _ = _publish(tmp_path, "first")
+        before, kept = _live(tmp_path), generations(report)
         with pytest.raises(RuntimeError, match="build failed"):
             with replacing(report, now=NOW) as staged:
                 staged.ledger.write_text('{"run": "half-built"}')
                 raise RuntimeError("build failed")
-        assert _live(tmp_path) == before and len(before) == 3
-        assert not (tmp_path / "archive").exists()
+        assert _live(tmp_path) == before and generations(report) == kept
         assert not _leftovers(tmp_path)
-
-    def test_a_rebuild_that_writes_no_report_publishes_nothing(self, tmp_path):
-        report = _run(tmp_path)
-        before = _live(tmp_path)
-        with pytest.raises(NotPublished, match="wrote no report"):
-            with replacing(report, now=NOW) as staged:
-                _stage(staged, "orphan", report=False)
-        assert _live(tmp_path) == before
-        assert not (tmp_path / "archive").exists()
-        assert not _leftovers(tmp_path)
-
-    def test_a_finished_rebuild_archives_the_earlier_run_and_goes_live(self, tmp_path):
-        report = _run(tmp_path)
-        with replacing(report, now=NOW) as staged:
-            assert STAGING_DIR in staged.report.parts and not staged.report.exists()
-            assert report.exists()  # still live while the rebuild runs
-            _stage(staged, "second")
-        assert report.read_text().startswith("# second report")
-        assert json.loads(ledger_path(report).read_text())["run"] == "second"
-        assert generation_of(report) == generation_of(ledger_path(report)) == staged.generation_id
-        # the earlier run's audit is not left beside the new report
-        assert not report.with_name("AAPL_2026-09-26_audit.md").exists()
-        arch = tmp_path / "archive"
-        assert sorted(p.name for p in staged.archived) == [
-            "AAPL_2026-09-26.210507.ledger.json",
-            "AAPL_2026-09-26.210507.md",
-            "AAPL_2026-09-26.210507_audit.md",
-        ]
-        assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
-        assert (arch / "AAPL_2026-09-26.210507_audit.md").read_text() == "# first audit"
-        assert not _leftovers(tmp_path)
-
-    def test_a_first_run_archives_nothing(self, tmp_path):
-        report = tmp_path / "AAPL_2026-09-26.md"
-        with replacing(report, now=NOW) as staged:
-            _stage(staged, "first")
-        assert staged.archived == [] and not (tmp_path / "archive").exists()
-        assert report.read_text().startswith("# first") and ledger_path(report).exists()
-
-    def test_two_rebuilds_within_a_second_archive_under_two_stamps(self, tmp_path):
-        report = _run(tmp_path, audit=False)
-        for n in ("second", "third"):
-            with replacing(report, now=NOW) as staged:
-                _stage(staged, n)
-        arch = tmp_path / "archive"
-        assert (arch / "AAPL_2026-09-26.210507.md").read_text() == "# first report"
-        assert (arch / "AAPL_2026-09-26.210507-1.md").read_text().startswith("# second report")
-        assert report.read_text().startswith("# third report")
 
     def test_staged_files_are_invisible_to_the_live_report_globs(self, tmp_path):
-        report = _run(tmp_path, audit=False)
+        report, _ = _publish(tmp_path, "first")
         with replacing(report, now=NOW) as staged:
             _stage(staged, "second")
             live = [p.name for p in tmp_path.glob("AAPL_*.md") if is_live_report(p)]
-            assert live == ["AAPL_2026-09-26.md"]
+            assert live == [NAME]
 
-    def test_a_rebuild_committing_leaves_another_rebuilds_staging_in_place(self, tmp_path):
-        """Round-9 audit F1: rebuilds of different tickers share `.staging`. A
-        rebuild that committed while another had not yet written anything
-        removed the (empty) directory, and the other's report write failed."""
-        first = _run(tmp_path, audit=False)
+    def test_rebuilds_of_other_reports_share_staging_safely(self, tmp_path):
+        """Round-9 audit F1: a rebuild committing must not remove the staging
+        directory another is building in."""
+        first = tmp_path / NAME
         other = tmp_path / "NVDA_2026-09-26.md"
         with replacing(other, now=NOW) as staged_other:  # mid-build, nothing written yet
             with replacing(first, now=NOW) as staged_first:
-                _stage(staged_first, "second")
+                _stage(staged_first, "AAPL")
             _stage(staged_other, "NVDA")
-        assert first.read_text().startswith("# second report")
+        assert first.read_text().startswith("# AAPL report")
         assert other.read_text().startswith("# NVDA report")
 
-    def test_a_concurrent_rebuilds_staging_is_left_alone(self, tmp_path):
-        report = _run(tmp_path, audit=False)
-        other = tmp_path / STAGING_DIR / "someone-else.md"
+    def test_the_stamp_is_appended_to_the_builders_bytes(self, tmp_path):
+        """`_seal` once read the report as text and wrote it back: CR and CRLF
+        line ends became LF."""
+        report = tmp_path / NAME
         with replacing(report, now=NOW) as staged:
-            other.write_text("# in progress")
-            _stage(staged, "second")
-        assert other.read_text() == "# in progress"
-
-
-# --- Hermes deep audit, finding 2: a run without its ledger is not published -------
+            _stage(staged, "first")
+            staged.report.write_bytes(b"line1\r\nline2\rline3\n")
+        assert report.read_bytes().startswith(b"line1\r\nline2\rline3\n\n\n- Generation: ")
 
 
 class TestAWholeGenerationOrNothing:
-    def test_a_rebuild_without_a_ledger_publishes_nothing(self, tmp_path):
-        """It used to publish the report alone, archive the complete earlier
-        pair and delete the live ledger: a run with no evidence went live."""
-        report = _run(tmp_path)
-        before = _live(tmp_path)
-        with pytest.raises(NotPublished, match="no evidence ledger"):
+    @pytest.mark.parametrize("missing, match", [("ledger", "no evidence ledger"),
+                                                ("report", "wrote no report")])
+    def test_a_rebuild_missing_a_file_publishes_nothing(self, tmp_path, missing, match):
+        report, _ = _publish(tmp_path, "first")
+        before, kept = _live(tmp_path), generations(report)
+        with pytest.raises(NotPublished, match=match):
             with replacing(report, now=NOW) as staged:
-                _stage(staged, "second", ledger=False)  # the ledger build failed
-        assert _live(tmp_path) == before and len(before) == 3
-        assert not (tmp_path / "archive").exists()
+                _stage(staged, "second", **{missing: False})
+        assert _live(tmp_path) == before and generations(report) == kept
         assert not _leftovers(tmp_path)
 
     @pytest.mark.parametrize("stale", ["report", "ledger"])
     def test_a_file_naming_another_generation_publishes_nothing(self, tmp_path, stale):
-        report = _run(tmp_path)
+        report, _ = _publish(tmp_path, "first")
         before = _live(tmp_path)
         with pytest.raises(NotPublished, match="names generation"):
             with replacing(report, now=NOW) as staged:
@@ -270,24 +193,10 @@ class TestAWholeGenerationOrNothing:
                 else:
                     staged.ledger.write_text(json.dumps({"generation_id": "0" * 32}))
         assert _live(tmp_path) == before
-        assert not (tmp_path / "archive").exists()
-
-    def test_the_publish_stamps_the_report_and_ledger_with_one_generation(self, tmp_path):
-        report = tmp_path / "AAPL_2026-09-26.md"
-        with replacing(report, now=NOW) as staged:
-            _stage(staged, "first")
-        live = read_live(report)
-        assert live is not None and live.generation_id == staged.generation_id
-        assert live.ledger == ledger_path(report) and live.audit is None and not live.stale
-        assert live.text.endswith(
-            f"{GENERATION_LINE}{staged.generation_id} (this report, its evidence ledger "
-            "and its audit carry the same id)\n")
-        assert json.loads(ledger_path(report).read_text()) == {
-            "run": "first", "generation_id": staged.generation_id}
 
     @pytest.mark.parametrize("bad", ["not json", "[1, 2]"])
     def test_a_ledger_that_is_not_a_json_object_publishes_nothing(self, tmp_path, bad):
-        report = _run(tmp_path)
+        report, _ = _publish(tmp_path, "first")
         before = _live(tmp_path)
         with pytest.raises(NotPublished, match="evidence ledger is not"):
             with replacing(report, now=NOW) as staged:
@@ -295,14 +204,78 @@ class TestAWholeGenerationOrNothing:
                 staged.ledger.write_text(bad)
         assert _live(tmp_path) == before
 
+    def test_the_publish_stamps_the_report_and_ledger_with_one_generation(self, tmp_path):
+        report, staged = _publish(tmp_path, "first")
+        live = read_live(report)
+        assert live is not None and live.generation_id == staged.generation_id
+        assert live.text.endswith(
+            f"{GENERATION_LINE}{staged.generation_id} (this report, its evidence ledger "
+            "and its audit carry the same id)\n")
+        assert json.loads(ledger_path(report).read_text()) == {
+            "run": "first", "generation_id": staged.generation_id}
 
-# --- Hermes deep audit, finding 1: two publishers of one report ----------------------
+
+# --- the re-audit, F1: a publisher killed at any point ---------------------------------
+
+_KILLED = textwrap.dedent("""
+    import json, os, sys
+    from pathlib import Path
+    sys.path.insert(0, {root!r})
+    import app.services.reporting.report_files as rf
+
+    stop, calls = int(sys.argv[1]), [0]
+
+    def dies(real):
+        def op(*a, **k):
+            calls[0] += 1
+            if calls[0] == stop:
+                os._exit(77)  # no handler, no rollback: a SIGKILL or power loss
+            return real(*a, **k)
+        return op
+
+    for name in ("replace", "rename", "symlink", "unlink"):
+        setattr(rf.os, name, dies(getattr(os, name)))
+    rf.Path.unlink = dies(rf.Path.unlink)
+    with rf.replacing(Path({report!r})) as staged:
+        staged.ledger.write_text(json.dumps({{"run": "second"}}))
+        staged.report.write_text("# second report\\n")
+""")
+
+
+def test_a_publisher_killed_at_any_step_leaves_one_whole_generation_live(tmp_path):
+    """Before: the ledger and the report were two replacements, and a process
+    dying between them (os._exit, SIGKILL, power loss: no rollback runs) left
+    the new ledger beside the old report. Now every step before the pointer's
+    one rename leaves the old generation live, and every step after it the
+    new one."""
+    report, first = _publish(tmp_path, "first")
+    seen = set()
+    for stop in range(1, 60):
+        proc = subprocess.run(
+            [sys.executable, "-c", _KILLED.format(root=str(ROOT), report=str(report)),
+             str(stop)], capture_output=True, text=True, timeout=60)
+        assert proc.returncode in (0, 77), proc.stderr
+        live = read_live(report)
+        assert live is not None and _one_generation(report), (stop, live)
+        assert live.ledger is not None and generation_of(live.ledger) == live.generation_id
+        seen.add("new" if live.generation_id != first.generation_id else "old")
+        # And the next publish succeeds from whatever the crash left.
+        _publish(tmp_path, "again")
+        assert _one_generation(report)
+        restore(report, first.generation_id)  # back to the first run for the next kill
+        if proc.returncode == 0:
+            break
+    else:
+        pytest.fail("the publish never completed")
+    assert seen == {"old", "new"}
+
+
+# --- deep audit, finding 1: two publishers of one report --------------------------------
 
 
 def _publisher(args):
     """One rebuild in its own process: stage, wait for the rival, publish.
     `os.replace` is slowed so an unlocked publish would interleave."""
-    import os
     import time
 
     import app.services.reporting.report_files as rf
@@ -323,53 +296,83 @@ def _publisher(args):
 
 def test_two_processes_publishing_one_report_leave_one_whole_generation(tmp_path):
     """Two rebuilds of one report publishing at once (a manual rerun and the
-    watcher on a filing night) interleaved their `os.replace` calls and left
-    report A beside ledger B: each file valid, the pair from two runs."""
+    watcher on a filing night) interleaved and left report A beside ledger B."""
     import multiprocessing as mp
 
-    report = _run(tmp_path, audit=False)
+    report, _ = _publish(tmp_path, "first")
     ctx = mp.get_context("fork")
     with ctx.Manager() as manager:
         barrier = manager.Barrier(2)
         with ctx.Pool(2) as pool:
             ids = pool.map(_publisher, [(report, "A", barrier), (report, "B", barrier)])
     live = read_live(report)
-    assert live is not None and live.generation_id in ids
-    assert generation_of(ledger_path(report)) == live.generation_id
-    # The earlier generation went to the archive whole, once per publish.
-    archived = sorted(p.name for p in (tmp_path / "archive").iterdir())
-    assert len([n for n in archived if n.endswith(".ledger.json")]) == 2
+    assert live is not None and live.generation_id in ids and _one_generation(report)
+    assert len(generations(report)) == 3
     assert not _leftovers(tmp_path)
 
 
+# --- the re-audit, F2 and F3: readers --------------------------------------------------
+
+
 class TestReadLive:
-    def test_an_audit_of_another_generation_is_stale_not_the_reports(self, tmp_path):
-        report = tmp_path / "AAPL_2026-09-26.md"
-        with replacing(report, now=NOW) as staged:
-            _stage(staged, "first")
-        audit = report.with_name("AAPL_2026-09-26_audit.md")
-        audit.write_text(f"<!-- generation: {'f' * 32} -->\n\n# an earlier run's audit")
+    def test_a_reader_is_pinned_to_one_generation(self, tmp_path):
+        """F3: a reader that returned live NAMES read them later, after a
+        rebuild could have replaced them. The paths it returns are the
+        generation's own, which no later publish changes."""
+        report, first = _publish(tmp_path, "first")
         live = read_live(report)
-        assert live is not None and live.audit is None and live.stale == (audit,)
+        _publish(tmp_path, "second")
+        assert live.report.parent.name.endswith(first.generation_id)
+        assert live.report.read_text() == live.text
+        assert json.loads(live.ledger.read_text())["run"] == "first"
+
+    def test_an_audit_of_another_generation_is_stale_not_the_reports(self, tmp_path):
+        report, staged = _publish(tmp_path, "first")
+        audit = current_generation(report) / "AAPL_2026-09-26_audit.md"
+        audit.write_text(f"<!-- generation: {'f' * 32} -->\n\n# someone else's audit")
+        live = read_live(report)
+        assert live.audit is None and live.stale == (audit,)
         audit.write_text(f"<!-- generation: {staged.generation_id} -->\n\n# its audit")
         assert read_live(report).audit == audit
 
     def test_files_from_before_generations_still_pair(self, tmp_path):
-        report = _run(tmp_path, audit=False)
+        report = _plain_run(tmp_path, audit=False)
         live = read_live(report)
-        assert live is not None and live.generation_id is None
+        assert live is not None and live.generation_id is None and live.generation_dir is None
         assert live.ledger == ledger_path(report) and not live.stale
 
     def test_no_report_reads_as_none(self, tmp_path):
-        assert read_live(tmp_path / "AAPL_2026-09-26.md") is None
+        assert read_live(tmp_path / NAME) is None
 
-    def test_a_directory_without_a_lock_is_read_but_never_published(self, tmp_path, monkeypatch):
-        """A reader of a copied-out report (a directory it cannot write) has
-        no publisher to exclude; a publisher that cannot take the lock must
-        not publish unlocked."""
+    def test_reading_creates_nothing(self, tmp_path):
+        report, _ = _publish(tmp_path, "first")
+        arch = current_generation(report)
+        before = sorted(p.name for p in arch.iterdir())
+        assert read_live(arch / NAME).text.startswith("# first report")
+        assert sorted(p.name for p in arch.iterdir()) == before
+        assert read_live(tmp_path / "nowhere" / NAME) is None
+        assert not (tmp_path / "nowhere").exists()
+
+    def test_a_pointer_that_cannot_be_read_fails_closed(self, tmp_path, monkeypatch):
+        """F2: any failure to open the reader's lock was read as "nothing
+        published" and the reader read unlocked, mid-publish. Only a missing
+        pointer means none; anything else raises."""
         import app.services.reporting.report_files as rf
 
-        report = _run(tmp_path, audit=False)
+        report, _ = _publish(tmp_path, "first")
+
+        def denied(path):
+            raise PermissionError("not ours")
+
+        monkeypatch.setattr(rf.os, "readlink", denied)
+        with pytest.raises(PermissionError):
+            read_live(report)
+
+    def test_a_publisher_that_cannot_take_the_lock_publishes_nothing(self, tmp_path, monkeypatch):
+        import app.services.reporting.report_files as rf
+
+        report, _ = _publish(tmp_path, "first")
+        before = _live(tmp_path)
         real_open = rf.os.open
 
         def no_lock(path, *a, **k):
@@ -378,150 +381,72 @@ class TestReadLive:
             return real_open(path, *a, **k)
 
         monkeypatch.setattr(rf.os, "open", no_lock)
-        live = read_live(report)
-        assert live is not None and live.text == "# first report"
-        before = _live(tmp_path)
         with pytest.raises(PermissionError, match="read-only"):
-            with replacing(report, now=NOW) as staged:
-                _stage(staged, "second")
+            _publish(tmp_path, "second")
         assert _live(tmp_path) == before
 
 
-# --- audit of #97 ---------------------------------------------------------------------
+# --- set aside, restore, and files from before generations -----------------------------
 
 
-class TestAuditOfThePublishLock:
-    def test_a_reader_without_write_access_to_the_lock_still_waits_for_a_publish(
-            self, tmp_path, monkeypatch):
-        """A reader running as another user than the publisher could not open
-        the lock read-write, fell back to reading unlocked, and read mid-publish."""
-        import fcntl
-        import os
-        import threading
-        import time
+class TestSetAsideAndRestore:
+    def test_set_aside_takes_the_run_off_the_live_names_and_keeps_it(self, tmp_path):
+        report, staged = _publish(tmp_path, "first")
+        gen = current_generation(report)
+        aside = set_aside(report)
+        assert sorted(p.name for p in aside) == ["AAPL_2026-09-26.ledger.json", NAME]
+        assert read_live(report) is None and not report.exists()
+        assert (gen / NAME).read_text().startswith("# first report")
+        assert [p.name for p in tmp_path.glob("AAPL_*.md") if p.exists()] == []
 
-        import app.services.reporting.report_files as rf
+    def test_restore_brings_a_kept_generation_back_in_one_step(self, tmp_path):
+        report, first = _publish(tmp_path, "first")
+        _publish(tmp_path, "second")
+        assert restore(report, first.generation_id).parent == current_generation(report)
+        assert report.read_text().startswith("# first report") and _one_generation(report)
 
-        report = tmp_path / "AAPL_2026-09-26.md"
-        with replacing(report, now=NOW) as staged:
-            _stage(staged, "first")
-        holder = os.open(tmp_path / STAGING_DIR / "AAPL_2026-09-26.lock", os.O_RDWR)
-        fcntl.flock(holder, fcntl.LOCK_EX)  # a publisher mid-publish
-        real_open = rf.os.open
+    @pytest.mark.parametrize("which", ["nope", "20260926T210507Z"])
+    def test_restore_refuses_an_unknown_or_ambiguous_generation(self, tmp_path, which):
+        report, _ = _publish(tmp_path, "first")
+        _publish(tmp_path, "second")  # same stamp: the stamp alone is ambiguous
+        live = current_generation(report)
+        with pytest.raises(ValueError, match="generations match"):
+            restore(report, which)
+        assert current_generation(report) == live
 
-        def not_writable(path, flags, *a):
-            if str(path).endswith(".lock") and flags & (os.O_RDWR | os.O_WRONLY):
-                raise PermissionError("owned by the publisher")
-            return real_open(path, flags, *a)
+    def test_nothing_published_sets_nothing_aside(self, tmp_path):
+        assert set_aside(tmp_path / NAME) == []
+        assert not (tmp_path / GENERATIONS_DIR).exists()
 
-        monkeypatch.setattr(rf.os, "open", not_writable)
-        done = threading.Event()
-        reader = threading.Thread(target=lambda: (read_live(report), done.set()))
-        reader.start()
-        time.sleep(0.3)
-        assert not done.is_set()  # waits for the publish
-        os.close(holder)
-        reader.join(5)
-        assert done.is_set()
+    def test_a_run_from_before_generations_is_kept_by_the_first_rebuild(self, tmp_path):
+        report = _plain_run(tmp_path)
+        _, staged = _publish(tmp_path, "second")
+        assert report.read_text().startswith("# second report") and _one_generation(report)
+        adopted = {p.name: p.read_text() for p in staged.archived}
+        assert adopted == {NAME: "# first report", "AAPL_2026-09-26.ledger.json": '{"run": "first"}',
+                           "AAPL_2026-09-26_audit.md": "# first audit"}
+        assert not report.with_name("AAPL_2026-09-26_audit.md").exists()
 
-    def test_reading_creates_nothing(self, tmp_path):
-        """Reading an archived run created `archive/.staging/`; reading a
-        path under a missing directory created the directory."""
-        arch = tmp_path / "archive"
-        arch.mkdir()
-        run = _run(arch, name="AAPL_2026-09-26.210507.md", audit=False)
-        assert read_live(run).text == "# first report"
-        assert sorted(p.name for p in arch.iterdir()) == [
-            "AAPL_2026-09-26.210507.ledger.json", "AAPL_2026-09-26.210507.md"]
-        assert read_live(tmp_path / "nowhere" / "AAPL_2026-09-26.md") is None
-        assert not (tmp_path / "nowhere").exists()
+    def test_a_plain_file_that_is_not_the_live_runs_stops_the_rebuild(self, tmp_path):
+        report, _ = _publish(tmp_path, "first")
+        ledger = ledger_path(report)
+        ledger.unlink()
+        ledger.write_text('{"run": "copied back by hand"}')
+        with pytest.raises(NotPublished, match="set it aside by hand"):
+            _publish(tmp_path, "second")
+        assert ledger.read_text() == '{"run": "copied back by hand"}'
 
-    def test_the_stamp_is_appended_to_the_builders_bytes(self, tmp_path):
-        """`_seal` read the report as text and wrote it back: CR and CRLF
-        line ends became LF."""
-        report = tmp_path / "AAPL_2026-09-26.md"
-        with replacing(report, now=NOW) as staged:
-            _stage(staged, "first")
-            staged.report.write_bytes(b"line1\r\nline2\rline3\n")
-        assert report.read_bytes().startswith(b"line1\r\nline2\rline3\n\n\n- Generation: ")
-
-
-# --- round-9 independent review: the commit phase itself fails --------------------
-
-
-class TestReplacingCommitFailures:
-    def _fail_on(self, monkeypatch, fn_name, match, exc):
-        import app.services.reporting.report_files as rf
-
-        real = getattr(rf.os if fn_name == "replace" else rf.shutil, fn_name)
-
-        def flaky(src, dst, *a, **k):
-            if str(dst).endswith(match):
-                raise exc
-            return real(src, dst, *a, **k)
-
-        monkeypatch.setattr(rf.os if fn_name == "replace" else rf.shutil, fn_name, flaky)
-
-    def test_an_interrupt_between_ledger_and_report_rolls_back(self, tmp_path, monkeypatch):
-        """R1: the new ledger was published and the report was not; the pair
-        stayed mismatched and the next rebuild archived it as one run."""
-        report = _run(tmp_path)
-        before = _live(tmp_path)
-        self._fail_on(monkeypatch, "replace", "AAPL_2026-09-26.md", KeyboardInterrupt())
-        with pytest.raises(KeyboardInterrupt):
-            with replacing(report, now=NOW) as staged:
-                _stage(staged, "second")
-        assert _live(tmp_path) == before  # report, ledger AND audit as they were
-        assert not list((tmp_path / "archive").glob("*"))  # the live run is not also archived
-        assert not _leftovers(tmp_path)
-
-    def test_a_first_run_that_fails_to_publish_leaves_no_orphan_ledger(self, tmp_path, monkeypatch):
-        report = tmp_path / "AAPL_2026-09-26.md"
-        self._fail_on(monkeypatch, "replace", "AAPL_2026-09-26.md", OSError("disk"))
-        with pytest.raises(OSError, match="disk"):
-            with replacing(report, now=NOW) as staged:
-                _stage(staged, "first")
-        assert not report.exists() and not ledger_path(report).exists()
-
-    def test_an_audit_that_cannot_be_removed_publishes_nothing(self, tmp_path, monkeypatch):
-        """R2: the earlier audit was removed AFTER the new report went live,
-        so a failure there left it beside the new report (the round-7 pairing
-        defect) and the caller saw an error for a published rebuild."""
-        report = _run(tmp_path)
-        before = _live(tmp_path)
-        audit = tmp_path / "AAPL_2026-09-26_audit.md"
-        real_unlink = type(audit).unlink
-
-        def stuck(self, *a, **k):
-            if self == audit:
-                raise PermissionError("audit locked")
-            return real_unlink(self, *a, **k)
-
-        monkeypatch.setattr(type(audit), "unlink", stuck)
-        with pytest.raises(PermissionError):
-            with replacing(report, now=NOW) as staged:
-                _stage(staged, "second")
-        monkeypatch.undo()
-        assert _live(tmp_path) == before
-        assert not list((tmp_path / "archive").glob("*"))
-
-    def test_a_failed_archive_copy_leaves_no_partial_archived_run(self, tmp_path, monkeypatch):
-        """R3: a copy that failed part-way left an archived report with no
-        ledger or audit, which then looked like a whole archived run."""
-        report = _run(tmp_path)
-        before = _live(tmp_path)
-        self._fail_on(monkeypatch, "copy2", ".ledger.json", OSError("ENOSPC"))
-        with pytest.raises(OSError, match="ENOSPC"):
-            with replacing(report, now=NOW) as staged:
-                _stage(staged, "second")
-        assert _live(tmp_path) == before
-        assert not list((tmp_path / "archive").glob("*"))
+    def test_a_replay_keeps_its_replay_names(self, tmp_path):
+        report, _ = _publish(tmp_path, "replay", name="AAPL_2025-06-30.replay.md")
+        assert ledger_path(report).name == "AAPL_2025-06-30.replay.ledger.json"
+        assert current_generation(report).parent.name == "AAPL_2025-06-30.replay"
+        assert _one_generation(report)
 
 
 def test_a_ledger_failure_is_logged_under_its_report_and_raised(tmp_path, monkeypatch, caplog):
-    """R4: built into staging, a failed ledger logged only
-    `<token>.ledger.json`, and the operator could not tell which report. It
-    is now also raised: the run is not published without it."""
+    """R4: built into staging, a failed ledger logged only its staging name,
+    and the operator could not tell which report. It is also raised: the run
+    is not published without it."""
     from datetime import date
 
     from app.services.reporting import report_builder

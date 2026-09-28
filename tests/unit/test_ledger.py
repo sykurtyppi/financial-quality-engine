@@ -367,8 +367,9 @@ def test_both_entry_points_write_the_ledger_beside_the_report(monkeypatch, tmp_p
     # Each builder writes into staging (Hermes round 8: a rebuild is built off
     # to the side), and the ledger is published beside the report it belongs to.
     cli, journal = observed
-    assert cli.parent == tmp_path / "reports" / ".staging" and cli.name.endswith(".ledger.json")
-    assert journal.parent == tmp_path / "j" / ".staging"
+    assert cli.parent.parent == tmp_path / "reports" / ".staging"
+    assert cli.name.endswith(".ledger.json")
+    assert journal.parent.parent == tmp_path / "j" / ".staging"
     (cli_report,) = (tmp_path / "reports").glob("AAPL_*.md")
     for report in (cli_report, out):
         # One generation: the ledger published beside the report is its own.

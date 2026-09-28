@@ -14,9 +14,10 @@ of something the analyst has to remember to run.
 Deliberately minimal: one subprocess, one prompt, no retries, no orchestration.
 A failed or timed-out audit exits 1 and leaves the engine report untouched.
 
-The audit names the report generation it read (first line), and is written
-only while that generation is still live: a report rebuilt during the audit
-(which can take 30 minutes) is not given an audit of the run it replaced.
+The audit reads one pinned report generation and is written into that
+generation, naming it on its first line: a report rebuilt during the audit
+(which can take 30 minutes) is never given an audit of the run it replaced —
+the audit stays with the run it read, and exits 1 so it is rerun.
 """
 
 from __future__ import annotations
@@ -31,8 +32,12 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.headless import claude_command  # noqa: E402
 from app.services.reporting.report_files import (  # noqa: E402
+    LiveRun,
+    current_generation,
     generation_of,
+    link_audit,
     publish_lock,
+    read_live,
     write_atomic,
 )
 
@@ -56,12 +61,14 @@ def audit_output_path(report_path: Path) -> Path:
 
 
 def run_audit(report_path: Path, timeout: float = DEFAULT_TIMEOUT_S) -> int:
-    if not report_path.is_file():
+    live = read_live(report_path)
+    if live is None:
         print(f"No such report: {report_path}", file=sys.stderr)
         return 1
     ticker = report_path.stem.split("_")[0]
-    generation = generation_of(report_path)
-    prompt = build_prompt(ticker, report_path)
+    # The pinned file, not the live name: a rebuild during the audit must not
+    # change what the auditor reads.
+    prompt = build_prompt(ticker, live.report)
     try:
         proc = subprocess.run(
             [claude_command(), "-p", prompt],
@@ -79,24 +86,40 @@ def run_audit(report_path: Path, timeout: float = DEFAULT_TIMEOUT_S) -> int:
         if proc.stderr:
             print(proc.stderr, file=sys.stderr)
         return 1
-    return publish_audit(report_path, generation, proc.stdout)
+    return publish_audit(report_path, live, proc.stdout)
 
 
-def publish_audit(report_path: Path, generation: str | None, text: str) -> int:
-    """Write the audit beside the report, atomically and under the report's
-    publish lock, only if the report is still the generation the audit read.
-    A report from before generations names none; its audit names none too."""
+def publish_audit(report_path: Path, live: LiveRun, text: str) -> int:
+    """Write the audit of the run ``live`` pinned. In a generation it goes
+    into that generation, whatever is live by now: it can never sit beside
+    another run's report, and if the report was rebuilt (or set aside) while
+    the audit ran it exits 1, so the live run is audited too. Files from
+    before generations have no generation to keep it in: the audit is
+    written beside them only if they are still the run it read."""
+    body = (f"<!-- generation: {live.generation_id} -->\n\n"
+            if live.generation_id else "") + text
+    if live.generation_dir is not None:
+        out = audit_output_path(live.report)
+        write_atomic(out, body)
+        with publish_lock(report_path):
+            link_audit(report_path)  # shown at the live name only if its run is live
+        if current_generation(report_path) != live.generation_dir:
+            print(f"{report_path.name} was rebuilt or set aside while the audit ran; the audit "
+                  f"is kept with the run it read ({out}). Rerun it for the live report.",
+                  file=sys.stderr)
+            return 1
+        print(f"audit -> {audit_output_path(report_path)}")
+        return 0
     out = audit_output_path(report_path)
-    body = (f"<!-- generation: {generation} -->\n\n" if generation else "") + text
     with publish_lock(report_path):
-        if not report_path.is_file():
-            print(f"Audit discarded: {report_path.name} is no longer live (set aside while "
-                  "the audit ran).", file=sys.stderr)
+        if not report_path.is_file() or report_path.is_symlink():
+            print(f"Audit discarded: {report_path.name} is no longer the run it read.",
+                  file=sys.stderr)
             return 1
         now = generation_of(report_path)
-        if now != generation:
+        if now != live.generation_id:
             print(f"Audit discarded: {report_path.name} was rebuilt while it ran "
-                  f"(audited generation {generation}, live {now}). Rerun the audit.",
+                  f"(audited generation {live.generation_id}, live {now}). Rerun the audit.",
                   file=sys.stderr)
             return 1
         write_atomic(out, body)

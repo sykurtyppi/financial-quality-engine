@@ -349,7 +349,8 @@ def _archived(cmd: Command) -> list[Path]:
 
 
 def _staged_left(ws: Workspace) -> list[Path]:
-    """Files a rebuild left in staging; the publish locks there stay."""
+    """What a rebuild left in staging (its build directory); the publish
+    locks there stay."""
     staging = ws.reports / ".staging"
     return [p for p in staging.iterdir() if p.suffix != ".lock"] if staging.is_dir() else []
 
@@ -611,21 +612,27 @@ class Drill:
     # 10 --------------------------------------------------------------------------
     def s10_rollback(self, step: Step) -> None:
         ws = self.main
-        from app.services.reporting.report_files import archive_existing, read_live
+        from app.services.reporting.report_files import (
+            current_generation,
+            read_live,
+            restore,
+        )
 
         archived = [p for p in self.state.get("s1_archived", []) if p.name.endswith(".md")
                     and not p.name.endswith("_audit.md")]
         if not step.check("step 1's archived report is available", len(archived) == 1):
             return
         live = ws.live()
-        # The runbook's restore, as the operator does it: put the current run
-        # aside, then copy the chosen archived run back to the live names.
-        aside = archive_existing(live)
-        step.check("current (step-3) run put aside", any(p.suffix == ".md" for p in aside),
-                   ", ".join(map(str, aside)))
-        shutil.copy2(archived[0], live)
-        shutil.copy2(archived[0].with_name(archived[0].name.removesuffix(".md") + ".ledger.json"),
-                     live.with_suffix(".ledger.json"))
+        # The runbook's restore, as the operator does it: point the live names
+        # back at the chosen generation, in one step.
+        step3 = current_generation(live)
+        restore(live, archived[0].parent.name)
+        step.check("the live names now resolve to step 1's generation",
+                   current_generation(live) == archived[0].parent)
+        step.check("the step-3 run is kept, whole, in its own generation",
+                   step3 is not None and (step3 / live.name).is_file()
+                   and (step3 / live.with_suffix(".ledger.json").name).is_file(),
+                   str(step3))
         step.check("restored report is byte-identical to step 1",
                    live.read_text() == self.state.get("s1_report"))
         step.check("restored ledger is byte-identical to step 1",
@@ -655,8 +662,8 @@ class Drill:
         self.wrote_report(step, ws, first)
         live, ledger = ws.live(), ws.live(".ledger.json")
         before = {p: p.read_bytes() for p in (live, ledger) if p.is_file()}
-        archive = ws.reports / "archive"
-        archived = sorted(archive.iterdir()) if archive.is_dir() else []
+        kept = ws.reports / ".generations" / live.stem
+        archived = sorted(kept.iterdir())
         cmd = self.generate(step, ws, "--no-docs", env_extra={"FQE_DRILL_FAIL_BUILD": "1"})
         injected = "drill: injected report-build failure" in cmd.stderr
         step.check("scenario: the report build raises after the data was acquired", injected,
@@ -665,11 +672,11 @@ class Drill:
         step.check("the live report and ledger are byte-identical to before",
                    len(before) == 2 and all(p.is_file() and p.read_bytes() == b
                                             for p, b in before.items()))
-        step.check("nothing was archived by the failed rebuild",
-                   (sorted(archive.iterdir()) if archive.is_dir() else []) == archived)
+        step.check("no generation was added by the failed rebuild",
+                   sorted(kept.iterdir()) == archived)
         step.check("no staged file is left behind", not _staged_left(ws))
         again = self.generate(step, ws, "--no-docs")
-        moved = {p.name.split(".", 2)[-1]: p for p in _archived(again)}  # "md" / "ledger.json"
+        moved = {p.name.removeprefix(live.stem + "."): p for p in _archived(again)}
         step.check("the next rebuild succeeds", again.returncode == 0,
                    f"exit {again.returncode}: {again.stderr[-300:]}")
         step.check("it archives the first run byte for byte (report and ledger)",
@@ -691,8 +698,8 @@ class Drill:
         self.wrote_report(step, ws, first)
         live, ledger = ws.live(), ws.live(".ledger.json")
         before = {p: p.read_bytes() for p in (live, ledger) if p.is_file()}
-        archive = ws.reports / "archive"
-        archived = sorted(archive.iterdir()) if archive.is_dir() else []
+        kept = ws.reports / ".generations" / live.stem
+        archived = sorted(kept.iterdir())
         cmd = self.generate(step, ws, "--no-docs", env_extra={"FQE_DRILL_FAIL_LEDGER": "1"})
         injected = "drill: injected ledger failure" in cmd.stderr
         step.check("scenario: the evidence ledger cannot be built", injected,
@@ -703,8 +710,7 @@ class Drill:
         step.check("the live report and ledger are byte-identical to before",
                    len(before) == 2 and all(p.is_file() and p.read_bytes() == b
                                             for p, b in before.items()))
-        step.check("nothing was archived",
-                   (sorted(archive.iterdir()) if archive.is_dir() else []) == archived)
+        step.check("no generation was added", sorted(kept.iterdir()) == archived)
         step.check("no staged file is left behind", not _staged_left(ws))
 
 

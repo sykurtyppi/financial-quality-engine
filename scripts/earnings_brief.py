@@ -58,7 +58,7 @@ from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal.store import safe_ticker
-from app.services.reporting.report_files import is_live_report, read_live
+from app.services.reporting.report_files import LiveRun, is_live_report, read_live
 
 REPORT_DIRS = (ROOT / "reports" / "auto", ROOT / "reports")
 DEFAULT_TIMEOUT_S = 1800.0
@@ -80,7 +80,7 @@ def latest_report(ticker: str) -> Path | None:
     never an audit, and never a historical replay (`.replay.md`), which is
     today's code rebuilding an old day, not the current view."""
     matches = [p for d in REPORT_DIRS for p in d.glob(f"{ticker}_*.md")
-               if is_live_report(p)]
+               if is_live_report(p) and p.exists()]  # a set-aside run's names resolve to nothing
     return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
 
@@ -88,6 +88,13 @@ def audit_for(report: Path | None) -> Path | None:
     """The report's own audit: one that names another generation (it
     finished after a rebuild replaced the report it read) is not this
     report's, and is left out with a warning rather than paired."""
+    live = _pinned(report)
+    return live.audit if live is not None else None
+
+
+def _pinned(report: Path | None) -> LiveRun | None:
+    """The live run of ``report``, read once: its report and audit paths are
+    its generation's own, which no rebuild changes afterwards."""
     if report is None:
         return None
     live = read_live(report)
@@ -97,7 +104,7 @@ def audit_for(report: Path | None) -> Path | None:
         if path.name.endswith("_audit.md"):
             print(f"warning: {path.name} audited an earlier generation of {report.name}; "
                   "not used", file=sys.stderr)
-    return live.audit
+    return live
 
 
 def prior_brief(ticker: str, before: date, root: Path | None = None) -> Path | None:
@@ -215,13 +222,19 @@ def cmd_build(args: argparse.Namespace) -> int:
         # brief with no engine findings in it.
         print(f"{ticker}: --report {report} does not exist.", file=sys.stderr)
         return 1
+    # One run, pinned: the brief's model reads these files later, by path, and
+    # a rebuild meanwhile must not swap the report or its audit under it.
+    live = _pinned(report)
+    audit = live.audit if live is not None else None
+    if live is not None:
+        report = live.report
     try:
         # prior brief needs the print date, which the 8-K establishes: collect
         # once without it, then attach.
         src = collect_sources(
             client, ticker, accession=args.accession,
             transcript=Path(args.transcript) if args.transcript else None,
-            report=report, audit=audit_for(report),
+            report=report, audit=audit,
         )
         if no_report:
             src.diagnostics.append(
