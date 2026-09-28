@@ -50,6 +50,7 @@ from pathlib import Path
 from app.services.ingestion.companyfacts_mapper import (
     FLOW_FIELDS,
     INSTANT_FIELDS,
+    IngestionDiagnostics,
     _parse_date,
     _unit_for,
     build_dataset,
@@ -706,7 +707,10 @@ def _series(facts: dict, scored_only: bool,
     `_active_tag`, best coverage — so a revision reported here is a revision
     to the number a report would show, not to some abandoned candidate tag
     carrying stale data. The unit is the field's unit, with the same
-    mis-filed-share-count fallback the sibling detector uses.
+    mis-filed-share-count fallback the sibling detector uses. One concept
+    per field: a quarter the mapper fills from another concept after a tag
+    switch is not followed here (`raw_diff_blind_spots` names it;
+    `diff_scored` compares it as scored).
 
     Same-day ties resolve as the mapper's `_dedupe_latest_filed` does, by
     the shared `precedence` order (an amendment over an original, then the
@@ -771,6 +775,10 @@ def diff_vintages(
 
     Share counts are excluded unless `include_split_adjusted`: a split is not
     a restatement.
+
+    Raw facts, one concept per field (`_series`): a quarter the mapper
+    filled from another concept is not inspected. A caller that shows this
+    diff on its own must print `raw_diff_blind_spots` beside it.
     """
     a = _series(older, scored_only, include_split_adjusted)
     b = _series(newer, scored_only, include_split_adjusted)
@@ -799,6 +807,42 @@ def diff_vintages(
                                and _retains(older, newer, old["key"], old_accn))))
     changes.sort(key=lambda c: (c.key.end, c.field_name, c.key.tag), reverse=True)
     return changes
+
+
+def raw_diff_blind_spots(*snapshots: dict) -> list[str]:
+    """The reported quarters the raw fact diff cannot see, one line each.
+
+    `diff_vintages` follows ONE concept per field (`_active_tag`). The
+    mapper can fill a quarter the selected concept does not report from
+    another candidate proven equal to it (a filer's tag switch), and that
+    quarter's value is then read from a concept the raw diff never
+    follows: a revision of it would pass unseen, and "nothing changed"
+    would claim coverage it does not have. `diff_scored` compares those
+    quarters as the engine builds them; a caller showing the raw diff alone
+    prints these lines beside it. A snapshot the mapper cannot build has no
+    such quarters."""
+    out: list[str] = []
+    for facts in snapshots:
+        mapped = _mapped_diagnostics(facts)
+        if mapped is None:
+            continue
+        for d in mapped.fields:
+            for period_end, concept in sorted(d.fallbacks.items()):
+                line = (
+                    f"{d.field_name} at {period_end} is read from {concept} (the selected "
+                    f"concept, {d.tag_used}, does not report it); the raw fact diff follows "
+                    "one concept per field and did not inspect it"
+                )
+                if line not in out:
+                    out.append(line)
+    return out
+
+
+def _mapped_diagnostics(facts: dict) -> IngestionDiagnostics | None:
+    try:
+        return build_dataset(facts, "SNAPSHOT")[1]
+    except ValueError:
+        return None
 
 
 # `FactKey.taxonomy` of a change to a figure no single fact carries (total

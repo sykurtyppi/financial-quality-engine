@@ -38,13 +38,6 @@ reason = "A payload row is JSON: every non-dict (list, str, number, bool, null) 
 
 [[exclusion]]
 kind = "equivalent"
-path = "app/services/ingestion/companyfacts_mapper.py"
-operator = "continue"
-source = "if not facts: continue"
-reason = "An empty candidate builds an empty series, whose coverage key (0, 0, -rank) fails the `key[1] > 0` test, so it can never be chosen. Skipping it early only saves the work."
-
-[[exclusion]]
-kind = "equivalent"
 path = "app/services/ingestion/restatements.py"
 operator = "continue"
 source = "if len(stable) < 2: continue"

@@ -15,7 +15,10 @@ in a later original filing is the quieter one.
 
 Tag switches are NOT restatements: two different tags reporting the same period
 live in different series and are never compared (that would fabricate a
-"restatement" at every taxonomy change).
+"restatement" at every taxonomy change). A quarter the mapper filled from
+another concept after a switch (`SeriesSelection.fallbacks`) is scanned in
+that concept's own history, over the quarters it supplied only — never
+summed with, or compared against, the selected concept.
 
 TIER 2 (separate follow-up) — a company that revises a number WITHOUT
 re-presenting the original leaves companyfacts holding only the new value.
@@ -463,6 +466,22 @@ def _resolve_tags(
     return [active] if active is not None else []
 
 
+def _fallback_periods(
+    field_name: str, selected_tags: Selected | None
+) -> dict[tuple[str, str], frozenset[date]]:
+    """(taxonomy, concept) -> the reported quarter ends that concept supplied
+    in place of the selected one (`SeriesSelection.fallbacks`). Empty for a
+    legacy string selection, which cannot say, and for the approximation."""
+    selected = (selected_tags or {}).get(field_name)
+    if not isinstance(selected, SeriesSelection):
+        return {}
+    out: dict[tuple[str, str], set[date]] = {}
+    for period_end, concept in selected.fallbacks:
+        taxonomy, _, tag = concept.partition(":")
+        out.setdefault((taxonomy, tag), set()).add(date.fromisoformat(period_end))
+    return {k: frozenset(v) for k, v in out.items()}
+
+
 def _fields_to_inspect(
     selected_tags: Selected | None,
 ) -> dict[str, tuple[tuple[str, str], ...]]:
@@ -595,6 +614,23 @@ def scan_restatements(
         else:
             for taxonomy, tag in series:
                 groups.append((f"{taxonomy}:{tag}", _trail(facts_json, taxonomy, tag, unit, as_of)))
+        # A single-concept field whose selected concept did not report some
+        # quarters may have had them filled from another candidate proven
+        # equal to it (the mapper's checked fallback for a tag switch). Such
+        # a concept is NOT a component: the figure is one concept per
+        # quarter, so it stays out of `series` — there it would make the
+        # field "composite" and `_composite_vintages` would add the two
+        # (68 + 68 for CRM's shared quarter). Each is scanned as a single
+        # concept of its own, over only the quarters it supplied: its filing
+        # history for a period the selected concept supplied is not what the
+        # engine scored. A DERIVED fallback quarter is also rebuilt by
+        # `derived_revisions`, which follows each quarter's own components.
+        # A legacy string selection carries no fallbacks; the scan then reads
+        # the selected concept alone.
+        supplied = _fallback_periods(field_name, selected_tags)
+        for (taxonomy, tag), ends in supplied.items():
+            own = _trail(facts_json, taxonomy, tag, unit, as_of)
+            groups.append((f"{taxonomy}:{tag}", {k: v for k, v in own.items() if k[1] in ends}))
 
         if not any(by_key for _tag, by_key in groups):
             # A resolved series with no eligible fact at all (unit mismatch,
@@ -615,10 +651,16 @@ def scan_restatements(
         inspected.append(field_name)
 
         # Same-day disagreements, per component concept: in a summed field
-        # the component is where the choice was made.
-        for taxonomy, tag in series:
+        # the component is where the choice was made. A fallback concept is
+        # checked over the quarters it supplied only.
+        read: list[tuple[str, str, frozenset[date] | None]] = [
+            (taxonomy, tag, None) for taxonomy, tag in series
+        ] + [(taxonomy, tag, ends) for (taxonomy, tag), ends in supplied.items()]
+        for taxonomy, tag, only in read:
             for (start, end), trail in _trail(facts_json, taxonomy, tag, unit, as_of).items():
                 if period_since is not None and end < period_since:
+                    continue
+                if only is not None and end not in only:
                     continue
                 for group in conflicts(trail, key=_order, value=lambda f: f[1]):
                     same_day.append(SameDayConflict(

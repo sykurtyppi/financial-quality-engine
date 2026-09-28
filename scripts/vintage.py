@@ -36,6 +36,7 @@ from app.services.ingestion.vintages import (  # noqa: E402
     list_vintages,
     load_vintage,
     observed_vintages,
+    raw_diff_blind_spots,
     read_manifest,
     render_changes,
     snapshot_day,
@@ -119,6 +120,11 @@ def cmd_diff(args: argparse.Namespace) -> int:
         # include split-adjusted fields.
         changes = diff_vintages(old_facts, new_facts, scored_only=True, since=since,
                                 include_split_adjusted=True)
+        # One concept per field: say which scored quarters it did not follow
+        # (a quarter filled from another concept after a tag switch), so an
+        # empty diff does not read as covering them.
+        for gap in raw_diff_blind_spots(old_facts, new_facts):
+            print(f"Note: {gap}.", file=sys.stderr)
     else:
         # What the engine scores, compared as the mapper builds it; raw facts
         # as provenance and pre-window context.

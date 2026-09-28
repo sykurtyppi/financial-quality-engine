@@ -62,7 +62,12 @@ def test_every_selection_round_trips_through_its_legacy_string(case, facts):
             assert d.tag_used is None, (case, d.field_name)
             continue
         assert d.tag_used == d.selection.tag_used
-        assert SeriesSelection.from_tag_used(d.field_name, d.tag_used) == d.selection, (
+        # The legacy string names the selected concept(s) only; the quarters
+        # a tag switch filled from another concept (`fallbacks`) are not in
+        # it, and never were — which is why anything that must rebuild the
+        # scored figure takes the object.
+        without_fallbacks = d.selection.model_copy(update={"fallbacks": ()})
+        assert SeriesSelection.from_tag_used(d.field_name, d.tag_used) == without_fallbacks, (
             case, d.field_name,
         )
         assert d.selection.composer is composer_for(d.field_name)

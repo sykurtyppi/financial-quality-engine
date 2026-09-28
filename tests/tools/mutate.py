@@ -64,18 +64,20 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_restatement_scan.py", "tests/unit/test_properties_restatements.py",
         "tests/unit/test_debt_composition.py", "tests/unit/test_series_selection.py",
         "tests/unit/test_restatement_scan_truth.py", "tests/unit/test_same_day_precedence.py",
-        "tests/unit/test_payload_fuzz.py",
+        "tests/unit/test_payload_fuzz.py", "tests/unit/test_tag_switch_fallback.py",
     )),
     Target("app/services/ingestion/companyfacts_mapper.py", (
         "tests/unit/test_companyfacts_mapper.py", "tests/unit/test_coherent_derivation.py",
         "tests/unit/test_same_day_precedence.py", "tests/unit/test_provenance.py",
         "tests/integration/test_selection_snapshot.py", "tests/unit/test_build_dataset_as_of.py",
+        "tests/unit/test_tag_switch_fallback.py",
     )),
     Target("app/services/ingestion/vintages.py", (
         "tests/unit/test_vintages.py", "tests/unit/test_vintage_composed.py",
         "tests/unit/test_vintage_diff_report.py", "tests/unit/test_replay.py",
         "tests/unit/test_pit_agreement.py", "tests/unit/test_vintage_capture_from_reports.py",
-        "tests/unit/test_vintage_amendment.py",
+        "tests/unit/test_vintage_amendment.py", "tests/unit/test_tag_switch_fallback.py",
+        "tests/unit/test_vintage_cli.py",
     )),
     Target("app/services/backtesting/pit.py", (
         "tests/unit/test_pit_agreement.py", "tests/unit/test_build_dataset_as_of.py",
@@ -91,6 +93,7 @@ TARGETS: tuple[Target, ...] = (
     )),
     Target("app/services/ingestion/selection.py", (
         "tests/unit/test_series_selection.py", "tests/unit/test_debt_composition.py",
+        "tests/unit/test_tag_switch_fallback.py",
     )),
     Target("app/core/pipeline.py", (
         "tests/unit/test_distress_flags.py", "tests/integration/test_pipeline.py",
