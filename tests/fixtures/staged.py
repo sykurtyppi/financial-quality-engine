@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-_GENERATION = re.compile(r"\n\n- Generation: [0-9a-f]{32} \(.*\)\n\Z")
+_GENERATION = re.compile(r"\n\n- Engine: .*\n- Generation: [0-9a-f]{32} \(.*\)\n\Z")
 
 
 def write_ledger(kwargs: dict) -> None:
@@ -16,5 +16,6 @@ def write_ledger(kwargs: dict) -> None:
 
 
 def without_generation(text: str) -> str:
-    """A published report less the generation line the publish appends."""
+    """A published report less the engine and generation lines the publish
+    appends."""
     return _GENERATION.sub("", text)

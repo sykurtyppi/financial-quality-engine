@@ -25,13 +25,17 @@ from pathlib import Path
 
 import pytest
 
+from app.services.reporting import report_files
 from app.services.reporting.report_builder import ledger_path
 from app.services.reporting.report_files import (
+    ENGINE_ENV,
+    ENGINE_LINE,
     GENERATION_LINE,
     GENERATIONS_DIR,
     STAGING_DIR,
     NotPublished,
     current_generation,
+    engine_commit,
     generation_of,
     generations,
     is_live_report,
@@ -44,6 +48,16 @@ from app.services.reporting.report_files import (
 NOW = datetime(2026, 9, 26, 21, 5, 7, tzinfo=UTC)
 NAME = "AAPL_2026-09-26.md"
 ROOT = Path(__file__).resolve().parents[2]
+ENGINE = "0123456789ab (stated by FQE_ENGINE_COMMIT; not a git checkout)"
+
+
+@pytest.fixture(autouse=True)
+def _engine(monkeypatch):
+    """Publishes here state a fixed engine commit, not this checkout's."""
+    monkeypatch.setenv(ENGINE_ENV, "0123456789ab")
+    engine_commit.cache_clear()
+    yield
+    engine_commit.cache_clear()
 
 
 def _stage(staged, tag, *, ledger=True, report=True):
@@ -167,7 +181,8 @@ class TestReplacing:
         with replacing(report, now=NOW) as staged:
             _stage(staged, "first")
             staged.report.write_bytes(b"line1\r\nline2\rline3\n")
-        assert report.read_bytes().startswith(b"line1\r\nline2\rline3\n\n\n- Generation: ")
+        assert report.read_bytes().startswith(
+            b"line1\r\nline2\rline3\n\n\n- Engine: " + ENGINE.encode() + b"\n- Generation: ")
 
 
 class TestAWholeGenerationOrNothing:
@@ -213,7 +228,10 @@ class TestAWholeGenerationOrNothing:
             f"{GENERATION_LINE}{staged.generation_id} (this report, its evidence ledger "
             "and its audit carry the same id)\n")
         assert json.loads(ledger_path(report).read_text()) == {
-            "run": "first", "generation_id": staged.generation_id}
+            "run": "first", "generation_id": staged.generation_id, "engine_commit": ENGINE}
+        # The engine line sits directly above the generation line, which
+        # stays the report's last.
+        assert live.text.splitlines()[-2] == f"{ENGINE_LINE}{ENGINE}"
 
 
 # --- the re-audit, F1: a publisher killed at any point ---------------------------------
@@ -597,3 +615,104 @@ def test_a_ledger_failure_is_logged_under_its_report_and_raised(tmp_path, monkey
             tmp_path / ".staging" / "0123456789ab.ledger.json",
             ticker="AAPL", report_date=date(2026, 9, 26), result=None)
     assert "AAPL 2026-09-26" in caplog.text
+
+
+class TestEngineCommit:
+    """A season runs from a pinned commit; every published run names it, and
+    says so when the code it ran is not that commit."""
+
+    @pytest.fixture
+    def repo(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(ENGINE_ENV, raising=False)
+        root = tmp_path / "engine"
+        (root / "app").mkdir(parents=True)
+        (root / "journal").mkdir()
+        (root / "app" / "mod.py").write_text("X = 1\n")
+        (root / "journal" / "watchlist.json").write_text("{}\n")
+        (root / ".gitignore").write_text("__pycache__/\n")
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q")
+        git("add", ".")
+        git("commit", "-q", "-m", "engine")
+        monkeypatch.setattr(report_files, "_ENGINE_ROOT", root)
+        engine_commit.cache_clear()
+        return root, git("rev-parse", "--short=12", "HEAD")
+
+    def test_a_clean_checkout_names_its_commit(self, repo):
+        _, sha = repo
+        assert engine_commit() == f"{sha} (clean checkout)"
+
+    @pytest.mark.parametrize("change", ["edit", "untracked"])
+    def test_changed_engine_code_is_named_as_not_that_commit(self, repo, change):
+        root, sha = repo
+        if change == "edit":
+            (root / "app" / "mod.py").write_text("X = 2\n")
+        else:
+            (root / "app" / "new.py").write_text("Y = 1\n")
+        assert engine_commit() == (
+            f"{sha} + uncommitted changes to the engine code (not reproducible from {sha})")
+
+    def test_data_the_engine_rewrites_and_caches_do_not_count(self, repo):
+        """`watch.py` rewrites journal/watchlist.json on every re-arm."""
+        root, sha = repo
+        (root / "journal" / "watchlist.json").write_text('{"re": "armed"}\n')
+        (root / "app" / "__pycache__").mkdir()
+        (root / "app" / "__pycache__" / "mod.cpython-312.pyc").write_bytes(b"\0")
+        assert engine_commit() == f"{sha} (clean checkout)"
+
+    def test_read_once_per_process(self, repo):
+        """The code a running process loaded is the code it started with."""
+        root, sha = repo
+        assert engine_commit() == f"{sha} (clean checkout)"
+        (root / "app" / "mod.py").write_text("X = 2\n")
+        assert engine_commit() == f"{sha} (clean checkout)"
+
+    def test_not_a_checkout(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(ENGINE_ENV, raising=False)
+        monkeypatch.setattr(report_files, "_ENGINE_ROOT", tmp_path)
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+        engine_commit.cache_clear()
+        assert engine_commit() == "unknown (not run from a git checkout; set FQE_ENGINE_COMMIT)"
+
+    def test_a_copy_inside_another_checkout_is_not_that_checkout(self, repo, monkeypatch):
+        """An installed copy (site-packages under a venv inside some repo)
+        must not report the enclosing repo's commit."""
+        root, _ = repo
+        inner = root / "venv" / "lib"
+        inner.mkdir(parents=True)
+        monkeypatch.setattr(report_files, "_ENGINE_ROOT", inner)
+        assert engine_commit() == "unknown (not run from a git checkout; set FQE_ENGINE_COMMIT)"
+
+    def test_no_git_binary(self, repo, monkeypatch):
+        def missing(*a, **k):
+            raise FileNotFoundError("git")
+        monkeypatch.setattr(report_files.subprocess, "run", missing)
+        assert engine_commit().startswith("unknown (not run from a git checkout")
+
+    def test_status_that_fails_is_said_not_read_as_clean(self, repo, monkeypatch):
+        _, sha = repo
+        real = subprocess.run
+
+        def status_fails(argv, *a, **k):
+            if "status" in argv:
+                return subprocess.CompletedProcess(argv, 128, "", "fatal")
+            return real(argv, *a, **k)
+        monkeypatch.setattr(report_files.subprocess, "run", status_fails)
+        assert engine_commit() == (
+            f"{sha} (could not check the checkout for uncommitted changes)")
+
+    def test_a_stated_commit_says_it_was_stated(self, monkeypatch):
+        monkeypatch.setenv(ENGINE_ENV, "  c62095d  ")
+        engine_commit.cache_clear()
+        assert engine_commit() == "c62095d (stated by FQE_ENGINE_COMMIT; not a git checkout)"
+
+    def test_a_blank_statement_is_no_statement(self, repo, monkeypatch):
+        _, sha = repo
+        monkeypatch.setenv(ENGINE_ENV, "   ")
+        engine_commit.cache_clear()
+        assert engine_commit() == f"{sha} (clean checkout)"

@@ -46,7 +46,7 @@ others each start from a clean copy of the inputs.
 
 | # | Step | What must happen |
 |---|---|---|
-| 1 | Baseline report | Exits 0. Report and evidence ledger written, vintage captured. |
+| 1 | Baseline report | Exits 0. Report and evidence ledger written, vintage captured; the report names the engine commit that built it. |
 | 2 | Rerun, same inputs | Step 1's run is **kept whole in its own generation** (`reports/.generations/<T>_<day>/`), not overwritten. The new report is byte-identical once the `Data fetched:` and `Vintage snapshot:` lines are masked, and so is the ledger once `fetched_at` is masked. |
 | 3 | A 10-Q/A lands | The scored revenue fact for the newest directly reported quarter is re-filed +10% as a 10-Q/A filed today, and listed in the filing index. The card has `Restatement (10-Q/A) affecting <quarter>`, and **no** `Silent revision:` line. Every card line whose metric read the amended revenue carries `⚠ reads a revised figure: revenue <quarter> <was> → <now> (amended by 10-Q/A <accn>)`, and lines that do not read it (accruals, CFO / net income) carry none. The ledger cites the /A accession. The silent-revision check compares two snapshots and attributes the move to the /A. Step 2's report is archived. |
 | 4 | Same-day conflicting facts | A second value for that fact, same day and form. A field note names the conflict, and it is not called a restatement. |

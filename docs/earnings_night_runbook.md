@@ -202,6 +202,40 @@ brief need that cron does not provide:
   On a Mac that sleeps, prefer a launchd LaunchAgent over cron: it runs in
   your login session and catches up after a missed hour; cron skips it.
 
+**Preflight.** `scripts/preflight.py` checks all of the above from the
+checkout the season runs from, and says what to fix:
+
+```
+.venv/bin/python scripts/preflight.py --expect <pinned sha>   # offline
+.venv/bin/python scripts/preflight.py --expect <pinned sha> --live --claude-login
+```
+
+It checks the Python version, the engine commit (`--expect` fails unless the
+checkout is exactly that commit with no changes to the engine code),
+`EDGAR_IDENTITY`, the CLI a scheduler would find (under `/usr/bin:/bin`, not
+your shell's PATH), the portfolio and watchlist (rows that can never fire,
+past hints, names with no linked thesis), whether `journal/watchlist.json`
+now differs from the commit (after `sync` it names your holdings: do not
+commit it), and whether an hourly sweep is installed. `--live` makes one
+EDGAR request and `--claude-login` makes one headless run (paid); neither
+happens without the flag. Exit 1 means something would fail on print night.
+
+`scripts/preflight.py launchd` prints a LaunchAgent that runs the hourly
+sweep from this checkout with a scheduler-shaped environment. It is printed,
+never installed:
+
+```
+.venv/bin/python scripts/preflight.py launchd \
+  > ~/Library/LaunchAgents/com.financial-quality-engine.watch-sweep.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.financial-quality-engine.watch-sweep.plist
+```
+
+**Which code built a report.** Every published report states the engine
+commit on the line above its `- Generation:` line, and its ledger carries
+the same string as `engine_commit`: `<sha> (clean checkout)`, or `<sha> +
+uncommitted changes to the engine code` when the checkout was edited. A copy
+without `.git` states `FQE_ENGINE_COMMIT` if set, and says so.
+
 Per pass, in order:
 
 1. **Sync** (`--portfolio`): any holding not yet watched is armed exactly as

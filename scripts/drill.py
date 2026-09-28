@@ -27,6 +27,7 @@ runbook is docs/earnings_night_drill.md.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import platform
@@ -223,6 +224,9 @@ class Workspace:
             "EDGAR_IDENTITY": "Earnings Drill drill@example.com",
             "PYTHONPATH": str(self.path / "_shim"),
             "PYTHONDONTWRITEBYTECODE": "1",
+            # The workspace is a copy, not a checkout: it states the commit it
+            # was copied from, as a deployment without .git would.
+            **({"FQE_ENGINE_COMMIT": head} if (head := _git_head()) else {}),
             **(env_extra or {}),
         })
         argv = [script, *args]
@@ -430,6 +434,9 @@ class Drill:
         report = self.wrote_report(step, ws, cmd)
         step.check("thermometer line on stdout", "distress signals:" in cmd.stdout)
         step.check("vintage captured", "Vintage snapshot: captured" in report)
+        if head := _git_head():
+            step.check("report names the engine commit that built it",
+                       f"\n- Engine: {head} " in report)
         self.state["s1_report"] = report
         self.state["s1_ledger"] = ws.live(".ledger.json").read_text() if report else ""
         self.state["s1_vintages"] = _vintage_files(ws)
@@ -763,6 +770,7 @@ if os.environ.get("FQE_DRILL_FAIL_LEDGER"):
 
 # --- output ------------------------------------------------------------------------
 
+@functools.cache
 def _git_head() -> str:
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
