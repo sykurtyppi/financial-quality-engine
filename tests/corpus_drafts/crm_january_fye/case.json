@@ -24,7 +24,7 @@
    "ebit": "us-gaap:OperatingIncomeLoss",
    "goodwill": "us-gaap:Goodwill",
    "intangible_assets": "us-gaap:FiniteLivedIntangibleAssetsNet",
-   "interest_expense": "us-gaap:InterestExpenseDebt",
+   "interest_expense": "us-gaap:InterestExpenseDebt|2026-04-30:us-gaap:InterestExpenseNonoperating",
    "net_income": "us-gaap:NetIncomeLoss",
    "operating_income": "us-gaap:OperatingIncomeLoss",
    "ppe_net": "us-gaap:PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",

@@ -234,12 +234,15 @@ class TestCheckedFallback:
         assert (fd.fallbacks == {GAP: NONOP}) is used
 
     def test_a_selected_zero_is_matched_only_by_zero(self):
-        rows = [_q(i, 0.0) for i in range(7)]
+        """Zero against zero agrees, and zero against anything else does not
+        (the tolerance is relative) — but agreeing zeros are not proof on
+        their own (TestWhatCountsAsProof)."""
+        rows = [_q(i, 0.0) for i in range(6)] + [_q(6, 100.0)]
         agree = _payload(InterestExpenseDebt=rows,
-                         InterestExpenseNonoperating=[_q(6, 0.0), _q(7, 5.0)])
+                         InterestExpenseNonoperating=[_q(5, 0.0), _q(6, 100.0), _q(7, 5.0)])
         assert _interest(agree)[0][GAP].interest_expense == 5.0
         differ = _payload(InterestExpenseDebt=rows,
-                          InterestExpenseNonoperating=[_q(6, 0.001), _q(7, 5.0)])
+                          InterestExpenseNonoperating=[_q(5, 0.001), _q(6, 100.0), _q(7, 5.0)])
         assert _interest(differ)[0][GAP].interest_expense is None
 
     def test_candidates_are_tried_in_rank_order_and_rejections_are_named(self):
@@ -342,6 +345,112 @@ class TestCheckedFallback:
         assert fd.notes == ["FY2025Q4 from us-gaap:ReceivablesNetCurrent: the filer switched "
                             "concepts; it agrees with us-gaap:AccountsReceivableNetCurrent on "
                             "FY2025Q2, FY2025Q3."]
+
+
+class TestWhatCountsAsProof:
+    """Independent review of 7a65130: two proofs of equality that prove
+    nothing were accepted. Every shared quarter must still agree, AND at
+    least one of them must be a reported-window quarter where the selected
+    value is not zero."""
+
+    def test_agreeing_only_on_zero_is_not_proof(self):
+        """Both tags report 0 at FY2024Q1, the only quarter they share, and
+        the alternative's 5000 filled FY2025Q4 against a series of 100s."""
+        facts = _payload(
+            InterestExpenseDebt=[_q(0, 0.0)] + [_q(i, 100.0) for i in range(1, 7)],
+            InterestExpenseNonoperating=[_q(0, 0.0), _q(7, 5000.0)],
+        )
+        by_end, fd, _ = _interest(facts)
+        assert by_end[GAP].interest_expense is None
+        assert fd.fallbacks == {}
+        assert fd.notes == [
+            f"FY2025Q4: {NONOP} reports 5,000 but was not used: it agrees with {DEBT} only "
+            "where both report zero (FY2024Q1), which does not show they measure the same figure."
+        ]
+
+    def test_a_zero_beside_a_nonzero_agreement_does_not_block_the_fill(self):
+        facts = _payload(
+            InterestExpenseDebt=[_q(0, 0.0)] + [_q(i, 100.0) for i in range(1, 7)],
+            InterestExpenseNonoperating=[_q(0, 0.0), _q(6, 100.0), _q(7, 130.0)],
+        )
+        by_end, fd, _ = _interest(facts)
+        assert by_end[GAP].interest_expense == 130.0
+        assert fd.notes == [f"FY2025Q4 from {NONOP}: the filer switched concepts; it agrees "
+                            f"with {DEBT} on FY2024Q1, FY2025Q3."]
+
+    def test_a_proof_only_before_the_reported_window_is_not_proof(self):
+        """n_quarters=4: the one shared quarter, FY2024Q1, is in the
+        derivation buffer, not a quarter the report shows; the alternative's
+        999 filled FY2025Q4 against ~100."""
+        facts = _payload(
+            InterestExpenseDebt=_selected(),
+            InterestExpenseNonoperating=[_q(0, 100.0), _q(7, 999.0)],
+        )
+        by_end, fd, _ = _interest(facts, n_quarters=4)
+        assert by_end[GAP].interest_expense is None
+        assert fd.fallbacks == {}
+        assert fd.notes == [
+            f"FY2025Q4: {NONOP} reports 999 but was not used: it agrees with {DEBT} only "
+            "before the reported window (FY2024Q1), so agreement is not shown on a quarter "
+            "the report uses."
+        ]
+
+    def test_a_disagreement_in_the_buffer_still_rejects(self):
+        """Disagreement is checked over every quarter, buffer included."""
+        facts = _payload(
+            InterestExpenseDebt=_selected(),
+            InterestExpenseNonoperating=[_q(0, 150.0), _q(6, 100.0), _q(7, 130.0)],
+        )
+        by_end, fd, _ = _interest(facts, n_quarters=4)
+        assert by_end[GAP].interest_expense is None
+        assert fd.notes == [
+            f"FY2025Q4: {NONOP} reports 130 but was not used: it disagrees with {DEBT} "
+            "at FY2024Q1 (150 vs 100)."
+        ]
+
+    def test_a_window_proof_with_buffer_agreement_fills(self):
+        facts = _payload(
+            InterestExpenseDebt=_selected(),
+            InterestExpenseNonoperating=[_q(0, 100.0), _q(6, 100.0), _q(7, 130.0)],
+        )
+        by_end, fd, _ = _interest(facts, n_quarters=4)
+        assert by_end[GAP].interest_expense == 130.0
+        assert fd.fallbacks == {GAP: NONOP}
+
+
+class TestRecordsNameTheFallbacks:
+    """Independent review of 7a65130: the ledger and the corpus observation
+    recorded `tag_used` alone, so CRM's ledger said interest_expense was
+    InterestExpenseDebt although FY2027Q1 was read from
+    InterestExpenseNonoperating."""
+
+    CRM_LABEL = f"{DEBT}|2026-04-30:{NONOP}"
+
+    def test_the_selection_label_carries_the_fallbacks(self):
+        plain = SeriesSelection.of("interest_expense", (DEBT,))
+        assert plain.label == DEBT == plain.tag_used
+        filled = SeriesSelection.of("interest_expense", (DEBT,), (("2026-04-30", NONOP),))
+        assert filled.label == self.CRM_LABEL
+
+    def test_the_ledger_records_the_fallback(self):
+        from app.core.pipeline import analyze
+        from app.services.reporting.ledger import build_ledger
+
+        facts = json.loads(CRM_DRAFT.read_text())
+        ds, diag = build_dataset(facts, "CRM", as_of=date(2026, 5, 28))
+        doc = build_ledger(result=analyze(ds), dataset=ds, ticker="CRM",
+                           report_date=date(2026, 5, 28), field_tags=diag.selected_series())
+        assert doc.selections["interest_expense"] == self.CRM_LABEL
+        # A field without fallbacks reads exactly as before.
+        assert doc.selections["revenue"] == diag.field_by_name("revenue").tag_used
+
+    def test_the_corpus_observation_records_the_fallback(self):
+        from app.services.corpus import load_case, observe
+
+        case, facts, subs = load_case(CRM_DRAFT.parent)
+        obs = observe(facts, subs, case.ticker, case.as_of, case.since)
+        assert obs.selections["interest_expense"] == self.CRM_LABEL
+        assert case.expected.selections["interest_expense"] == self.CRM_LABEL
 
 
 class TestPointInTime:

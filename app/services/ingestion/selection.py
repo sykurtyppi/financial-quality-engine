@@ -99,6 +99,16 @@ class SeriesSelection(BaseModel):
         return "+".join(_bare(c) for c in self.components)
 
     @property
+    def label(self) -> str:
+        """`tag_used`, then `|<period end>:<concept>` for each quarter filled
+        from another concept (`fallbacks`). The one spelling of a selection
+        for records that keep a string — the ledger, the corpus, the
+        selections digest: a field without fallbacks reads exactly as
+        `tag_used`, and one with them no longer claims the selected concept
+        supplied every quarter."""
+        return self.tag_used + "".join(f"|{q}:{c}" for q, c in self.fallbacks)
+
+    @property
     def concepts(self) -> list[tuple[str, str]]:
         """(taxonomy, concept) pairs, for readers of companyfacts."""
         return [(taxonomy, concept) for taxonomy, _, concept in

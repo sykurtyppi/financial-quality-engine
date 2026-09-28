@@ -135,7 +135,10 @@ class LedgerDocument(BaseModel):
     fresh: bool = False
     config_version: str
     coverage: float | None = None
-    # field -> the concept(s) its values were read from (the mapper's selection)
+    # field -> the concept(s) its values were read from (the mapper's
+    # selection, `SeriesSelection.label`): `tag_used`, then
+    # "|<period end>:<concept>" for each quarter filled from another concept
+    # after a tag switch. A field without such quarters is just `tag_used`.
     selections: dict[str, str] = Field(default_factory=dict)
     # stream -> "checked" | "not run" | "data failure: …" | "internal error: …"
     streams: dict[str, str] = Field(default_factory=dict)

@@ -61,7 +61,7 @@ class Expected(BaseModel):
     tier1: bool  # the card must show at least one Tier-1 event
     footprints: list[ExpectedFootprint] = Field(default_factory=list)
     non_reliance: list[str] = Field(default_factory=list)  # 8-K 4.02 accessions
-    selections: dict[str, str] = Field(default_factory=dict)  # field -> tag_used
+    selections: dict[str, str] = Field(default_factory=dict)  # field -> SeriesSelection.label
     coverage_min: float = Field(default=0.0, ge=0.0, le=1.0)
     uninspected: list[str] = Field(default_factory=list)  # must be named as not inspected
 
@@ -157,7 +157,9 @@ def observe(
                 non_reliance.append(accession)
                 tier1.append(f"8-K Item 4.02 non-reliance (restatement announced) filed {filed}")
     return Observation(
-        selections={f.field_name: f.tag_used for f in diag.fields if f.tag_used},
+        # `label`, not `tag_used`: a quarter filled from another concept
+        # after a tag switch is part of what was selected.
+        selections={f.field_name: f.selection.label for f in diag.fields if f.selection is not None},
         footprints=tuple(
             ObservedFootprint(
                 fp.field_name, fp.period_end, fp.is_amendment,
