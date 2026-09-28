@@ -116,10 +116,11 @@ def main() -> int:
     generated_on = date.today().isoformat()
     out_dir = ROOT / "reports"
     out = out_dir / f"{ticker}_{generated_on}.md"
-    # Built off to the side, then published: a same-day rerun (filing night:
-    # the /A lands after the first run) copies the earlier report, ledger and
-    # audit to reports/archive/ only once the new report exists, and a build
-    # that fails leaves the live report as it was.
+    # Built off to the side, then published in one step: a same-day rerun
+    # (filing night: the /A lands after the first run) goes live only once
+    # its report and ledger exist, the earlier run is kept whole as the
+    # previous generation, and a build that fails leaves the live report as
+    # it was.
     with replacing(out) as staged:
         report, thermometer = build_report(
             result, dataset,

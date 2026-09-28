@@ -91,7 +91,7 @@ def build_report(
     stream cut there (they all anchor on ``generated_on``, which a replay sets
     to that day). The report opens with a replay banner and is written to
     ``<TICKER>_<day>.replay.md``, never over a real report; a replay rerun
-    archives the earlier replay as any rebuild does.
+    keeps the earlier replay as any rebuild does.
     """
     ticker = ticker.upper()
     as_of: date | None = None
@@ -141,9 +141,10 @@ def build_report(
     warnings = list(diag.warnings)
     if as_of is not None:
         warnings.append(f"HISTORICAL REPLAY as of {as_of}: fundamentals from {replay_source}.")
-    # Built off to the side, then published: a rerun on the same day copies
-    # the earlier report (and its ledger and audit) to archive/ only once the
-    # new one exists, and a build that fails leaves the live report as it was.
+    # Built off to the side, then published in one step: a rerun on the same
+    # day goes live only once its report and ledger exist, the earlier run is
+    # kept whole as the previous generation, and a build that fails leaves the
+    # live report as it was.
     with replacing(out) as staged:
         report, thermometer = build_full_report(
             result, dataset,

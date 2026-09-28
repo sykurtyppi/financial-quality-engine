@@ -62,7 +62,7 @@ class TestTheDrill:
             assert list((out / "steps").glob(f"{n:02d}_*/cmd1.stdout.txt")) or n == 10
         # The code copies are removed; what the runs wrote is kept.
         assert not (out / "work" / "night" / "app").exists()
-        assert list((out / "work" / "night" / "reports" / "archive").glob("*.md"))
+        assert list((out / "work" / "night" / "reports" / ".generations").glob("*/*/*.md"))
 
     def test_the_real_trees_are_untouched(self, run):
         """Reports, vintages, the SEC cache and journal entries of the checkout

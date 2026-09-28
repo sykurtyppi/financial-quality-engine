@@ -7,7 +7,8 @@ Rehearse it first: [earnings_night_drill.md](earnings_night_drill.md)
 (`scripts/drill.py`) runs a filing night offline, including an amendment
 landing, a stale cache, SEC down, a rerun and a rollback, and leaves a log to
 sign. A same-day rerun no longer overwrites a report: the earlier run, with
-its ledger and audit, moves to `reports/archive/`.
+its ledger and audit, is kept whole in `reports/.generations/`, and
+`report_files.restore` makes it live again in one step.
 
 ## What is and isn't automated
 
