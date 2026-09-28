@@ -37,7 +37,22 @@ values; every gap surfaces as `missing_data` in the report.
 5. **Tag switches break series** — XOM receivables: first-matching-tag
    selection produced a 2/8 series because the filer changed tags. Fixed:
    every candidate tag is scored; best in-window coverage wins; tags are never
-   mixed within a series. (`TestAmendmentsAndTagSelection`)
+   mixed where the selected tag has a value. (`TestAmendmentsAndTagSelection`)
+   The same switch then left the NEWEST quarter empty: the tag with the
+   longer history kept winning, and the quarter reported only under the new
+   concept went missing (CRM FY2027Q1 `interest_expense`, reported only as
+   `InterestExpenseNonoperating`; KO FY2024Q1 at a 2025-03-31 cut). Fixed: a
+   reported quarter the selected tag has no value for is filled from another
+   candidate of the field, in candidate order, only when that candidate
+   agrees with the selected tag (within 0.5%) on every quarter both report,
+   and on at least one. It is read through the same point-in-time view and
+   derivation rules as the selected tag; the quarter's provenance names the
+   concept, and a field note says which quarter came from which concept and
+   on which quarters it was proven equal. A candidate that could fill the gap
+   but is not proven equal is named in a note with its value and the reason,
+   and is not used. `tag_used` stays the selected tag. Single-concept fields
+   only: SG&A and D&A resolve each quarter from their own strategies.
+   (`tests/unit/test_tag_switch_fallback.py`)
 6. **Cover-page share dates** — `dei:EntityCommonStockSharesOutstanding` is
    stamped with the cover date, weeks after quarter end (WMT: 0/8 coverage).
    Fixed: bounded 60-day nearest-forward matching, method `nearest`, with a

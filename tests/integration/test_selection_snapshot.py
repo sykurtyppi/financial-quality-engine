@@ -198,6 +198,9 @@ BRANCHES = {
     ),
     ("synthetic/debt_none", "total_debt"): None,
     ("synthetic/quarter_ends_from_revenue", "revenue"): "us-gaap:Revenues",
+    # A tag switch fills the gap but leaves the selection the selected tag's.
+    ("synthetic/tag_switch_fallback", "interest_expense"): "us-gaap:InterestExpenseDebt",
+    ("synthetic/tag_switch_fallback", "receivables"): "us-gaap:AccountsReceivableNetCurrent",
 }
 
 

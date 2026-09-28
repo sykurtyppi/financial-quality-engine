@@ -138,6 +138,29 @@ class TestListAndDiff:
         _two_vintages(monkeypatch)
         assert _run(["diff", "NVDA", "--since", "not-a-date"], monkeypatch) == 1
 
+    def test_the_raw_diff_names_the_filled_quarters_it_did_not_inspect(self, monkeypatch, capsys):
+        """`--splits` shows the raw fact diff, one concept per field. A quarter
+        the mapper filled from another concept after a tag switch is not in
+        it, and an empty table must not read as covering it."""
+        from tests.unit.test_tag_switch_fallback import GAP, _payload, _q, _selected
+
+        def snap(val, filed):
+            return _payload(InterestExpenseDebt=_selected(),
+                            InterestExpenseNonoperating=[_q(6, 100.0), _q(7, val, filed=filed)])
+
+        client = _Client(snap(130.0, "2026-02-01"), snap(160.0, "2026-04-01"))
+        monkeypatch.setattr(cli, "SecClient", lambda *a, **k: client)
+        _run(["capture", "NVDA"], monkeypatch)
+        _run(["capture", "NVDA", "--force"], monkeypatch)
+        assert _run(["diff", "NVDA", "--splits"], monkeypatch) == 0
+        out = capsys.readouterr()
+        assert "130" not in out.out  # the raw diff did not see the move ...
+        assert (f"Note: interest_expense at {GAP} is read from "
+                "us-gaap:InterestExpenseNonoperating") in out.err  # ... and says so
+        assert _run(["diff", "NVDA"], monkeypatch) == 0  # the scored diff sees it
+        out = capsys.readouterr()
+        assert "130" in out.out and "Note:" not in out.err
+
     def test_an_unreadable_snapshot_is_reported_and_kept(self, monkeypatch, capsys):
         _two_vintages(monkeypatch)
         victim = v.list_vintages(1045810)[0]

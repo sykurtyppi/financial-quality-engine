@@ -140,8 +140,15 @@ class TestAmendmentsAndTagSelection:
         assert all(p.receivables == 2.0 for p in ds.periods)
         assert diag.field_by_name("receivables").tag_used == "us-gaap:ReceivablesNetCurrent"
 
-    def test_tags_never_mixed_within_series(self):
-        """Even when mixing would fill more quarters, one tag is chosen."""
+    def test_tags_are_mixed_only_into_gaps_and_only_when_proven_equal(self):
+        """The no-mixing rule, refined. Two tags that never report the same
+        quarter cannot be shown to measure one thing, so even though mixing
+        would fill all eight quarters, one tag is chosen and the other is
+        named in a note, not used (a 1 -> 2 step at the seam would be a
+        fabricated jump). A tag that does share quarters but disagrees on
+        one is never used either. Only a tag equal on every shared quarter
+        fills the selected tag's GAPS — never a quarter it reports
+        (tests/unit/test_tag_switch_fallback.py covers the fill)."""
         first_half = [fact(None, e, 1.0) for e in Q_ENDS[:4]]
         second_half = [fact(None, e, 2.0) for e in Q_ENDS[4:]]
         fj = facts_json({
@@ -152,8 +159,23 @@ class TestAmendmentsAndTagSelection:
         })
         ds, diag = build_dataset(fj, "SYN", n_quarters=8)
         vals = {p.receivables for p in ds.periods if p.receivables is not None}
-        assert len(vals) == 1  # one tag's values only
-        assert diag.field_by_name("receivables").periods_filled == 4
+        assert vals == {1.0}  # one tag's values only
+        fd = diag.field_by_name("receivables")
+        assert fd.periods_filled == 4 and fd.fallbacks == {}
+        assert len(fd.notes) == 4
+        assert all("us-gaap:ReceivablesNetCurrent reports 2 but was not used: it shares no "
+                   "quarter with us-gaap:AccountsReceivableNetCurrent" in n for n in fd.notes)
+
+        # Overlapping on one quarter with a different value: the newer tag now
+        # covers more and wins, and the older one is still not mixed in.
+        overlapping = [fact(None, e, 2.0) for e in Q_ENDS[3:]]
+        fj["facts"]["us-gaap"]["ReceivablesNetCurrent"]["units"]["USD"] = overlapping
+        ds, diag = build_dataset(fj, "SYN", n_quarters=8)
+        assert {p.receivables for p in ds.periods if p.receivables is not None} == {2.0}
+        fd = diag.field_by_name("receivables")
+        assert fd.periods_filled == 5 and fd.fallbacks == {}
+        assert len(fd.notes) == 3
+        assert all("it disagrees with us-gaap:ReceivablesNetCurrent" in n for n in fd.notes)
 
 
 class TestDebtComposition:
