@@ -35,6 +35,7 @@ touches again.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import functools
@@ -233,8 +234,10 @@ class Staged:
 
 def _git(*args: str) -> str | None:
     try:
+        # errors="replace": with core.quotePath=false git prints a file name
+        # in whatever bytes it has, and a stamp must never fail on one.
         proc = subprocess.run(["git", *args], cwd=_ENGINE_ROOT, capture_output=True,
-                              text=True, timeout=10)
+                              text=True, errors="replace", timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout.strip() if proc.returncode == 0 else None
@@ -243,8 +246,9 @@ def _git(*args: str) -> str | None:
 @functools.cache
 def engine_commit() -> str:
     """The commit this engine runs from, as a report states it: the short
-    sha and whether the engine code differs from it. Read once per process:
-    the code a running process has loaded is the code it started with."""
+    sha and whether the engine code differs from it. Read once per process,
+    when this module is imported (below): the code a running process has
+    loaded is the code it started with."""
     stated = os.environ.get(ENGINE_ENV, "").strip()
     if stated:
         return f"{stated} (stated by {ENGINE_ENV}; not a git checkout)"
@@ -262,6 +266,14 @@ def engine_commit() -> str:
     if changed:
         return f"{sha} + uncommitted changes to the engine code (not reproducible from {sha})"
     return f"{sha} (clean checkout)"
+
+
+# Read now, when the engine's code is loaded: a long-lived process (the web
+# UI) that publishes after a `git pull` must name the code it is running, not
+# the checkout's new HEAD. Never fatal at import: a failure is read again at
+# the first publish, and stamped "unknown" there if it fails again.
+with contextlib.suppress(Exception):
+    engine_commit()
 
 
 def _seal(staged: Staged, name: str) -> None:
@@ -290,7 +302,10 @@ def _seal(staged: Staged, name: str) -> None:
             raise NotPublished(f"{name}: {path.name} names generation {found}, not this "
                                f"rebuild's {gid}; nothing published")
     doc["generation_id"] = gid
-    engine = engine_commit()
+    try:
+        engine = engine_commit()
+    except Exception as e:  # noqa: BLE001 - the stamp is metadata; never a reason not to publish
+        engine = f"unknown (the engine commit could not be read: {type(e).__name__}: {e})"
     doc["engine_commit"] = engine
     write_atomic(staged.ledger, json.dumps(doc, indent=1, ensure_ascii=False) + "\n")
     if m is None:

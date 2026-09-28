@@ -772,11 +772,24 @@ if os.environ.get("FQE_DRILL_FAIL_LEDGER"):
 
 @functools.cache
 def _git_head() -> str:
-    try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
-                              capture_output=True, text=True, timeout=10).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
+    """The drilled code's commit: the short sha, with "+uncommitted" when the
+    engine code (app/, scripts/, pyproject.toml; untracked files too) differs
+    from it. The workspaces state this to the reports they build, and an
+    edited checkout must not be drilled under a clean commit's name."""
+    def git(*args: str) -> str | None:
+        try:
+            proc = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+                                  errors="replace", timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    sha = git("rev-parse", "--short", "HEAD")
+    if not sha:
         return ""
+    changed = git("status", "--porcelain", "--untracked-files=normal", "--",
+                  "app", "scripts", "pyproject.toml")
+    return sha if changed == "" else f"{sha}+uncommitted"
 
 
 def _save_step(out: Path, step: Step) -> None:
