@@ -106,7 +106,7 @@ class TestReplacing:
         report, staged = _publish(tmp_path, "first")
         gen = current_generation(report)
         assert gen is not None and gen.parent == tmp_path / GENERATIONS_DIR / "AAPL_2026-09-26"
-        assert gen.name == f"20260926T210507Z_{staged.generation_id}"
+        assert gen.name == f"20260926T210507Z_0001_{staged.generation_id}"
         assert report.is_symlink() and ledger_path(report).is_symlink()
         assert report.read_text().startswith("# first report")
         assert json.loads(ledger_path(report).read_text())["run"] == "first"
@@ -127,8 +127,9 @@ class TestReplacing:
         assert (earlier / "AAPL_2026-09-26.md").read_text().startswith("# first report")
         # The earlier run's audit is not left at the live name.
         assert not report.with_name("AAPL_2026-09-26_audit.md").exists()
-        assert {g.name for g in generations(report)} == {
-            f"20260926T210507Z_{first.generation_id}", f"20260926T210507Z_{second.generation_id}"}
+        assert [g.name for g in generations(report)] == [
+            f"20260926T210507Z_0001_{first.generation_id}",
+            f"20260926T210507Z_0002_{second.generation_id}"]
 
     def test_a_failed_rebuild_changes_nothing(self, tmp_path):
         report, _ = _publish(tmp_path, "first")
@@ -444,6 +445,106 @@ class TestSetAsideAndRestore:
         assert ledger_path(report).name == "AAPL_2025-06-30.replay.ledger.json"
         assert current_generation(report).parent.name == "AAPL_2025-06-30.replay"
         assert _one_generation(report)
+
+
+# --- review of #100 --------------------------------------------------------------------
+
+
+class TestReviewOfTheGenerationLayout:
+    def test_restore_does_not_overwrite_a_hand_placed_file(self, tmp_path):
+        """A rebuild and set_aside refused a plain file that is not the live
+        run's; restore replaced it with a link, and the operator's copy was
+        gone."""
+        report, first = _publish(tmp_path, "first")
+        _publish(tmp_path, "second")
+        report.unlink()
+        report.write_text("# the operator's copy")
+        with pytest.raises(NotPublished, match="set it aside by hand"):
+            restore(report, first.generation_id)
+        assert report.read_text() == "# the operator's copy" and not report.is_symlink()
+
+    def test_a_failed_copy_of_files_from_before_generations_leaves_nothing(
+            self, tmp_path, monkeypatch):
+        """The copy into a new generation left a hidden partial directory
+        that `generations()` listed and `restore` could make live."""
+        import app.services.reporting.report_files as rf
+
+        report = _plain_run(tmp_path)
+        real = rf.shutil.copy2
+
+        def full(src, dst, *a, **k):
+            if str(dst).endswith(".ledger.json"):
+                raise OSError("ENOSPC")
+            return real(src, dst, *a, **k)
+
+        monkeypatch.setattr(rf.shutil, "copy2", full)
+        with pytest.raises(OSError, match="ENOSPC"):
+            _publish(tmp_path, "second")
+        monkeypatch.undo()
+        home = tmp_path / GENERATIONS_DIR / "AAPL_2026-09-26"
+        assert [p.name for p in home.iterdir()] == [] and generations(report) == []
+        assert report.read_text() == "# first report" and not report.is_symlink()
+
+    def test_hidden_empty_and_pointer_directories_are_not_generations(self, tmp_path):
+        report, first = _publish(tmp_path, "first")
+        home = current_generation(report).parent
+        (home / f".{current_generation(report).name}.1234abcd").mkdir()  # an interrupted copy
+        (home / "20260926T210507Z_0009_empty").mkdir()  # holds no report
+        assert [g.name for g in generations(report)] == [current_generation(report).name]
+        # An exact name is not ambiguous with a hidden leftover containing it.
+        assert restore(report, current_generation(report).name).parent == current_generation(report)
+
+    def test_a_crash_after_copying_old_files_is_finished_not_repeated(self, tmp_path):
+        """A crash after the copy of pre-generation files but before the
+        pointer: the next rebuild raised a raw OSError (same second) or
+        copied them again (a later second)."""
+        import app.services.reporting.report_files as rf
+
+        report = _plain_run(tmp_path)
+        (tmp_path / GENERATIONS_DIR / "AAPL_2026-09-26").mkdir(parents=True)
+        plain = {r: p for r, p in rf._companions(report).items() if p.exists()}
+        rf._copy_adopted(report, plain)  # then the process died
+        _publish(tmp_path, "second")
+        _publish(tmp_path, "third")
+        adopted = [g for g in generations(report) if g.name.endswith("_adopted")]
+        assert len(adopted) == 1 and (adopted[0] / NAME).read_text() == "# first report"
+        assert restore(report, "adopted") == adopted[0] / NAME
+
+    def test_generations_are_listed_in_publish_order_within_one_second(self, tmp_path):
+        """Named `<stamp>_<id>`, same-second generations sorted by their
+        random id, and the first rebuild after this change always published
+        the kept run and the new one in the same second."""
+        report = _plain_run(tmp_path)
+        tags = ["second", "third", "fourth", "fifth"]
+        for tag in tags:
+            _publish(tmp_path, tag)
+        texts = [(g / NAME).read_text().split("\n")[0] for g in generations(report)]
+        assert texts == ["# first report"] + [f"# {t} report" for t in tags]
+
+    def test_a_copy_with_links_dereferenced_says_so(self, tmp_path):
+        """`shutil.copytree` (or `cp -L`) turns the pointer into a directory;
+        every call then failed with a bare EINVAL."""
+        import shutil
+
+        src = tmp_path / "reports"
+        src.mkdir()
+        _publish(src, "first")
+        dst = tmp_path / "copied"
+        shutil.copytree(src, dst)
+        with pytest.raises(OSError, match="copied with its links dereferenced"):
+            read_live(dst / NAME)
+        assert [g.name for g in generations(dst / NAME)] == [
+            g.name for g in generations(src / NAME)]
+
+    def test_published_files_are_read_only(self, tmp_path):
+        """A write to a live name (a hand `cp` over it) went through the link
+        into the kept generation. Published files are read-only."""
+        import stat
+
+        report, _ = _publish(tmp_path, "first")
+        gen = current_generation(report)
+        for name in (NAME, "AAPL_2026-09-26.ledger.json"):
+            assert stat.S_IMODE((gen / name).stat().st_mode) == 0o444
 
 
 def test_a_ledger_failure_is_logged_under_its_report_and_raised(tmp_path, monkeypatch, caplog):

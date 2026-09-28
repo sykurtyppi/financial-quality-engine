@@ -146,7 +146,7 @@ def test_a_report_rebuilt_during_the_audit_does_not_get_it(tmp_path, monkeypatch
     assert run_audit.run_audit(report) == 1
     assert not (tmp_path / "KTOS_2026-07-31_audit.md").exists()
     assert (first / "KTOS_2026-07-31_audit.md").read_text().endswith("AUDIT OF THE FIRST RUN")
-    assert "rebuilt or set aside while the audit ran" in capsys.readouterr().err
+    assert "rebuilt, set aside or restored while the audit ran" in capsys.readouterr().err
     staging = tmp_path / ".staging"
     assert [p for p in staging.iterdir() if p.suffix != ".lock"] == []
 
@@ -195,3 +195,23 @@ def test_an_audit_of_files_from_before_generations_goes_beside_them(tmp_path, mo
     assert run_audit.run_audit(report) == 0
     assert (tmp_path / "KTOS_2026-07-31_audit.md").read_text() == "AUDIT"
     assert read_live(report).audit == tmp_path / "KTOS_2026-07-31_audit.md"
+
+
+def test_an_audit_of_a_generation_path_creates_nothing_inside_it(tmp_path, monkeypatch):
+    """Review of #100: given a generation's own path, the audit took the
+    publish lock there and created `.staging/` inside the generation."""
+    import stat
+
+    from app.services.reporting.report_files import current_generation
+
+    report, gid = _published(tmp_path, "first")
+    gen = current_generation(report)
+    monkeypatch.setattr(
+        run_audit.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="AUDIT", stderr=""),
+    )
+    assert run_audit.run_audit(gen / "KTOS_2026-07-31.md") == 0
+    assert sorted(p.name for p in gen.iterdir()) == [
+        "KTOS_2026-07-31.ledger.json", "KTOS_2026-07-31.md", "KTOS_2026-07-31_audit.md"]
+    assert stat.S_IMODE((gen / "KTOS_2026-07-31_audit.md").stat().st_mode) == 0o444
+    assert (tmp_path / "KTOS_2026-07-31_audit.md").read_text().endswith("AUDIT")

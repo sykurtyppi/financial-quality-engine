@@ -14,7 +14,7 @@ Each run is one GENERATION, kept whole and never modified once published
   one without its evidence ledger, publishes nothing;
 - a finished rebuild is stamped with its ``generation_id`` (the report's
   last line, the ledger's field), fsynced, and renamed whole into
-  ``<dir>/.generations/<base>/<stamp>_<id>/``;
+  ``<dir>/.generations/<base>/<stamp>_<seq>_<id>/``, read-only;
 - ONE pointer, the symlink ``.generations/<base>/current``, is then swapped
   atomically to it. The live names are fixed symlinks through that pointer
   (``<base>.md`` -> ``.generations/<base>/current/<base>.md``; the audit's
@@ -33,6 +33,7 @@ touches again.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -54,6 +55,9 @@ REPLAY_SUFFIX = ".replay.md"
 GENERATION_LINE = "- Generation: "
 _GENERATION_RE = re.compile(r"^(?:- Generation: |<!-- generation: )([0-9a-f]{32})\b", re.M)
 _ROLES = ("report", "ledger", "audit")
+# A published file is never written again: read-only, so a write to a live
+# name (a hand `cp` over it) fails instead of editing a kept generation.
+READ_ONLY = 0o444
 
 
 class NotPublished(RuntimeError):
@@ -85,25 +89,61 @@ def _pointer(report: Path) -> Path:
     return _home(report) / CURRENT
 
 
+def live_name(path: Path) -> Path:
+    """The live name of a report, given it or one of its generations' paths
+    (``<dir>/.generations/<base>/<gen>/<base>.md`` -> ``<dir>/<base>.md``)."""
+    home = path.parent.parent
+    if home.parent.name == GENERATIONS_DIR and home.name == _base(path):
+        return home.parent.parent / path.name
+    return path
+
+
 def current_generation(report: Path) -> Path | None:
     """The generation directory ``report``'s live names resolve to, or None
     when none is live (never published, set aside, or from before
     generations). Only a missing pointer reads as none: any other failure to
     read it (permission, I/O) raises rather than being taken for "nothing
     published" (Hermes re-audit F2)."""
+    pointer = _pointer(report)
     try:
-        target = os.readlink(_pointer(report))
+        target = os.readlink(pointer)
     except FileNotFoundError:
         return None
+    except OSError as e:
+        if e.errno == errno.EINVAL:  # a directory, not a link: copied dereferenced
+            raise OSError(e.errno, f"{pointer} is not a symlink: the reports directory was "
+                          "copied with its links dereferenced; copy it with `cp -a`") from e
+        raise
     return _home(report) / target
 
 
+def _seq(gen: Path) -> int:
+    """A generation's publish order, from its name (``<stamp>_<seq>_<id>``)."""
+    parts = gen.name.split("_")
+    return int(parts[1]) if len(parts) > 2 and parts[1].isdigit() else -1
+
+
 def generations(report: Path) -> list[Path]:
-    """Every generation of ``report`` kept on disk, oldest first."""
+    """Every whole generation of ``report`` kept on disk, in publish order.
+    Not the pointer, not a hidden directory (a build or copy interrupted
+    part way), and not a directory holding no report."""
     home = _home(report)
     if not home.is_dir():
         return []
-    return sorted(d for d in home.iterdir() if d.is_dir() and not d.is_symlink())
+    return sorted(
+        (d for d in home.iterdir()
+         if d.is_dir() and not d.is_symlink() and d.name != CURRENT
+         and not d.name.startswith(".") and (d / report.name).is_file()),
+        key=lambda d: (_seq(d), d.name))
+
+
+def _name_next(report: Path, stamp: str, tag: str) -> str:
+    """``<stamp>_<seq>_<tag>``: the sequence number orders generations by
+    publish even within one second (the first rebuild after this change
+    publishes a kept run and a new one in the same call)."""
+    home = _home(report)
+    taken = [_seq(d) for d in home.iterdir() if d.is_dir()] if home.is_dir() else []
+    return f"{stamp}_{max(taken, default=0) + 1:04d}_{tag}"
 
 
 def generation_of(path: Path) -> str | None:
@@ -211,20 +251,25 @@ def _seal(staged: Staged, name: str) -> None:
         with staged.report.open("a", newline="") as fh:
             fh.write(f"\n\n{GENERATION_LINE}{gid} "
                      "(this report, its evidence ledger and its audit carry the same id)\n")
-    for path in (staged.report, staged.ledger, staged.report.parent):
+    for path in (staged.report, staged.ledger):
+        os.chmod(path, READ_ONLY)
         _fsync(path)
+    _fsync(staged.report.parent)
 
 
-def write_atomic(path: Path, text: str) -> None:
+def write_atomic(path: Path, text: str, *, mode: int | None = None) -> None:
     """Write ``text`` to ``path`` through a temporary file beside it,
     fsynced, and ``os.replace``: a reader sees the old file or the new one,
-    and a failed write leaves no temporary behind."""
+    and a failed write leaves no temporary behind. ``mode``, when given, is
+    set before the file takes its name."""
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         with tmp.open("w") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
@@ -272,7 +317,7 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None) -> 
     home.mkdir(parents=True, exist_ok=True)
     _adopt(report, now)
     previous = current_generation(report)
-    gen = home / f"{_stamp(now)}_{staged.generation_id}"
+    gen = home / _name_next(report, _stamp(now), staged.generation_id)
     os.rename(work, gen)
     _fsync(home)
     _link_live_names(report)
@@ -324,15 +369,12 @@ def _adopt(report: Path, now: datetime | None) -> None:
         return
     gen = current_generation(report)
     if gen is None:
-        gen = _home(report) / f"{_stamp(now)}_adopted"
-        tmp = gen.with_name(f".{gen.name}.{uuid.uuid4().hex[:8]}")
-        tmp.mkdir()
-        for p in plain.values():
-            shutil.copy2(p, tmp / p.name)
-            _fsync(tmp / p.name)
-        _fsync(tmp)
-        os.rename(tmp, gen)
-        _fsync(gen.parent)
+        # A crash after the copy but before the pointer left the copy whole:
+        # it is reused, not copied again.
+        same = [d for d in generations(report) if d.name.endswith("_adopted") and all(
+            (d / p.name).is_file() and (d / p.name).read_bytes() == p.read_bytes()
+            for p in plain.values())]
+        gen = same[-1] if same else _copy_adopted(report, plain)
         _symlink(_pointer(report), gen.name)
         _fsync(gen.parent)
     for role, p in plain.items():
@@ -343,6 +385,28 @@ def _adopt(report: Path, now: datetime | None) -> None:
                 "set it aside by hand before rebuilding")
     _link_live_names(report)
     link_audit(report)
+
+
+def _copy_adopted(report: Path, plain: dict[str, Path]) -> Path:
+    """The plain files, copied whole into a new generation named for when
+    they were written; a copy that fails leaves nothing behind."""
+    written = max(p.stat().st_mtime for p in plain.values())
+    stamp = datetime.fromtimestamp(written, UTC).strftime("%Y%m%dT%H%M%SZ")
+    gen = _home(report) / _name_next(report, stamp, "adopted")
+    tmp = gen.with_name(f".{gen.name}.{uuid.uuid4().hex[:8]}")
+    tmp.mkdir()
+    try:
+        for p in plain.values():
+            shutil.copy2(p, tmp / p.name)
+            os.chmod(tmp / p.name, READ_ONLY)
+            _fsync(tmp / p.name)
+        _fsync(tmp)
+        os.rename(tmp, gen)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    _fsync(gen.parent)
+    return gen
 
 
 def set_aside(report: Path, *, now: datetime | None = None) -> list[Path]:
@@ -366,9 +430,14 @@ def set_aside(report: Path, *, now: datetime | None = None) -> list[Path]:
 def restore(report: Path, generation: str) -> Path:
     """Make a kept generation live again, in one step: ``generation`` is its
     directory name or a unique part of it (its id, its stamp). Returns the
-    restored report's path in its generation."""
+    restored report's path in its generation. A plain file at a live name
+    that is not the live run's stops it, as it stops a rebuild."""
     with publish_lock(report):
-        matches = [d for d in generations(report) if generation in d.name]
+        _home(report).mkdir(parents=True, exist_ok=True)
+        _adopt(report, None)
+        kept = generations(report)
+        matches = ([d for d in kept if d.name == generation]
+                   or [d for d in kept if generation in d.name])
         if len(matches) != 1:
             raise ValueError(f"{report.name}: {len(matches)} generations match {generation!r}")
         (gen,) = matches
@@ -407,9 +476,10 @@ class LiveRun:
 def read_live(report: Path) -> LiveRun | None:
     """The live run of ``report``, pinned to one generation: the pointer is
     resolved once and every file is read from that generation. None when no
-    run is live. Files from before generations are read at their live names,
-    and a report and ledger that both name no generation still pair."""
-    gen = current_generation(report)
+    run is live. Given a generation's own path, that generation is read
+    (live or not). Files from before generations are read at their live
+    names, and a report and ledger that both name no generation still pair."""
+    gen = report.parent if live_name(report) != report else current_generation(report)
     if gen is None and report.is_symlink():
         return None  # the live names exist but name no run (set aside)
     paths = (_companions(report) if gen is None

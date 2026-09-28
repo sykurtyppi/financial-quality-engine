@@ -98,7 +98,7 @@ Found while the drill was being built. Fixed alongside it:
   `_audit.md` beside the new report, where `earnings_brief.audit_for` would
   pair them. Now every run is a generation, kept whole: the rerun is built
   in `reports/.staging/<id>/`, and only once its report and ledger exist is
-  it moved, whole, to `reports/.generations/<T>_<day>/<stamp>_<id>/`. A build
+  it moved, whole, to `reports/.generations/<T>_<day>/<stamp>_<seq>_<id>/`. A build
   that fails leaves the live report exactly as it was; step 11 checks this.
   Earlier generations are never overwritten or moved: they are the archive.
 - **A run is published whole, or not at all** (Hermes deep audit, findings
@@ -137,13 +137,13 @@ check masks exactly those lines, the `- Generation:` line and the ledger's
 ## Restoring an earlier run
 
 ```
-ls reports/.generations/NVDA_2026-11-18/      # the runs, oldest first: <stamp>_<id>
+ls reports/.generations/NVDA_2026-11-18/      # the runs, in publish order: <stamp>_<seq>_<id>
 .venv/bin/python -c "from pathlib import Path; from app.services.reporting.report_files \
 import restore; print(restore(Path('reports/NVDA_2026-11-18.md'), '20261118T210507Z'))"
 ```
 
 `restore` takes the generation's directory name or any unique part of it
-(its stamp or its id), and makes it live in one step: the report, ledger and
+(its stamp, its sequence number or its id), and makes it live in one step: the report, ledger and
 audit (if it had one) all switch together, and the run it replaces stays
 kept. `set_aside` takes the live run off the live names without putting
 another in its place. Step 10 restores step 1's generation and checks the
@@ -154,7 +154,11 @@ change that.
 Live files written before generations (plain files at the live names) are
 kept as a generation of their own by the first rebuild after this change. A
 plain file that is not the live generation's (a file copied back by hand)
-stops the rebuild, which says so, rather than being overwritten.
+stops the rebuild (and a `restore`), which says so, rather than being
+overwritten. Published files are read-only, so a hand `cp` over a live
+name fails instead of editing a kept run. Copy a reports directory with
+`cp -a` (links kept): a copy that dereferences the links is refused with
+an error saying so.
 
 ## The operator's part
 
