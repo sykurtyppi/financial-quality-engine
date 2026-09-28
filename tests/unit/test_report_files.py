@@ -324,6 +324,7 @@ class TestReadLive:
         _publish(tmp_path, "second")
         assert live.report.parent.name.endswith(first.generation_id)
         assert live.report.read_text() == live.text
+        assert live.audit is None and live.stale == ()  # no audit is not a stale one
         assert json.loads(live.ledger.read_text())["run"] == "first"
 
     def test_an_audit_of_another_generation_is_stale_not_the_reports(self, tmp_path):
@@ -340,6 +341,8 @@ class TestReadLive:
         live = read_live(report)
         assert live is not None and live.generation_id is None and live.generation_dir is None
         assert live.ledger == ledger_path(report) and not live.stale
+        # No audit: none returned, though a missing file also names no generation.
+        assert live.audit is None
 
     def test_no_report_reads_as_none(self, tmp_path):
         assert read_live(tmp_path / NAME) is None
