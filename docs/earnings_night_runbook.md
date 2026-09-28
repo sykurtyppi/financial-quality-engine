@@ -227,7 +227,8 @@ Per pass, in order:
    `<TICKER>__print-night` for a print-night brief, `<TICKER>__<report
    stem>` (e.g. `NVDA__NVDA_2026-11-19`) for a full one. Each is a target
    line (`-` or the report's path), `attempts=N`, and `alerted=<day>` once
-   an exhausted entry has notified. A brief that succeeds clears only its
+   an exhausted entry has notified. A print-night entry that has given up
+   also carries `gave_up=<day>` and `accession=<8-K>` (see below). A brief that succeeds clears only its
    own event's file — plus the print-night file when it is the full brief
    (the 10-Q rebuild is the print-night brief's second chance). A failure
    writes only its own event's file. So a full brief that has failed six
@@ -309,9 +310,17 @@ date within 14 days of the 8-K means build one. A failed print-night brief
 is queued and retried like any other (exit 5) — but never in the pass that
 is about to rebuild it with the engine report anyway, and at most six times
 (the 10-Q rebuild is its second chance; an hourly paid run for weeks is
-not). The 8-K pass stays quiet only while a brief of **this** print is
+not). After the sixth failure it **gives up**: the entry stays in the
+queue, marked `gave_up=<day>` with the 8-K's `accession=`. It is not
+retried or rebuilt for that 8-K, and it is reported once (exit 5). It goes
+when that print's full brief succeeds. A newer earnings 8-K is a new print:
+the given-up entry is cleared and the new print's brief starts a fresh
+count. The 8-K pass stays quiet only while a brief of **this** print is
 queued: the print-night entry, or a full brief whose report was generated
-on or after the 8-K. An older quarter's kept entry does not hold it back. Amended 8-Ks (8-K/A) never count as the print, so a corrected exhibit
+on or after the 8-K and which is still being retried. An older quarter's
+kept entry does not hold it back. Nor does this print's own full brief
+once it has failed six times: then the print-night brief is the fallback,
+under its own cap. Amended 8-Ks (8-K/A) never count as the print, so a corrected exhibit
 days later cannot move the brief to a second file; the prior-quarter guide
 must be at least 45 days older than the print, so a preliminary-results
 8-K is never mistaken for last quarter's release. Two earnings 8-Ks within

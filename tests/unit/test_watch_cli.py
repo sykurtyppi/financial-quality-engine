@@ -933,14 +933,17 @@ class TestPrintNightBrief:
         assert watch_cli._run_brief("NVDA", None) == 2  # same target: attempts climb
         assert watch_cli._queue_read("NVDA", "-") == ("-", 2, "")
 
-    def test_retry_cap_drops_a_hopeless_print_night_brief(self, monkeypatch, tmp_path, capsys):
+    def test_retry_cap_gives_up_on_a_hopeless_print_night_brief(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
         watch_cli._queue_write("NVDA", "-", watch_cli.PRINT_BRIEF_MAX_ATTEMPTS)
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not run"))
         assert watch_cli._retry_pending_brief("NVDA") == 5  # says so once
         assert "giving up" in capsys.readouterr().err
-        assert watch_cli._queue_read("NVDA", "-") is None
+        # Kept, marked as given up, so the trigger does not start it over
+        # (TestBriefQueuePerEvent); never retried, never said again.
+        assert watch_cli._queue_read("NVDA", "-") == ("-", watch_cli.PRINT_BRIEF_MAX_ATTEMPTS, "")
         assert watch_cli._retry_pending_brief("NVDA") == 0
+        assert "giving up" not in capsys.readouterr().err
         # A queued FULL brief past the cap is kept and reported, never re-run
         # (see TestBriefRetryCap); below the cap it still retries.
         report = tmp_path / "NVDA_2026-09-01.md"
@@ -1589,16 +1592,20 @@ class TestBriefQueuePerEvent:
         assert briefs.runs == [("AAPL", report_b)]
         assert self._queued() == {}
 
-    def test_a_legacy_entry_past_its_cap_is_dropped_or_kept_under_its_new_name(
+    def test_a_legacy_entry_past_its_cap_is_kept_under_its_new_name(
             self, briefs, tmp_path, capsys):
-        # Print-night past the cap: dropped, the legacy file with it (left,
-        # it would say "giving up" every pass, forever).
+        # Print-night past the cap: given up under its per-event name, the
+        # legacy file gone (left, it would say "giving up" every pass).
         watch_cli.BRIEF_PENDING.mkdir(parents=True)
         legacy = watch_cli.BRIEF_PENDING / "AAPL"
         legacy.write_text(f"-\nattempts={watch_cli.PRINT_BRIEF_MAX_ATTEMPTS}\n")
         assert watch_cli._retry_pending_brief("AAPL") == 5
         assert "giving up" in capsys.readouterr().err
-        assert self._queued() == {} and briefs.runs == []
+        assert list(self._queued()) == ["AAPL__print-night"] and briefs.runs == []
+        assert "gave_up=" in self._queued()["AAPL__print-night"]
+        assert watch_cli._retry_pending_brief("AAPL") == 0
+        assert "giving up" not in capsys.readouterr().err
+        watch_cli._queue_clear("AAPL", "-")
         # A full brief past the cap: kept, and the log names the file it is
         # now in, the one to delete to silence it.
         report_a = self._report(tmp_path, "AAPL_2026-07-31.md")
@@ -1655,6 +1662,92 @@ class TestBriefQueuePerEvent:
         assert watch_cli.cmd_sweep(_sweep_args()) == 0
         assert briefs.runs == []
         assert "FULL brief" in brief.read_text()
+
+    # --- the print-night cap must hold (PR #104 review) ---------------------
+
+    @staticmethod
+    def _only(monkeypatch, ticker: str = "NVDA") -> None:
+        monkeypatch.setattr(watch_cli.wl, "load", lambda path=None: [_watch(ticker)])
+
+    @pytest.mark.parametrize("queued_at", [None, "cap"])
+    def test_a_print_night_brief_given_up_stays_given_up(
+            self, briefs, monkeypatch, capsys, queued_at):
+        # Giving up deleted the marker; with no brief on disk and nothing
+        # queued, the trigger fired again (in the same pass, since e35c213)
+        # and wrote a fresh attempts=1: a paid run every pass for the whole
+        # 14-day window, and "giving up" was false. 21 passes cost 21 runs.
+        self._only(monkeypatch)
+        briefs.rcs["NVDA"] = 2
+        if queued_at == "cap":
+            watch_cli._queue_write("NVDA", "-", watch_cli.PRINT_BRIEF_MAX_ATTEMPTS)
+        codes = [watch_cli.cmd_sweep(_sweep_args()) for _ in range(21)]
+        err = capsys.readouterr().err
+        assert len(briefs.runs) == (0 if queued_at else watch_cli.PRINT_BRIEF_MAX_ATTEMPTS)
+        assert err.count("giving up") == 1  # said once ...
+        assert codes.count(5) == len(briefs.runs) + 1  # ... and reported once
+        assert codes[-1] == 0
+        # The entry is kept, marked, and names the 8-K it gave up on.
+        assert "gave_up=2026-10-13" in self._queued()["NVDA__print-night"]
+        assert "accession=k-b" in self._queued()["NVDA__print-night"]
+
+    def test_a_newer_8k_is_a_new_print_and_is_not_blocked(self, briefs, monkeypatch, capsys):
+        from app.services.watch.poller import Filing
+
+        self._only(monkeypatch)
+        briefs.rcs["NVDA"] = 2
+        watch_cli._queue_write("NVDA", "-", watch_cli.PRINT_BRIEF_MAX_ATTEMPTS)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5  # gives up on k-b
+        assert briefs.runs == []
+        # A newer earnings 8-K (a second print in the window): its brief is
+        # built, with a count of its own.
+        monkeypatch.setattr(
+            watch_cli, "latest_earnings_8k",
+            lambda subs: Filing("8-K", "k-c", watch_cli.date(2026, 10, 20), items="2.02,9.01"))
+        self._at(monkeypatch, "2026-10-20T22:05:00+00:00")
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert briefs.runs == [("NVDA", None)]
+        assert self._queued() == {"NVDA__print-night": "-\nattempts=1\n"}
+        assert "gave up on k-b" in capsys.readouterr().out
+
+    def test_the_events_full_build_still_clears_a_given_up_print_night_entry(
+            self, briefs, monkeypatch, tmp_path):
+        self._only(monkeypatch)
+        watch_cli._queue_write("NVDA", "-", watch_cli.PRINT_BRIEF_MAX_ATTEMPTS)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        report = self._report(tmp_path, f"NVDA_{self.DAY}.md")
+        assert watch_cli._run_brief("NVDA", report) == 0
+        assert self._queued() == {}
+
+    def test_a_given_up_marker_from_this_change_or_before_still_parses(self, briefs, tmp_path):
+        marker = tmp_path / "m"
+        marker.write_text("-\nattempts=6\ngave_up=2026-10-13\naccession=k-b\n")
+        assert watch_cli._parse_marker(marker) == ("-", 6, "")
+        marker.write_text("-\nattempts=6\ngave_up=2026-10-13\n")  # 8-K unknown
+        assert watch_cli._parse_marker(marker) == ("-", 6, "")
+
+    def test_a_kept_full_entry_for_this_print_does_not_leave_it_brief_less(
+            self, briefs, monkeypatch, tmp_path):
+        # This print's full brief failed BRIEF_MAX_ATTEMPTS times and is kept
+        # (alerting daily). It was counted as "queued for this print", so the
+        # print-night trigger stayed quiet for good and the print got no
+        # brief at all. It no longer counts: the print-night brief is the
+        # fallback, and its own cap still holds.
+        self._only(monkeypatch)
+        report = self._report(tmp_path, f"NVDA_{self.DAY}.md")
+        watch_cli._queue_write("NVDA", str(report), watch_cli.BRIEF_MAX_ATTEMPTS,
+                               alerted="2026-10-14")
+        assert not watch_cli._event_queued("NVDA", watch_cli.date(2026, 10, 13))
+        briefs.rcs["NVDA"] = 2
+        for _ in range(21):
+            watch_cli.cmd_sweep(_sweep_args())
+        assert briefs.runs == [("NVDA", None)] * watch_cli.PRINT_BRIEF_MAX_ATTEMPTS
+        briefs.runs.clear()
+        # It succeeding instead: the print has its (release-only) brief.
+        watch_cli._queue_clear("NVDA", "-")
+        briefs.rcs["NVDA"] = 0
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert briefs.runs == [("NVDA", None)]
+        assert (watch_cli.BRIEFS / f"NVDA_{self.DAY}.md").exists()
 
 
 class TestVintageCapture:

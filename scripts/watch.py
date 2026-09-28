@@ -84,6 +84,7 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -398,19 +399,34 @@ def _legacy_path(ticker: str) -> Path:
     return BRIEF_PENDING / ticker
 
 
-def _parse_marker(path: Path) -> tuple[str, int, str] | None:
-    """(target, attempts, alerted) from one marker, or None when it is
-    missing or does not parse.
+class _Marker(NamedTuple):
+    """One queue entry. ``gave_up`` and ``accession`` are set only on a
+    print-night entry past its cap: the day it gave up, and the earnings
+    8-K it gave up on ("" when that could not be read)."""
+
+    target: str
+    attempts: int
+    alerted: str
+    gave_up: str = ""
+    accession: str = ""
+
+
+_MARKER_TEXT_FIELDS = ("alerted", "gave_up", "accession")
+
+
+def _read_marker(path: Path) -> _Marker | None:
+    """One marker, or None when it is missing or does not parse.
 
     Parses means: a first line that is NO_REPORT_MARK or a ``.md`` path, then
-    only ``attempts=<int>`` and ``alerted=<day>`` lines (blank lines aside).
-    Anything else is a torn write — the writer before this change was a
-    plain ``write_text`` — or a hand edit, and is None, never a guess: a
-    truncated path taken as a target is retried as a report that never
-    existed, and an empty first line was read as "nothing queued" by the
-    retry while the print-night trigger read the same file as "queued"
-    (round-24 audit). A marker from before ``attempts`` existed (target line
-    only) reads as attempt 1, one from before ``alerted`` as ""."""
+    only ``attempts=<int>``, ``alerted=``, ``gave_up=`` and ``accession=``
+    lines (blank lines aside). Anything else is a torn write — the writer
+    before round 24 was a plain ``write_text`` — or a hand edit, and is
+    None, never a guess: a truncated path taken as a target is retried as a
+    report that never existed, and an empty first line was read as "nothing
+    queued" by the retry while the print-night trigger read the same file as
+    "queued" (round-24 audit). A marker from before ``attempts`` existed
+    (target line only) reads as attempt 1; the text fields missing read as
+    "" — every marker any earlier version wrote still parses."""
     try:
         lines = path.read_text().splitlines()
     except (OSError, ValueError):  # missing, unreadable, or not text
@@ -418,7 +434,7 @@ def _parse_marker(path: Path) -> tuple[str, int, str] | None:
     target = lines[0].strip() if lines else ""
     if target != NO_REPORT_MARK and not target.endswith(".md"):
         return None
-    attempts, alerted = 1, ""
+    attempts, text = 1, dict.fromkeys(_MARKER_TEXT_FIELDS, "")
     for line in lines[1:]:
         name, sep, value = line.partition("=")
         if sep and name == "attempts":
@@ -426,11 +442,17 @@ def _parse_marker(path: Path) -> tuple[str, int, str] | None:
                 attempts = int(value)
             except ValueError:
                 return None
-        elif sep and name == "alerted":
-            alerted = value.strip()
+        elif sep and name in text:
+            text[name] = value.strip()
         elif line.strip():
             return None
-    return target, attempts, alerted
+    return _Marker(target, attempts, **text)
+
+
+def _parse_marker(path: Path) -> tuple[str, int, str] | None:
+    """(target, attempts, alerted) from one marker (`_read_marker`)."""
+    m = _read_marker(path)
+    return None if m is None else (m.target, m.attempts, m.alerted)
 
 
 def _queue_markers(ticker: str) -> list[Path]:
@@ -453,20 +475,31 @@ def _queue_read(ticker: str, target: str) -> tuple[str, int, str] | None:
     event's: an operator's queue from before the per-event scheme keeps
     working, and moves to its per-event name on its first write
     (``_queue_write``) or goes with its event's success (``_queue_clear``)."""
-    entry = _parse_marker(_queue_path(ticker, target))
+    m = _queue_entry(ticker, target)
+    return None if m is None else (m.target, m.attempts, m.alerted)
+
+
+def _queue_entry(ticker: str, target: str) -> _Marker | None:
+    """`_queue_read`, whole: the marker of ``target``'s event, per-event or
+    legacy."""
+    entry = _read_marker(_queue_path(ticker, target))
     if entry is None:
-        legacy = _parse_marker(_legacy_path(ticker))
-        if legacy is not None and _queue_path(ticker, legacy[0]) == _queue_path(ticker, target):
+        legacy = _read_marker(_legacy_path(ticker))
+        if legacy is not None and _queue_path(ticker, legacy.target) == _queue_path(ticker, target):
             entry = legacy
     return entry
 
 
-def _queue_write(ticker: str, target: str, attempts: int, alerted: str = "") -> None:
+def _queue_write(ticker: str, target: str, attempts: int, alerted: str = "", *,
+                 gave_up: str = "", accession: str = "") -> None:
     """Queue ``target``'s event, whole or not at all: a temporary file,
     fsynced and renamed over the marker, so a kill mid-write leaves the old
-    marker or the new one, never the torn one a plain write left."""
+    marker or the new one, never the torn one a plain write left. Empty
+    fields are not written."""
     BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
-    body = f"{target}\nattempts={attempts}\n" + (f"alerted={alerted}\n" if alerted else "")
+    fields = {"alerted": alerted, "gave_up": gave_up, "accession": accession}
+    body = f"{target}\nattempts={attempts}\n" + "".join(
+        f"{name}={value}\n" for name, value in fields.items() if value)
     write_atomic(_queue_path(ticker, target), body)
     _drop_legacy(ticker, target)  # migrated: the per-event marker now holds it
 
@@ -499,10 +532,10 @@ def _report_day(target: str) -> date | None:
         return None
 
 
-def _event_queued(ticker: str, filed: date) -> bool:
-    """Is a brief of the print whose 8-K was filed on ``filed`` already
-    queued? Then its retry owns it and the print-night trigger adds no
-    second run.
+def _event_queued(ticker: str, filed: date, accession: str | None = None) -> bool:
+    """Is a brief of the print whose 8-K (``accession``) was filed on
+    ``filed`` already queued? Then its retry owns it and the print-night
+    trigger adds no second run.
 
     Only a marker that PARSES counts: an unreadable one queues nothing, and
     counting it (the old ``marker.exists()``) blocked the print-night brief
@@ -512,24 +545,56 @@ def _event_queued(ticker: str, filed: date) -> bool:
     brief with the engine findings in it. An older quarter's full brief,
     kept past its cap on purpose and alerting daily, is another event: it
     blocked the next quarter's print-night brief for as long as it was kept
-    (round-24 audit)."""
-    if _queue_read(ticker, NO_REPORT_MARK) is not None:
+    (round-24 audit).
+
+    Two refinements (PR #104 review). A print-night entry that GAVE UP
+    still counts, for the 8-K it gave up on: deleting it let this trigger
+    fire again at once and restart the count, a paid run every pass for the
+    whole window. It stops counting for a NEWER 8-K (`_superseded`), a new
+    print. And a full brief of this print kept past ITS cap no longer
+    counts: its retry will never run, so counting it left the print with
+    no brief at all; the print-night brief is the fallback, under its own
+    cap."""
+    night = _queue_entry(ticker, NO_REPORT_MARK)
+    if night is not None and not _superseded(night, accession):
         return True
     for path in _queue_markers(ticker):
-        entry = _parse_marker(path)
-        if entry is None or entry[0] == NO_REPORT_MARK:
+        entry = _read_marker(path)
+        if entry is None or entry.target == NO_REPORT_MARK:
             continue
-        day = _report_day(entry[0])
+        if entry.attempts >= BRIEF_MAX_ATTEMPTS:
+            continue  # kept to alert, never retried: it writes no brief
+        day = _report_day(entry.target)
         if day is not None and day >= filed:
             return True
     return False
 
 
-def _retry_pending_brief(ticker: str) -> int:
+def _superseded(night: _Marker, accession: str | None) -> bool:
+    """A given-up print-night entry, and ``accession`` (the newest earnings
+    8-K) is not the one it gave up on: a new print, which it must not hold
+    back. An entry that did not record its 8-K yields to any. Unknown
+    ``accession`` (None) supersedes nothing."""
+    return bool(night.gave_up) and accession is not None and night.accession != accession
+
+
+def _newest_8k(submissions: dict | None) -> str:
+    """The newest earnings 8-K's accession in ``submissions``, or ""."""
+    if submissions is None:
+        return ""
+    try:
+        return latest_earnings_8k(submissions).accession
+    except Exception:  # noqa: BLE001 — a label on a queue entry, never worth a crash
+        return ""
+
+
+def _retry_pending_brief(ticker: str, submissions: dict | None = None) -> int:
     """Re-run the briefs queued for ``ticker`` by earlier failures, one per
     event. 0 when nothing is queued or every retry succeeded;
-    BRIEF_PENDING_RC when one failed again, is kept past its cap (once a
-    day), or its marker was unreadable.
+    BRIEF_PENDING_RC when one failed again, reached its cap (a print-night
+    brief: once; a full brief: once a day), or its marker was unreadable.
+    ``submissions`` (the pass's EDGAR payload) names the 8-K a print-night
+    brief gives up on.
 
     An unreadable marker is said on stderr, removed, and makes this pass 5:
     it names nothing that can be retried, so the job it held is lost, and a
@@ -539,7 +604,7 @@ def _retry_pending_brief(ticker: str) -> int:
     rc = 0
     queued = []
     for path in _queue_markers(ticker):
-        entry = _parse_marker(path)
+        entry = _read_marker(path)
         if entry is None:
             print(f"  {ticker}: unreadable queue marker {path} (a torn write or a hand "
                   f"edit) — removing it. Whatever brief it held is no longer queued: check "
@@ -551,18 +616,20 @@ def _retry_pending_brief(ticker: str) -> int:
             queued.append((path, entry))
     # Full briefs first: one that succeeds also clears the print-night entry
     # (`_run_brief`), so the pass spends one headless run, not two.
-    queued.sort(key=lambda q: q[1][0] == NO_REPORT_MARK)
+    queued.sort(key=lambda q: q[1].target == NO_REPORT_MARK)
     for path, entry in queued:
         if not path.is_file():
             continue  # cleared by a success earlier in this pass
-        rc = _retry_one(ticker, path, entry) or rc
+        rc = _retry_one(ticker, path, entry, submissions) or rc
     return rc
 
 
-def _retry_one(ticker: str, marker: Path, entry: tuple[str, int, str]) -> int:
+def _retry_one(ticker: str, marker: Path, entry: _Marker, submissions: dict | None) -> int:
     """One queued event: 0 or BRIEF_PENDING_RC, as `_retry_pending_brief`."""
-    target, attempts, alerted = entry
+    target, attempts, alerted = entry.target, entry.attempts, entry.alerted
     report: Path | None = None if target == NO_REPORT_MARK else Path(target)
+    if report is None and entry.gave_up:
+        return 0  # said once, when it gave up; the trigger clears it for a new print
     if report is not None and not report.is_file():
         print(f"  {ticker}: queued brief names a report that no longer exists "
               f"({report}) — dropping the queue entry.", file=sys.stderr)
@@ -570,10 +637,20 @@ def _retry_one(ticker: str, marker: Path, entry: tuple[str, int, str]) -> int:
         return 0
     if attempts >= BRIEF_MAX_ATTEMPTS:
         if report is None:
-            print(f"  {ticker}: print-night brief failed {attempts} times — giving up on it; "
-                  f"the brief is built with the engine findings when the 10-Q lands, or run "
-                  f"`earnings_brief.py build {ticker} --no-report` by hand.", file=sys.stderr)
-            _queue_clear(ticker, target)
+            # KEPT, marked as given up, never retried, said once. Deleting it
+            # (as before) left nothing queued and no brief on disk, so the
+            # trigger fired again — in the same pass since it runs after a
+            # failed retry — and wrote a fresh attempts=1: a paid run every
+            # pass for the 14-day window (PR #104 review). It goes when this
+            # event's full build succeeds (`_run_brief`), or when a newer 8-K
+            # is a new print (`_print_night_brief`).
+            accession = _newest_8k(submissions)
+            _queue_write(ticker, target, attempts, gave_up=_utcnow().date().isoformat(),
+                         accession=accession)
+            print(f"  {ticker}: print-night brief failed {attempts} times — giving up on it "
+                  f"for {accession or 'this 8-K'}; the brief is built with the engine "
+                  f"findings when the 10-Q lands, or run `earnings_brief.py build {ticker} "
+                  f"--no-report` by hand.", file=sys.stderr)
             return BRIEF_PENDING_RC
         # Kept, not retried: nothing else will produce this brief. It is
         # logged every pass, but it only ALERTS once a day — an hourly
@@ -633,8 +710,12 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
                 or meta.get("accession") == k.accession:
             return 0
         superseded = meta.get("accession")
-    if _event_queued(watch.ticker, k.filing_date):
+    if _event_queued(watch.ticker, k.filing_date, k.accession):
         return 0  # already queued by an earlier failure; the retry owns it
+    given_up = _queue_entry(watch.ticker, NO_REPORT_MARK)  # only one superseded is left
+    if given_up is not None:
+        print(f"[{stamp}] {watch.ticker}: the print-night brief gave up on "
+              f"{given_up.accession or 'an earlier 8-K'}; {k.accession} is a new print")
     if superseded:
         print(f"[{stamp}] {watch.ticker}: a newer earnings 8-K {k.accession} superseded "
               f"{superseded} the same day — rebuilding the print-night brief")
@@ -643,6 +724,8 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
     if args.dry_run:
         print("  (dry run — not building)")
         return 0
+    if given_up is not None:
+        _queue_clear(watch.ticker, NO_REPORT_MARK)  # the new print gets a count of its own
     return BRIEF_PENDING_RC if _run_brief(watch.ticker, None) != 0 else 0
 
 
@@ -1004,7 +1087,7 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
         # would spend a headless run on a version overwritten minutes later.
         if not args.dry_run and not getattr(args, "no_brief", False):
             try:
-                pending = _retry_pending_brief(watch.ticker)
+                pending = _retry_pending_brief(watch.ticker, submissions)
             except Exception as e:  # noqa: BLE001 — the queue must not take the pass down
                 print(f"[{stamp}] {watch.ticker}: queued brief retry crashed: "
                       f"{type(e).__name__}: {e} — still queued.", file=sys.stderr)
