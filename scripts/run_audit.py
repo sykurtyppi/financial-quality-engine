@@ -32,10 +32,12 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.headless import claude_command  # noqa: E402
 from app.services.reporting.report_files import (  # noqa: E402
+    READ_ONLY,
     LiveRun,
     current_generation,
     generation_of,
     link_audit,
+    live_name,
     publish_lock,
     read_live,
     write_atomic,
@@ -99,14 +101,17 @@ def publish_audit(report_path: Path, live: LiveRun, text: str) -> int:
     body = (f"<!-- generation: {live.generation_id} -->\n\n"
             if live.generation_id else "") + text
     if live.generation_dir is not None:
+        # Given a generation's own path, the lock and the live-run check are
+        # the live name's: nothing is created inside the generation.
+        report_path = live_name(report_path)
         out = audit_output_path(live.report)
-        write_atomic(out, body)
+        write_atomic(out, body, mode=READ_ONLY)
         with publish_lock(report_path):
             link_audit(report_path)  # shown at the live name only if its run is live
         if current_generation(report_path) != live.generation_dir:
-            print(f"{report_path.name} was rebuilt or set aside while the audit ran; the audit "
-                  f"is kept with the run it read ({out}). Rerun it for the live report.",
-                  file=sys.stderr)
+            print(f"{report_path.name}'s live run is not the one audited (rebuilt, set aside "
+                  f"or restored while the audit ran, or an earlier run was named); the audit "
+                  f"is kept with the run it read ({out}).", file=sys.stderr)
             return 1
         print(f"audit -> {audit_output_path(report_path)}")
         return 0
