@@ -62,9 +62,13 @@ READERS = {
     "tickers": ("company_tickers.json", lambda c: c.resolve_cik("AAPL"), GOOD_TICKERS),
 }
 
+# A key that is ABSENT is not here: the readers define it (no `facts` is "no
+# rows", no `filings` is "a new filer"). A key that is present with the wrong
+# type, or a payload that is not an object at all, is.
 BAD = {
-    "companyfacts": [[], {}, {"cik": CIK}, {"cik": CIK, "facts": []}, "facts", None],
-    "submissions": [[], {}, {"cik": CIK}, {"cik": CIK, "filings": []}, 7],
+    "companyfacts": [[], {"cik": CIK, "facts": []}, {"cik": CIK, "facts": None},
+                     {"facts": "x"}, "facts", None],
+    "submissions": [[], {"cik": CIK, "filings": []}, {"cik": CIK, "filings": None}, 7],
     "submissions page": [[], "page", None],
     "tickers": [[], {}, {"0": "AAPL"}, None],
 }
@@ -170,6 +174,77 @@ class TestFetchedPayloadsAreShapeChecked:
         parse-only contract."""
         c = _client(tmp_path, [b"[]"])
         assert c._cached_json("x.json", "https://example/x") == []
+
+
+class TestAMissingKeyIsTheReadersToInterpret:
+    """Defect (review of r23): the validators rejected a payload with no
+    `facts` / `filings` key at all, although the readers define that case —
+    `payloads.concept_rows` reads a missing `facts` as no rows, and
+    `payloads.recent_filings` a missing `filings` as a new filer. A bare
+    companyfacts payload then failed as "could not be ACQUIRED — retry, or
+    check EDGAR_IDENTITY and the network" instead of "could not be mapped",
+    and a filer with no filings read as "filing index unavailable"."""
+
+    @pytest.mark.parametrize(("reader", "payload"), [
+        ("companyfacts", {}),
+        ("companyfacts", {"cik": CIK, "entityName": "X"}),
+        ("submissions", {}),
+        ("submissions", {"cik": str(CIK), "name": "X"}),
+    ])
+    def test_it_is_fetched_cached_and_served(self, tmp_path, reader, payload):
+        name, read, _ = READERS[reader]
+        c = _client(tmp_path, [_body(payload)])
+        assert read(c) == payload
+        assert json.loads((tmp_path / name).read_text()) == payload
+        assert read(c) == payload  # a cache hit, not a refetch
+        assert len(c.requested) == 1
+
+    def test_the_wrong_type_is_named_as_such(self, tmp_path):
+        c = _client(tmp_path, [_body({"cik": CIK, "facts": None})])
+        with pytest.raises(sc.SecClientError, match="companyfacts.facts is NoneType"):
+            c.company_facts_by_cik(CIK)
+
+    def test_a_bare_companyfacts_payload_is_unmappable_not_unacquirable(
+            self, tmp_path, monkeypatch, capsys):
+        import importlib
+        import sys
+
+        root = Path(__file__).resolve().parents[2]
+        monkeypatch.syspath_prepend(str(root / "scripts"))
+        cli = importlib.import_module("generate_report")
+
+        def fake_get(url):
+            if "company_tickers" in url:
+                return _body({"0": {"ticker": "XCO", "cik_str": 21344}})
+            if "companyfacts" in url:
+                return _body({"cik": 21344, "entityName": "X"})
+            raise AssertionError(f"unexpected request {url}")
+
+        def client(**kw):
+            c = sc.SecClient(cache_dir=tmp_path / "cache",
+                             identity="Test Suite test@example.com", **kw)
+            c._get = fake_get  # noqa: SLF001 - network seam
+            return c
+
+        monkeypatch.setattr(cli, "SecClient", client)
+        monkeypatch.setattr(cli, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv", ["generate_report.py", "XCO", "--no-docs", "--no-vintage"])
+        assert cli._main() == 2
+        err = capsys.readouterr().err
+        assert "could not be mapped" in err
+        assert "could not be acquired" not in err
+
+    def test_a_filer_without_filings_is_not_an_unavailable_index(self, tmp_path):
+        from app.services.ingestion.edgar_adapter import fetch_submissions_snapshot
+
+        def fake_get(url):
+            if "company_tickers" in url:
+                return _body(GOOD_TICKERS)
+            return _body({"cik": str(CIK), "name": "New Filer"})
+
+        c = sc.SecClient(cache_dir=tmp_path, identity="Test Suite test@example.com")
+        c._get = fake_get  # noqa: SLF001 - network seam
+        assert fetch_submissions_snapshot("AAPL", c) == {"cik": str(CIK), "name": "New Filer"}
 
 
 # --- archive documents ------------------------------------------------------------

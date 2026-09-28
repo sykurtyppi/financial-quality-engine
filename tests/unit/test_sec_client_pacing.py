@@ -348,15 +348,41 @@ def _http(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
     return urllib.error.HTTPError("https://example/x", code, "slow down", headers, None)
 
 
+class _VirtualTime:
+    """Stands in for the `time` module inside sec_client only: a sleep is
+    recorded and ADVANCES the clocks instead of passing. A plain no-op sleep
+    would leave the clocks where they were, so a Retry-After hold-off already
+    waited out by the retrying thread would be waited out again by the
+    limiter and recorded twice."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.offset
+
+    def time(self) -> float:
+        return time.time() + self.offset
+
+    def time_ns(self) -> int:
+        return time.time_ns() + int(self.offset * 1e9)
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.offset += max(seconds, 0.0)
+
+
 class TestRetryAfter:
     @pytest.fixture
     def run(self, fast_pacing, monkeypatch, tmp_path):
         """Fetch once against the given outcomes; return (body, sleeps).
-        Sleeps are recorded, not slept."""
+        Sleeps are recorded, not slept (virtual time)."""
 
         def go(*outcomes):
-            sleeps: list[float] = []
-            monkeypatch.setattr(sc.time, "sleep", sleeps.append)
+            clock = _VirtualTime()
+            sleeps = clock.sleeps
+            monkeypatch.setattr(sc, "time", clock)
             queue = list(outcomes)
 
             def fake(req, timeout=None):
@@ -367,9 +393,8 @@ class TestRetryAfter:
 
             monkeypatch.setattr(sc.urllib.request, "urlopen", fake)
             body = sc.SecClient(cache_dir=tmp_path)._get("https://example/x")
-            # The limiter's own waits (a few intervals at most, since these
-            # sleeps return at once) are recorded too; only the
-            # between-attempt waits, all >= 1 s here, matter.
+            # The limiter's own waits (an interval at most) are recorded
+            # too; only the between-attempt waits, all >= 1 s here, matter.
             return body, [s for s in sleeps if s >= 1.0]
 
         return go
@@ -457,3 +482,204 @@ def test_no_state_file_outside_the_cache_dir(fast_pacing, monkeypatch, tmp_path)
     sc.SecClient(cache_dir=tmp_path / "c")._get("https://example/x")
     assert sorted(p.name for p in (tmp_path / "c").iterdir()) == [".sec_rate", ".sec_rate.lock"]
     assert not Path(tmp_path / ".sec_rate").exists()
+
+
+# --- a Retry-After holds off the whole machine ----------------------------------
+
+HOLD = "1"  # seconds of Retry-After in the hold-off tests: short, but >> INTERVAL
+
+
+def _signal_after_hold_off(event, monkeypatch=None) -> bool:
+    """Set `event` once the throttled request has pushed the schedule. On a
+    module without a hold-off the throttling fake sets it itself, so the test
+    fails on its assertion rather than hanging."""
+    if not hasattr(sc, "_hold_off"):
+        return False
+    real = sc._hold_off
+
+    def hold_off(cache_dir, seconds):
+        real(cache_dir, seconds)
+        event.set()
+
+    if monkeypatch is None:
+        sc._hold_off = hold_off  # type: ignore[assignment]
+    else:
+        monkeypatch.setattr(sc, "_hold_off", hold_off)
+    return True
+
+
+def _throttling_urlopen(throttled_at: list[float], event, sets_event: bool, others: list[float]):
+    """The first request is refused with `429, Retry-After: HOLD`; every
+    other request succeeds and records when it started."""
+    lock = threading.Lock()
+
+    def fake(req, timeout=None):
+        with lock:
+            first = not throttled_at
+            (throttled_at if first else others).append(time.monotonic())
+        if first:
+            if not sets_event:
+                event.set()
+            raise _http(429, HOLD)
+        return _Resp(b"ok")
+
+    return fake
+
+
+class TestRetryAfterHoldsOffEveryone:
+    """Defect: only the call that got the 429 waited. SEC throttles by IP,
+    so while it did, a second thread made 20 requests inside the window SEC
+    had just asked the whole machine to stay out of."""
+
+    def test_another_thread_on_another_client_waits_it_out(
+            self, fast_pacing, monkeypatch, tmp_path):
+        throttled_at: list[float] = []
+        others: list[float] = []
+        event = threading.Event()
+        sets = _signal_after_hold_off(event, monkeypatch)
+        monkeypatch.setattr(sc.urllib.request, "urlopen",
+                            _throttling_urlopen(throttled_at, event, sets, others))
+        monkeypatch.setattr(sc, "_RETRY_BACKOFF_S", (0.0, 0.0))
+        retried: list[bytes] = []
+        a = threading.Thread(target=lambda: retried.append(
+            sc.SecClient(cache_dir=tmp_path / "a")._get("https://example/a")))
+        a.start()
+        assert event.wait(5)
+        # A different client on a different cache dir: the process-wide
+        # schedule, not only the shared file, must carry the hold-off.
+        b = sc.SecClient(cache_dir=tmp_path / "b")
+        for i in range(5):
+            b._get(f"https://example/b/{i}")
+        a.join(5)
+        assert retried == [b"ok"]
+        not_before = throttled_at[0] + float(HOLD)
+        early = [round(t - throttled_at[0], 3) for t in others if t < not_before - RESERVE_TOL]
+        assert early == [], f"requests {early} s after the 429 asked for {HOLD} s"
+
+    def test_another_process_waits_it_out(self, tmp_path):
+        ctx = multiprocessing.get_context("spawn")
+        event = ctx.Event()
+        out = ctx.Queue()
+        procs = [
+            ctx.Process(target=_throttled_worker, args=(str(tmp_path), INTERVAL, event, out)),
+            ctx.Process(target=_waiting_worker, args=(str(tmp_path), INTERVAL, event, out)),
+        ]
+        for p in procs:
+            p.start()
+        results = dict(out.get(timeout=60) for _ in procs)
+        for p in procs:
+            p.join(timeout=60)
+            assert p.exitcode == 0
+        not_before = results["throttled"] + float(HOLD)
+        early = [round(t - results["throttled"], 3) for t in results["waiting"]
+                 if t < not_before - RESERVE_TOL]
+        assert early == [], f"the other process started {early} s after a {HOLD} s Retry-After"
+
+    def test_the_shared_cap_admits_any_honoured_retry_after(self):
+        """A stored start more than the cap ahead is taken for a stepped
+        clock and discarded — which must never include a real hold-off."""
+        assert sc._SHARED_AHEAD_CAP_S > sc._RETRY_AFTER_CAP_S
+
+    def test_a_hold_off_written_by_another_process_is_honoured(self, fast_pacing, tmp_path):
+        (tmp_path / ".sec_rate").write_text(repr(time.time() + 50))
+        start = sc._reserve_slot(tmp_path)
+        assert start - time.monotonic() >= 49.0
+
+    def test_a_hold_off_over_a_garbled_state_file_restarts_it(self, fast_pacing, tmp_path):
+        (tmp_path / ".sec_rate").write_text("not a number")
+        before = time.time()
+        sc._hold_off(tmp_path, 1.0)
+        stored = float((tmp_path / ".sec_rate").read_text())
+        assert before + 1.0 - INTERVAL <= stored <= time.time() + 1.0
+        # ...and the next reservation lands at or after the hold-off.
+        assert sc._reserve_slot(tmp_path) - time.monotonic() >= 1.0 - 0.05
+
+    def test_a_hold_off_never_pulls_the_schedule_earlier(self, fast_pacing, tmp_path):
+        far = time.time() + 30
+        (tmp_path / ".sec_rate").write_text(repr(far))
+        sc._hold_off(tmp_path, 1.0)
+        assert float((tmp_path / ".sec_rate").read_text()) == far
+
+    def test_an_unwritable_cache_still_holds_off_this_process(
+            self, fast_pacing, monkeypatch, tmp_path):
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+
+        def no_locks(fd, op):
+            raise OSError(37, "No locks available")
+
+        monkeypatch.setattr(sc.fcntl, "flock", no_locks)
+        sc._hold_off(tmp_path, 1.0)
+        assert sc._reserve_slot(tmp_path) - time.monotonic() >= 1.0 - 0.05
+
+
+def _throttled_worker(cache_dir: str, interval: float, event, out) -> None:
+    """Gets the 429, pushes the shared schedule, then retries."""
+    sc._REQUEST_INTERVAL_S = interval
+    sc._RETRY_BACKOFF_S = (0.0, 0.0)  # type: ignore[assignment]
+    throttled_at: list[float] = []
+    sets = _signal_after_hold_off(event)
+    sc.urllib.request.urlopen = _throttling_urlopen(  # type: ignore[assignment]
+        throttled_at, event, sets, [])
+    sc.SecClient(cache_dir=cache_dir, identity="Test Suite test@example.com")._get(
+        "https://example/throttled")
+    out.put(("throttled", throttled_at[0]))
+
+
+def _waiting_worker(cache_dir: str, interval: float, event, out) -> None:
+    """Starts its requests only once the other process has been throttled."""
+    sc._REQUEST_INTERVAL_S = interval
+    starts: list[float] = []
+    sc.urllib.request.urlopen = _recording_urlopen(starts)  # type: ignore[assignment]
+    client = sc.SecClient(cache_dir=cache_dir, identity="Test Suite test@example.com")
+    event.wait(30)
+    for i in range(3):
+        client._get(f"https://example/waiting/{i}")
+    out.put(("waiting", starts))
+
+
+# --- the state files are never followed through a symlink -----------------------
+
+class TestStateFilesDoNotFollowSymlinks:
+    """Defect: `.sec_rate` was written with `Path.write_text` and the lock
+    opened with plain O_CREAT, so a symlink planted at either name had its
+    target overwritten or created. Both are opened O_NOFOLLOW now; a link
+    there makes pacing fall back to process-wide, as any other OSError."""
+
+    def test_a_symlinked_state_file_is_not_written_through(
+            self, fast_pacing, monkeypatch, tmp_path):
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        victim = tmp_path / "victim.txt"
+        victim.write_text("precious")
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / ".sec_rate").symlink_to(victim)
+        starts: list[float] = []
+        monkeypatch.setattr(sc.urllib.request, "urlopen", _recording_urlopen(starts))
+        client = sc.SecClient(cache_dir=cache)
+        for i in range(3):
+            assert client._get(f"https://example/{i}") == b'{"ok": true}'
+        assert victim.read_text() == "precious"
+        _assert_paced(starts, 3)
+
+    def test_a_symlinked_lock_file_is_not_created_through(
+            self, fast_pacing, monkeypatch, tmp_path):
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        target = tmp_path / "created-through-the-link"
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / ".sec_rate.lock").symlink_to(target)
+        monkeypatch.setattr(sc.urllib.request, "urlopen", _recording_urlopen([]))
+        sc.SecClient(cache_dir=cache)._get("https://example/x")
+        assert not target.exists()
+        assert not (cache / ".sec_rate").exists()
+
+    def test_without_o_nofollow_pacing_is_process_wide(self, fast_pacing, monkeypatch, tmp_path):
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        monkeypatch.delattr(sc.os, "O_NOFOLLOW")
+        starts: list[float] = []
+        monkeypatch.setattr(sc.urllib.request, "urlopen", _recording_urlopen(starts))
+        client = sc.SecClient(cache_dir=tmp_path)
+        for i in range(2):
+            client._get(f"https://example/{i}")
+        assert not (tmp_path / ".sec_rate").exists()
+        _assert_paced(starts, 2)
