@@ -845,8 +845,19 @@ def main(argv: list[str] | None = None) -> int:
     # and are handed paths under it, so a relative `--out` was applied twice
     # (Hermes re-audit F4: 0/12 with a relative path, 12/12 absolute).
     out = (args.out or ROOT / "drills" / started.strftime("%Y%m%dT%H%M%SZ")).expanduser().resolve()
-    if out.exists() and any(out.iterdir()):
-        print(f"error: {out} is not empty", file=sys.stderr)
+    cache = args.cache.expanduser().resolve() if args.cache else None
+    # Every argument is checked before anything is written: a refusal after
+    # the output directory was half built made the same --out unusable.
+    problem = (
+        f"{out} is not empty" if out.is_dir() and any(out.iterdir())
+        else f"{out} is not a directory" if out.exists() and not out.is_dir()
+        else f"--cache {cache} is not a directory" if cache is not None and not cache.is_dir()
+        else "the bundled fixture is AAPL; pass --cache for another ticker"
+        if cache is None and args.ticker.upper() != "AAPL"
+        else None
+    )
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
         return 2
     out.mkdir(parents=True, exist_ok=True)
     only = {int(n) for n in args.only.split(",")} if args.only else None
@@ -864,7 +875,6 @@ def main(argv: list[str] | None = None) -> int:
     (code / "_shim").mkdir()
     (code / "_shim" / "sitecustomize.py").write_text(_SHIM)
 
-    cache = args.cache.expanduser().resolve() if args.cache else None
     inputs = Inputs(args.ticker, cache, out / "work" / "_inputs")
     drill = Drill(inputs, out, code)
     steps: list[Step] = []

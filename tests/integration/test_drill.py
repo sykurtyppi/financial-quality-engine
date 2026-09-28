@@ -213,3 +213,29 @@ def test_a_relative_out_directory_works(tmp_path):
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
     log = json.loads((tmp_path / "evidence" / "drill-aapl" / "drill_log.json").read_text())
     assert log["passed"] is True and [s["slug"] for s in log["steps"]] == ["baseline", "rerun"]
+
+
+@pytest.mark.parametrize("case", ["out_is_a_file", "out_not_empty", "cache_missing",
+                                  "other_ticker_without_cache"])
+def test_bad_arguments_are_refused_before_anything_is_written(tmp_path, case):
+    """Review of #101: `--out` naming a file raised NotADirectoryError, and a
+    missing `--cache` (or another ticker without one) raised only after the
+    output directory was half built, so the same `--out` was then refused
+    as not empty. Each is refused up front, and nothing is created."""
+    out = tmp_path / "out"
+    args = ["--out", str(out), "--only", "1"]
+    if case == "out_is_a_file":
+        out.write_text("a file")
+    elif case == "out_not_empty":
+        out.mkdir()
+        (out / "keep").write_text("")
+    elif case == "cache_missing":
+        args += ["--ticker", "KO", "--cache", str(tmp_path / "nope")]
+    else:
+        args += ["--ticker", "KO"]
+    before = sorted(p.name for p in tmp_path.rglob("*"))
+    proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "drill.py"), *args],
+                          cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 2, proc.stderr[-1500:]
+    assert proc.stderr.startswith("error: ") and "Traceback" not in proc.stderr
+    assert sorted(p.name for p in tmp_path.rglob("*")) == before
