@@ -12,6 +12,7 @@ Endpoints used:
 from __future__ import annotations
 
 import email.utils
+import errno
 import fcntl
 import json
 import logging
@@ -38,6 +39,9 @@ TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{doc}"
 _REQUEST_INTERVAL_S = 0.15  # stay far under SEC's 10 req/s limit
+# The longest Retry-After honoured (see `_retry_after_s`). Here because the
+# shared schedule's credibility cap below is derived from it.
+_RETRY_AFTER_CAP_S = 60.0
 
 # --- fair-access pacing ---------------------------------------------------------
 #
@@ -64,19 +68,30 @@ _REQUEST_INTERVAL_S = 0.15  # stay far under SEC's 10 req/s limit
 #   clock every reader of the file agrees on. Its weakness — a clock stepped
 #   backwards makes the stored start look far in the future — is bounded by
 #   `_SHARED_AHEAD_CAP_S`. Clients share it when they share a cache dir.
+#   Both files are opened O_NOFOLLOW: a symlink planted at either name must
+#   not have its target overwritten (or created); pacing then falls back to
+#   process-wide like any other failure to use the file.
 #
 # A caller RESERVES its slot under the locks (`start = max(now, last + i)`,
 # then `last = start`) and sleeps until it OUTSIDE them, so waiters queue in
 # reservation order and no lock is ever held across a sleep.
+#
+# A 429/503 with Retry-After pushes the SAME schedule (`_hold_off`): SEC
+# throttles by IP, so the wait it asks for binds every thread, client and
+# process on the machine, not only the call that was refused.
 _pace_lock = threading.Lock()
 _last_start = 0.0  # time.monotonic() of the last reserved request start
 _RATE_STATE = ".sec_rate"
-# How far ahead of now a stored reservation may legitimately be: the queue of
-# waiters times the interval (a 40-thread web pool plus a sweep is ~7 s). A
-# value further out is a wall clock that stepped backwards or a corrupted
-# file; honouring it would park every request on the machine behind it, so it
-# is discarded and the schedule restarts from now.
-_SHARED_AHEAD_CAP_S = 15.0
+# How far ahead of now a stored reservation may legitimately be: a Retry-After
+# hold-off (at most `_RETRY_AFTER_CAP_S`) plus the queue of waiters behind it
+# (a 40-thread web pool plus a sweep is ~7 s at the interval). A value further
+# out is a wall clock that stepped backwards or a corrupted file; honouring it
+# would park every request on the machine behind it, so it is discarded and
+# the schedule restarts from now. One field and one cap, rather than a
+# separate hold-off field with its own: the price is that a clock stepped back
+# by less than the cap can delay the next request by up to that step, once.
+_SHARED_QUEUE_S = 15.0
+_SHARED_AHEAD_CAP_S = _RETRY_AFTER_CAP_S + _SHARED_QUEUE_S
 _shared_pacing_warned: set[str] = set()
 # The sidecar descriptor while a reservation holds its flock (always under
 # `_pace_lock`), so a forked child can drop its inherited copy; see below.
@@ -109,11 +124,27 @@ def _reinit_after_fork() -> None:
 os.register_at_fork(after_in_child=_reinit_after_fork)
 
 
-def _reserve_shared(cache_dir: Path, interval: float, local_last_m: float) -> float:
-    """Reserve a start against every process sharing `cache_dir`, no earlier
-    than this process's own next slot (`local_last_m + interval`); return it
-    on the monotonic clock. Raises OSError when the state cannot be locked or
-    written (read-only cache, no lock support).
+def _open_state(path: Path) -> int:
+    """Open one of the pacing files read-write, creating it, WITHOUT following
+    a symlink at `path` (ELOOP, an OSError, if one is there). Where the
+    platform has no O_NOFOLLOW the file is not opened at all — the caller
+    falls back to process-wide pacing rather than risk writing through a
+    link."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError(errno.ENOTSUP, "no O_NOFOLLOW: cannot open the pacing state safely",
+                      str(path))
+    return os.open(path, os.O_RDWR | os.O_CREAT | nofollow, 0o644)
+
+
+def _update_shared(
+    cache_dir: Path, step: Callable[[float | None, float, float], float],
+) -> tuple[float, float, float]:
+    """Read-modify-write the shared schedule under its flock: `step(last_w,
+    now_m, now_w)` returns the new stored start from the stored one (None
+    when absent, garbled or not credible) and the clocks. Returns
+    `(new_w, now_m, now_w)`. Raises OSError when the state cannot be locked
+    or written (read-only cache, no lock support, a symlink at either name).
 
     The clocks are read INSIDE the flock, after the file I/O: a slot dated
     before a slow open (a loaded disk, a first-use create) would already be
@@ -125,30 +156,61 @@ def _reserve_shared(cache_dir: Path, interval: float, local_last_m: float) -> fl
     assumption: `fcntl.flock` is advisory and NOT reliable over NFS, so a
     cache directory on a network mount paces only within each process. It is
     held for one read and one write of a few bytes, never across a sleep.
-    The state is rewritten in place rather than renamed: every reader holds
-    the lock, and a write torn by a crash reads as garbage, which restarts
-    the schedule (one unpaced request) rather than failing a fetch."""
+    The state is rewritten in place, through the descriptor of its own
+    no-follow open (never a path-based write, which would follow a link
+    swapped in after the open): every reader holds the lock, and a write
+    torn by a crash reads as garbage, which restarts the schedule (one
+    unpaced request) rather than failing a fetch."""
     global _held_rate_fd
-    state = cache_dir / _RATE_STATE
-    fd = os.open(cache_dir / f"{_RATE_STATE}.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    fd = _open_state(cache_dir / f"{_RATE_STATE}.lock")
     _held_rate_fd = fd
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        state = _open_state(cache_dir / _RATE_STATE)
         try:
-            last_w: float | None = float(state.read_text())
-        except (OSError, ValueError):
-            last_w = None  # first use, or a torn write: restart the schedule
-        now_m, now_w = time.monotonic(), time.time()
-        earliest_w = now_w + max(0.0, local_last_m + interval - now_m)
-        if last_w is not None and not (math.isfinite(last_w)
-                                       and last_w - earliest_w <= _SHARED_AHEAD_CAP_S):
-            last_w = None
-        start_w = earliest_w if last_w is None else max(earliest_w, last_w + interval)
-        state.write_text(repr(start_w))
-        return now_m + (start_w - now_w)
+            try:
+                last_w: float | None = float(os.read(state, 64).decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                last_w = None  # first use, or a torn write: restart the schedule
+            now_m, now_w = time.monotonic(), time.time()
+            if last_w is not None and not (math.isfinite(last_w)
+                                           and last_w - now_w <= _SHARED_AHEAD_CAP_S):
+                last_w = None
+            new_w = step(last_w, now_m, now_w)
+            os.ftruncate(state, 0)
+            os.pwrite(state, repr(new_w).encode("ascii"), 0)
+            return new_w, now_m, now_w
+        finally:
+            os.close(state)
     finally:
         _held_rate_fd = None
         os.close(fd)  # closing releases the lock
+
+
+def _reserve_shared(cache_dir: Path, interval: float, local_last_m: float) -> float:
+    """Reserve a start against every process sharing `cache_dir`, no earlier
+    than this process's own next slot (`local_last_m + interval`); return it
+    on the monotonic clock. OSError as `_update_shared`."""
+
+    def step(last_w: float | None, now_m: float, now_w: float) -> float:
+        earliest_w = now_w + max(0.0, local_last_m + interval - now_m)
+        return earliest_w if last_w is None else max(earliest_w, last_w + interval)
+
+    start_w, now_m, now_w = _update_shared(cache_dir, step)
+    return now_m + (start_w - now_w)
+
+
+def _warn_unshared(cache_dir: Path, e: OSError) -> None:
+    """Never fail a fetch over pacing: the caller falls back to this
+    process's schedule. Said once per directory, not per request. Called
+    under `_pace_lock`, which guards the set."""
+    key = str(cache_dir)
+    if key not in _shared_pacing_warned:
+        _shared_pacing_warned.add(key)
+        logger.warning(
+            "SEC request pacing is process-wide only for cache %s: "
+            "cannot share its schedule with other processes (%s)", cache_dir, e,
+        )
 
 
 def _reserve_slot(cache_dir: Path) -> float:
@@ -163,20 +225,35 @@ def _reserve_slot(cache_dir: Path) -> float:
         try:
             start = _reserve_shared(cache_dir, interval, _last_start)
         except OSError as e:
-            # Never fail a fetch over pacing: fall back to this process's
-            # schedule, and say so once per directory rather than per request.
-            key = str(cache_dir)
-            if key not in _shared_pacing_warned:
-                _shared_pacing_warned.add(key)
-                logger.warning(
-                    "SEC request pacing is process-wide only for cache %s: "
-                    "cannot share its schedule with other processes (%s)", cache_dir, e,
-                )
+            _warn_unshared(cache_dir, e)
             # The clock is read after the failed attempt and the log line,
-            # for the same reason `_reserve_shared` reads it last.
+            # for the same reason `_update_shared` reads it last.
             start = max(time.monotonic(), _last_start + interval)
         _last_start = start
     return start
+
+
+def _hold_off(cache_dir: Path, seconds: float) -> None:
+    """Keep EVERY request on the machine out for `seconds` from now, as a
+    429/503's Retry-After asks. The schedule is pushed so that its next slot
+    (`last + interval`) is no earlier than now + `seconds` — in this process
+    and, through the shared state, in every process using `cache_dir`. Never
+    pulls a schedule already further out back in. Same locks, same order and
+    same fallback as `_reserve_slot`; nothing sleeps here."""
+    global _last_start
+    interval = _REQUEST_INTERVAL_S
+    with _pace_lock:
+        _last_start = max(_last_start, time.monotonic() + seconds - interval)
+
+        def step(last_w: float | None, now_m: float, now_w: float) -> float:
+            held_w = now_w + seconds - interval
+            return held_w if last_w is None else max(last_w, held_w)
+
+        try:
+            _update_shared(cache_dir, step)
+        except OSError as e:
+            _warn_unshared(cache_dir, e)
+
 
 # A single transport failure used to end a whole unattended sweep pass. Three
 # days of the hourly job logged 162 of them across 73 passes, and 154 were one
@@ -197,7 +274,6 @@ _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 # Retrying sooner than asked is exactly what fair access forbids; waiting
 # longer than a minute would stall an unattended pass on one bad header.
 _RETRY_AFTER_STATUSES = frozenset({429, 503})
-_RETRY_AFTER_CAP_S = 60.0
 
 
 def _retry_after_s(err: urllib.error.HTTPError) -> float | None:
@@ -311,18 +387,31 @@ def _object(payload: object, what: str) -> dict:
 
 
 def _companyfacts_shape(payload: object) -> None:
-    """What `companyfacts_mapper` walks: `payload["facts"][taxonomy]`. `{}`,
-    `[]` and `{"cik": ...}` all parse, and all used to fail later as an
-    AttributeError that looked like a defect in the mapper."""
-    _object(_object(payload, "companyfacts payload").get("facts"), "companyfacts.facts")
+    """What `companyfacts_mapper` walks: `payload["facts"][taxonomy]`. `[]`
+    or `{"facts": null}` parse, and used to fail later as an AttributeError
+    that looked like a defect in the mapper.
+
+    Agrees with the reader contract in `payloads.concept_rows`: a MISSING
+    `facts` is "no rows" — the payload was acquired and is then reported as
+    unmappable — so only a present `facts` of the wrong type is refused.
+    Refusing the missing case too made a bare payload read as "could not be
+    acquired; check the network", which sends an operator the wrong way."""
+    obj = _object(payload, "companyfacts payload")
+    if "facts" in obj:
+        _object(obj["facts"], "companyfacts.facts")
 
 
 def _submissions_shape(payload: object) -> None:
     """What `edgar_documents._merged_filings` walks: `filings.recent` and
-    `filings.files` under an OBJECT `filings`. SEC sends one even for a filer
-    with no filings; its columns are checked where they are read
-    (`payloads.recent_filings`, `edgar_documents._aligned_arrays`)."""
-    _object(_object(payload, "submissions payload").get("filings"), "submissions.filings")
+    `filings.files` under an OBJECT `filings`; its columns are checked where
+    they are read (`payloads.recent_filings`, `edgar_documents._aligned_arrays`).
+
+    A MISSING `filings` is a new filer with none (`payloads.recent_filings`),
+    not an unavailable index, so only a present one of the wrong type (`[]`,
+    `null`) is refused."""
+    obj = _object(payload, "submissions payload")
+    if "filings" in obj:
+        _object(obj["filings"], "submissions.filings")
 
 
 def _submissions_page_shape(payload: object) -> None:
@@ -454,8 +543,12 @@ class SecClient:
                     # Never sooner than SEC asked, and never sooner than our
                     # own back-off either: a `Retry-After: 0` is not a reason
                     # to hammer a server that just said it is overloaded.
+                    # The ask binds the whole machine, not this call: push the
+                    # shared schedule so every other thread and process waits
+                    # it out too (this call does, by the sleep below).
                     asked = _retry_after_s(e)
                     if asked is not None:
+                        _hold_off(self.cache_dir, asked)
                         backoff = max(backoff, asked)
             except Exception as e:  # noqa: BLE001 - every transport failure is retryable
                 last = e
