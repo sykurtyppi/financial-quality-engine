@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("watch_cli", ROOT / "scripts" / "watch.py")
 watch_cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(watch_cli)
+_REAL_RUN_BRIEF = watch_cli._run_brief  # before any fixture stubs it
 
 
 def _poll_args(**over) -> Namespace:
@@ -756,8 +757,9 @@ class TestBriefHook:
         monkeypatch.setattr(watch_cli.subprocess, "run",
                             lambda cmd, **k: seen.append(cmd) or SimpleNamespace(returncode=next(rcs)))
         assert watch_cli._run_brief("NVDA", report) == 2
-        marker = tmp_path / "pending" / "NVDA"
-        assert watch_cli._queue_read("NVDA") == (str(report), 1, "")
+        marker = tmp_path / "pending" / "NVDA__NVDA_2026-09-01"  # one marker per event
+        assert marker.is_file()
+        assert watch_cli._queue_read("NVDA", str(report)) == (str(report), 1, "")
         assert "queued at" in capsys.readouterr().err
         assert seen[0][1:] == [str(watch_cli.ROOT / "scripts" / "earnings_brief.py"),
                                "build", "NVDA", "--report", str(report)]
@@ -927,9 +929,9 @@ class TestPrintNightBrief:
                             lambda cmd, **k: seen.append(cmd) or SimpleNamespace(returncode=2))
         assert watch_cli._run_brief("NVDA", None) == 2
         assert seen[0][-3:] == ["build", "NVDA", "--no-report"]
-        assert watch_cli._queue_read("NVDA") == ("-", 1, "")
+        assert watch_cli._queue_read("NVDA", "-") == ("-", 1, "")
         assert watch_cli._run_brief("NVDA", None) == 2  # same target: attempts climb
-        assert watch_cli._queue_read("NVDA") == ("-", 2, "")
+        assert watch_cli._queue_read("NVDA", "-") == ("-", 2, "")
 
     def test_retry_cap_drops_a_hopeless_print_night_brief(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
@@ -937,7 +939,7 @@ class TestPrintNightBrief:
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: pytest.fail("must not run"))
         assert watch_cli._retry_pending_brief("NVDA") == 5  # says so once
         assert "giving up" in capsys.readouterr().err
-        assert watch_cli._queue_read("NVDA") is None
+        assert watch_cli._queue_read("NVDA", "-") is None
         assert watch_cli._retry_pending_brief("NVDA") == 0
         # A queued FULL brief past the cap is kept and reported, never re-run
         # (see TestBriefRetryCap); below the cap it still retries.
@@ -956,7 +958,7 @@ class TestPrintNightBrief:
             raise OSError("disk")
         monkeypatch.setattr(watch_cli, "_run_brief", boom)
         assert watch_cli.cmd_sweep(_sweep_args()) == 5
-        assert watch_cli._queue_read("AAPL") == ("-", 1, "")
+        assert watch_cli._queue_read("AAPL", "-") == ("-", 1, "")
         assert "print-night brief crashed" in capsys.readouterr().err
 
     def test_window_boundary_is_inclusive_at_14_days(self, sweep_env, monkeypatch):
@@ -1000,6 +1002,7 @@ class TestPrintNightBrief:
 
     def test_same_day_second_8k_rebuilds_a_print_night_brief_but_never_a_full_one(
             self, sweep_env, monkeypatch, capsys):
+        import hashlib
         import json
 
         monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-13T23:05:00+00:00"))
@@ -1008,11 +1011,13 @@ class TestPrintNightBrief:
         for t in ("AAPL", "MSFT", "NVDA"):
             (watch_cli.BRIEFS / t / "2026-10-13").mkdir(parents=True)
             (watch_cli.BRIEFS / f"{t}_2026-10-13.md").write_text("# brief")
-        # AAPL: print-night from the preliminary accession; MSFT: full; NVDA: no record
+        # AAPL: print-night from the preliminary accession; MSFT: full; NVDA:
+        # no record. A record vouches only for the brief whose hash it names.
+        digest = hashlib.sha256(b"# brief").hexdigest()
         (watch_cli.BRIEFS / "AAPL" / "2026-10-13" / "built.json").write_text(
-            json.dumps({"kind": "print-night", "accession": "k-prelim"}))
+            json.dumps({"kind": "print-night", "accession": "k-prelim", "brief_sha256": digest}))
         (watch_cli.BRIEFS / "MSFT" / "2026-10-13" / "built.json").write_text(
-            json.dumps({"kind": "full", "accession": "k-prelim"}))
+            json.dumps({"kind": "full", "accession": "k-prelim", "brief_sha256": digest}))
         self._k(monkeypatch, acc="k-final")
         assert watch_cli.cmd_sweep(_sweep_args()) == 0
         assert built == ["AAPL"]
@@ -1359,7 +1364,7 @@ class TestBriefRetryCap:
         monkeypatch.setattr(watch_cli, "_utcnow",
                             lambda: watch_cli._now("2026-10-14T00:30:00+00:00"))
         assert watch_cli._retry_pending_brief("NVDA") == 5
-        assert watch_cli._queue_read("NVDA")[:2] == (str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
+        assert watch_cli._queue_read("NVDA", str(report))[:2] == (str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
 
     def test_a_new_failure_rearms_the_alert(self, monkeypatch, tmp_path):
         monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
@@ -1371,7 +1376,7 @@ class TestBriefRetryCap:
         monkeypatch.setattr(watch_cli.subprocess, "run",
                             lambda cmd, **k: SimpleNamespace(returncode=2))
         assert watch_cli._run_brief("NVDA", report) == 2
-        assert watch_cli._queue_read("NVDA") == (str(report), 3, "")
+        assert watch_cli._queue_read("NVDA", str(report)) == (str(report), 3, "")
 
     def test_below_the_cap_a_full_brief_still_retries(self, monkeypatch, tmp_path):
         monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")
@@ -1381,6 +1386,275 @@ class TestBriefRetryCap:
         ran = []
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, r: ran.append(r) or 0)
         assert watch_cli._retry_pending_brief("NVDA") == 0 and ran == [report]
+
+
+class TestBriefQueuePerEvent:
+    """The brief queue under reports/briefs/.pending/ was keyed by TICKER: one
+    file, written in place, that any brief success deleted and any failure
+    overwrote. Three defects followed (round-24 audit):
+
+    - a torn or empty marker parsed as "nothing queued", so the retry did
+      nothing, yet the print-night trigger saw the FILE exist and stayed
+      quiet: the print went brief-less, silently, for as long as it sat there;
+    - quarter A's exhausted full brief is kept on purpose (nothing else
+      rebuilds it) and alerts daily, but that same entry suppressed quarter
+      B's print-night brief, and B's 10-Q brief succeeding then deleted A's
+      entry without a word;
+    - a failure for target B overwrote A's entry, losing it the same way.
+
+    The queue is now one marker per event, written atomically, and a marker
+    that does not parse is logged, reported and removed."""
+
+    DAY = "2026-10-13"
+
+    @pytest.fixture
+    def briefs(self, sweep_env, monkeypatch):
+        """The real `_run_brief` over a fake earnings_brief.py: `rcs[ticker]`
+        (default 0) is its exit code; a success writes the brief file, as
+        the real build does. `runs` records (ticker, report) per build."""
+        from app.services.watch.poller import Filing
+
+        monkeypatch.setattr(watch_cli, "_run_brief", _REAL_RUN_BRIEF)
+        monkeypatch.setattr(
+            watch_cli, "latest_earnings_8k",
+            lambda subs: Filing("8-K", "k-b", watch_cli.date.fromisoformat(self.DAY),
+                                items="2.02,9.01"))
+        self._at(monkeypatch, f"{self.DAY}T22:05:00+00:00")
+        env = SimpleNamespace(rcs={}, runs=[])
+
+        def run(cmd, **k):
+            ticker = cmd[3]
+            report = None if cmd[-1] == "--no-report" else Path(cmd[-1])
+            env.runs.append((ticker, report))
+            rc = env.rcs.get(ticker, 0)
+            if rc == 0:
+                watch_cli.BRIEFS.mkdir(parents=True, exist_ok=True)
+                (watch_cli.BRIEFS / f"{ticker}_{self.DAY}.md").write_text("# brief")
+            return SimpleNamespace(returncode=rc)
+        monkeypatch.setattr(watch_cli.subprocess, "run", run)
+        return env
+
+    @staticmethod
+    def _at(monkeypatch, when: str) -> None:
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now(when))
+
+    @staticmethod
+    def _queued() -> dict[str, str]:
+        """Every marker on disk, by file name -> contents."""
+        pending = watch_cli.BRIEF_PENDING
+        return {} if not pending.is_dir() else {
+            p.name: p.read_text() for p in sorted(pending.iterdir())}
+
+    @staticmethod
+    def _report(tmp_path, name: str) -> Path:
+        report = tmp_path / name
+        report.write_text("# r")
+        return report
+
+    @pytest.mark.parametrize("name", ["AAPL", "AAPL__print-night"])
+    @pytest.mark.parametrize("body", ["", "\n", "-\nattempts=", "/reports/AAPL_2026-10-0"])
+    def test_an_unreadable_marker_never_suppresses_the_print_night_brief(
+            self, briefs, capsys, name, body):
+        # A marker torn mid-write (the old writer was a plain write_text) or
+        # truncated by hand: before, the retry read "nothing queued" and the
+        # trigger read "queued", and the print sat brief-less indefinitely.
+        watch_cli.BRIEF_PENDING.mkdir(parents=True)
+        (watch_cli.BRIEF_PENDING / name).write_text(body)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5  # the discarded job is reported
+        out, err = capsys.readouterr()
+        assert ("AAPL", None) in briefs.runs  # the print-night brief went out this pass
+        assert (watch_cli.BRIEFS / f"AAPL_{self.DAY}.md").exists()
+        assert "unreadable queue marker" in err and name in err
+        assert "AAPL -> 5" in out
+        assert self._queued() == {}  # removed, never left to block anything
+        # ...and said once: the next pass is clean.
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+
+    def test_an_exhausted_quarter_neither_blocks_nor_is_erased_by_the_next(
+            self, briefs, monkeypatch, tmp_path, capsys):
+        # Quarter A's full brief failed BRIEF_MAX_ATTEMPTS times: its entry is
+        # kept (nothing else rebuilds it) and alerts daily. Quarter B's 8-K
+        # lands: B's print-night brief must go out, and neither B's print-night
+        # nor B's 10-Q brief may delete A's entry.
+        report_a = self._report(tmp_path, "AAPL_2026-07-31.md")
+        watch_cli._queue_write("AAPL", str(report_a), watch_cli.BRIEF_MAX_ATTEMPTS)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5  # A alerts (first time today)
+        assert ("AAPL", None) in briefs.runs  # B's print-night was not suppressed by A
+        assert ("AAPL", report_a) not in briefs.runs  # A is not retried: it is exhausted
+        assert "no longer retrying" in capsys.readouterr().err
+        kept = [body for body in self._queued().values() if str(report_a) in body]
+        assert len(kept) == 1 and f"attempts={watch_cli.BRIEF_MAX_ATTEMPTS}" in kept[0]
+        # B's 10-Q lands and its full brief succeeds: A's entry is untouched...
+        report_b = self._report(tmp_path, f"AAPL_{self.DAY}.md")
+        assert watch_cli._run_brief("AAPL", report_b) == 0
+        assert [str(report_a) in body for body in self._queued().values()] == [True]
+        # ...and it keeps alerting, once a day, until someone acts on it.
+        self._at(monkeypatch, "2026-10-14T09:00:00+00:00")
+        assert watch_cli._retry_pending_brief("AAPL") == 5
+        assert "no longer retrying" in capsys.readouterr().err
+
+    def test_a_failure_for_another_target_never_overwrites_an_entry(self, briefs, tmp_path):
+        report_a = self._report(tmp_path, "AAPL_2026-07-31.md")
+        report_b = self._report(tmp_path, f"AAPL_{self.DAY}.md")
+        watch_cli._queue_write("AAPL", str(report_a), 3)
+        briefs.rcs["AAPL"] = 2
+        assert watch_cli._run_brief("AAPL", report_b) == 2
+        bodies = list(self._queued().values())
+        assert len(bodies) == 2
+        assert any(b.startswith(f"{report_a}\n") and "attempts=3" in b for b in bodies)
+        assert any(b.startswith(f"{report_b}\n") and "attempts=1" in b for b in bodies)
+        # The same target failing again climbs its own count, not A's.
+        assert watch_cli._run_brief("AAPL", report_b) == 2
+        bodies = list(self._queued().values())
+        assert any(b.startswith(f"{report_a}\n") and "attempts=3" in b for b in bodies)
+        assert any(b.startswith(f"{report_b}\n") and "attempts=2" in b for b in bodies)
+
+    def test_a_full_success_clears_its_events_print_night_entry_and_nothing_else(
+            self, briefs, tmp_path):
+        # The print-night brief failing is queued; the 10-Q rebuild of the
+        # same event is its second chance, and its success clears it. The
+        # old quarter's entry is a different event and stays.
+        report_a = self._report(tmp_path, "AAPL_2026-07-31.md")
+        watch_cli._queue_write("AAPL", str(report_a), watch_cli.BRIEF_MAX_ATTEMPTS)
+        briefs.rcs["AAPL"] = 2
+        assert watch_cli._run_brief("AAPL", None) == 2
+        assert len(self._queued()) == 2
+        # A print-night success clears only its own entry, never a full one.
+        briefs.rcs["AAPL"] = 0
+        report_b = self._report(tmp_path, f"AAPL_{self.DAY}.md")
+        watch_cli._queue_write("AAPL", str(report_b), 1)
+        assert watch_cli._run_brief("AAPL", None) == 0
+        bodies = sorted(self._queued().values())
+        assert len(bodies) == 2 and not any(b.startswith("-\n") for b in bodies)
+        # The full brief of the event succeeding clears it and the print-night.
+        watch_cli._queue_write("AAPL", "-", 2)
+        assert len(self._queued()) == 3
+        assert watch_cli._run_brief("AAPL", report_b) == 0
+        assert [str(report_a) in b for b in self._queued().values()] == [True]
+
+    def test_a_same_event_full_entry_still_owns_the_print_night_brief(self, briefs, tmp_path):
+        # A full brief of THIS print queued (the 10-Q landed, its brief
+        # failed): its retry writes this 8-K's brief with the engine findings,
+        # so the trigger does not spend a second run on a release-only one.
+        report_b = self._report(tmp_path, f"AAPL_{self.DAY}.md")
+        watch_cli._queue_write("AAPL", str(report_b), 1)
+        briefs.rcs["AAPL"] = 2
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert [r for t, r in briefs.runs if t == "AAPL"] == [report_b]  # the retry, only
+
+    def test_what_parses_and_what_does_not(self, briefs, tmp_path):
+        # A marker parses only whole: a target, then known lines. Anything
+        # else is a torn write or a hand edit, never guessed at.
+        marker = tmp_path / "m"
+        cases = {
+            "-\n": ("-", 1, ""),  # before `attempts` existed
+            "-\n\nattempts=2\n": ("-", 2, ""),  # a blank line is not damage
+            "/r/A_2026-07-31.md\nattempts=6\nalerted=2026-10-13\n":
+                ("/r/A_2026-07-31.md", 6, "2026-10-13"),
+            "-\nattempts=2\ngarbage\n": None,
+            "-\nattempts=two\n": None,
+            "/r/A_2026-07-3": None,
+            "": None,
+        }
+        for body, parsed in cases.items():
+            marker.write_text(body)
+            assert watch_cli._parse_marker(marker) == parsed, body
+        marker.write_bytes(b"\xff\xfe-\n")  # not text at all
+        assert watch_cli._parse_marker(marker) is None
+        assert watch_cli._parse_marker(tmp_path / "missing") is None
+        # The trigger's check reads the same way, even in a pass whose retry
+        # never ran to remove the torn marker (a 10-Q pass).
+        watch_cli.BRIEF_PENDING.mkdir(parents=True)
+        (watch_cli.BRIEF_PENDING / "AAPL__AAPL_2026-10-14").write_text("")
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text("\n")
+        assert not watch_cli._event_queued("AAPL", watch_cli.date(2026, 10, 13))
+
+    def test_one_run_when_the_events_full_brief_clears_its_print_night_entry(
+            self, briefs, tmp_path):
+        # Both of this print's entries queued: the full one is retried first,
+        # and its success clears the print-night entry, which then costs no
+        # second headless run.
+        report_b = self._report(tmp_path, f"AAPL_{self.DAY}.md")
+        watch_cli._queue_write("AAPL", "-", 1)
+        watch_cli._queue_write("AAPL", str(report_b), 1)
+        assert watch_cli._retry_pending_brief("AAPL") == 0
+        assert briefs.runs == [("AAPL", report_b)]
+        assert self._queued() == {}
+        # The same when the full entry is a legacy marker, which is listed
+        # after every per-event one: order is by kind, not by file name.
+        watch_cli._queue_write("AAPL", "-", 1)
+        (watch_cli.BRIEF_PENDING / "AAPL").write_text(f"{report_b}\nattempts=1\n")
+        briefs.runs.clear()
+        assert watch_cli._retry_pending_brief("AAPL") == 0
+        assert briefs.runs == [("AAPL", report_b)]
+        assert self._queued() == {}
+
+    def test_a_legacy_entry_past_its_cap_is_dropped_or_kept_under_its_new_name(
+            self, briefs, tmp_path, capsys):
+        # Print-night past the cap: dropped, the legacy file with it (left,
+        # it would say "giving up" every pass, forever).
+        watch_cli.BRIEF_PENDING.mkdir(parents=True)
+        legacy = watch_cli.BRIEF_PENDING / "AAPL"
+        legacy.write_text(f"-\nattempts={watch_cli.PRINT_BRIEF_MAX_ATTEMPTS}\n")
+        assert watch_cli._retry_pending_brief("AAPL") == 5
+        assert "giving up" in capsys.readouterr().err
+        assert self._queued() == {} and briefs.runs == []
+        # A full brief past the cap: kept, and the log names the file it is
+        # now in, the one to delete to silence it.
+        report_a = self._report(tmp_path, "AAPL_2026-07-31.md")
+        legacy.write_text(f"{report_a}\nattempts={watch_cli.BRIEF_MAX_ATTEMPTS}\n")
+        assert watch_cli._retry_pending_brief("AAPL") == 5
+        err = capsys.readouterr().err
+        assert f"Queued at {watch_cli.BRIEF_PENDING / 'AAPL__AAPL_2026-07-31'};" in err
+        assert list(self._queued()) == ["AAPL__AAPL_2026-07-31"] and briefs.runs == []
+
+    def test_a_legacy_ticker_only_marker_is_honoured_and_migrated(self, briefs, tmp_path):
+        # A queue left on disk by the ticker-keyed version: `.pending/AAPL`.
+        watch_cli.BRIEF_PENDING.mkdir(parents=True)
+        legacy = watch_cli.BRIEF_PENDING / "AAPL"
+        legacy.write_text("-\nattempts=2\n")
+        # It still owns the print-night brief (the retry runs it, once) ...
+        briefs.rcs["AAPL"] = 2
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        assert [r for t, r in briefs.runs if t == "AAPL"] == [None]
+        # ... and its count carries over into the per-event marker.
+        assert not legacy.exists()
+        assert self._queued() == {"AAPL__print-night": "-\nattempts=3\n"}
+        # A legacy full entry keeps its target and count where it is.
+        report_a = self._report(tmp_path, "AAPL_2026-07-31.md")
+        legacy.write_text(f"{report_a}\nattempts=2\n")
+        briefs.runs.clear()
+        # A different event's success leaves it; its own success clears it.
+        briefs.rcs["AAPL"] = 0
+        assert watch_cli._run_brief("AAPL", None) == 0
+        assert legacy.exists()
+        assert watch_cli._retry_pending_brief("AAPL") == 0
+        assert briefs.runs == [("AAPL", None), ("AAPL", report_a)]
+        assert self._queued() == {}
+
+    def test_a_print_night_record_that_does_not_match_its_brief_is_no_record(self, briefs):
+        # built.json is written after the brief; a kill between the two can
+        # leave a NEW full brief beside an OLD print-night record. Read as
+        # "print-night", a same-day second 8-K would rebuild over the full
+        # brief. A record whose hash does not match reads as no record, and
+        # no record is never rebuilt here.
+        import hashlib
+        import json
+
+        brief = watch_cli.BRIEFS / f"AAPL_{self.DAY}.md"
+        (watch_cli.BRIEFS / "AAPL" / self.DAY).mkdir(parents=True)
+        brief.write_text("# print-night brief")
+        record = {"kind": "print-night", "accession": "k-prelim",
+                  "brief_sha256": hashlib.sha256(brief.read_bytes()).hexdigest()}
+        (watch_cli.BRIEFS / "AAPL" / self.DAY / "built.json").write_text(json.dumps(record))
+        assert watch_cli._built_meta("AAPL", self.DAY)["kind"] == "print-night"
+        brief.write_text("# the FULL brief, its record never written")
+        assert watch_cli._built_meta("AAPL", self.DAY) is None
+        for t in ("MSFT", "NVDA"):  # out of the way: they have briefs already
+            (watch_cli.BRIEFS / f"{t}_{self.DAY}.md").write_text("# brief")
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert briefs.runs == []
+        assert "FULL brief" in brief.read_text()
 
 
 class TestVintageCapture:

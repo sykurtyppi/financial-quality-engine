@@ -222,6 +222,29 @@ Per pass, in order:
    under `reports/briefs/.pending/`, and every later pass retries it first —
    so a season-long fault (no CLI on the scheduler's PATH, an expired login)
    shows up as a run of 5s, never as a quiet season without briefs.
+
+   The queue holds one small text file per **event**, not per ticker:
+   `<TICKER>__print-night` for a print-night brief, `<TICKER>__<report
+   stem>` (e.g. `NVDA__NVDA_2026-11-19`) for a full one. Each is a target
+   line (`-` or the report's path), `attempts=N`, and `alerted=<day>` once
+   an exhausted entry has notified. A brief that succeeds clears only its
+   own event's file — plus the print-night file when it is the full brief
+   (the 10-Q rebuild is the print-night brief's second chance). A failure
+   writes only its own event's file. So a full brief that has failed six
+   times and is kept (see below) keeps saying so every day through the next
+   quarter: the next quarter's briefs neither delete it nor wait behind it.
+   A full brief that keeps failing is retried six times, then kept, not
+   retried, and notified once a day until you act (run the `earnings_brief.py
+   build` line the log gives you, or delete the file to silence it).
+
+   Each file is written whole (temporary file, then rename). A file that
+   still does not parse — an empty one, a truncated path, a hand edit — is
+   named on stderr, deleted, and makes that pass exit 5: whatever it held is
+   no longer queued, so check the print's brief. It never holds back a
+   print-night brief. A queue from before this change has bare `<TICKER>`
+   files; they are still read and honoured, and each moves to its per-event
+   name the next time its entry is written, or goes when its brief
+   succeeds. Nothing needs doing by hand.
 4. **Re-arm** — once an event completes (exit 0 on either track, or a skip),
    the row is rewritten for the NEXT quarter from the issuer's history: new
    baseline accession (the filing just consumed), next expected period, next
@@ -286,7 +309,9 @@ date within 14 days of the 8-K means build one. A failed print-night brief
 is queued and retried like any other (exit 5) — but never in the pass that
 is about to rebuild it with the engine report anyway, and at most six times
 (the 10-Q rebuild is its second chance; an hourly paid run for weeks is
-not). Amended 8-Ks (8-K/A) never count as the print, so a corrected exhibit
+not). The 8-K pass stays quiet only while a brief of **this** print is
+queued: the print-night entry, or a full brief whose report was generated
+on or after the 8-K. An older quarter's kept entry does not hold it back. Amended 8-Ks (8-K/A) never count as the print, so a corrected exhibit
 days later cannot move the brief to a second file; the prior-quarter guide
 must be at least 45 days older than the print, so a preliminary-results
 8-K is never mistaken for last quarter's release. Two earnings 8-Ks within
@@ -294,9 +319,21 @@ the window (Boeing's preliminary-then-final pattern) each get a brief; if
 they share a day, the print-night brief is rebuilt from the newer one.
 
 Each brief records how it was built in `reports/briefs/<T>/<date>/built.json`
-(`kind`: `print-night` or `full`, the 8-K accession, the report path). A
-print-night build never downgrades a brief that already carries the engine
-findings — a queued retry or a stray `--no-report` by hand is a no-op then.
+(`kind`: `print-night` or `full`, the 8-K accession, the report path, and
+`brief_sha256`, the hash of the brief file it describes). A print-night
+build never downgrades a brief that already carries the engine findings — a
+queued retry or a stray `--no-report` by hand is a no-op then. The brief,
+its `assessment.json` and `built.json` are each written whole, in that
+order, with the record last. A build killed part way can therefore leave a
+new brief beside an old record, and that record's hash no longer matches.
+A record that does not match its brief, or names no hash (one written
+before this change), counts as **no record**, and a brief with no record
+is treated as full: it is never rebuilt without the engine findings (the
+8-K pass leaves it alone, `--no-report` refuses). The next full build
+writes a matching record. Editing a brief by hand, flipping `useful:`
+included, changes its hash in the same way. A print-night brief you have
+edited is therefore not rebuilt from a same-day second 8-K. The 10-Q
+rebuild still replaces it and keeps your `useful:` value.
 
 Two deliberate limits: `poll` is the 10-Q track only (on print night, run
 `earnings_brief.py build TICKER --no-report` by hand if you are at the

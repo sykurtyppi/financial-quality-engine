@@ -20,6 +20,8 @@ can be checked against the exact text it was given.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -51,6 +53,41 @@ _NON_NARRATIVE_RE = re.compile(r"table|supplement|slide|presentation|infographic
 _LABEL_CHARS_RE = re.compile(r"[^\w.\-]+")
 _NAME_CHARS_RE = re.compile(r"[^\w .,&'\-]+")
 LABEL_MAX = 60
+
+
+def brief_sha256(brief: Path) -> str | None:
+    """The sha256 of a brief file's bytes, or None when it cannot be read."""
+    try:
+        return hashlib.sha256(brief.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def read_build_record(record: Path, brief: Path) -> dict | None:
+    """A brief's build record (``built.json``: how the brief was built), or
+    None when there is none that vouches for ``brief`` as it is on disk.
+
+    The brief and its record are two files, and the record is written
+    last: a process killed between the two leaves a NEW brief beside the
+    OLD record, which, read as it stands, said "print-night" beside a brief
+    that carries the engine findings, and a later print-night build
+    overwrote them (round-24 audit). So the record names the sha256 of the
+    brief it describes, and one that does not match — or names none: a
+    record from before the hash, or a hand edit — is no record. No record
+    is the safe direction at both readers: each treats the brief as full
+    and never rebuilds it without the engine findings. One reader of this
+    file for both (``earnings_brief.py`` and the sweep), so the rule cannot
+    drift between them."""
+    try:
+        meta = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    digest = meta.get("brief_sha256")
+    if not isinstance(digest, str) or digest != brief_sha256(brief):
+        return None
+    return meta
 
 
 def _safe_label(s: str, limit: int = LABEL_MAX) -> str:
