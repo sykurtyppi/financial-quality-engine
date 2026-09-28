@@ -129,6 +129,9 @@ class LedgerDocument(BaseModel):
     # (`report_files.replacing`): the report beside it names the same id on
     # its last line. None for a ledger never published (the API, tests).
     generation_id: str | None = None
+    # The engine commit that built the run (`report_files.engine_commit`),
+    # stamped at the same time; the report states it on the line above.
+    engine_commit: str | None = None
     ticker: str
     generated_on: date
     fetched_at: str | None = None

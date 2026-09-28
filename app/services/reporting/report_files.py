@@ -13,7 +13,9 @@ Each run is one GENERATION, kept whole and never modified once published
 - a rebuild is built in ``<dir>/.staging/<id>/``; a build that fails, or
   one without its evidence ledger, publishes nothing;
 - a finished rebuild is stamped with its ``generation_id`` (the report's
-  last line, the ledger's field), fsynced, and renamed whole into
+  last line, the ledger's field) and with the engine commit that built it
+  (``engine_commit``: the line above, the ledger's ``engine_commit``),
+  fsynced, and renamed whole into
   ``<dir>/.generations/<base>/<stamp>_<seq>_<id>/``, read-only;
 - ONE pointer, the symlink ``.generations/<base>/current``, is then swapped
   atomically to it. The live names are fixed symlinks through that pointer
@@ -35,10 +37,12 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import functools
 import json
 import os
 import re
 import shutil
+import subprocess
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -58,6 +62,16 @@ _ROLES = ("report", "ledger", "audit")
 # A published file is never written again: read-only, so a write to a live
 # name (a hand `cp` over it) fails instead of editing a kept generation.
 READ_ONLY = 0o444
+# Which code built a published run: a season is run from a pinned commit, and
+# a report that cannot say which one cannot be traced back to it.
+ENGINE_LINE = "- Engine: "
+# For a deployment without a git checkout (or a copy of one, as the drill's
+# workspaces are): the commit it was copied from, stated by whoever copied it.
+ENGINE_ENV = "FQE_ENGINE_COMMIT"
+_ENGINE_ROOT = Path(__file__).resolve().parents[3]
+# The engine is its code. Data files it rewrites itself (journal/watchlist.json
+# on every re-arm) are not, so they never make a checkout read as modified.
+_ENGINE_PATHS = ("app", "scripts", "pyproject.toml")
 
 
 class NotPublished(RuntimeError):
@@ -217,6 +231,39 @@ class Staged:
     archived: list[Path] = field(default_factory=list)
 
 
+def _git(*args: str) -> str | None:
+    try:
+        proc = subprocess.run(["git", *args], cwd=_ENGINE_ROOT, capture_output=True,
+                              text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+@functools.cache
+def engine_commit() -> str:
+    """The commit this engine runs from, as a report states it: the short
+    sha and whether the engine code differs from it. Read once per process:
+    the code a running process has loaded is the code it started with."""
+    stated = os.environ.get(ENGINE_ENV, "").strip()
+    if stated:
+        return f"{stated} (stated by {ENGINE_ENV}; not a git checkout)"
+    # The engine's own checkout, not one it happens to sit inside (an
+    # installed copy under a venv in some other repository).
+    top = _git("rev-parse", "--show-toplevel")
+    sha = _git("rev-parse", "--short=12", "HEAD")
+    if not (top and sha and Path(top).resolve() == _ENGINE_ROOT.resolve()):
+        return "unknown (not run from a git checkout; set FQE_ENGINE_COMMIT)"
+    # Untracked files count: a new module the engine imports changes what it
+    # does as much as an edit (caches are gitignored, so they never count).
+    changed = _git("status", "--porcelain", "--untracked-files=normal", "--", *_ENGINE_PATHS)
+    if changed is None:
+        return f"{sha} (could not check the checkout for uncommitted changes)"
+    if changed:
+        return f"{sha} + uncommitted changes to the engine code (not reproducible from {sha})"
+    return f"{sha} (clean checkout)"
+
+
 def _seal(staged: Staged, name: str) -> None:
     """A publish is one whole generation or nothing: both files must exist,
     and each is stamped with the rebuild's id (the report on its last line,
@@ -243,13 +290,15 @@ def _seal(staged: Staged, name: str) -> None:
             raise NotPublished(f"{name}: {path.name} names generation {found}, not this "
                                f"rebuild's {gid}; nothing published")
     doc["generation_id"] = gid
+    engine = engine_commit()
+    doc["engine_commit"] = engine
     write_atomic(staged.ledger, json.dumps(doc, indent=1, ensure_ascii=False) + "\n")
     if m is None:
         # Appended in place (the staged file is this rebuild's own), never
         # rewritten: what the builder wrote is the report, byte for byte, up
         # to the stamp.
         with staged.report.open("a", newline="") as fh:
-            fh.write(f"\n\n{GENERATION_LINE}{gid} "
+            fh.write(f"\n\n{ENGINE_LINE}{engine}\n{GENERATION_LINE}{gid} "
                      "(this report, its evidence ledger and its audit carry the same id)\n")
     for path in (staged.report, staged.ledger):
         os.chmod(path, READ_ONLY)
