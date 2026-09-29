@@ -402,6 +402,18 @@ pending before. Before this, the marker named the `journal.py` child, dead
 throughout the audit, so it looked stale and `--retry` published over the
 run being audited (review of the pending marker).
 
+A plain `journal.py report` or the web report page whose stamp fails after
+the publish (exit `9`, or the page's 500) leaves the entry pending too, with
+a marker of its own kind ("published, not stamped", recording the run).
+Nobody audits that run and nobody is at work on it, whoever wrote the marker
+(the web page's writer is the server, running for good): a plain `report`
+and the page refuse, naming `journal.py mark-reported <T> --date <day>
+--generation <id>`, which stamps the published run; `journal.py report <T>
+--date <day> --retry` rebuilds it without `--force`, the new run replacing it
+as the live one (it stays, an earlier generation). If another writer stamped
+a v2 entry while its report was built (a hand edit), `report` keeps that
+stamp, says so, leaves nothing pending and exits `0`.
+
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.
 

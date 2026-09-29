@@ -1743,6 +1743,7 @@ def test_an_old_format_marker_still_reads(tmp_path, monkeypatch):
     pending = store.pending_marker(path)
     assert pending.owner == store.ReportOwner(**handed)
     assert (pending.generation_id, pending.report) == (None, None)
+    assert pending.not_stamped is False  # the sweep's kind: its owner may be at work
     assert pending.text == (f"marked 2026-09-01T00:00:00Z by journal.py report --defer-mark, "
                             f"for watch.py, pid 4242 on {handed['host']}")
     store.set_report_pending(path, "journal.py report --defer-mark",
@@ -2001,3 +2002,141 @@ def test_the_sweeps_exit_9_says_the_next_pass_rebuilds_and_names_no_stamp(
     assert "Do not stamp it by hand: it is not audited" in out.err
     assert "the sweep's next pass rebuilds and audits it" in out.err
     assert f"`journal.py report TST --date {day} --retry`" in out.err
+
+
+# --- review of 40c2d36 -------------------------------------------------------------------
+# L1: the marker a failed stamp leaves (CLI or web page) named its writer as an
+#     owner, and the web page's owner is the server, running for good: `--retry`
+#     was refused as if the page were auditing the report, and pointed at
+#     --force. Such a marker now says what it is ("published, not stamped"):
+#     nobody is at work on it, a plain report still refuses (naming the stamp
+#     command with the run), and `--retry` rebuilds, replacing the unstamped run.
+# N1: a v2 stamp refused because another writer stamped the entry while the
+#     report built was exit 9 "NOT stamped ... until the entry is restored",
+#     with a marker beside a stamped entry.
+# N2/N3: a marker whose write (or removal) landed before its directory fsync
+#     failed was said as not written (not removed).
+
+
+def _dir_fsyncs_fail(monkeypatch):
+    """From now on every directory fsync fails (EIO); returns the switch."""
+    import errno
+    import stat as _stat
+
+    real, armed = os.fsync, [1]
+
+    def fsync(fd):
+        if armed and _stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "directory fsync failed")
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    return armed
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_marker_left_by_a_failed_stamp_has_no_owner_at_work(
+        tmp_path, monkeypatch, capsys, v2):
+    """The owner it names (here this process, running, as the web server
+    would be) is not auditing anything: a plain report refuses and names
+    the stamp, `--retry` goes ahead without --force and replaces the run."""
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    day = path.stem.split("_", 1)[1]
+    cli = _cli()
+    _by_hand(monkeypatch)
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    _stamp_fails(monkeypatch, path, "ENOSPC")
+    assert cli.cmd_report(_report_ns(path)) == 9
+    first = _live(built[0]).generation_id
+    pending = store.pending_marker(path)
+    assert pending.not_stamped and pending.generation_id == first
+    capsys.readouterr()
+    assert cli.cmd_report(_report_ns(path)) == 1 and len(built) == 1
+    err = capsys.readouterr().err
+    assert "was published but NOT stamped" in err and "is running" not in err
+    assert "audit" not in err
+    named = {n.cmd: n for n in _hinted(cli, err)}
+    assert (named["mark-reported"].date, named["mark-reported"].generation) == (day, first)
+    assert named["report"].retry and not named["report"].force
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 0
+    out = capsys.readouterr()
+    assert len(built) == 2 and _is_reported(path) and store.report_pending(path) is None
+    assert f"replacing the published, unstamped run {first}" in out.out + out.err
+
+
+def test_a_stamp_made_meanwhile_by_another_writer_is_kept_and_said(
+        tmp_path, monkeypatch, capsys):
+    """rev31d_refused_already: the entry stamped by another writer (a hand
+    edit) while the report built. Not "NOT stamped, restore the entry": the
+    entry is stamped, the report is live, nothing is left pending; exit 0,
+    and the stamp is said to be the other writer's."""
+    from datetime import UTC, datetime
+
+    from app.services.journal.schema_v2 import render_entry
+
+    path = _either(tmp_path / "entries", monkeypatch, True)
+    cli = _cli()
+    _by_hand(monkeypatch)
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    real_build = cli.build_report
+    theirs = datetime.now(UTC)
+
+    def build(*a, **k):
+        out = real_build(*a, **k)
+        e = store.load_v2(path)
+        path.write_text(render_entry(e.model_copy(update={"reported": theirs})),
+                        encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(cli, "build_report", build)
+    assert cli.cmd_report(_report_ns(path)) == 0
+    err = capsys.readouterr().err
+    assert "NOT stamped" not in err and "restored" not in err
+    assert f"stamped by another writer while its report was built ({theirs.isoformat()})" in err
+    assert store.load_v2(path).reported == theirs and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_marker_in_place_whose_directory_fsync_failed_is_said_in_place(
+        tmp_path, monkeypatch, capsys, v2):
+    """rev31d_marker_landed: the stamp fails before its rename; the marker
+    is then linked into place and its directory fsync fails."""
+    import errno
+
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    cli = _cli()
+    _by_hand(monkeypatch)
+    _publishing(monkeypatch, cli, tmp_path)
+    name = "update_v2" if v2 else "mark_reported"
+
+    def stamp(p, *a, **k):
+        _dir_fsyncs_fail(monkeypatch)
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(store, name, stamp)
+    assert cli.cmd_report(_report_ns(path)) == 9
+    err = capsys.readouterr().err
+    assert "could not be written either" not in err
+    assert "Its pending marker is in place, but its write could not be confirmed durable" in err
+    assert store.pending_marker(path).not_stamped
+
+
+def test_a_marker_removed_whose_directory_fsync_failed_is_said_removed(
+        tmp_path, monkeypatch, capsys):
+    """rev31d_marker_msg: removed, not "could not be removed"."""
+    import argparse
+
+    path = _either(tmp_path / "entries", monkeypatch, True)
+    cli = _cli()
+    _by_hand(monkeypatch)
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    gid = _live(built[0]).generation_id
+    _dir_fsyncs_fail(monkeypatch)
+    capsys.readouterr()
+    assert cli.cmd_mark_reported(argparse.Namespace(
+        ticker="TST", date=path.stem.split("_", 1)[1], generation=gid)) == 0
+    err = capsys.readouterr().err
+    assert store.report_pending(path) is None
+    assert "could not be removed" not in err
+    assert "its pending marker was removed, but the removal could not be confirmed durable" in err

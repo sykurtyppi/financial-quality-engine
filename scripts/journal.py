@@ -26,7 +26,9 @@ Core logic lives in app/services/journal/ so the CLI and the web UI never diverg
 PENDING its audit until `mark-reported`: meanwhile a plain `report` refuses
 (the web report page too), and `report --retry` rebuilds it on purpose once
 the marker's owner (the sweep that is auditing it) is gone; `--retry
---force` whatever the owner.
+--force` whatever the owner. A report whose stamp failed after its publish
+(exit 9, or the web page's) is left pending as "published, not stamped":
+nobody is at work on it, so `--retry` rebuilds it as it is.
 
 `report --defer-mark --result-file PATH` (the sweep's) also writes, once
 its report is published, which run that is: JSON with `report` (the
@@ -142,6 +144,8 @@ def _refused_as_pending(path: Path, args: argparse.Namespace) -> bool:
     if pending is None:
         return False
     retry, defer = getattr(args, "retry", False), getattr(args, "defer_mark", False)
+    if pending.not_stamped:
+        return _refused_as_not_stamped(path, pending, retry or defer)
     if retry and getattr(args, "force", False):
         return False
     me = store.report_owner()
@@ -164,6 +168,27 @@ def _refused_as_pending(path: Path, args: argparse.Namespace) -> bool:
           f"`journal.py mark-reported {ticker} --date {day}{_flag(pending.generation_id)}`; "
           f"to rebuild it on purpose instead: `journal.py report {ticker} --date {day} "
           "--retry`.", file=sys.stderr)
+    return True
+
+
+def _refused_as_not_stamped(path: Path, pending, rebuild: bool) -> bool:
+    """A report left pending because its stamp failed after the publish
+    (`store.mark_not_stamped`; review of 40c2d36, L1). Nobody is at work on
+    it: its writer is no owner to wait for (the web page's is the server),
+    so `--retry` (and the sweep's `--defer-mark`) rebuild it, the new run
+    replacing it as the live one (it stays, an earlier generation). A plain
+    report refuses, and names the stamp of the run that is live."""
+    ticker, day = path.stem.split("_", 1)
+    gid = pending.generation_id
+    if rebuild:
+        print(f"{path.name}: replacing the published, unstamped run {gid or '(unrecorded)'} "
+              "(it stays, an earlier generation).")
+        return False
+    print(f"{path.name}: this case's report was published but NOT stamped: {pending.text}. "
+          "Not building another over it. Stamp the published run: "
+          f"`journal.py mark-reported {ticker} --date {day}{_flag(gid)}`; or rebuild it on "
+          "purpose (the new run replaces it as the live one): "
+          f"`journal.py report {ticker} --date {day} --retry`.", file=sys.stderr)
     return True
 
 
@@ -229,15 +254,24 @@ def _no_longer_pending(path: Path) -> None:
     try:
         store.clear_report_pending(path)
     except OSError as e:
+        if store.pending_marker(path) is None:
+            # Unlinked, then the directory's fsync failed (review of 40c2d36, N3).
+            print(f"{path.name}: stamped; its pending marker was removed, but the removal "
+                  f"could not be confirmed durable ({e}).", file=sys.stderr)
+            return
         print(f"{path.name}: stamped, but its pending marker could not be removed ({e}); "
               "it has no effect on a stamped entry.", file=sys.stderr)
+
+
+class _StampedMeanwhile(store.UpdateRefused):
+    """`_stamp_reported` found the entry stamped by another writer."""
 
 
 def _stamp_reported(entry):
     """Stamp `reported` on the entry as it is on disk — once: a stamp another
     writer made meanwhile is kept, and the update refused."""
     if entry.reported is not None:
-        raise store.UpdateRefused("already reported.")
+        raise _StampedMeanwhile("already reported.")
     return entry.model_copy(update={"reported": datetime.now(UTC)})
 
 
@@ -267,15 +301,17 @@ def _not_stamped(path: Path, out: Path, made: Published | None, e: Exception) ->
     print(f"{path.name}: the report WAS published: {_which(made, out)}; but the entry is "
           f"NOT stamped reported: {type(e).__name__}: {e}", file=sys.stderr)
     gid = None if made is None else made.generation_id
-    try:
-        # Its owner is this plain report, which has exited once it is read.
-        store.set_report_pending(path, _STAMP_FAILED,
-                                 store.ReportOwner.this_process("journal.py report"),
-                                 generation_id=gid,
-                                 report=None if made is None else str(made.report))
+    in_place, e2 = store.mark_not_stamped(
+        path, _STAMP_FAILED, store.ReportOwner.this_process("journal.py report"), gid,
+        None if made is None else str(made.report))
+    if e2 is None:
         kept = ("It is left PENDING: a plain `report` of it refuses rather than build and "
                 "publish again.")
-    except OSError as e2:
+    elif in_place:
+        kept = (f"Its pending marker is in place, but its write could not be confirmed "
+                f"durable ({type(e2).__name__}: {e2}): a plain `report` of it refuses "
+                "rather than build and publish again.")
+    else:
         kept = (f"And its pending marker could not be written either ({type(e2).__name__}: "
                 f"{e2}): a plain `report` of it would build and publish again.")
     # A stamp REFUSED (review of 6563168, finding 2: the lock broken while it
@@ -286,6 +322,21 @@ def _not_stamped(path: Path, out: Path, made: Published | None, e: Exception) ->
     print(f"{kept} {when}stamp it: `python scripts/journal.py mark-reported {ticker} "
           f"--date {day}{_flag(gid)}`.", file=sys.stderr)
     return PUBLISHED_NOT_STAMPED_RC
+
+
+def _theirs(path: Path) -> str | None:
+    """A report's stamp refused because another writer stamped the entry while
+    the report was built (`_StampedMeanwhile`; a hand edit, since every
+    stamping command holds the report lock): the case IS reported and its
+    report live, so there is nothing to stamp and nothing to leave pending,
+    and a stamp is never moved. Said, and that stamp returned; None if it
+    cannot be read back (review of 40c2d36, N1: it was exit 9 "NOT stamped,
+    restore the entry", with a marker beside the stamped entry)."""
+    theirs = store.reported_on_disk(path)
+    if theirs is not None:
+        print(f"{path.name}: stamped by another writer while its report was built "
+              f"({theirs}), not by this run; that stamp is kept.", file=sys.stderr)
+    return theirs
 
 
 def _stamp(path: Path) -> str:
@@ -431,7 +482,10 @@ def _report_v2_locked(path, args: argparse.Namespace) -> int:
     try:
         stamped = _stamp(path)
     except Exception as e:  # noqa: BLE001 - the report is live: said, exit 9 (_not_stamped)
-        return _not_stamped(path, out, made, e)
+        theirs = _theirs(path) if isinstance(e, _StampedMeanwhile) else None
+        if theirs is None:
+            return _not_stamped(path, out, made, e)
+        stamped = theirs
     _no_longer_pending(path)  # a --retry over a pending report: reported now
     print(f"Report stamped at {stamped}.")
     print(f"distress: {distress} -> {out}")
