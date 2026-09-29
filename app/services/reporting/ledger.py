@@ -437,8 +437,16 @@ def _snapshot(obs: Any, role: str) -> Provenance:
 
 
 def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
-    from app.services.ingestion.vintages import silent_revision_tier1_lines
+    from app.services.ingestion.vintages import tier1_promotions
 
+    # VALIDATED is exactly what the card promoted: one item per card line.
+    # A fact both windows promote is one line on the card (each fact once),
+    # but was validated from each window; the other window's item is now
+    # DIRECTIONAL and names the window that promoted it — kept, not
+    # dropped, so its snapshots stay in the trail (review of c131583,
+    # finding 4).
+    promoted = {(c.field_name, c.key.start, c.key.end): (c, older, newer)
+                for c, older, newer, _line in tier1_promotions(rep, period_since=floor)}
     windows = []
     if rep.compared and rep.previous is not None and rep.newest is not None:
         windows.append((rep.changes_since_previous, rep.previous, rep.newest))
@@ -456,8 +464,8 @@ def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
                             period_start=c.key.start, period_end=c.key.end)
                 if p is not None:
                     prov.append(p)
-            promoted = bool(silent_revision_tier1_lines([c], older.captured, newer.captured,
-                                                        period_since=floor))
+            by = promoted.get((c.field_name, c.key.start, c.key.end))
+            here = by is not None and by[0] is c
             if c.kind == "withdrawn":
                 what = f"withdrawn (was {c.old_value:,.0f})"
             else:
@@ -471,9 +479,11 @@ def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
                 value=c.new_value, provenance=tuple(prov),
                 change_state="recomposed" if c.moved_tag else c.kind,
                 validation_status=(
-                    ValidationStatus.VALIDATED if promoted else ValidationStatus.DIRECTIONAL
+                    ValidationStatus.VALIDATED if here else ValidationStatus.DIRECTIONAL
                 ),
                 note="; ".join(n for n in (
+                    f"also promoted via snapshots {by[1].captured} → {by[2].captured} (the card "
+                    "lists each fact once)" if by is not None and not here else "",
                     "before the scored window (context)" if c.scope == "context" else "",
                     "raw fact (a snapshot could not be mapped): not a scored change"
                     if c.scope == "raw" else "",

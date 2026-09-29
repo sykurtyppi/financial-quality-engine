@@ -432,7 +432,7 @@ def _collect_streams(
         from app.services.ingestion.vintages import (
             digest_of,
             report_diff,
-            silent_revision_tier1_lines,
+            tier1_promotions,
         )
 
         cik = client.resolve_cik(ticker)
@@ -451,35 +451,9 @@ def _collect_streams(
         out = _Staged(result=vintage_diff)
         out.evidence["vintage"] = vintage_diff
         out.sections.append(_silent_revisions_section(vintage_diff))
-        # Promote from BOTH windows, each fact once. The lock-to-now window
-        # catches a revision that landed in an intermediate state (invisible
-        # to previous -> newest); previous -> newest catches a revision to a
-        # period the lock snapshot did not yet contain (a quarter added after
-        # the lock, then quietly revised), which the lock-to-now diff cannot
-        # see because it only walks facts present in the older snapshot.
-        # `compared` (and a lock window) imply both snapshots exist; the
-        # explicit None checks only let the type checker see it.
-        newest, previous, baseline = vintage_diff.newest, vintage_diff.previous, vintage_diff.baseline
-        windows = []
-        if vintage_diff.changes_since_baseline is not None and baseline is not None and newest is not None:
-            windows.append((vintage_diff.changes_since_baseline, baseline.captured, newest.captured))
-        if vintage_diff.compared and previous is not None and newest is not None:
-            windows.append((vintage_diff.changes_since_previous, previous.captured, newest.captured))
-        # A fact is "promoted" once a window actually put it on the card. Every
-        # key the lock window listed used to count — a raw row (never
-        # promoted) or a move below the threshold since the lock suppressed a
-        # real Tier-1 revision in previous -> newest while the ledger marked
-        # it VALIDATED (review of 224b896, finding 3).
-        promoted: set[tuple] = set()
-        for changes, older, newer in windows:
-            for c in changes:
-                key = (c.field_name, c.key.start, c.key.end)
-                if key in promoted:
-                    continue
-                lines = silent_revision_tier1_lines([c], older, newer, period_since=floor)
-                if lines:
-                    out.tier1 += lines
-                    promoted.add(key)
+        # Both windows, each fact once — the same list the ledger validates
+        # from, so the card and the ledger agree (review of c131583, finding 4).
+        out.tier1 += [line for *_, line in tier1_promotions(vintage_diff, period_since=floor)]
         return out
 
     takedowns = run("offerings", offerings) or []
@@ -509,7 +483,8 @@ def _silent_revisions_section(rep) -> str:
     lines.append(
         "_Prior-period figures that changed or disappeared between the two most "
         "recent distinct companyfacts snapshots a report scored, taken at or before "
-        f"{rep.as_of} (a raw watch-sweep capture is never compared). "
+        f"{rep.as_of} (a raw watch-sweep capture is compared only as the thesis-lock "
+        "baseline, when no scored snapshot predates the thesis day and the capture maps). "
         "Facts added for new periods are not listed. A figure that moved with a later "
         "filing still carried beside the original is listed apart (the restatement "
         "scan reads those from filing history); the rest has no such filing behind "
@@ -519,11 +494,25 @@ def _silent_revisions_section(rep) -> str:
     if rep.raw_note:
         lines.append(f"_{rep.raw_note}._")
         lines.append("")
-    lines.append(render_changes(rep.changes_since_previous, rep.previous.captured, rep.newest.captured))
+    # A window not compared as scored says so in its body, never "no
+    # prior-period figure changed" (review of c131583, finding 2).
+    lines.append(render_changes(rep.changes_since_previous, rep.previous.captured,
+                                rep.newest.captured, unavailable=rep.canonical_unavailable))
     if rep.changes_since_baseline is not None and rep.baseline is not None:
-        lines.append(f"**Since the pinned thesis was locked** ({rep.baseline.captured}):")
+        source = f", {rep.baseline_source}" if rep.baseline_source else ""
+        lines.append(f"**Since the pinned thesis was locked** ({rep.baseline.captured}{source}):")
         lines.append("")
-        lines.append(render_changes(rep.changes_since_baseline, rep.baseline.captured, rep.newest.captured))
+        if rep.baseline_source:
+            lines.append(
+                "_No snapshot a report scored predates the thesis day; the lock baseline is "
+                "the newest watch-sweep capture before it that the mapper builds, compared "
+                "as the engine scores it._")
+            lines.append("")
+        lines.append(render_changes(rep.changes_since_baseline, rep.baseline.captured,
+                                    rep.newest.captured, unavailable=rep.baseline_unavailable))
+    elif rep.baseline_unavailable:
+        lines.append("**Since the pinned thesis was locked:** Not compared as scored: "
+                     f"{rep.baseline_unavailable}.")
     elif rep.baseline_note:
         lines.append(f"_{rep.baseline_note}._")
     return "\n".join(lines)

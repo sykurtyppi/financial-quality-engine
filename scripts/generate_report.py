@@ -56,7 +56,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--no-vintage", action="store_true",
-        help="do not archive the scored companyfacts payload to data/vintages/",
+        help="do not archive the scored companyfacts payload to data/vintages/ (the "
+             "silent-revision check then reads 'not compared' unless the store already "
+             "holds identical content)",
     )
     parser.add_argument(
         "--as-of", metavar="YYYY-MM-DD", type=date.fromisoformat,
