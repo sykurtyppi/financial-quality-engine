@@ -165,16 +165,25 @@ def _generate_and_stamp(path: Path, ticker: str, day: str) -> tuple[str | None, 
     def cli(command: str) -> str:
         return f"scripts/journal.py {command} {store.safe_ticker(ticker)} --date {day}"
 
-    pending = store.report_pending(path)
+    pending = store.pending_marker(path)
     if pending is not None:
+        gen = "" if pending.generation_id is None else f" --generation {pending.generation_id}"
+        if pending.not_stamped:
+            # Its report was published and its stamp failed (here or by
+            # `journal.py report`): nobody is at work on it (review of
+            # 40c2d36, L1). Refused: nothing is built.
+            return (f"This case's report was published but its thesis was NOT stamped: "
+                    f"{pending.text}. Not building another over it. Stamp the published run: "
+                    f"`{cli('mark-reported')}{gen}`; or rebuild it on purpose (the new run "
+                    f"replaces it as the live one): `{cli('report')} --retry`."), 409
         # `journal.py report --defer-mark` published this report and the
         # sweep is auditing it; it stamps it once the audit passes (review of
         # the finding-3b fix: the page built and published over the run being
         # audited, and stamped it). Refused: nothing is built.
         return (f"This case's report is pending (being audited by the sweep, or left by an "
-                f"interrupted run): {pending}. It is stamped once the audit passes; not "
+                f"interrupted run): {pending.text}. It is stamped once the audit passes; not "
                 f"building another over it. Once the audit has passed: "
-                f"`{cli('mark-reported')}`; to rebuild it on purpose (once its owner is "
+                f"`{cli('mark-reported')}{gen}`; to rebuild it on purpose (once its owner is "
                 f"gone): `{cli('report')} --retry`."), 409
     try:
         # fresh=True: the first report LOCKS the thesis against what was
@@ -213,14 +222,17 @@ def _not_stamped(path: Path, e: Exception, made, mark: str) -> tuple[str, int]:
                 f"the stamp was in place ({e}): the stamp could not be confirmed durable. "
                 "Check the disk."), 200
     gen = "" if made is None else f" --generation {made.generation_id}"
-    try:
-        store.set_report_pending(
-            path, "the web report page (its report was published; the stamp failed)",
-            store.ReportOwner.this_process("the web report page"),
-            generation_id=None if made is None else made.generation_id,
-            report=None if made is None else str(made.report))
+    in_place, e2 = store.mark_not_stamped(
+        path, "the web report page (its report was published; the stamp failed)",
+        store.ReportOwner.this_process("the web report page"),
+        None if made is None else made.generation_id,
+        None if made is None else str(made.report))
+    if e2 is None:
         kept = "It is left pending: this page will not build it again."
-    except OSError as e2:
+    elif in_place:
+        kept = (f"Its pending marker is in place, but its write could not be confirmed "
+                f"durable ({e2}): this page will not build it again.")
+    else:
         kept = (f"Its pending marker could not be written either ({e2}): opening this page "
                 "again builds its report again.")
     return (f"The report was generated and is live (below), but the thesis was NOT "

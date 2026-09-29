@@ -562,3 +562,76 @@ def test_a_stamp_that_landed_on_the_page_is_a_stamp(client, monkeypatch):
     assert r.status_code == 200
     assert "could not be confirmed durable" in r.text
     assert store.parse_entry(path)["is_reported"] and store.report_pending(path) is None
+
+
+# --- review of 40c2d36 (rev31d_web_owner): the page's own marker, said as what it is ------
+
+
+def _page_stamp_fails(monkeypatch, then=None):
+    real_mark, fired = store.mark_reported, []
+
+    def once(p):
+        if not fired:
+            fired.append(1)
+            if then is not None:
+                then()
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_mark(p)
+
+    monkeypatch.setattr(store, "mark_reported", once)
+
+
+def test_the_pages_unstamped_run_is_refused_in_its_own_words_and_retryable(
+        client, monkeypatch):
+    import argparse
+    import importlib.util
+
+    from app.services.reporting.report_files import read_live
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    day = path.stem.split("_", 1)[1]
+    builds: list = []
+    _publishing_build(monkeypatch, builds)
+    _page_stamp_fails(monkeypatch)
+    assert client.get("/report/KO").status_code == 500
+    gid = read_live(builds[0]).generation_id
+    r = client.get("/report/KO")
+    assert r.status_code == 409 and len(builds) == 1
+    assert "was published but its thesis was NOT stamped" in r.text
+    assert f"mark-reported KO --date {day} --generation {gid}" in r.text
+    assert f"report KO --date {day} --retry" in r.text
+    assert "being audited" not in r.text and "once the audit passes" not in r.text
+    assert "owner is gone" not in r.text
+    # The server that wrote it runs on; `--retry` is not held for it.
+    spec = importlib.util.spec_from_file_location(
+        "journal_cli_web", Path(__file__).resolve().parents[2] / "scripts" / "journal.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    monkeypatch.delenv("FQE_REPORT_OWNER", raising=False)
+    assert cli.cmd_report(argparse.Namespace(ticker="KO", date=day, no_docs=True,
+                                             defer_mark=False, retry=True, force=False)) == 0
+    assert len(builds) == 2 and store.parse_entry(path)["is_reported"]
+
+
+def test_the_pages_marker_in_place_is_said_in_place(client, monkeypatch):
+    """rev31d_marker_landed, on the page: the marker's directory fsync fails
+    after it is linked into place; it is there, and the page says so."""
+    import stat
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    _publishing_build(monkeypatch, [])
+    real_fsync = os.fsync
+
+    def dir_fsyncs_fail():
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "directory fsync failed")
+            return real_fsync(fd)
+        monkeypatch.setattr(os, "fsync", fsync)
+
+    _page_stamp_fails(monkeypatch, then=dir_fsyncs_fail)
+    r = client.get("/report/KO")
+    assert r.status_code == 500
+    assert "builds its report again" not in r.text
+    assert "Its pending marker is in place, but its write could not be confirmed durable" in r.text
+    assert store.pending_marker(path).not_stamped

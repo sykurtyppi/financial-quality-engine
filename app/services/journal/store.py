@@ -181,6 +181,13 @@ class Pending(NamedTuple):
     owner: ReportOwner | None
     generation_id: str | None = None
     report: str | None = None
+    # Left by a stamp that failed after the publish (`mark_not_stamped`):
+    # nobody is at work on it, whoever wrote it (review of 40c2d36, L1).
+    not_stamped: bool = False
+
+
+# The marker's `state` when its report was published and its stamp failed.
+NOT_STAMPED = "published, not stamped"
 
 
 def report_owner() -> ReportOwner:
@@ -191,7 +198,8 @@ def report_owner() -> ReportOwner:
 
 
 def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None, *,
-                       generation_id: str | None = None, report: str | None = None) -> None:
+                       generation_id: str | None = None, report: str | None = None,
+                       not_stamped: bool = False) -> None:
     """Record that ``path``'s report is PENDING its audit: built (or being
     built) by ``journal.py report --defer-mark`` and not yet stamped, for
     ``owner`` (default: ``report_owner()``), the run that will audit and
@@ -216,7 +224,9 @@ def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None, *,
     ``generation_id`` and ``report`` name the run once it is published (Hermes
     re-audit of 84e65b0, findings 3 and 4): ``mark-reported --generation``
     takes the run a marker records as the entry's own, whatever is live by
-    then, and a refusal names the command that stamps it.
+    then, and a refusal names the command that stamps it. ``not_stamped``
+    records (``state``) that the stamp failed after the publish: see
+    `mark_not_stamped`.
 
     A hidden sidecar (``.<name>.report.pending``), JSON, written whole. What
     is there already is replaced (a ``--defer-mark`` retry takes over the
@@ -228,6 +238,8 @@ def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None, *,
     doc: dict[str, object] = {"marked": now_iso(), "by": by, "owner": owner._asdict()}
     if generation_id is not None:
         doc.update(generation_id=generation_id, report=report)
+    if not_stamped:
+        doc["state"] = NOT_STAMPED
     text = json.dumps(doc) + "\n"
     try:
         regular = stat.S_ISREG(os.lstat(marker).st_mode)
@@ -279,10 +291,36 @@ def pending_marker(path: Path) -> Pending | None:
                        f"{raw.strip()[:200]!r})", None)
     said = f"marked {doc.get('marked')} by {doc.get('by')}, for {owner.describe()}"
     gid, report = doc.get("generation_id"), doc.get("report")
+    not_stamped = doc.get("state") == NOT_STAMPED
     if not isinstance(gid, str):
-        return Pending(said, owner)  # none recorded (or not in kind): the old format's
+        # None recorded (or not in kind): the old format's.
+        return Pending(said, owner, not_stamped=not_stamped)
     report = report if isinstance(report, str) else None
-    return Pending(f"{said}; its report: generation {gid} ({report})", owner, gid, report)
+    return Pending(f"{said}; its report: generation {gid} ({report})", owner, gid, report,
+                   not_stamped)
+
+
+def mark_not_stamped(path: Path, by: str, owner: ReportOwner, generation_id: str | None,
+                     report: str | None) -> tuple[bool, OSError | None]:
+    """Leave ``path`` PENDING because its report was published and its stamp
+    failed (`journal.py report`, the web report page): a plain report of it
+    refuses rather than build and publish again. The marker says so
+    (``state``): its writer is no owner at work (the web page's is the
+    server, running for good), so ``--retry`` rebuilds without ``--force``
+    (review of 40c2d36, L1).
+
+    Returns whether the marker is in place, and the error its write raised,
+    if any. A marker linked into place whose directory's fsync then failed IS
+    in place, its durability unconfirmed: read back, not taken for "not
+    written" (review of 40c2d36, N2). The caller holds ``report_lock``."""
+    try:
+        set_report_pending(path, by, owner, generation_id=generation_id, report=report,
+                           not_stamped=True)
+    except OSError as e:
+        pending = pending_marker(path)
+        return (pending is not None and pending.not_stamped
+                and pending.generation_id == generation_id), e
+    return True, None
 
 
 def report_pending(path: Path) -> str | None:
