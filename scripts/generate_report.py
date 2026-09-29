@@ -23,6 +23,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -43,6 +45,7 @@ from app.services.reporting.report_files import (
     PUBLISH_IN_DOUBT_RC,
     NotPublished,
     PublishInDoubt,
+    Staged,
     replacing,
 )
 
@@ -61,6 +64,26 @@ def _unmappable(ticker: str, e: ValueError) -> int:
     print("no report written: the fundamentals were fetched but could not be "
           "mapped into quarters to score.", file=sys.stderr)
     return 2
+
+
+@contextmanager
+def _publishing(out: Path) -> Iterator[Staged]:
+    """`replacing`, with an OSError of the publish itself (a foreign pointer,
+    a linked ``.staging`` or ``.generations``: refused before anything live
+    changes) raised as `NotPublished`, so it is the one-line "no report
+    published" and exit 3, not a traceback and exit 1 (cross-branch review
+    of the finding 5 fix, finding 3). One raised by the build inside the
+    block is the build's, and passes through as it is."""
+    building = False
+    try:
+        with replacing(out) as staged:
+            building = True
+            yield staged
+            building = False
+    except OSError as e:
+        if building:
+            raise
+        raise NotPublished(f"{out.name}: {e}") from e
 
 
 def main() -> int:
@@ -147,7 +170,7 @@ def main() -> int:
     # its report and ledger exist, the earlier run is kept whole as the
     # previous generation, and a build that fails leaves the live report as
     # it was.
-    with replacing(out) as staged:
+    with _publishing(out) as staged:
         report, thermometer = build_report(
             result, dataset,
             generated_on=generated_on,

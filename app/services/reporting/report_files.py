@@ -105,6 +105,16 @@ class PublishInDoubt(RuntimeError):
 PUBLISH_IN_DOUBT_RC = 8
 
 
+class ForeignPointer(OSError):
+    """``.generations/<base>/current`` is a link this engine did not write:
+    it names no generation directory beside it (``_generation_dir``), and is
+    never followed. EINVAL, as before, but its own type: a copy with its
+    links dereferenced (the pointer a directory) is a plain OSError, and a
+    caller that must tell "nothing of ours is live" from "this directory is
+    not ours to read" (``restore``) can (cross-branch review of the finding
+    5 fix, finding 1)."""
+
+
 def _base(report: Path) -> str:
     """`AAPL_2026-09-26.md` -> `AAPL_2026-09-26`; a replay keeps `.replay`."""
     return report.name.removesuffix(".md")
@@ -182,9 +192,9 @@ def current_generation(report: Path) -> Path | None:
     generations). Only a missing pointer reads as none: any other failure to
     read it (permission, I/O) raises rather than being taken for "nothing
     published" (Hermes re-audit F2), and so does a pointer that does not
-    name one of its generations (``_generation_dir``): it is never followed
-    out of the reports directory, and never read as "nothing published"
-    either. ``restore`` writes the pointer anew."""
+    name one of its generations (``_generation_dir``, `ForeignPointer`): it
+    is never followed out of the reports directory, and never read as
+    "nothing published" either. ``restore`` writes the pointer anew."""
     pointer = _pointer(report)
     try:
         target = os.readlink(pointer)
@@ -197,10 +207,10 @@ def current_generation(report: Path) -> Path | None:
         raise
     gen = _generation_dir(report, target)
     if gen is None or not gen.is_dir():
-        raise OSError(errno.EINVAL, f"{pointer} -> {target!r} names no generation directory "
-                      "beside it: not a pointer this engine wrote, or its generation was "
-                      "removed. It is not followed; `restore` a kept generation, or remove "
-                      "the pointer by hand to publish afresh")
+        raise ForeignPointer(errno.EINVAL, f"{pointer} -> {target!r} names no generation "
+                             "directory beside it: not a pointer this engine wrote, or its "
+                             "generation was removed. It is not followed; `restore` a kept "
+                             "generation, or remove the pointer by hand to publish afresh")
     return gen
 
 
@@ -688,10 +698,20 @@ def restore(report: Path, generation: str) -> Path:
     """Make a kept generation live again, in one step: ``generation`` is its
     directory name or a unique part of it (its id, its stamp). Returns the
     restored report's path in its generation. A plain file at a live name
-    that is not the live run's stops it, as it stops a rebuild."""
+    that is not the live run's stops it, as it stops a rebuild. A pointer
+    this engine did not write (`ForeignPointer`) names no live run to keep,
+    and is written anew."""
     with publish_lock(report):
         _home(report).mkdir(parents=True, exist_ok=True)
-        _adopt(report, None)
+        try:
+            _adopt(report, None)
+        except ForeignPointer:
+            # Read (before any change) as the run plain files at the live
+            # names must match. Dropped, those files are kept as a generation
+            # of their own, as with no pointer at all (cross-branch review of
+            # the finding 5 fix, finding 1).
+            _pointer(report).unlink()
+            _adopt(report, None)
         kept = generations(report)
         matches = ([d for d in kept if d.name == generation]
                    or [d for d in kept if generation in d.name])

@@ -28,6 +28,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -258,6 +259,133 @@ class TestPointer:
         assert read_live(report).audit == live.generation_dir / f"{BASE}_audit.md"
         set_aside(report)
         assert read_live(via) is None
+
+
+class TestForeignPointerIsItsOwnError:
+    """A pointer this engine did not write and a pointer that is not a link
+    at all (a reports directory copied with its links dereferenced) raised
+    the same bare ``OSError(EINVAL)``, so a caller that must tell "nothing
+    of ours is live" from "this directory is not ours to read" (a
+    ``restore`` that reads the live run to roll back to it) could not
+    (cross-branch review of the finding 5 fix, finding 1). The foreign
+    pointer is a `ForeignPointer`: still an OSError with EINVAL, with the
+    same message; the dereferenced copy is not one."""
+
+    @pytest.mark.parametrize("aim", ["outside", "dotdot", "missing"])
+    def test_every_read_of_a_foreign_pointer_raises_it(self, tmp_path, outside, aim):
+        reports = tmp_path / "reports"
+        report = _publish(reports)
+        target = {"outside": str(outside), "dotdot": "..",
+                  "missing": "20260926T210507Z_0009_gone"}[aim]
+        rf._symlink(_home(reports) / rf.CURRENT, target)
+        for op in (lambda: current_generation(report), lambda: read_live(report),
+                   lambda: set_aside(report), lambda: link_audit(report),
+                   lambda: _publish(reports, "second")):
+            with pytest.raises(rf.ForeignPointer, match="not a pointer this engine wrote") as e:
+                op()
+            assert isinstance(e.value, OSError) and e.value.errno == errno.EINVAL
+
+    def test_a_dereferenced_copy_is_not_a_foreign_pointer(self, tmp_path):
+        import shutil
+
+        src = tmp_path / "reports"
+        report = _publish(src)
+        gen = current_generation(report).name
+        dst = tmp_path / "copied"
+        shutil.copytree(src, dst)
+        before = _tree(dst)
+        for op in (lambda: current_generation(dst / NAME), lambda: read_live(dst / NAME),
+                   lambda: restore(dst / NAME, gen)):
+            with pytest.raises(OSError, match="copied with its links dereferenced") as e:
+                op()
+            assert not isinstance(e.value, rf.ForeignPointer)
+            assert e.value.errno == errno.EINVAL
+        assert _tree(dst) == before
+
+    def test_restore_over_a_foreign_pointer_keeps_the_plain_files(self, tmp_path, outside):
+        """With a foreign pointer there is no live run to keep: `restore`
+        drops it and writes its own. Plain files at the live names are still
+        kept first, as a generation of their own, as they are with no
+        pointer at all; they refused the restore instead (the foreign pointer
+        was read as the live run they must match)."""
+        reports = tmp_path / "reports"
+        report = _publish(reports)
+        first = current_generation(report)
+        _publish(reports, "second")
+        report.unlink()
+        report.write_text("# a plain report\n")
+        victims = _outside_run(outside)
+        rf._symlink(_home(reports) / rf.CURRENT, str(outside))
+        assert restore(report, first.name) == first / NAME
+        assert read_live(report).text.startswith("# first report")
+        kept = [g for g in generations(report) if g.name.endswith("_adopted")]
+        assert [(g / NAME).read_text() for g in kept] == ["# a plain report\n"]
+        assert all(_intact(v, f"VICTIM {v.name}\n") for v in victims)
+
+
+def _stub_generate_report(cli, root: Path, monkeypatch, *, build_error=None) -> Path:
+    """``generate_report.py AAPL`` against stubs: no SEC, a trivial build;
+    returns the report path it publishes."""
+    from types import SimpleNamespace
+
+    diag = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_series=lambda: {},
+                           field_notes=lambda: [])
+    snapshot = SimpleNamespace(dataset=SimpleNamespace(documents=[]), diagnostics=diag,
+                               company_facts={})
+
+    def build(result, dataset, *, ledger_out, **kw):
+        if build_error is not None:
+            raise build_error
+        ledger_out.write_text(json.dumps({"run": "cli"}))
+        return "# cli report\n", None
+
+    monkeypatch.setattr(cli, "ROOT", root)
+    monkeypatch.setattr(cli, "SecClient", lambda fresh=False: object())
+    monkeypatch.setattr(cli, "fetch_dataset_snapshot", lambda *a, **k: snapshot)
+    monkeypatch.setattr(cli, "store_vintage_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "fetch_submissions_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "analyze", lambda dataset: None)
+    monkeypatch.setattr(cli, "build_report", build)
+    monkeypatch.setattr("sys.argv", ["generate_report.py", "AAPL", "--no-docs", "--no-vintage"])
+    return root / "reports" / f"AAPL_{date.today().isoformat()}.md"
+
+
+class TestPublishRefusalsAtTheCLI:
+    """The publish's refusals (a foreign pointer, a linked ``.generations``
+    or ``.staging``) left `generate_report.py` as a traceback and exit 1,
+    not the "no report published" line and exit 3 a refused publish gets
+    (cross-branch review of the finding 5 fix, finding 3). Only the
+    publish's own OSErrors: one raised by the build inside it is still
+    the build's."""
+
+    gen_cli = _script("generate_report")
+
+    @pytest.mark.parametrize("planted", ["pointer", GENERATIONS_DIR, STAGING_DIR])
+    def test_a_refused_publish_is_exit_3(self, tmp_path, outside, monkeypatch, capsys,
+                                         planted):
+        report = _stub_generate_report(self.gen_cli, tmp_path, monkeypatch)
+        assert self.gen_cli._main() == 0
+        assert read_live(report).text.startswith("# cli report")
+        capsys.readouterr()
+        if planted == "pointer":
+            rf._symlink(report.parent / GENERATIONS_DIR / report.stem / rf.CURRENT,
+                        str(outside))
+        else:
+            os.rename(report.parent / planted, outside / "away")
+            os.symlink(outside / "away", report.parent / planted)
+        before = _tree(outside)
+        assert self.gen_cli._main() == 3
+        out, err = capsys.readouterr()
+        assert "no report published" in err and "Traceback" not in err
+        assert "distress signals" not in out
+        assert _tree(outside) == before
+
+    def test_an_oserror_from_the_build_is_not_a_refused_publish(
+            self, tmp_path, monkeypatch):
+        _stub_generate_report(self.gen_cli, tmp_path, monkeypatch,
+                              build_error=OSError(errno.EIO, "the cache could not be read"))
+        with pytest.raises(OSError, match="the cache could not be read"):
+            self.gen_cli._main()
 
 
 # --- lock sidecars ---------------------------------------------------------------
@@ -959,6 +1087,70 @@ class TestModesKept:
         assert rf.existing_mode(p) is None
         rf.write_atomic(p, "new")
         assert p.stat().st_mode & 0o777 == _new_file_mode(tmp_path)
+
+    @pytest.fixture
+    def entry(self, tmp_path, monkeypatch):
+        from app.services.journal import store
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        return store.open_entry("NVDA", thesis="data-center demand holds")
+
+    def test_a_journal_update_keeps_only_the_permission_bits(self, entry):
+        """The journal's own rewrite (`_durable_write`, which another
+        branch's pending marker also goes through) copied the whole
+        ``S_IMODE``: a planted 0o6777 entry stayed set-id (cross-branch
+        review of the finding 5 fix, finding 2)."""
+        from app.services.journal import store
+
+        os.chmod(entry, 0o6777)
+        store.set_field(entry, "what_it_surfaced", "x")
+        assert entry.stat().st_mode & 0o7777 == 0o777
+        os.chmod(entry, 0o600)
+        store.mark_reported(entry)
+        assert entry.stat().st_mode & 0o7777 == 0o600
+
+    def test_a_private_entry_is_never_wider_while_it_is_written(self, entry, monkeypatch):
+        """The mode an update keeps is set after the text is written: until
+        then the temporary is 0o600, never the umask's, so a 0o600 entry's
+        text is not readable by others while it is written."""
+        from app.services.journal import store
+
+        os.chmod(entry, 0o600)
+        seen = []
+        real = os.fsync
+
+        def fsync(fd):
+            st = os.fstat(fd)
+            if stat.S_ISREG(st.st_mode):
+                seen.append(st.st_mode & 0o777)
+            return real(fd)
+
+        monkeypatch.setattr(os, "fsync", fsync)
+        old = os.umask(0o022)
+        try:
+            store.set_field(entry, "what_it_surfaced", "x")
+        finally:
+            os.umask(old)
+        assert seen == [0o600] and entry.stat().st_mode & 0o777 == 0o600
+
+    def test_a_journal_entry_of_another_owner_lends_no_mode(self, entry, monkeypatch):
+        from app.services.journal import store
+
+        os.chmod(entry, 0o600)
+        monkeypatch.setattr(rf.os, "geteuid", lambda: entry.stat().st_uid + 1)
+        store.set_field(entry, "what_it_surfaced", "x")
+        assert "what_it_surfaced: x" in entry.read_text()
+        assert entry.stat().st_mode & 0o7777 == _new_file_mode(entry.parent)
+
+    @pytest.mark.skipif(os.geteuid() != 0, reason="making a file of another owner needs root")
+    def test_a_journal_entry_of_another_owner_lends_no_mode_for_real(self, entry):
+        from app.services.journal import store
+
+        os.chmod(entry, 0o6770)
+        os.chown(entry, 54321, 54321)
+        store.set_field(entry, "what_it_surfaced", "x")
+        assert "what_it_surfaced: x" in entry.read_text()
+        assert entry.stat().st_mode & 0o7777 == _new_file_mode(entry.parent)
 
     def test_overdue_alert_state(self, tmp_path, monkeypatch):
         state = tmp_path / "journal" / ".overdue_alerted.json"
