@@ -83,11 +83,21 @@ def _lookup_metric_value(
     bundle: MetricsBundle | None,
 ) -> tuple[float | None, str, bool]:
     """Returns (value, note, structural).
-    Value is None with an explanatory note when the metric is missing or
-    non-OK for that period. A non-finite value is returned as found; the
-    caller refuses it before any comparison. `structural` is True iff the metric name is
+    Value is None with an explanatory note when the metric is missing,
+    non-OK, or non-finite for that period. `structural` is True iff the metric name is
     unknown (unresolvable), False iff the metric is known but not yet populated
-    (pending)."""
+    (pending).
+
+    Non-finite (Hermes audit of 424b0b4, finding 7): NaN compares False
+    against everything, so it resolved `violated` (and +/-inf whichever way
+    its sign fell), and a committed verdict is final. It is refused here,
+    before any comparator ever sees it, and as its source warrants. An
+    engine metric's is structural, like NOT_MEANINGFUL: the value is
+    deterministic for the inputs as filed. `MetricResult` already turns an
+    OK one into NOT_MEANINGFUL, but `model_copy(update=...)` skips that
+    validation, so it is checked again here. A raw field's waits like a
+    missing field: it is a reported number, not a computation, and
+    comparative revisions do arrive."""
     # 1. Engine spec_id: consult the bundle's latest+history (latest ≡ this period
     #    when the assumption's window matches the bundle's latest period). We
     #    look up by period label to be safe if the bundle's latest is elsewhere.
@@ -124,11 +134,11 @@ def _lookup_metric_value(
                 f"metric '{metric_name}' is {m.status.value} in "
                 f"{basis}{period.fiscal_label}"
             ), structural
-        return (
-            float(m.value),
-            f"engine metric '{metric_name}' ({basis}{period.fiscal_label})",
-            False,
-        )
+        value = float(m.value)
+        note = f"engine metric '{metric_name}' ({basis}{period.fiscal_label})"
+        if not math.isfinite(value):
+            return None, f"{note} is not a finite number ({value!r})", True
+        return value, note, False
 
     # 2. Raw XBRL-mapped field on PeriodFinancials.
     if hasattr(period, metric_name):
@@ -137,7 +147,13 @@ def _lookup_metric_value(
             # Field exists but not populated for this period — comparative
             # revisions do arrive, so retryable (pending).
             return None, f"field '{metric_name}' missing in {period.fiscal_label}", False
-        return float(raw), f"XBRL field '{metric_name}' ({period.fiscal_label})", False
+        value = float(raw)
+        if not math.isfinite(value):
+            return None, (
+                f"field '{metric_name}' in {period.fiscal_label} is not a finite "
+                f"number ({value!r})"
+            ), False
+        return value, f"XBRL field '{metric_name}' ({period.fiscal_label})", False
 
     # Unknown metric name is a spec problem — never resolvable given this schema.
     return None, f"unknown metric or field '{metric_name}'", True
@@ -302,21 +318,6 @@ def propose_resolution(
             state="unresolvable" if structural else "pending",
             at=period.period_end,
             note=note,
-        )
-    if not math.isfinite(value):
-        # Hermes audit of 424b0b4, finding 7: NaN compares False against
-        # everything, so it resolved `violated` (and +/-inf whichever way
-        # its sign fell), and a committed verdict is final. `MetricResult`
-        # now refuses an OK non-finite value, but a raw field is a plain
-        # float and `model_copy(update=...)` skips validation, so the check
-        # is made here, before any comparator — and before the source check,
-        # whose `pending` would carry the value as `observed`. Terminal: the
-        # value is deterministic for the data as filed.
-        return Resolution(
-            assumption_index=assumption_index,
-            state="unresolvable",
-            at=period.period_end,
-            note=f"{note} is not a finite number ({value!r})",
         )
 
     # Round-11 finding 2, closed: which filings reported this number. A

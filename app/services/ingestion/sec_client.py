@@ -68,9 +68,10 @@ _RETRY_AFTER_CAP_S = 60.0
 #   clock every reader of the file agrees on. Its weakness — a clock stepped
 #   backwards makes the stored start look far in the future — is bounded by
 #   `_SHARED_AHEAD_CAP_S`. Clients share it when they share a cache dir.
-#   Both files are opened O_NOFOLLOW: a symlink planted at either name must
-#   not have its target overwritten (or created); pacing then falls back to
-#   process-wide like any other failure to use the file.
+#   Its files (and the hold-off's, below) are opened O_NOFOLLOW: a symlink
+#   planted at any of their names must not have its target overwritten (or
+#   created); pacing then falls back to process-wide like any other failure
+#   to use the file.
 #
 # A caller RESERVES its slot under the locks (`start = max(now, last + i)`,
 # then `last = start`) and sleeps until it OUTSIDE them, so waiters queue in
@@ -85,24 +86,30 @@ _RETRY_AFTER_CAP_S = 60.0
 # send inside the cooldown (Hermes audit of 424b0b4, finding 6: a second
 # client's request ~0.3 s after a `Retry-After: 2`). So the hold-off is also
 # recorded on its own, as a BLOCKED-UNTIL instant — process-wide
-# `_blocked_until` (monotonic) and a second field in the state file (wall
-# clock) — that no reservation may land before and that `_get` re-checks
-# after its sleep, immediately before sending: a request still inside the
-# cooldown reserves again and sleeps again. It is kept apart from the
-# schedule because the schedule is "the last start", which a re-reservation
-# moves on; the block is when the cooldown ends, which only another
-# Retry-After moves, and only later.
+# `_blocked_until` (monotonic) and a file of its own beside the schedule,
+# `_HOLD_STATE` (wall clock) — that no reservation may land before and that
+# `_get` re-checks after its sleep, immediately before sending: a request
+# still inside the cooldown reserves again and sleeps again. It is kept apart
+# from the schedule because the schedule is "the last start", which a
+# re-reservation moves on; the block is when the cooldown ends, which only
+# another Retry-After moves, and only later.
 #
-# The state file is `<last start>` or, while a hold-off is running,
-# `<last start> <blocked until>`. An old one-field file reads as a schedule
-# with no hold-off, and the second field is written only while it binds, so
-# a process still running the previous module (which reads a two-field file
-# as garbage and restarts its schedule — one unpaced request) only meets one
-# during a cooldown.
+# `_RATE_STATE` stays exactly ONE number, the schedule, in every state. The
+# previous module reads it as one number and rewrites anything else as a
+# schedule starting now; when the block was a second field there, a single
+# request from a process still running that module (a long-lived web UI
+# across an upgrade) erased the pushed schedule AND the block for every
+# process sharing the directory, and a bystander on this module sent 0.06 s
+# into a 5 s hold-off (review of 2025f74). Kept one number, the schedule
+# still carries the hold-off in the form that module honours; it never reads
+# `_HOLD_STATE`. Both files are read and written under the same sidecar
+# flock, opened the same no-follow way, and fall back the same way. The hold
+# file holds an end only while it binds, and is empty otherwise.
 _pace_lock = threading.Lock()
 _last_start = 0.0  # time.monotonic() of the last reserved request start
 _blocked_until = 0.0  # time.monotonic() before which no request may start
 _RATE_STATE = ".sec_rate"
+_HOLD_STATE = ".sec_rate_hold"
 # How far ahead of now a stored reservation may legitimately be: a Retry-After
 # hold-off (at most `_RETRY_AFTER_CAP_S`) plus the queue of waiters behind it
 # (a 40-thread web pool plus a sweep is ~7 s at the interval). A value further
@@ -112,11 +119,13 @@ _RATE_STATE = ".sec_rate"
 # less than the cap can delay the next request by up to that step, once.
 _SHARED_QUEUE_S = 15.0
 _SHARED_AHEAD_CAP_S = _RETRY_AFTER_CAP_S + _SHARED_QUEUE_S
-# The stored blocked-until has the same weakness and the same guard, with a
-# tighter bound: it is written as now + a Retry-After already capped at
-# `_RETRY_AFTER_CAP_S`, and no queue ever stands in front of it, so anything
-# further out than that cap is a stepped clock or a corrupted file and is
-# discarded (the schedule field is judged on its own cap, independently).
+# The stored blocked-until has the same weakness and the same guard, with
+# the same cap. It is written as now + a Retry-After already capped at
+# `_RETRY_AFTER_CAP_S`; judged on that cap itself, a maximal hold-off sat
+# exactly ON the bound and a wall clock stepped back by 1 ms made every other
+# process discard it (review of 2025f74). The schedule's slack keeps it, at
+# the schedule's price. Each value is judged on its own: a discarded one
+# leaves the other standing.
 _shared_pacing_warned: set[str] = set()
 # The sidecar descriptor while a reservation holds its flock (always under
 # `_pace_lock`), so a forked child can drop its inherited copy; see below.
@@ -165,16 +174,16 @@ def _open_state(path: Path) -> int:
 
 @contextmanager
 def _locked_state(cache_dir: Path):
-    """The shared state's descriptor, under its flock. Raises OSError when
-    the state cannot be locked or opened (read-only cache, no lock support,
-    a symlink at either name).
+    """The shared state's descriptors, `(schedule, hold)`, under their
+    flock. Raises OSError when the state cannot be locked or opened
+    (read-only cache, no lock support, a symlink at any of the three names).
 
     The lock is a sidecar, following `watch/watchlist.py` `_write_lock` and
     `reporting/report_files.py` `publish_lock`, and carries the same
     assumption: `fcntl.flock` is advisory and NOT reliable over NFS, so a
     cache directory on a network mount paces only within each process. It is
-    held for one read and at most one write of a few bytes, never across a
-    sleep."""
+    held for a read and at most a write of a few bytes per file, never
+    across a sleep."""
     global _held_rate_fd
     fd = _open_state(cache_dir / f"{_RATE_STATE}.lock")
     _held_rate_fd = fd
@@ -182,7 +191,11 @@ def _locked_state(cache_dir: Path):
         fcntl.flock(fd, fcntl.LOCK_EX)
         state = _open_state(cache_dir / _RATE_STATE)
         try:
-            yield state
+            hold = _open_state(cache_dir / _HOLD_STATE)
+            try:
+                yield state, hold
+            finally:
+                os.close(hold)
         finally:
             os.close(state)
     finally:
@@ -190,30 +203,31 @@ def _locked_state(cache_dir: Path):
         os.close(fd)  # closing releases the lock
 
 
-def _read_state(state: int) -> tuple[float | None, float | None, float, float]:
+def _read_number(fd: int) -> float | None:
+    """The one number a pacing file holds; None when it is empty (first use,
+    no hold-off) or garbled (a torn write), which restarts that value."""
+    try:
+        return float(os.read(fd, 64).decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def _read_state(state: int, hold: int) -> tuple[float | None, float | None, float, float]:
     """`(last_w, blocked_w, now_m, now_w)` from the locked state: the stored
     start and hold-off end, each None when absent, garbled or not credible
-    (past its cap, or a hold-off already over), and the clocks.
+    (past the cap, or a hold-off already over), and the clocks.
 
     The clocks are read AFTER the file I/O: a slot dated before a slow read
     (a loaded disk, a first-use create) would already be in the past when
     the request went out, starting it late and leaving the next caller less
     than an interval behind it."""
-    raw = os.read(state, 64)
+    last_w, blocked_w = _read_number(state), _read_number(hold)
     now_m, now_w = time.monotonic(), time.time()
-    try:
-        fields = [float(f) for f in raw.decode("ascii").split()]
-    except (UnicodeDecodeError, ValueError):
-        fields = []
-    if len(fields) not in (1, 2):
-        return None, None, now_m, now_w  # first use, or a torn write: restart
-    last_w: float | None = fields[0]
-    if not (math.isfinite(fields[0]) and fields[0] - now_w <= _SHARED_AHEAD_CAP_S):
+    if last_w is not None and not (math.isfinite(last_w)
+                                   and last_w - now_w <= _SHARED_AHEAD_CAP_S):
         last_w = None
-    # An old one-field file: a schedule, no hold-off.
-    blocked_w = fields[1] if len(fields) == 2 else None
     if blocked_w is not None and not (math.isfinite(blocked_w)
-                                      and now_w < blocked_w <= now_w + _RETRY_AFTER_CAP_S):
+                                      and now_w < blocked_w <= now_w + _SHARED_AHEAD_CAP_S):
         blocked_w = None
     return last_w, blocked_w, now_m, now_w
 
@@ -227,20 +241,22 @@ def _update_shared(
     from the stored ones (see `_read_state`) and the clocks. Returns
     `(new_w, now_m, now_w)`. OSError as `_locked_state`.
 
-    The state is rewritten in place, through the descriptor of its own
-    no-follow open (never a path-based write, which would follow a link
+    Both files are rewritten in place, each through the descriptor of its
+    own no-follow open (never a path-based write, which would follow a link
     swapped in after the open): every reader holds the lock, and a write
-    torn by a crash reads as garbage, which restarts the schedule (one
-    unpaced request) rather than failing a fetch. The hold-off field is
-    written only while it is still ahead (see the pacing notes above)."""
-    with _locked_state(cache_dir) as state:
-        last_w, blocked_w, now_m, now_w = _read_state(state)
+    torn by a crash reads as garbage, which restarts that value (one
+    unpaced request, or a hold-off forgotten by other processes) rather than
+    failing a fetch. The hold-off's end is written only while it is still
+    ahead, and the file emptied otherwise (see the pacing notes above)."""
+    with _locked_state(cache_dir) as (state, hold):
+        last_w, blocked_w, now_m, now_w = _read_state(state, hold)
         new_w, blocked_w = step(last_w, blocked_w, now_m, now_w)
-        text = repr(new_w)
-        if blocked_w is not None and blocked_w > now_w:
-            text += f" {blocked_w!r}"
-        os.ftruncate(state, 0)
-        os.pwrite(state, text.encode("ascii"), 0)
+        for fd, text in (
+            (state, repr(new_w)),
+            (hold, repr(blocked_w) if blocked_w is not None and blocked_w > now_w else ""),
+        ):
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, text.encode("ascii"), 0)
         return new_w, now_m, now_w
 
 
@@ -306,8 +322,8 @@ def _held_off(cache_dir: Path) -> bool:
     falls back to this process's hold-off, like every other use of it."""
     with _pace_lock:
         try:
-            with _locked_state(cache_dir) as state:
-                shared = _read_state(state)[1] is not None
+            with _locked_state(cache_dir) as (state, hold):
+                shared = _read_state(state, hold)[1] is not None
         except OSError as e:
             _warn_unshared(cache_dir, e)
             shared = False
@@ -322,8 +338,8 @@ def _hold_off(cache_dir: Path, seconds: float) -> None:
     pulls a schedule already further out back in. Same locks, same order and
     same fallback as `_reserve_slot`; nothing sleeps here.
 
-    Also records when the hold-off ENDS (`_blocked_until`, and the state
-    file's second field), never pulling a later end in: a request that had
+    Also records when the hold-off ENDS (`_blocked_until`, and the shared
+    `_HOLD_STATE`), never pulling a later end in: a request that had
     already reserved a slot inside the window finds it there before sending
     (`_held_off`) and waits too."""
     global _last_start, _blocked_until
