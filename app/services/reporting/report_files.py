@@ -718,7 +718,12 @@ def restore(report: Path, generation: str) -> Path:
         if len(matches) != 1:
             raise ValueError(f"{report.name}: {len(matches)} generations match {generation!r}")
         (gen,) = matches
-        previous = current_generation(report)
+        try:
+            previous = current_generation(report)
+        except ForeignPointer:
+            # No live run to keep or to put back on a rollback: the pointer is
+            # replaced, never followed (a dereferenced copy is still refused).
+            previous = None
         _link_live_names(report)
         _switch(report, gen, previous, f"restoring {gen.name}")
         return gen / report.name

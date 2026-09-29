@@ -322,6 +322,25 @@ class TestForeignPointerIsItsOwnError:
         assert [(g / NAME).read_text() for g in kept] == ["# a plain report\n"]
         assert all(_intact(v, f"VICTIM {v.name}\n") for v in victims)
 
+    @pytest.mark.parametrize("aim", ["outside", "dotdot", "missing"])
+    def test_restore_writes_over_a_foreign_pointer_it_does_not_read(self, tmp_path, outside, aim):
+        """`restore` reads the live generation to put it back if the switch
+        fails. A foreign pointer names none: it is written over, never read
+        as a run to roll back to, and never makes the restore a publish in
+        doubt (a dereferenced copy is still refused, above)."""
+        reports = tmp_path / "reports"
+        report = _publish(reports)
+        first = current_generation(report)
+        _publish(reports, "second")
+        victims = _outside_run(outside)
+        target = {"outside": str(outside), "dotdot": "..",
+                  "missing": "20260926T210507Z_0009_gone"}[aim]
+        rf._symlink(_home(reports) / rf.CURRENT, target)
+        assert restore(report, first.name) == first / NAME
+        assert current_generation(report) == first
+        assert read_live(report).text.startswith("# first report")
+        assert all(_intact(v, f"VICTIM {v.name}\n") for v in victims)
+
 
 def _stub_generate_report(cli, root: Path, monkeypatch, *, build_error=None) -> Path:
     """``generate_report.py AAPL`` against stubs: no SEC, a trivial build;
