@@ -25,6 +25,12 @@ Each run is one GENERATION, kept whole and never modified once published
   a process killed at any point leaves the earlier generation live or the
   new one, never one's report beside the other's ledger. Two rebuilds
   publish one after the other (``publish_lock``);
+- a publish that RAISES leaves the earlier generation live (Hermes audit of
+  424b0b4, finding 3a): every step that can fail runs before the pointer's
+  rename, and a failure after it (the directory's fsync) puts the earlier
+  pointer back, reads it back, and only then says so (``NotPublished``). A
+  put-back that fails says the new generation may be live
+  (``PublishInDoubt``), never that the earlier one is;
 - earlier generations stay where they are: they are the archive, and
   ``restore`` points the live names back at one.
 
@@ -76,8 +82,15 @@ _ENGINE_PATHS = ("app", "scripts", "pyproject.toml")
 
 
 class NotPublished(RuntimeError):
-    """A rebuild that could not be published whole: the earlier run, if any,
-    is still live and unchanged."""
+    """A rebuild that could not be published whole (or a ``restore`` or
+    ``set_aside`` that did not happen): the earlier run, if any, is still
+    live and unchanged."""
+
+
+class PublishInDoubt(RuntimeError):
+    """A change to the live names that failed after the pointer was switched,
+    and whose switch back failed too: the NEW generation may be live. Not a
+    `NotPublished`, whose handlers tell the operator the earlier run is."""
 
 
 def _base(report: Path) -> str:
@@ -354,7 +367,9 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
     and nothing live changes. Otherwise, holding ``publish_lock``, the
     stamped generation is renamed whole into ``.generations/<base>/`` and the
     one pointer swapped to it (the module docstring). Every step before the
-    swap leaves the earlier generation live; the swap is one rename.
+    swap leaves the earlier generation live; the swap is one rename; a
+    failure after it swaps the earlier generation back before raising
+    (``_switch``).
 
     The staging directory is shared by every rebuild writing to ``<dir>`` and
     is never removed: a rebuild that removed it once it looked empty pulled
@@ -376,21 +391,90 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
 
 
 def _publish(report: Path, staged: Staged, work: Path, now: datetime | None) -> None:
-    """The publish; the caller holds ``publish_lock``."""
+    """The publish; the caller holds ``publish_lock``. What it reports as
+    archived is read before the switch: nothing that can fail runs after
+    it but the directory's fsync (``_switch``)."""
     home = _home(report)
     home.mkdir(parents=True, exist_ok=True)
     _adopt(report, now)
     previous = current_generation(report)
+    archived = [] if previous is None else [
+        p for name in _names(_base(report)).values() if (p := previous / name).exists()]
     gen = home / _name_next(report, _stamp(now), staged.generation_id)
     os.rename(work, gen)
     _fsync(home)
     _link_live_names(report)
-    _symlink(_pointer(report), gen.name)  # the switch: one rename
-    _fsync(home)
-    link_audit(report)  # the new run has none yet; before this, the name resolved to nothing
-    if previous is not None:
-        staged.archived.extend(
-            p for name in _names(_base(report)).values() if (p := previous / name).exists())
+    _switch(report, gen, previous, f"publishing {gen.name}")
+    staged.archived.extend(archived)
+
+
+def _switch(report: Path, gen: Path | None, previous: Path | None, what: str) -> None:
+    """Point ``report``'s live names at ``gen`` (None: at nothing, a set-aside)
+    from ``previous``, so that a raised error means ``previous`` is live. The
+    caller holds ``publish_lock``.
+
+    Hermes audit of 424b0b4, finding 3a: the publish swapped the pointer, then
+    fsynced the directory and re-linked the audit; either failing raised
+    (the command said "failed", the operator was told the earlier run stayed
+    live) with the new generation live. Now every step that can fail runs
+    before the pointer's rename. After it only the directory's fsync (what
+    makes the rename durable) and, for a restored generation with an audit,
+    that audit's link; if either fails the earlier pointer is put back
+    (``_switch_back``) before anything is raised."""
+    audit = _companions(report)["audit"]
+    link_its_audit = gen is not None and (gen / audit.name).is_file()
+    try:
+        # The audit's live name resolves through the pointer, so left in place
+        # it would name ``gen``'s audit from the switch on (a freshly published
+        # generation never has one). It goes first: until the switch the
+        # earlier run is live without its audit at the live name, the safe
+        # direction (an audit missing, never another run's beside a report).
+        if audit.is_symlink():
+            audit.unlink()
+            _fsync(report.parent)
+        if gen is None:
+            _pointer(report).unlink()  # the switch, to nothing
+        else:
+            _symlink(_pointer(report), gen.name)  # the switch: one rename
+        _fsync(_home(report))
+        if link_its_audit:
+            link_audit(report)
+    except BaseException as e:
+        _switch_back(report, gen, previous, what, e)
+        if not isinstance(e, Exception):
+            raise  # an interrupt stays one, raised with the earlier run live
+        back = "no run is live, as before" if previous is None else f"{previous.name} is live again"
+        raise NotPublished(
+            f"{report.name}: {what} failed ({type(e).__name__}: {e}); the switch was undone "
+            f"and read back from the pointer: {back}") from e
+
+
+def _switch_back(report: Path, gen: Path | None, previous: Path | None, what: str,
+                 failure: BaseException) -> None:
+    """After a failed ``_switch``: point the live names at ``previous`` again
+    (nothing, if there was none), with its audit, and read the pointer back.
+    Anything short of that raises `PublishInDoubt`: the new generation may
+    be live, and saying the earlier one is would be a guess."""
+    pointer = _pointer(report)
+    try:
+        if previous is None:
+            pointer.unlink(missing_ok=True)
+        else:
+            _symlink(pointer, previous.name)
+        _fsync(pointer.parent)
+        link_audit(report)
+        back = current_generation(report)
+    except BaseException as e:
+        why, cause = f"switching back failed ({type(e).__name__}: {e})", e
+    else:
+        if back == previous:
+            return
+        why, cause = f"switching back did not take (the pointer names {back})", failure
+    maybe = (f"the NEW generation {gen.name} may be live" if gen is not None
+             else "the run may be set aside, with no run live")
+    raise PublishInDoubt(
+        f"{report.name}: {what} failed ({type(failure).__name__}: {failure}), and {why}: "
+        f"{maybe}. Read {pointer} before assuming which run is.") from cause
 
 
 def _link_live_names(report: Path) -> None:
@@ -485,9 +569,7 @@ def set_aside(report: Path, *, now: datetime | None = None) -> list[Path]:
         gen = current_generation(report)
         if gen is None:
             return []
-        _pointer(report).unlink()
-        _fsync(_home(report))
-        link_audit(report)
+        _switch(report, None, gen, "setting it aside")
         return [p for name in _names(_base(report)).values() if (p := gen / name).exists()]
 
 
@@ -505,10 +587,9 @@ def restore(report: Path, generation: str) -> Path:
         if len(matches) != 1:
             raise ValueError(f"{report.name}: {len(matches)} generations match {generation!r}")
         (gen,) = matches
+        previous = current_generation(report)
         _link_live_names(report)
-        _symlink(_pointer(report), gen.name)
-        _fsync(gen.parent)
-        link_audit(report)
+        _switch(report, gen, previous, f"restoring {gen.name}")
         return gen / report.name
 
 

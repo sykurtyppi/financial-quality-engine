@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import html as _html
 import re
-import threading
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -28,17 +27,6 @@ BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 app = FastAPI(title="Decision-Impact Journal", docs_url=None, redoc_url=None)
-
-# Per-entry locks so concurrent GET /report requests (double-click, tab prefetch)
-# don't each fire a redundant EDGAR fetch. Single-process local server only.
-_gen_locks: dict[str, threading.Lock] = {}
-_gen_guard = threading.Lock()
-
-
-def _gen_lock(key: str) -> threading.Lock:
-    with _gen_guard:
-        return _gen_locks.setdefault(key, threading.Lock())
-
 
 OPENV2_HINT = 'scripts/journal.py openv2 <TICKER> --thesis "..." --conviction 3'
 
@@ -150,7 +138,12 @@ def report_view(request: Request, ticker: str, date: str | None = None,
     if not entry["is_reported"]:
         # First view: generate the networked report, then lock the thesis. Serialize
         # per entry and re-check under the lock so a double-request generates once.
-        with _gen_lock(str(path)):
+        # The entry's report lock, the one `journal.py report` holds (Hermes
+        # audit of 424b0b4, finding 3b): an in-process lock let this route and
+        # the CLI each build and publish one entry's report. It also serves the
+        # double-click it was for: each holder opens its own descriptor, so
+        # two request threads exclude each other as two processes do.
+        with store.report_lock(path):
             if not store.is_reported(path.read_text(encoding="utf-8")):
                 try:
                     # fresh=True: the first report LOCKS the thesis against
