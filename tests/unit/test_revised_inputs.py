@@ -201,6 +201,33 @@ def test_a_silent_change_is_matched_by_its_fact_and_an_explained_one_is_not(crm)
     assert not explained  # a filed move is the scan's to report, not a silent one
 
 
+def test_a_figure_built_from_other_concepts_is_not_a_revised_input():
+    """Review of 626ca1b, finding 1: a quarter now built from other concepts
+    (`moved_tag`) is a change of composition, which Tier 1 never promotes;
+    indexed, it put "reads a revised figure … changed silently" on the card."""
+    key = FactKey("composed", "Depreciation+AmortizationOfIntangibleAssets", "USD", None,
+                  date(2024, 6, 30))
+
+    class _Obs:
+        captured = "2026-09-19"
+
+    class _Rep:
+        compared = True
+        previous = newest = _Obs()
+        baseline = changes_since_baseline = None
+
+        def __init__(self, changes):
+            self.changes_since_previous = changes
+
+    def change(new_tag):
+        return VintageChange("revised", "depreciation_amortization", key, 31.0, None, "", "",
+                             41.0, None, "", "", 0.3, new_tag)
+
+    assert not revision_index(vintage=_Rep([change("Depreciation")]))
+    (rev,) = revision_index(vintage=_Rep([change("")])).by_cell.values()
+    assert (rev.field, rev.original, rev.current) == ("depreciation_amortization", 31.0, 41.0)
+
+
 def test_a_derived_quarter_that_moved_is_matched_by_its_cell(crm):
     from app.services.ingestion.restatements import DerivedRevision, RestatementScan
 

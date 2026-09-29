@@ -476,15 +476,18 @@ def _silent_revisions_section(rep) -> str:
         lines.append(
             f"Not checked: {rep.no_baseline_reason}. Two distinct companyfacts "
             f"snapshots a report scored, taken at or before {rep.as_of}, are needed to "
-            "diff (a raw watch-sweep capture is never compared); the store fills as "
-            "reports run, and nothing can be back-filled."
+            "diff (a raw watch-sweep capture never stands in for either; one is compared "
+            "only as the thesis-lock baseline, when it is the nearest state before the "
+            "thesis day and holds every figure the scored comparison reads); the store "
+            "fills as reports run, and nothing can be back-filled."
         )
         return "\n".join(lines)
     lines.append(
         "_Prior-period figures that changed or disappeared between the two most "
         "recent distinct companyfacts snapshots a report scored, taken at or before "
         f"{rep.as_of} (a raw watch-sweep capture is compared only as the thesis-lock "
-        "baseline, when no scored snapshot predates the thesis day and the capture maps). "
+        "baseline, when it is the nearest state before the thesis day and holds every "
+        "figure the scored comparison reads). "
         "Facts added for new periods are not listed. A figure that moved with a later "
         "filing still carried beside the original is listed apart (the restatement "
         "scan reads those from filing history); the rest has no such filing behind "
@@ -504,9 +507,10 @@ def _silent_revisions_section(rep) -> str:
         lines.append("")
         if rep.baseline_source:
             lines.append(
-                "_No snapshot a report scored predates the thesis day; the lock baseline is "
-                "the newest watch-sweep capture before it that the mapper builds, compared "
-                "as the engine scores it._")
+                "_The lock baseline is a watch-sweep capture: the nearest state before the "
+                "thesis day, and it holds every field and quarter the scored comparison "
+                "reads, built from the same concepts as the scored snapshot; compared as "
+                "the engine scores it._")
             lines.append("")
         lines.append(render_changes(rep.changes_since_baseline, rep.baseline.captured,
                                     rep.newest.captured, unavailable=rep.baseline_unavailable))

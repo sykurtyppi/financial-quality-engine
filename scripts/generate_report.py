@@ -8,6 +8,11 @@ documents -> markdown report under reports/.
 
 Report assembly lives in app/services/reporting/report_builder.build_report, the
 single builder shared by the CLI, journal, and API (review finding 1).
+
+Exit codes: 0 report written; 2 the fundamentals could not be acquired or
+mapped; 3 the run was not whole and nothing was published; 4 (--as-of only)
+the mapper trips on a stored snapshot a report scored — the message names
+it; move it aside to replay from an older state.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import (
+    ScoredSnapshotUnmappable,
     fetch_dataset_snapshot,
     fetch_submissions_snapshot,
     store_vintage_snapshot,
@@ -33,6 +39,10 @@ from app.services.reporting.report_builder import build_report, ledger_path
 from app.services.reporting.report_files import NotPublished, replacing
 
 logging.basicConfig(level=logging.WARNING)
+
+# A replay's stored scored snapshot trips the mapper (review of 626ca1b,
+# finding 2): not 2, which says the fundamentals themselves are unusable.
+EXIT_SCORED_SNAPSHOT = 4
 
 
 def _unmappable(ticker: str, e: ValueError) -> int:
@@ -82,6 +92,11 @@ def main() -> int:
             # Only the snapshot stage's own failure; any other ValueError is a
             # defect in the build and surfaces as one (round-9 audit F3).
             return _unmappable(ticker, e)
+        except ScoredSnapshotUnmappable as e:
+            # A defect, but one the operator can route around: one line naming
+            # the snapshot, not a traceback that names neither it nor the way out.
+            print(f"error: {ticker}: {e}", file=sys.stderr)
+            return EXIT_SCORED_SNAPSHOT
         print(f"historical replay as of {args.as_of}: distress signals: {distress} -> {out}")
         return 0
 
