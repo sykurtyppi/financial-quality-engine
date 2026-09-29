@@ -508,8 +508,8 @@ def test_an_update_that_changes_the_locked_entry_is_refused_and_writes_nothing(
     path = _seed(tmp_path, monkeypatch, reported=False)
     before = path.read_bytes()
     callback, named = _REFUSED[change]
-    with pytest.raises(store.UpdateRefused, match=f"the update changed {named}, which the lock "
-                       "seals or the file is named for; refusing to save"):
+    with pytest.raises(store.UpdateRefused, match=f"the update changed {named}, which an "
+                       "update must leave as it is"):
         store.update_v2(path, callback)
     assert path.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".md")) == [path.name]
@@ -692,3 +692,73 @@ def test_a_deferred_report_leaves_the_case_retryable_and_markable(tmp_path, monk
     assert store.load_v2(path).reported is None
     assert cli.cmd_mark_reported(argparse.Namespace(ticker="TST", date="2026-07-27")) == 0
     assert store.load_v2(path).reported is not None
+
+
+# --- follow-up: a `reported` stamp, once made, stays -----------------------------------
+# The "no peek-then-edit" invariant: a report is generated once. `update_v2`
+# refused any change to the lock, but a callback could still clear the
+# stamp (and the case could be reported again) or move it.
+
+
+@pytest.mark.parametrize("change", ["cleared", "moved"])
+def test_an_update_cannot_clear_or_move_a_reported_stamp(tmp_path, monkeypatch, change):
+    from datetime import timedelta
+
+    path = _seed(tmp_path, monkeypatch, reported=True)
+    before = path.read_bytes()
+    with pytest.raises(store.UpdateRefused, match="the update changed reported,"):
+        store.update_v2(path, lambda e: e.model_copy(update={
+            "reported": None if change == "cleared" else e.reported + timedelta(hours=1)}))
+    assert path.read_bytes() == before
+
+
+def test_a_reported_stamp_is_still_set_once_and_can_be_kept(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    now = datetime.now(UTC)
+    store.update_v2(path, lambda e: e.model_copy(update={"reported": now}))
+    # An update that keeps the stamp as it is (every AFTER/OUTCOME edit) is saved.
+    store.update_v2(path, _disagree)
+    entry = store.load_v2(path)
+    assert entry.reported == now and entry.after.what_i_disagreed_with == "written meanwhile"
+
+
+# --- follow-up: a publish in doubt is said, with its own exit code ----------------------
+# `PublishInDoubt` (the new generation may be live) reached the report
+# commands' `except Exception` and was printed as an ordinary "Report
+# generation failed" (exit 1): the same code as a build that published
+# nothing, so neither cron nor the operator could tell the live report might
+# be the new one.
+
+
+def _in_doubt(*a, **k):
+    from app.services.reporting.report_files import PublishInDoubt
+
+    raise PublishInDoubt("TST_2026-07-27.md: publishing g failed (OSError: eio), and switching "
+                         "back failed (OSError: eio): the NEW generation g may be live.")
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+@pytest.mark.parametrize("mode", ["stamp", "defer-mark", "replay"])
+def test_a_publish_in_doubt_exits_with_its_own_code_and_stamps_nothing(
+        tmp_path, monkeypatch, capsys, v2, mode):
+    import argparse
+
+    from app.services.reporting.report_files import PUBLISH_IN_DOUBT_RC
+
+    if v2:
+        path = _seed(tmp_path, monkeypatch, reported=False)
+    else:
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        path = store.open_entry("TST", thesis="a real thesis")
+    before = path.read_bytes()
+    cli = _cli()
+    monkeypatch.setattr(cli, "build_report", _in_doubt)
+    rc = cli.cmd_report(argparse.Namespace(
+        ticker="TST", date=path.stem.split("_", 1)[1], no_docs=True,
+        defer_mark=mode == "defer-mark", replay=mode == "replay"))
+    err = capsys.readouterr().err
+    assert rc == PUBLISH_IN_DOUBT_RC == 8
+    assert "the NEW generation g may be live" in err and "Report generation failed" not in err
+    assert path.read_bytes() == before  # never stamped

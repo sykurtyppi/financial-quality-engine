@@ -208,6 +208,24 @@ def test_report_waits_for_the_entrys_report_lock_then_rechecks(client, monkeypat
     assert built == [] and store.parse_entry(path)["is_reported"]
 
 
+def test_a_publish_in_doubt_is_said_plainly_and_nothing_is_stamped(client, monkeypatch):
+    """`PublishInDoubt` (the new run may be live) was shown as an ordinary
+    "Report generation failed", with a 200. It is said as what it is, with
+    a 500, and the thesis is not locked."""
+    from app.services.reporting.report_files import PublishInDoubt
+
+    def in_doubt(*a, **k):
+        raise PublishInDoubt("KO_x.md: publishing g failed, and switching back failed: "
+                             "the NEW generation g may be live.")
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    monkeypatch.setattr(reporting, "build_report", in_doubt)
+    r = client.get("/report/KO")
+    assert r.status_code == 500
+    assert "the NEW generation g may be live" in r.text and "generation failed" not in r.text
+    assert not store.parse_entry(path)["is_reported"]
+
+
 def test_report_for_dated_entry_reads_same_file_it_generates(client):
     _seed("KO", "steady staple", 3, "hold")
     p = store.find_entry("KO")

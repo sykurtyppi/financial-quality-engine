@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.services.journal import reporting, store
+from app.services.reporting.report_files import PublishInDoubt
 
 BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
@@ -135,6 +136,7 @@ def report_view(request: Request, ticker: str, date: str | None = None,
         return RedirectResponse("/open?error=Write+a+thesis+before+generating+a+report.", status_code=303)
 
     report_file = reporting.report_path(ticker, entry["day"])
+    status = 200
     if not entry["is_reported"]:
         # First view: generate the networked report, then lock the thesis. Serialize
         # per entry and re-check under the lock so a double-request generates once.
@@ -152,12 +154,18 @@ def report_view(request: Request, ticker: str, date: str | None = None,
                     reporting.build_report(ticker, with_docs=True, report_day=entry["day"],
                                            fresh=True)
                     store.mark_reported(path)
+                except PublishInDoubt as e:
+                    # The new report MAY be live (and is what the page below
+                    # shows, if so): said as it is, as a server error, and
+                    # the thesis is not locked.
+                    error, status = f"Report publish IN DOUBT: {e}", 500
                 except Exception as e:  # noqa: BLE001
                     error = f"Report generation failed: {e}"
     html = _render_report(report_file.read_text()) if report_file.exists() else None
     return templates.TemplateResponse(
         request, "report.html",
         {"entry": store.parse_entry(path), "report_html": html, "error": error},
+        status_code=status,
     )
 
 

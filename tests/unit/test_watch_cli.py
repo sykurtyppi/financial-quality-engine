@@ -25,6 +25,7 @@ _spec = importlib.util.spec_from_file_location("watch_cli", ROOT / "scripts" / "
 watch_cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(watch_cli)
 _REAL_RUN_BRIEF = watch_cli._run_brief  # before any fixture stubs it
+_REAL_GENERATE_AUTO = watch_cli._generate_auto  # likewise
 
 
 def _poll_args(**over) -> Namespace:
@@ -2004,3 +2005,62 @@ class TestSeasonCriticalFixes:
         )
         watch_cli.cmd_sweep(_sweep_args(dry_run=True))
         assert not state.exists()
+
+
+# --- follow-up: a publish in doubt has its own exit code --------------------------------
+# `PublishInDoubt` means the new run MAY be live. On the auto track it was
+# caught as any failure (exit 1), and the journal track's code was not in
+# the sweep's severity order, so an alert keyed on the code could miss it.
+
+
+class TestAPublishInDoubt:
+    def test_the_journal_track_passes_it_on_and_marks_nothing(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: watch_cli.PUBLISH_IN_DOUBT_RC)
+        assert watch_cli.cmd_poll(_poll_args()) == 8
+        assert poll_env.marked == [] and poll_env.audit == [] and poll_env.rearm == []
+
+    def test_the_auto_track_says_it_and_exits_with_its_code(self, poll_env, monkeypatch, capsys):
+        from app.services.journal import reporting
+        from app.services.reporting.report_files import PublishInDoubt
+
+        def in_doubt(*a, **k):
+            raise PublishInDoubt("NVDA_x.md: publishing g failed, and switching back failed: "
+                                 "the NEW generation g may be live.")
+
+        _force_decision(monkeypatch, "refuse")
+        monkeypatch.setattr(watch_cli, "_generate_auto", _REAL_GENERATE_AUTO)
+        monkeypatch.setattr(reporting, "build_report", in_doubt)
+        assert watch_cli.cmd_poll(_poll_args()) == 8
+        assert "the NEW generation g may be live" in capsys.readouterr().err
+        assert poll_env.audit == [] and poll_env.rearm == []
+
+    def test_it_outranks_every_other_sweep_code_and_is_named(self, sweep_env, monkeypatch):
+        assert all(watch_cli._worst([8, c]) == 8 for c in (0, 1, 2, 3, 4, 5, 6, 7))
+        sweep_env.table.update({"AAPL": "generate", "NVDA": "generate"})
+        monkeypatch.setattr(watch_cli, "_generate",
+                            lambda t, day, nd: 8 if t == "AAPL" else 1)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 8
+        (title, text), = sweep_env.notified
+        assert "AAPL: report publish IN DOUBT" in text
+
+    def test_codes_outside_the_severity_order_fall_back_to_the_highest(self):
+        """Every code a pass can return is ranked (8 included); the fallback
+        for any other is the highest of them."""
+        assert watch_cli._worst([9]) == 9 and watch_cli._worst([10, 9]) == 10
+
+
+@pytest.mark.parametrize("action", ["generate", "refuse"])
+@pytest.mark.parametrize("capped, noted", [((0, False), False), ((0, True), False),
+                                           ((4, True), True)])
+def test_the_abandoned_note_is_only_for_an_audit_that_failed_and_was_abandoned(
+        poll_env, monkeypatch, action, capped, noted):
+    """`_act` was changed for the publish in doubt; its other branches are
+    pinned here: an abandoned counter read without a run (exit 0) or a
+    passing audit is not reported as a failed one."""
+    notes = []
+    _force_decision(monkeypatch, action)
+    monkeypatch.setattr(watch_cli, "_run_audit_capped", lambda report: capped)
+    monkeypatch.setattr(watch_cli, "_abandoned_note", lambda *a: notes.append(a))
+    watch_cli.cmd_poll(_poll_args())
+    assert bool(notes) == noted

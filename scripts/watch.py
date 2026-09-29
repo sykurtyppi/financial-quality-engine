@@ -50,6 +50,10 @@ Exit codes (for cron/alerting):
        failed audit (4) blocks the re-arm, so without this the next hourly
        pass would rebuild the report and spend another headless run on a
        failure that has already proved deterministic, every hour, forever.
+    8  a report's publish is IN DOUBT: it failed and could not be undone,
+       so the new report may be live (report_files.PublishInDoubt; the log
+       says how to check and how to put the previous run back). Nothing is
+       audited or marked, and the row is not re-armed. The most severe code.
 
 Print night vs 10-Q: the engine report needs the quarter's XBRL, so the
 report/audit track fires on the 10-Q/10-K. The brief is a read of the
@@ -63,10 +67,10 @@ apart; for a small cap the 10-Q can be weeks later.
     but the row still names the consumed event and will never fire again
     until it is re-`add`ed — a scheduler must see that.
     `sweep` returns the worst per-name code — worst by severity, not by
-    number: 1 (setup/EDGAR) > 4 (audit failed) > 2 (refused) > 5 (brief
-    queued) > 7 (audit abandoned) > 6 (vintage stalled) > 0 — except that
-    3 (waiting) is 0 and a sweep already running elsewhere is 0 (it just
-    yields). A name still waiting more than OVERDUE_DAYS past its print hint
+    number: 8 (publish in doubt) > 1 (setup/EDGAR) > 4 (audit failed) >
+    2 (refused) > 5 (brief queued) > 7 (audit abandoned) > 6 (vintage
+    stalled) > 0 — except that 3 (waiting) is 0 and a sweep already running
+    elsewhere is 0 (it just yields). A name still waiting more than OVERDUE_DAYS past its print hint
     is named on stderr on every pass, --verbose or not, AND notified once a
     day: "waiting" must not hide a mis-armed row, and stderr alone is a
     channel nobody reads.
@@ -100,7 +104,12 @@ from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.ingestion.vintages import capture as capture_vintage
 from app.services.journal import store
 from app.services.journal.schema_v2 import verify_lock
-from app.services.reporting.report_files import is_live_report, write_atomic
+from app.services.reporting.report_files import (
+    PUBLISH_IN_DOUBT_RC,
+    PublishInDoubt,
+    is_live_report,
+    write_atomic,
+)
 from app.services.watch import watchlist as wl
 from app.services.watch.infer import infer_print_at
 from app.services.watch.poller import (
@@ -151,7 +160,8 @@ AUDIT_ABANDONED_RC = 7
 # Sweep aggregate: the worst code across names, by what it means rather than
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
-SEVERITY_ORDER = (1, 4, 2, 5, 7, 6, 0)
+# A publish in doubt (8) outranks everything: which report is live is unknown.
+SEVERITY_ORDER = (PUBLISH_IN_DOUBT_RC, 1, 4, 2, 5, 7, 6, 0)
 
 
 def _worst(codes) -> int:
@@ -274,6 +284,8 @@ def _generate_auto(ticker: str, no_docs: bool) -> Path | None:
             ticker, with_docs=not no_docs, fresh=True,
             out_dir=AUTO_DIR, banner=AUTO_BANNER,
         )
+    except PublishInDoubt:
+        raise  # not a failed build: the new run may be live (`_act` says so)
     except Exception as e:  # noqa: BLE001
         print(f"  auto-report generation failed: {type(e).__name__}: {e}", file=sys.stderr)
         return None
@@ -803,6 +815,8 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
         entry_day = watch.thesis_entry
         rc = _generate(ticker, entry_day, args.no_docs)
         if rc != 0:
+            # Passed on as it is: 8, a publish in doubt, was said by
+            # journal.py, and nothing is audited or marked after it.
             return rc
         if args.no_audit:
             # No audit requested — generation completes the case.
@@ -844,7 +858,11 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
         if args.dry_run:
             print("  (dry run — would generate auto-report)")
             return 0
-        report = _generate_auto(ticker, args.no_docs)
+        try:
+            report = _generate_auto(ticker, args.no_docs)
+        except PublishInDoubt as e:
+            print(f"  auto-report publish IN DOUBT: {e}", file=sys.stderr)
+            return PUBLISH_IN_DOUBT_RC
         if report is None:
             return 1
         if not args.no_audit:
@@ -1267,7 +1285,8 @@ def _sweep_locked(args: argparse.Namespace) -> int:
 
 _RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED",
              5: "brief queued", 6: "vintage capture stalled",
-             7: "audit ABANDONED (brief built without it)"}
+             7: "audit ABANDONED (brief built without it)",
+             PUBLISH_IN_DOUBT_RC: "report publish IN DOUBT (the new run may be live)"}
 
 
 def _notify_problems(sync_rc: int, acted: dict, args: argparse.Namespace,

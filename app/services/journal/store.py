@@ -426,7 +426,10 @@ def update_v2(path: Path, change):
     the file is named for (ticker, day) must come back exactly as read, and
     the lock must verify; otherwise nothing is written. They are compared
     with a copy taken before ``change`` runs, which may have edited the
-    entry it was given in place. Returns the saved entry."""
+    entry it was given in place. A ``reported`` stamp may be made (from
+    None), never cleared or moved: a case is reported once, and a cleared
+    stamp would let its report be generated again after the AFTER block was
+    read (the "no peek-then-edit" rule). Returns the saved entry."""
     from app.services.journal.schema_v2 import render_entry, verify_lock
 
     with _entry_lock(path):
@@ -438,10 +441,13 @@ def update_v2(path: Path, change):
         read = current.model_copy(deep=True)
         updated = change(current)
         moved = [name for name in _SEALED if getattr(updated, name) != getattr(read, name)]
+        if read.reported is not None and updated.reported != read.reported:
+            moved.append("reported")
         if moved or not verify_lock(updated):
             raise UpdateRefused(
                 f"{path.name}: the update changed {', '.join(moved) or 'the BEFORE block'}, "
-                "which the lock seals or the file is named for; refusing to save it.")
+                "which an update must leave as it is (the lock seals it, the file is named "
+                "for it, or it is a `reported` stamp already made); refusing to save it.")
         _save_v2_locked(updated, path, True, render_entry)
         return updated
 
