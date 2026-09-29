@@ -36,6 +36,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
+from app.services.reporting.report_files import existing_mode
+
 ROOT = Path(__file__).resolve().parents[3]
 ENTRIES = ROOT / "journal" / "entries"
 
@@ -337,12 +339,17 @@ def _durable_write(path: Path, text: str, *, create: bool = False) -> None:
 
     A new entry gets the permissions the umask gives any new file (0o644, or
     0o600 under ``umask 077``), as ``write_text`` did; an update keeps the
-    entry's own."""
+    entry's own permission bits, by the reports' rule (``existing_mode``:
+    never setuid/setgid/sticky, and nothing from a file another user owns,
+    which gets the umask's as a new entry does; cross-branch review of the
+    finding 5 fix, finding 2)."""
+    mode = None if create else existing_mode(path)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        # 0o666 on a create: the kernel applies the umask, which is how every
-        # other new file gets its mode (os.umask would be process-wide).
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666 if create else 0o600)
+        # 0o666 with no mode to keep: the kernel applies the umask, which is
+        # how every other new file gets its mode (os.umask would be
+        # process-wide).
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666 if mode is None else 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
             fh.flush()
@@ -357,7 +364,8 @@ def _durable_write(path: Path, text: str, *, create: bool = False) -> None:
                     raise FileExistsError(path) from None
                 os.replace(tmp, path)
         else:
-            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+            if mode is not None:
+                os.chmod(tmp, mode)
             os.replace(tmp, path)
         dir_fd = os.open(path.parent, os.O_RDONLY)
         try:
