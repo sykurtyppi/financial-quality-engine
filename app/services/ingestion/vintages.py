@@ -35,6 +35,7 @@ them if it is ever lost.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import gzip
 import hashlib
@@ -114,6 +115,18 @@ def cik_dir(cik: int, root: Path | None = None) -> Path:
 
 def _manifest_path(cik: int, root: Path | None = None) -> Path:
     return cik_dir(cik, root) / MANIFEST
+
+
+def _unlinked(path: Path) -> Path:
+    """``path``, the manifest, refused when a symlink is there: the index is
+    read and written only where the store keeps it. A link planted at it had
+    its target read as the store's history (a count there that was not a
+    number raised out of `_store` before any problem day was recorded) and
+    was then replaced without a word (review of the finding 5 fix)."""
+    if path.is_symlink():
+        raise OSError(errno.ELOOP, f"{path} is a symlink, not the index this store wrote; "
+                      "it is never read, followed or replaced — remove it")
+    return path
 
 
 def canonical_bytes(facts: dict) -> bytes:
@@ -313,9 +326,16 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
 
     A missing or unreadable manifest is rebuilt from the snapshots on disk, so
     a corrupt index can never erase the history that capture compares against.
+    So is one behind a link, at the company's directory (`own_dir`) or at the
+    manifest's own name (O_NOFOLLOW): nothing another principal wrote there is
+    taken as this store's snapshots, observations, last check or count
+    (review of the finding 5 fix). `_store` refuses to capture past a linked
+    manifest; the directory's link it already refuses at the lock.
     """
     try:
-        data = json.loads(_manifest_path(cik, root).read_text())
+        fd = os.open(own_dir(cik_dir(cik, root)) / MANIFEST, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as fh:
+            data = json.loads(fh.read())
     except (OSError, ValueError):
         data = None
     if not isinstance(data, dict) or not isinstance(data.get("snapshots"), list):
@@ -323,14 +343,15 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
                 "observations": [],
                 "snapshots": reconcile_manifest(cik, root)}
     data.setdefault("last_checked", None)
-    data.setdefault("problem_days", 0)
     data.setdefault("observations", [])
     # The markers are the source of truth — one per distinct bad day. `max`
     # only honours a count stored before markers existed; both are cleared
     # together by any success, so a legacy value cannot outlive its store.
-    data["problem_days"] = max(
-        int(data.get("problem_days") or 0), _problem_days(cik, root)
-    )
+    # Anything but an integer there is no count at all: `int()` of it raised,
+    # and a raise here read as "no problem days" to the sweep's alert.
+    stored = data.get("problem_days")
+    data["problem_days"] = max(stored if isinstance(stored, int) else 0,
+                               _problem_days(cik, root))
     # An entry with no digest is kept: it records a file we hold but cannot
     # read, which is exactly the thing an operator needs to see.
     data["snapshots"] = [s for s in data["snapshots"]
@@ -386,7 +407,7 @@ def _tmp_beside(path: Path) -> Path:
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _tmp_beside(path)
+    tmp = _tmp_beside(_unlinked(path))
     try:
         with tmp.open("w") as fh:
             fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -534,8 +555,19 @@ def _store(
             _record_problem_day(cik, today, root)
             return Capture(cik, today, None, "", "busy",
                            f"another capture holds the lock ({cik_dir(cik, root) / LOCK})")
+        try:
+            # A link at the manifest is refused, not read around and replaced:
+            # it archives nothing and is a problem day, so the stale alert
+            # names the store until someone removes it. Any other failure to
+            # read the index is one too; raised, it escaped the marker as the
+            # lock's did (review of the finding 5 fix).
+            _unlinked(_manifest_path(cik, root))
+            man = read_manifest(cik, root)
+        except Exception as e:  # noqa: BLE001 — every way this archives nothing is counted
+            _record_problem_day(cik, today, root)
+            return Capture(cik, today, None, "", "failed",
+                           f"the manifest could not be used: {type(e).__name__}: {e}")
         _sweep_orphans(cik_dir(cik, root))
-        man = read_manifest(cik, root)
         if not force and man.get("last_checked") == today.isoformat():
             newest = _last_seen(man)
             if _problem_days(cik, root):

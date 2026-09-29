@@ -539,6 +539,15 @@ class TestReplacedNotFollowed:
 # --- the vintage store's own files -----------------------------------------------
 
 
+def _forged_manifest(path: Path, snapshot: str) -> None:
+    """A manifest another principal wrote: a snapshot the store never took, a
+    check far in the future, and a problem-day count that is not a number."""
+    path.write_text(json.dumps({
+        "last_checked": "2099-01-01", "problem_days": "many",
+        "observations": [{"date": "2026-09-01", "sha256": "ab" * 32}],
+        "snapshots": [{"file": snapshot, "captured": "2026-09-01", "sha256": "ab" * 32}]}))
+
+
 class TestVintageStore:
     def test_temporary_names_are_not_predictable(self, tmp_path, outside):
         """The manifest's and the snapshot's temporary names were the digest
@@ -578,6 +587,115 @@ class TestVintageStore:
         # A real day is still recorded.
         vg._record_problem_day(320193, date(2026, 9, 30), root)
         assert (vg.cik_dir(320193, root) / f"{vg.BUSY_PREFIX}2026-09-30").is_file()
+
+    def test_a_linked_manifest_is_neither_read_nor_replaced(self, tmp_path, outside):
+        """A link at ``CIK##########/manifest.json`` in a real directory: its
+        target was read as the store's index (a forged count raised out of
+        `_store` before any problem day was recorded), and the next write
+        replaced it silently. It is read as no manifest (the index is
+        rebuilt from the snapshots on disk, as for a lost one) and refused
+        for writing: the capture archives nothing, says why, and records the
+        day, so the stale alert names the store until the link is removed
+        (review of b17cc08, finding 1)."""
+        from app.services.ingestion import vintages as vg
+
+        root = tmp_path / "vintages"
+        first = vg.store_snapshot(320193, {"facts": {"x": 1}}, root=root,
+                                  now=datetime(2026, 9, 27, 15, tzinfo=UTC))
+        man = vg.cik_dir(320193, root) / vg.MANIFEST
+        man.unlink()
+        victim = outside / vg.MANIFEST
+        _forged_manifest(victim, "2026-09-01-0123456789ab.json.gz")
+        os.chmod(victim, 0o640)
+        body = victim.read_text()
+        _plant(man, victim)
+        got = vg.read_manifest(320193, root)
+        assert (got["last_checked"], got["problem_days"], got["observations"]) == (None, 0, [])
+        assert [s["file"] for s in got["snapshots"]] == [first.path.name]
+        for day in (28, 29):
+            cap = vg.store_snapshot(320193, {"facts": {"x": day}}, root=root,
+                                    now=datetime(2026, 9, day, 15, tzinfo=UTC))
+            assert (cap.reason, cap.path, cap.problem) == ("failed", None, True)
+            assert "symlink" in cap.detail and vg.MANIFEST in cap.detail
+        assert vg.read_manifest(320193, root)["problem_days"] == 2
+        assert vg.list_vintages(320193, root) == [first.path]
+        assert man.is_symlink() and _intact(victim, body)
+
+    def test_the_manifest_write_refuses_a_link(self, tmp_path, outside):
+        """The write itself refuses one too, rather than replacing it: the
+        index is written only where the store keeps it."""
+        from app.services.ingestion import vintages as vg
+
+        man = vg.cik_dir(320193, tmp_path / "vintages") / vg.MANIFEST
+        v = _victim(outside, vg.MANIFEST)
+        _plant(man, v)
+        with pytest.raises(OSError) as e:
+            vg._write_json_atomic(man, {"snapshots": []})
+        assert _eloop(e) and _intact(v) and man.is_symlink()
+        assert [p.name for p in man.parent.iterdir()] == [vg.MANIFEST]  # no temporary left
+
+    def test_a_linked_manifest_reaches_the_stale_alert(self, outside, capsys):
+        from app.services.ingestion import vintages as vg
+
+        victim = outside / vg.MANIFEST
+        _forged_manifest(victim, "2026-09-01-0123456789ab.json.gz")
+        before = _tree(outside)
+        _plant(vg.cik_dir(320193) / vg.MANIFEST, victim)
+        assert _stale_rcs(3) == _expected_stale_rcs(3)
+        assert "no vintage today (failed)" in capsys.readouterr().err
+        assert _tree(outside) == before
+
+    @pytest.mark.parametrize("count", ["many", None, [], {"n": 1}, 2.5])
+    def test_a_count_that_is_not_a_number_is_no_count(self, tmp_path, count):
+        """The store's own manifest, hand-edited or torn into another type:
+        its count reads as none, the markers still count, and nothing raises
+        (it raised out of `_vintage_rc`, which read that as 0). A legacy
+        integer count is still honoured."""
+        from app.services.ingestion import vintages as vg
+
+        root = tmp_path / "vintages"
+        vg.store_snapshot(320193, {"facts": {"x": 1}}, root=root,
+                          now=datetime(2026, 9, 27, 15, tzinfo=UTC))
+        man = vg.cik_dir(320193, root) / vg.MANIFEST
+        data = json.loads(man.read_text())
+        man.write_text(json.dumps(data | {"problem_days": count}))
+        assert vg.read_manifest(320193, root)["problem_days"] == 0
+        vg._record_problem_day(320193, date(2026, 9, 28), root)
+        assert vg.read_manifest(320193, root)["problem_days"] == 1
+        man.write_text(json.dumps(data | {"problem_days": 4}))
+        assert vg.read_manifest(320193, root)["problem_days"] == 4
+
+    def test_a_manifest_read_that_raises_is_a_problem_day(self, tmp_path, monkeypatch):
+        """Raised out of `_store`, a failed read of the index escaped the
+        marker, and the stale alert never fired."""
+        from app.services.ingestion import vintages as vg
+
+        root = tmp_path / "vintages"
+
+        def unreadable(cik, root=None):
+            raise TypeError("a crafted index")
+        monkeypatch.setattr(vg, "read_manifest", unreadable)
+        cap = vg.store_snapshot(320193, {"facts": {"x": 1}}, root=root,
+                                now=datetime(2026, 9, 28, 15, tzinfo=UTC))
+        assert (cap.reason, cap.path, cap.problem) == ("failed", None, True)
+        assert "TypeError: a crafted index" in cap.detail and "manifest" in cap.detail
+        assert vg._problem_days(320193, root) == 1
+        assert vg.list_vintages(320193, root) == []
+
+    def test_the_sweep_counts_the_markers_not_the_manifest(self, monkeypatch):
+        """`_vintage_rc` took its count from `read_manifest` and read any
+        exception there as 0; the markers are the source of truth."""
+        from app.services.ingestion import vintages as vg
+
+        def unreadable(cik, root=None):
+            raise ValueError("a crafted index")
+        monkeypatch.setattr(vg, "read_manifest", unreadable)
+        quiet = watch_cli.VINTAGE_STALE_DAYS - 1
+        for n in range(quiet):
+            vg._record_problem_day(320193, date(2026, 9, 20 + n))
+        assert watch_cli._vintage_rc("AAPL", _FactsClient()) == 0
+        vg._record_problem_day(320193, date(2026, 9, 20 + quiet))
+        assert watch_cli._vintage_rc("AAPL", _FactsClient()) == watch_cli.VINTAGE_STALE_RC
 
 
 # --- a holder's assumptions file -------------------------------------------------
@@ -651,10 +769,10 @@ class TestEngineDirectories:
         from app.services.ingestion import vintages as vg
 
         root = tmp_path / "vintages"
-        _victim(outside, vg.MANIFEST)
         _victim(outside, f"{vg.BUSY_PREFIX}2026-09-01")  # not this store's problem day
         forged = outside / "2026-09-01-0123456789ab.json.gz"
         forged.write_bytes(gzip.compress(b'{"facts": {"forged": 1}}'))
+        _forged_manifest(outside / vg.MANIFEST, forged.name)
         _plant(vg.cik_dir(320193, root), outside)
         before = _tree(outside)
         for day in (27, 28, 29):
@@ -665,18 +783,28 @@ class TestEngineDirectories:
         assert _tree(outside) == before
         assert vg.list_vintages(320193, root) == []
         assert vg.observed_vintages(320193, root) == []
-        assert vg.read_manifest(320193, root)["problem_days"] == 3
+        # Nothing of the forged manifest is taken: not its snapshots, its
+        # observations, its last check, nor its count, which raised
+        # (review of b17cc08, finding 1).
+        assert vg.read_manifest(320193, root) == {
+            "last_checked": None, "problem_days": 3, "observations": [], "snapshots": []}
         assert sorted(p.name for p in root.iterdir()) == [
             f"{vg.BUSY_PREFIX}CIK0000320193-2026-09-{d}" for d in (27, 28, 29)] + [
             "CIK0000320193"]
 
     def test_a_linked_cik_directory_reaches_the_stale_alert(self, outside, capsys):
+        """With a manifest behind the link whose count is not a number, the
+        sweep's count raised and `_vintage_rc` read that as 0 every day: the
+        markers were in the root, but the alert never fired (review of
+        b17cc08, finding 1). The count is the markers'."""
         from app.services.ingestion import vintages as vg
 
+        _forged_manifest(outside / vg.MANIFEST, "2026-09-01-0123456789ab.json.gz")
+        before = _tree(outside)
         _plant(vg.cik_dir(320193), outside)
         assert _stale_rcs(3) == _expected_stale_rcs(3)
         assert "no vintage today (failed)" in capsys.readouterr().err
-        assert list(outside.iterdir()) == []
+        assert _tree(outside) == before
 
     def test_problem_days_go_once_the_directory_is_real_again(self, tmp_path, outside):
         """The operator removes the link: the next capture succeeds and
@@ -789,6 +917,48 @@ class TestModesKept:
         rf.write_atomic(tmp_path / "linked", "x")
         assert not (tmp_path / "linked").is_symlink() and _intact(v)
         assert (tmp_path / "linked").stat().st_mode & 0o777 == _new_file_mode(tmp_path)
+
+    def test_only_the_permission_bits_are_kept(self, tmp_path):
+        """setuid, setgid and sticky are not lent to the engine's text (a
+        planted 0o6777 file made the state file set-id); the permission bits
+        are (review of b17cc08, finding 4)."""
+        from app.services.delivery import publish
+
+        p = tmp_path / "state.json"
+        p.write_text("planted")
+        os.chmod(p, 0o6777)
+        assert rf.existing_mode(p) == 0o777
+        rf.write_atomic(p, "engine text")
+        assert p.stat().st_mode & 0o7777 == 0o777
+        brief = tmp_path / "AAPL_2026-09-26.md"
+        brief.write_text("v1\n")
+        drop = tmp_path / "drop"
+        drop.mkdir()
+        (drop / brief.name).write_text("planted")
+        os.chmod(drop / brief.name, 0o4755)
+        assert publish(brief, drop).stat().st_mode & 0o7777 == 0o755
+
+    def test_a_file_of_another_owner_lends_no_mode(self, tmp_path, monkeypatch):
+        """Only a file this process owns lends its mode: another principal's
+        file at the name gets the umask's, as a new one does."""
+        p = tmp_path / "state.json"
+        p.write_text("x")
+        os.chmod(p, 0o600)
+        assert rf.existing_mode(p) == 0o600
+        monkeypatch.setattr(rf.os, "geteuid", lambda: p.stat().st_uid + 1)
+        assert rf.existing_mode(p) is None
+        rf.write_atomic(p, "new")
+        assert p.stat().st_mode & 0o777 == _new_file_mode(tmp_path)
+
+    @pytest.mark.skipif(os.geteuid() != 0, reason="making a file of another owner needs root")
+    def test_a_file_of_another_owner_lends_no_mode_for_real(self, tmp_path):
+        p = tmp_path / "state.json"
+        p.write_text("x")
+        os.chmod(p, 0o600)
+        os.chown(p, 54321, 54321)
+        assert rf.existing_mode(p) is None
+        rf.write_atomic(p, "new")
+        assert p.stat().st_mode & 0o777 == _new_file_mode(tmp_path)
 
     def test_overdue_alert_state(self, tmp_path, monkeypatch):
         state = tmp_path / "journal" / ".overdue_alerted.json"

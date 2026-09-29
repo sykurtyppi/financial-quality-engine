@@ -452,6 +452,19 @@ def _pending() -> Path:
     return own_dir(BRIEF_PENDING)
 
 
+def _still_queued(ticker: str) -> str:
+    """What a crashed retry leaves queued, for its log line. "still queued"
+    only when the queue can still be read: with ``.pending`` a link
+    (refused) or unreadable, nothing there is queued or retried, and saying
+    otherwise hid it (review of the finding 5 fix)."""
+    try:
+        _queue_markers(ticker)
+    except OSError as e:
+        return (f"the brief queue {BRIEF_PENDING} cannot be used ({e}), so nothing queued "
+                f"for {ticker} is being retried; fix the queue directory")
+    return "still queued"
+
+
 def _queue_path(ticker: str, target: str) -> Path:
     """The marker of ``target``'s event: ``<TICKER>__print-night`` for the
     print-night brief, ``<TICKER>__<report stem>`` for a full one.
@@ -1136,11 +1149,17 @@ def _vintage_rc(ticker: str, client: SecClient) -> int:
     caller's identity and cache settings and could block on a live EDGAR
     request — inside the error path of a job whose contract is to reach every
     name — and would slip past the client every test injects.
+
+    Counted from the problem-day markers, the store's source of truth, never
+    from the manifest: a manifest behind a link, or with a count that was not
+    a number, made the read raise, which read as 0 here every day and kept
+    the alert silent however long the archive stayed dark (review of the
+    finding 5 fix). A count stored before markers existed no longer alerts.
     """
     try:
-        from app.services.ingestion.vintages import read_manifest
+        from app.services.ingestion.vintages import _problem_days
 
-        days = int(read_manifest(client.resolve_cik(ticker)).get("problem_days") or 0)
+        days = _problem_days(client.resolve_cik(ticker))
     except Exception:  # noqa: BLE001 — the counter is advisory, never fatal
         return 0
     return VINTAGE_STALE_RC if days >= VINTAGE_STALE_DAYS else 0
@@ -1172,7 +1191,8 @@ def _sweep_one(client: SecClient, watch: wl.Watch, args: argparse.Namespace) -> 
                 pending = _retry_pending_brief(watch.ticker, submissions)
             except Exception as e:  # noqa: BLE001 — the queue must not take the pass down
                 print(f"[{stamp}] {watch.ticker}: queued brief retry crashed: "
-                      f"{type(e).__name__}: {e} — still queued.", file=sys.stderr)
+                      f"{type(e).__name__}: {e} — {_still_queued(watch.ticker)}.",
+                      file=sys.stderr)
                 pending = BRIEF_PENDING_RC
         overdue = (now - watch.print_at).days
         if overdue > OVERDUE_DAYS:

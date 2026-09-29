@@ -131,7 +131,14 @@ def own_dir(d: Path) -> Path:
     Only those: the roots themselves (``reports/``, ``journal/``, the
     vintage store, the SEC cache, the drop folder) may be links, and are
     never passed here; they are the operator's to place, on another disk if
-    they like."""
+    they like.
+
+    A check, then a use: a link swapped in between the two is still written
+    through. ``O_NOFOLLOW`` where a file is then opened covers only its last
+    component, never these directories above it; closing the gap needs every
+    open made relative to a descriptor held on the directory (``openat``
+    with ``O_DIRECTORY | O_NOFOLLOW``), which this does not do. What it stops
+    is a link already in place, which is what was reproduced."""
     if d.is_symlink():
         raise OSError(errno.ELOOP, f"{d} is a symlink, not the directory this engine "
                       "created there; it is never followed")
@@ -395,12 +402,18 @@ def _seal(staged: Staged, name: str) -> None:
 def existing_mode(path: Path) -> int | None:
     """The permission bits of the regular file at ``path``, which a file
     written whole over it keeps; None when there is none there (nothing, or
-    a symlink, which is not followed, or anything else)."""
+    a symlink, which is not followed, or anything else) or when another user
+    owns it. Only ``0o777``: setuid, setgid and sticky are never lent to the
+    engine's text, and a file someone else planted at the name lends nothing
+    at all — the new one gets the umask's, as a new file does (review of the
+    finding 5 fix)."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return None
-    return stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else None
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+        return None
+    return st.st_mode & 0o777
 
 
 def write_atomic(path: Path, text: str, *, mode: int | None = None) -> None:

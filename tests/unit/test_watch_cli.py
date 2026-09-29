@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 from argparse import Namespace
-from datetime import UTC
+from datetime import UTC, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -698,6 +698,24 @@ class TestSweep:
         assert watch_cli.cmd_sweep(_sweep_args()) == 0
         assert "still waiting" not in capsys.readouterr().err
 
+    @pytest.mark.parametrize("days, named", [(watch_cli.OVERDUE_DAYS, False),
+                                             (watch_cli.OVERDUE_DAYS + 1, True)])
+    def test_overdue_means_more_than_overdue_days(self, sweep_env, monkeypatch, capsys,
+                                                  days, named):
+        # Rows print 2026-10-29 20:30Z: exactly OVERDUE_DAYS later is still
+        # patience, a day more is a mis-armed row.
+        at = watch_cli._now("2026-10-29T20:30:00+00:00") + timedelta(days=days)
+        monkeypatch.setattr(watch_cli, "_utcnow", lambda: at)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert (f"AAPL: still waiting {days}d past its print hint"
+                in capsys.readouterr().err) is named
+
+    def test_verbose_says_each_wait(self, sweep_env, capsys):
+        assert watch_cli.cmd_sweep(_sweep_args()) == 0
+        assert "AAPL: forced wait" not in capsys.readouterr().out
+        assert watch_cli.cmd_sweep(_sweep_args(verbose=True)) == 0
+        assert "AAPL: forced wait" in capsys.readouterr().out
+
 
 class TestPortfolioSync:
     def test_read_portfolio_tolerates_csv_and_comments(self, tmp_path):
@@ -879,7 +897,25 @@ class TestBriefHook:
         sweep_env.table["NVDA"] = "refuse"
         assert watch_cli.cmd_sweep(_sweep_args()) == 5
         assert sweep_env.generate_auto == ["NVDA"]  # the pass reached NVDA
-        assert "queued brief retry crashed" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "queued brief retry crashed" in err and "still queued" in err
+        assert (watch_cli.BRIEF_PENDING / "AAPL").is_file()  # as it says
+
+    def test_an_unusable_queue_is_not_said_to_hold_the_brief(
+            self, sweep_env, monkeypatch, tmp_path, capsys):
+        """With ``.pending`` a link (refused), the retry raises and the pass
+        said "— still queued." when nothing could be queued or retried there
+        (review of b17cc08, finding 5)."""
+        away = tmp_path / "away"
+        away.mkdir()
+        watch_cli.BRIEF_PENDING.symlink_to(away)
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: pytest.fail("nothing to run"))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 5
+        err = capsys.readouterr().err
+        assert "still queued" not in err
+        assert err.count("queued brief retry crashed") == 3
+        assert f"the brief queue {watch_cli.BRIEF_PENDING} cannot be used" in err
+        assert "nothing queued for AAPL is being retried" in err
 
     def test_sweep_aggregate_ranks_by_severity_not_number(self, sweep_env, monkeypatch, tmp_path):
         # AAPL's audit fails (4) while MSFT's brief is queued (5): the pass
@@ -1867,8 +1903,13 @@ class TestVintageEscalation:
                 asked.append(t)
                 return 1045810
 
-        monkeypatch.setattr("app.services.ingestion.vintages.read_manifest",
-                            lambda cik, root=None: {"problem_days": 9})
+        from app.services.ingestion import vintages
+
+        # Counted from the markers (the isolated store's), not the manifest.
+        for n in range(watch_cli.VINTAGE_STALE_DAYS):
+            vintages._record_problem_day(1045810, watch_cli.date(2026, 9, 20 + n))
+        monkeypatch.setattr(vintages, "read_manifest",
+                            lambda cik, root=None: {"problem_days": 0})
         assert watch_cli._vintage_rc("NVDA", C()) == watch_cli.VINTAGE_STALE_RC
         assert asked == ["NVDA"]
 
