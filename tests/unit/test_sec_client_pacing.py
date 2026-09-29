@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import email.message
 import email.utils
+import errno
 import fcntl
 import itertools
 import logging
 import math
 import multiprocessing
 import os
+import stat
 import threading
 import time
 import urllib.error
@@ -1219,3 +1221,235 @@ def _sleeping_worker(cache_dir: str, interval: float, asleep, out) -> None:
     sc.SecClient(cache_dir=cache_dir, identity="Test Suite test@example.com")._get(
         "https://example/sleeping")
     out.put(starts)
+
+
+# --- the hold-off file is never left empty ---------------------------------------
+
+def _fail_write(monkeypatch, path: Path, at: int) -> list[str]:
+    """Make the `at`-th write syscall (pwrite or ftruncate, counted from 1)
+    on the file at `path` raise, where a SIGKILL or a full disk would stop
+    the rewrite. Returns the calls made on that file, by name."""
+    st = path.stat()
+    target = (st.st_dev, st.st_ino)
+    calls: list[str] = []
+
+    def counted(real, name):
+        def call(fd, *args):
+            fst = os.fstat(fd)
+            if (fst.st_dev, fst.st_ino) == target:
+                calls.append(name)
+                if len(calls) == at:
+                    raise OSError(errno.ENOSPC, f"simulated failure at {name}")
+            return real(fd, *args)
+        return call
+
+    monkeypatch.setattr(sc.os, "pwrite", counted(os.pwrite, "pwrite"))
+    monkeypatch.setattr(sc.os, "ftruncate", counted(os.ftruncate, "ftruncate"))
+    return calls
+
+
+def _as_another_process(monkeypatch) -> None:
+    """Forget this process's own hold-off and schedule: only the files know."""
+    monkeypatch.setattr(sc, "_blocked_until", 0.0)
+    monkeypatch.setattr(sc, "_last_start", 0.0)
+
+
+class TestTheHoldOffFileIsNeverLeftEmpty:
+    """Review of deb6364, finding 2: every reservation (~6.7/s) rewrote the
+    hold file with its UNCHANGED value — ftruncate to 0, then pwrite — so a
+    SIGKILL or a full disk between the two left it empty, and every other
+    process forgot a live hold-off. A reservation no longer writes it; a
+    change is written over the old value before the file is cut to length,
+    and before the schedule."""
+
+    def test_a_reservation_leaves_a_live_hold_off_alone(self, fast_pacing, monkeypatch, tmp_path):
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        sc._hold_off(tmp_path, 5.0)
+        stored = _stored_hold(tmp_path)
+        calls = _fail_write(monkeypatch, tmp_path / ".sec_rate_hold", at=2)
+        sc._reserve_slot(tmp_path)
+        assert calls == [], f"a reservation rewrote the hold-off file ({calls})"
+        _as_another_process(monkeypatch)
+        assert _stored_hold(tmp_path) == stored
+        assert sc._held_off(tmp_path) is True
+
+    @pytest.mark.parametrize("at", [1, 2], ids=["at-first-write", "between-the-writes"])
+    def test_a_hold_off_moved_later_survives_a_failed_rewrite(
+            self, fast_pacing, monkeypatch, tmp_path, at):
+        """The old end is stored LONGER than the new one will be (trailing
+        digits), the case where a write cut short of its truncate leaves
+        the old value's tail behind the new digits: that still reads as a
+        number no earlier than the new end, never as nothing."""
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        now = time.time()
+        old = f"{now + 2.0:.10f}"
+        _write_state(tmp_path, now, old)
+        calls = _fail_write(monkeypatch, tmp_path / ".sec_rate_hold", at=at)
+        sc._hold_off(tmp_path, 5.0)
+        assert len(calls) == at
+        _as_another_process(monkeypatch)
+        assert sc._held_off(tmp_path) is True
+        stored = float(_stored_hold(tmp_path))
+        assert stored >= float(old)
+        if at == 2:
+            assert stored >= now + 5.0 - RESERVE_TOL
+
+    def test_the_hold_off_is_recorded_before_the_schedule(self, fast_pacing, monkeypatch, tmp_path):
+        """Written second, a hold-off whose schedule write failed was never
+        recorded: already-reserved requests elsewhere sent into it."""
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        _write_state(tmp_path, time.time() - 1.0, "")
+        calls = _fail_write(monkeypatch, tmp_path / ".sec_rate", at=1)
+        sc._hold_off(tmp_path, 5.0)
+        assert calls, "the schedule was never written"
+        _as_another_process(monkeypatch)
+        assert sc._held_off(tmp_path) is True
+
+    def test_a_short_write_is_not_cut_to_length(self, fast_pacing, monkeypatch, tmp_path):
+        """A write that stops short leaves the new digits over the old
+        value's tail — a number. Cut to the NEW length after it, a file
+        shorter than that is padded with NULs, which reads as nothing."""
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        now = time.time()
+        old = f"{int(now) + 2}.5"
+        _write_state(tmp_path, now, old)
+        st = (tmp_path / ".sec_rate_hold").stat()
+        real = os.pwrite
+        shortened: list[bytes] = []
+
+        def short(fd, data, offset):
+            fst = os.fstat(fd)
+            if (fst.st_dev, fst.st_ino) == (st.st_dev, st.st_ino) and len(data) > len(old):
+                shortened.append(data)
+                return real(fd, data[:len(old) - 1], offset)
+            return real(fd, data, offset)
+
+        monkeypatch.setattr(sc.os, "pwrite", short)
+        sc._hold_off(tmp_path, 5.0)
+        assert shortened
+        _as_another_process(monkeypatch)
+        assert sc._held_off(tmp_path) is True
+        assert float(_stored_hold(tmp_path)) >= float(old)
+
+
+# --- a state file that cannot be used is judged on its own ----------------------
+
+def _plant(path: Path, layout: str, victim: Path) -> None:
+    if layout == "directory":
+        path.mkdir()
+    elif layout == "fifo":
+        os.mkfifo(path)
+    else:
+        path.symlink_to(victim)
+
+
+def _joined(procs, out, n: int, timeout: float = 30.0) -> list:
+    """`n` results from `out`, then the processes reaped. A process that
+    hangs (a FIFO read under the flock) fails the test instead of the run."""
+    try:
+        return [out.get(timeout=timeout) for _ in range(n)]
+    finally:
+        for p in procs:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.kill()
+                p.join()
+
+
+class TestAnUnusableHoldOffFileKeepsTheScheduleShared:
+    """Review of deb6364, finding 3: any failure to open `.sec_rate_hold`
+    dropped BOTH files, so the schedule went process-wide too; and a FIFO
+    at any state name hung `os.read` while holding `_pace_lock` and the
+    flock. The hold file failing now costs only the shared hold-off (this
+    process's still binds), and a name that is not a regular file is
+    refused at open."""
+
+    @pytest.mark.parametrize("layout", ["directory", "fifo", "symlink"])
+    def test_two_processes_still_share_the_schedule(self, tmp_path, layout):
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        victim = tmp_path / "victim.txt"
+        victim.write_text("precious")
+        _plant(cache / ".sec_rate_hold", layout, victim)
+        ctx = multiprocessing.get_context("spawn")
+        barrier = ctx.Barrier(2)
+        out = ctx.Queue()
+        procs = [ctx.Process(target=_process_worker,
+                             args=(str(cache), INTERVAL, 6, barrier, out))
+                 for _ in range(2)]
+        for p in procs:
+            p.start()
+        results = _joined(procs, out, 2)
+        assert [p.exitcode for p in procs] == [0, 0]
+        _assert_paced([s for r, _ in results for s in r], 12,
+                      [s for _, r in results for s in r])
+        float((cache / ".sec_rate").read_text())
+        assert victim.read_text() == "precious"
+
+    @pytest.mark.parametrize("name", [".sec_rate", ".sec_rate_hold", ".sec_rate.lock"])
+    def test_a_fifo_at_any_state_name_never_hangs(self, tmp_path, name):
+        os.mkfifo(tmp_path / name)
+        ctx = multiprocessing.get_context("spawn")
+        out = ctx.Queue()
+        p = ctx.Process(target=_every_pacing_call_worker, args=(str(tmp_path), INTERVAL, out))
+        p.start()
+        (held,) = _joined([p], out, 1)
+        assert p.exitcode == 0
+        assert held is True  # this process's own hold-off, whatever the files
+        assert stat.S_ISFIFO(os.lstat(tmp_path / name).st_mode)
+
+    def test_the_hold_off_still_binds_this_process_and_says_so(
+            self, fast_pacing, monkeypatch, tmp_path, caplog):
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        (tmp_path / ".sec_rate_hold").mkdir()
+        t0 = time.time()
+        with caplog.at_level(logging.WARNING, logger=sc.__name__):
+            sc._hold_off(tmp_path, 1.0)
+            assert sc._held_off(tmp_path) is True
+            assert sc._reserve_slot(tmp_path) - time.monotonic() >= 1.0 - 0.05
+        # The schedule is still shared: the slot is in the file other
+        # processes read.
+        assert _stored_schedule(tmp_path) >= t0 + 1.0 - RESERVE_TOL
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, warnings
+        assert "hold-off" in warnings[0] and "schedule is still shared" in warnings[0]
+
+    def test_the_schedule_failing_later_is_still_said(
+            self, fast_pacing, monkeypatch, tmp_path, caplog):
+        """Two fallbacks, two warnings: having said the hold-off is not
+        shared must not silence saying the schedule is not either."""
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+        (tmp_path / ".sec_rate_hold").mkdir()
+        with caplog.at_level(logging.WARNING, logger=sc.__name__):
+            sc._reserve_slot(tmp_path)
+
+            def no_locks(fd, op):
+                raise OSError(37, "No locks available")
+
+            monkeypatch.setattr(sc.fcntl, "flock", no_locks)
+            sc._reserve_slot(tmp_path)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2, warnings
+        assert "cannot share its schedule" in warnings[1]
+
+    @pytest.mark.parametrize("layout", ["directory", "fifo"])
+    def test_a_refused_state_file_leaves_no_descriptor_open(self, tmp_path, layout):
+        """POSIX hands out the lowest free descriptor, so the next open gets
+        the same number only if the refused one was closed."""
+        _plant(tmp_path / ".sec_rate_hold", layout, tmp_path / "unused")
+        probe = os.open(os.devnull, os.O_RDONLY)
+        os.close(probe)
+        with pytest.raises(OSError):
+            sc._open_state(tmp_path / ".sec_rate_hold")
+        again = os.open(os.devnull, os.O_RDONLY)
+        os.close(again)
+        assert again == probe
+
+
+def _every_pacing_call_worker(cache_dir: str, interval: float, out) -> None:
+    """Reserve, hold off, ask whether held off: each takes the state files."""
+    sc._REQUEST_INTERVAL_S = interval
+    cache = Path(cache_dir)
+    sc._reserve_slot(cache)
+    sc._hold_off(cache, 1.0)
+    out.put(sc._held_off(cache))

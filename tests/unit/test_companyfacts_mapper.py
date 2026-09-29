@@ -545,3 +545,88 @@ class TestMutationBacklog:
         assert q4.revenue == pytest.approx(4400.0)
         src = diag.field_by_name("revenue").period_sources[q4_24.isoformat()]
         assert src.method == "fy_minus_3q"
+
+
+# The spellings a companyfacts payload can carry a non-number in: `json.loads`
+# accepts the bare NaN / Infinity literals, and `float()` accepts the strings.
+_NON_FINITE_VALS = pytest.mark.parametrize(
+    "bad", [float("nan"), "NaN", float("inf"), "-Infinity"], ids=["nan", "NaN-str", "inf", "-Infinity-str"],
+)
+
+
+class TestNonFiniteFactValues:
+    """Review of deb6364, finding 1: `float(e["val"])` took NaN / inf as a
+    reported number. A NaN revenue then made DSO NOT_MEANINGFUL, which the
+    journal resolver commits as a terminal `unresolvable` — while the same
+    field, looked up raw, waits `pending`. A value that is not a number is
+    not a report of one: the fact is dropped where it is read, so the field
+    is missing like any unreported one — MISSING_DATA downstream, `pending`
+    in the resolver — and a warning names the fact."""
+
+    def _payload(self, bad, filed_bad: str = "2026-01-01") -> dict:
+        last = Q_ENDS[-1]
+        revenue = quarterly_flows([100.0] * 8)[:-1] + [
+            {**fact(q_start(last), last, bad, filed=filed_bad), "accn": "0000000000-26-000099"},
+        ]
+        receivables = [fact(None, end, 50.0) for end in Q_ENDS]
+        return facts_json({
+            "Assets": assets_instants(),
+            "Revenues": revenue,
+            "AccountsReceivableNetCurrent": receivables,
+        })
+
+    @_NON_FINITE_VALS
+    def test_the_fact_is_dropped_and_named(self, bad, caplog):
+        with caplog.at_level("WARNING", logger="app.services.ingestion.companyfacts_mapper"):
+            ds, _diag = build_dataset(self._payload(bad), "SYN", n_quarters=4)
+        assert [p.revenue for p in ds.periods] == [100.0, 100.0, 100.0, None]
+        # Finite facts are read as they always were.
+        assert [p.receivables for p in ds.periods] == [50.0] * 4
+        named = [r.getMessage() for r in caplog.records
+                 if "0000000000-26-000099" in r.getMessage()]
+        assert named, "no warning names the dropped fact"
+        assert all("us-gaap:Revenues" in m and "2025-12-31" in m for m in named)
+
+    @_NON_FINITE_VALS
+    def test_the_metric_is_missing_data_and_the_resolver_waits(self, bad):
+        from app.schemas.metrics import MetricStatus
+        from app.services.formulas.registry import compute_metrics
+        from app.services.journal.resolver import propose_resolution
+        from app.services.journal.schema_v2 import Assumption
+
+        ds, _diag = build_dataset(self._payload(bad), "SYN", n_quarters=4)
+        bundle = compute_metrics(ds)
+        label = ds.periods[-1].fiscal_label
+        (dso,) = [m for m in bundle.history["dso"] if m.fiscal_label == label]
+        assert dso.status is MetricStatus.MISSING_DATA
+        for metric in ("dso", "revenue"):
+            a = Assumption(metric=metric, comparator=">", threshold=1.0, window=label,
+                           source=None, resolve_by=date(2030, 1, 1))
+            r = propose_resolution(a, ds, bundle=bundle)
+            assert (r.state, r.observed) == ("pending", None), (metric, r.note)
+
+    @pytest.mark.parametrize("malformed", [
+        {"end": "not-a-date", "val": 1.0, "filed": "2026-01-01", "form": "10-Q"},
+        {"end": "2025-12-31", "filed": "2026-01-01", "form": "10-Q"},  # no val
+        {"end": "2025-12-31", "val": "a lot", "filed": "2026-01-01", "form": "10-Q"},
+    ], ids=["bad-date", "no-val", "not-a-number"])
+    def test_an_unreadable_fact_is_skipped_before_the_check(self, malformed):
+        """The finiteness check follows the parse, so an unreadable fact must
+        leave the loop before it (the check would otherwise meet no fact, or
+        the previous one). It is the FIRST row here."""
+        fj = facts_json({"Assets": assets_instants(),
+                         "Revenues": [malformed] + quarterly_flows([100.0] * 8)})
+        ds, _diag = build_dataset(fj, "SYN", n_quarters=4)
+        assert [p.revenue for p in ds.periods] == [100.0] * 4
+
+    @_NON_FINITE_VALS
+    def test_a_later_non_finite_filing_does_not_supersede_a_number(self, bad):
+        """Not reported means not reported: a later filing carrying no
+        number leaves the period's reported value current."""
+        fj = self._payload(100.0, filed_bad="2026-01-01")
+        last = Q_ENDS[-1]
+        fj["facts"]["us-gaap"]["Revenues"]["units"]["USD"].append(
+            {**fact(q_start(last), last, bad, filed="2026-03-01", form="10-Q/A"),
+             "accn": "0000000000-26-000100"})
+        ds, _diag = build_dataset(fj, "SYN", n_quarters=4)
+        assert ds.periods[-1].revenue == 100.0

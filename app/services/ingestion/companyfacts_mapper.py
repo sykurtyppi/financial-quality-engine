@@ -47,6 +47,8 @@ IngestionDiagnostics.
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -91,6 +93,8 @@ from app.services.ingestion.fields import field as field_spec
 from app.services.ingestion.precedence import Rank, current_conflict, latest
 from app.services.ingestion.precedence import rank as fact_rank
 from app.services.ingestion.selection import Composer, SeriesSelection, composer_for
+
+logger = logging.getLogger(__name__)
 
 QTD_DAYS = (70, 100)
 ANNUAL_DAYS = (330, 380)
@@ -311,19 +315,35 @@ def _collect(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[RawFa
     out: list[RawFact] = []
     for e in entries:
         try:
-            out.append(
-                RawFact(
-                    start=_parse_date(e["start"]) if "start" in e else None,
-                    end=_parse_date(e["end"]),
-                    val=float(e["val"]),
-                    filed=_parse_date(e.get("filed", "1900-01-01")),
-                    form=e.get("form", ""),
-                    accn=str(e.get("accn", "")),
-                    concept=f"{taxonomy}:{tag}",
-                )
+            f = RawFact(
+                start=_parse_date(e["start"]) if "start" in e else None,
+                end=_parse_date(e["end"]),
+                val=float(e["val"]),
+                filed=_parse_date(e.get("filed", "1900-01-01")),
+                form=e.get("form", ""),
+                accn=str(e.get("accn", "")),
+                concept=f"{taxonomy}:{tag}",
             )
         except (KeyError, ValueError, TypeError):
             continue
+        if not math.isfinite(f.val):
+            # `float()` takes "NaN" and "inf", and `json.loads` the bare NaN
+            # and Infinity literals, so a payload can carry a value that is
+            # not a number. It is not a report of one: dropped here, the
+            # field is missing like any unreported one (MISSING_DATA
+            # downstream, `pending` in the journal resolver), and a later
+            # such fact does not supersede an earlier real one. Kept, a NaN
+            # revenue made DSO NOT_MEANINGFUL, which the resolver commits as
+            # a final `unresolvable` (review of deb6364, finding 1).
+            # `restatements._trail` and `vintages._series` drop it the same
+            # way, so they stand on the figure scored here.
+            logger.warning(
+                "dropping %s %s%s (accession %s, filed %s): value %r is not a finite number",
+                f.concept, "" if f.start is None else f"{f.start}..", f.end,
+                f.accn or "none", f.filed, f.val,
+            )
+            continue
+        out.append(f)
     return out
 
 
