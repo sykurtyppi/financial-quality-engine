@@ -172,10 +172,15 @@ class ReportOwner(NamedTuple):
 
 class Pending(NamedTuple):
     """An entry's pending report: what its marker says (``text``), and its
-    ``owner`` (None when the marker does not say who)."""
+    ``owner`` (None when the marker does not say who); once its report is
+    published, which run that is: ``generation_id`` and ``report`` (its path
+    in its generation). None in a marker written before the publish, or
+    before markers recorded it (Hermes re-audit of 84e65b0, finding 3)."""
 
     text: str
     owner: ReportOwner | None
+    generation_id: str | None = None
+    report: str | None = None
 
 
 def report_owner() -> ReportOwner:
@@ -185,7 +190,8 @@ def report_owner() -> ReportOwner:
     return handed or ReportOwner.this_process("journal.py report --defer-mark (run by hand)")
 
 
-def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None) -> None:
+def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None, *,
+                       generation_id: str | None = None, report: str | None = None) -> None:
     """Record that ``path``'s report is PENDING its audit: built (or being
     built) by ``journal.py report --defer-mark`` and not yet stamped, for
     ``owner`` (default: ``report_owner()``), the run that will audit and
@@ -207,6 +213,11 @@ def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None) ->
     its identity), whose pid runs, and whose sweep lock is held, until the
     audit is done (``owner_at_work``).
 
+    ``generation_id`` and ``report`` name the run once it is published (Hermes
+    re-audit of 84e65b0, findings 3 and 4): ``mark-reported --generation``
+    takes the run a marker records as the entry's own, whatever is live by
+    then, and a refusal names the command that stamps it.
+
     A hidden sidecar (``.<name>.report.pending``), JSON, written whole. What
     is there already is replaced (a ``--defer-mark`` retry takes over the
     marker of an owner that is gone); something that is not a regular file
@@ -214,7 +225,10 @@ def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None) ->
     path refuses it), since a rename cannot replace a directory."""
     marker = _pending_path(path)
     owner = owner or report_owner()
-    text = json.dumps({"marked": now_iso(), "by": by, "owner": owner._asdict()}) + "\n"
+    doc: dict[str, object] = {"marked": now_iso(), "by": by, "owner": owner._asdict()}
+    if generation_id is not None:
+        doc.update(generation_id=generation_id, report=report)
+    text = json.dumps(doc) + "\n"
     try:
         regular = stat.S_ISREG(os.lstat(marker).st_mode)
     except FileNotFoundError:
@@ -263,8 +277,12 @@ def pending_marker(path: Path) -> Pending | None:
     if owner is None:
         return Pending(f"(the marker {marker.name} does not say who owns it: "
                        f"{raw.strip()[:200]!r})", None)
-    return Pending(f"marked {doc.get('marked')} by {doc.get('by')}, for {owner.describe()}",
-                   owner)
+    said = f"marked {doc.get('marked')} by {doc.get('by')}, for {owner.describe()}"
+    gid, report = doc.get("generation_id"), doc.get("report")
+    if not isinstance(gid, str):
+        return Pending(said, owner)  # none recorded (or not in kind): the old format's
+    report = report if isinstance(report, str) else None
+    return Pending(f"{said}; its report: generation {gid} ({report})", owner, gid, report)
 
 
 def report_pending(path: Path) -> str | None:

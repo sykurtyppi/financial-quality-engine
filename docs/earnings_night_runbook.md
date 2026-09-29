@@ -137,7 +137,24 @@ the row could not be re-armed after a completed case ·
 the new report may be live. Nothing was audited or marked; the log says how
 to check (`readlink` the generation pointer) and how to put the previous run
 back (`report_files.restore`). `generate_report.py` and `journal.py report`
-exit 8 on it too, and it outranks every other code in a `sweep`.
+exit 8 on it too, and it outranks every other code in a `sweep` ·
+`9` a report WAS published but its journal entry is NOT stamped (`journal.py
+report`'s own code: the stamp failed after the publish — a full disk, a
+denied write, the journal folder gone — or the sweep's child could not write
+which run it published). The message names the run and the command that
+stamps it, `journal.py mark-reported <T> --date <day> --generation <id>`;
+the entry is left pending, so a plain `report` refuses instead of building
+again. Ranked just below `8` in a `sweep`.
+
+The sweep audits and stamps exactly the report its own `journal.py report
+--defer-mark` published: the child writes that run (its generation's own
+report path and id) to a `--result-file`, and `mark-reported --generation`
+stamps the entry only if that run is the entry's (its live report carries
+it, or its pending marker records it). A child that exits 0 without saying
+which run it published is exit `4`: no other report is audited or marked in
+its place. Before this (Hermes re-audit of 84e65b0, finding 3) the sweep
+audited the ticker's newest report, another run's if one went live meanwhile,
+and stamped the entry for it.
 
 **4. After it generates — read, then fill AFTER**
 
@@ -364,7 +381,8 @@ names. While it may still be at work — its pid running on this host, or
 the sweep lock (`journal/sweep.lock`) held by any sweep or poll — a
 `--retry` (and a `--defer-mark` run by hand) is refused: rebuilding would
 publish over the report being audited. Once it is gone, either stamp the
-report that was audited, `journal.py mark-reported <T> --date <day>`, or
+report that was audited, `journal.py mark-reported <T> --date <day>
+--generation <id>` (the refusal names the id when the marker records it), or
 rebuild it on purpose, `journal.py report <T> --date <day> --retry` (built
 and stamped as a plain report). Only if you are sure the owner is not
 auditing this report (a pid reused by another process, an owner on another

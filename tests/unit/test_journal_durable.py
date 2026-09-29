@@ -973,7 +973,7 @@ def test_the_marker_is_a_hidden_sidecar_written_whole(tmp_path, monkeypatch):
     assert store.report_pending(path) == (
         f"marked {doc['marked']} by journal.py report --defer-mark, for "
         f"{owner.name}, pid {owner.pid} on {owner.host}")
-    assert store.pending_marker(path) == (store.report_pending(path), owner)
+    assert store.pending_marker(path) == store.Pending(store.report_pending(path), owner)
     handed = _owner(monkeypatch, pid=4242, lock=tmp_path / "sweep.lock")  # the sweep's child
     store.set_report_pending(path, "journal.py report --defer-mark")  # replaced whole
     assert store.pending_marker(path).owner == store.ReportOwner(**handed)
@@ -1491,3 +1491,360 @@ def test_a_publish_in_doubt_exits_with_its_own_code_and_stamps_nothing(
     assert rc == PUBLISH_IN_DOUBT_RC == 8
     assert "the NEW generation g may be live" in err and "Report generation failed" not in err
     assert path.read_bytes() == before  # never stamped
+
+
+# --- Hermes re-audit of 84e65b0, findings 3 and 4: which report, and a stamp that fails --
+# Finding 4: after a plain `report` had published, the stamp's OSError (a full
+# disk, a denied write, an fsync failure, the journal folder removed) was
+# uncaught: a traceback, the report live, the entry unstamped, and a retry
+# that believed nothing had happened. It is now exit 9, "published, not
+# stamped", naming the generation and the command that stamps it, and the
+# entry is left pending so a plain retry refuses instead of building again.
+# Finding 3: the sweep audited the NEWEST report of the ticker, not the one its
+# `report --defer-mark` child published, and stamped the entry for it. The
+# child now says which report it published (`--result-file`), and
+# `mark-reported --generation` stamps only that run.
+
+
+def _publishing(monkeypatch, cli, tmp_path):
+    """A build that publishes for real (`report_files.replacing`), as
+    `build_report` does, into a reports directory of the test's own (the
+    one `reporting.report_path` names, which `mark-reported --generation`
+    reads)."""
+    from app.services.journal import reporting
+    from app.services.reporting.report_files import replacing
+
+    reports = tmp_path / "reports"
+    reports.mkdir(exist_ok=True)
+    monkeypatch.setattr(reporting, "REPORTS", reports)
+    built: list[Path] = []
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False, **k):
+        out = reports / f"{ticker}_{report_day}.md"
+        with replacing(out) as staged:
+            staged.report.write_text(f"# {ticker} {report_day}, run {len(built)}\n")
+            staged.ledger.write_text("{}")
+        built.append(out)
+        return out, "no acute signals"
+
+    monkeypatch.setattr(cli, "build_report", build)
+    return reports, built
+
+
+def _live(out: Path):
+    from app.services.reporting.report_files import read_live
+
+    return read_live(out)
+
+
+def _stamp_fails(monkeypatch, path: Path, how: str) -> None:
+    """The entry's stamp (`update_v2` for v2, `mark_reported` for v1), and
+    only its first attempt, fails as ``how``; the publish before it and the
+    pending marker after it are written as usual."""
+    import errno
+    import shutil
+    from unittest import mock
+
+    name = "update_v2" if store.is_v2(path) else "mark_reported"
+    real = getattr(store, name)
+    fired: list[int] = []
+
+    def raiser(err):
+        def fail(*a, **k):
+            raise err
+        return fail
+
+    def stamp(p, *a, **k):
+        if fired:
+            return real(p, *a, **k)
+        fired.append(1)
+        if how == "ENOSPC":
+            with mock.patch.object(store, "_durable_write",
+                                   raiser(OSError(errno.ENOSPC, "No space left on device"))):
+                return real(p, *a, **k)
+        if how == "EACCES":
+            with mock.patch.object(os, "replace",
+                                   raiser(PermissionError(errno.EACCES, "Permission denied"))):
+                return real(p, *a, **k)
+        if how == "fsync":
+            with mock.patch.object(os, "fsync", raiser(OSError(errno.EIO, "fsync failed"))):
+                return real(p, *a, **k)
+        if how == "folder removed":
+            shutil.rmtree(p.parent)
+            return real(p, *a, **k)
+        if how == "defect":
+            raise TypeError("a programming error in the stamp")
+        raise AssertionError(how)
+
+    monkeypatch.setattr(store, name, stamp)
+
+
+def _hinted(cli, err: str):
+    import re
+    import shlex
+
+    return [cli.build_parser().parse_args(shlex.split(h))
+            for h in re.findall(r"`(?:python scripts/)?journal\.py ([^`]+)`", err)]
+
+
+@pytest.mark.parametrize("how", ["ENOSPC", "EACCES", "fsync", "folder removed"])
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_stamp_that_fails_after_the_publish_is_exit_9_and_recoverable(
+        tmp_path, monkeypatch, capsys, v2, how):
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    day = path.stem.split("_", 1)[1]
+    cli = _cli()
+    _by_hand(monkeypatch)
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    _stamp_fails(monkeypatch, path, how)
+    assert cli.cmd_report(_report_ns(path)) == 9
+    err = capsys.readouterr().err
+    run = _live(built[0])
+    assert "Traceback" not in err
+    assert f"the report WAS published: generation {run.generation_id} at {run.report}" in err
+    assert "the entry is NOT stamped reported" in err
+    (hint,) = [n for n in _hinted(cli, err) if n.cmd == "mark-reported"]
+    assert (hint.ticker, hint.date, hint.generation) == ("TST", day, run.generation_id)
+    assert "`python scripts/journal.py mark-reported TST" in err
+    if how == "folder removed":
+        # Nothing to stamp, nor to leave pending: said, not hidden.
+        assert "its pending marker could not be written either" in err
+        assert not path.exists()
+        return
+    assert "left PENDING" in err
+    assert not _is_reported(path)
+    assert store.pending_marker(path).generation_id == run.generation_id
+    # A plain retry refuses, naming the command that stamps the published run.
+    assert cli.cmd_report(_report_ns(path)) == 1 and len(built) == 1
+    err = capsys.readouterr().err
+    (again,) = [n for n in _hinted(cli, err) if n.cmd == "mark-reported"]
+    assert again.generation == run.generation_id
+    assert cli.cmd_mark_reported(hint) == 0
+    assert _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_defect_in_the_stamp_is_exit_9_with_its_traceback(tmp_path, monkeypatch, capsys, v2):
+    """Anything but the disk (OSError) or the entry (ValueError) is a defect:
+    still "published, not stamped", and its traceback is printed, not hidden."""
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    cli = _cli()
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    _stamp_fails(monkeypatch, path, "defect")
+    assert cli.cmd_report(_report_ns(path)) == 9
+    err = capsys.readouterr().err
+    assert "Traceback" in err and "TypeError: a programming error in the stamp" in err
+    assert f"generation {_live(built[0]).generation_id}" in err
+    assert store.pending_marker(path) is not None and not _is_reported(path)
+
+
+def test_a_stamp_that_fails_after_a_build_it_cannot_identify_says_so(
+        tmp_path, monkeypatch, capsys):
+    """A build that published nothing this command could see (no generation
+    recorded): the hint cannot pin one, and says what it can."""
+    path = _either(tmp_path / "entries", monkeypatch, True)
+    cli = _cli()
+    _builds(monkeypatch, cli)
+    _stamp_fails(monkeypatch, path, "ENOSPC")
+    assert cli.cmd_report(_report_ns(path)) == 9
+    err = capsys.readouterr().err
+    assert "the report WAS published: x.md (its generation could not be read)" in err
+    (hint,) = [n for n in _hinted(cli, err) if n.cmd == "mark-reported"]
+    assert hint.generation is None
+    assert store.pending_marker(path).generation_id is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_mark_reported_says_a_stamp_that_fails_without_a_traceback(
+        tmp_path, monkeypatch, capsys, v2):
+    import argparse
+
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    cli = _cli()
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    gid = _live(built[0]).generation_id
+    ns = argparse.Namespace(ticker="TST", date=path.stem.split("_", 1)[1], generation=gid)
+    _stamp_fails(monkeypatch, path, "ENOSPC")
+    capsys.readouterr()
+    assert cli.cmd_mark_reported(ns) == 1
+    err = capsys.readouterr().err
+    assert "NOT stamped" in err and "No space left on device" in err
+    assert not _is_reported(path) and store.pending_marker(path).generation_id == gid
+    assert cli.cmd_mark_reported(ns) == 0  # the disk freed: the same command
+    assert _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_mark_reported_stamps_only_the_generation_it_is_told(tmp_path, monkeypatch, capsys, v2):
+    import argparse
+
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    day = path.stem.split("_", 1)[1]
+    cli = _cli()
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    gid = _live(built[0]).generation_id
+    assert store.pending_marker(path).generation_id == gid
+    capsys.readouterr()
+    assert cli.cmd_mark_reported(argparse.Namespace(ticker="TST", date=day,
+                                                    generation="f" * 32)) == 1
+    err = capsys.readouterr().err
+    assert f"NOT stamped: generation {'f' * 32} is not this entry's report" in err
+    assert not _is_reported(path) and store.pending_marker(path).generation_id == gid
+    assert cli.cmd_mark_reported(argparse.Namespace(ticker="TST", date=day, generation=gid)) == 0
+    assert _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("by", ["marker", "live report"])
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_mark_reported_takes_the_marker_or_the_live_report_as_the_entrys_run(
+        tmp_path, monkeypatch, v2, by):
+    """The marker records the run its command published; the live report
+    named for the entry is the entry's run too. Neither: refused."""
+    import argparse
+
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    day = path.stem.split("_", 1)[1]
+    cli = _cli()
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    audited = _live(built[0]).generation_id
+    cli.build_report("TST", report_day=day)  # published over it meanwhile, by another run
+    later = _live(built[0]).generation_id
+    assert later != audited
+
+    def mark(gid):
+        return cli.cmd_mark_reported(argparse.Namespace(ticker="TST", date=day, generation=gid))
+
+    # An old-format marker (no generation recorded) leaves only the live report.
+    store.set_report_pending(path, "journal.py report --defer-mark")
+    assert store.pending_marker(path).generation_id is None
+    assert mark(audited) == 1 and not _is_reported(path)
+    if by == "marker":
+        store.set_report_pending(path, "journal.py report --defer-mark",
+                                 generation_id=audited, report=str(built[0]))
+        assert mark(audited) == 0
+    else:
+        assert mark(later) == 0
+    assert _is_reported(path) and store.report_pending(path) is None
+
+
+def test_an_old_format_marker_still_reads(tmp_path, monkeypatch):
+    import json
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    handed = _owner(monkeypatch, pid=4242)
+    marker = path.with_name(f".{path.name}.report.pending")
+    marker.write_text(json.dumps({"marked": "2026-09-01T00:00:00Z",
+                                  "by": "journal.py report --defer-mark", "owner": handed}))
+    pending = store.pending_marker(path)
+    assert pending.owner == store.ReportOwner(**handed)
+    assert (pending.generation_id, pending.report) == (None, None)
+    assert pending.text == (f"marked 2026-09-01T00:00:00Z by journal.py report --defer-mark, "
+                            f"for watch.py, pid 4242 on {handed['host']}")
+    store.set_report_pending(path, "journal.py report --defer-mark",
+                             generation_id="a" * 32, report="reports/TST_2026-07-27.md")
+    pending = store.pending_marker(path)
+    assert (pending.generation_id, pending.report) == ("a" * 32, "reports/TST_2026-07-27.md")
+    assert pending.text.endswith(f"; its report: generation {'a' * 32} "
+                                 "(reports/TST_2026-07-27.md)")
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_deferred_report_writes_its_result_file(tmp_path, monkeypatch, v2):
+    import json
+
+    from app.services.reporting.report_files import live_name
+
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    cli = _cli()
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    held = tmp_path / "held"
+    held.mkdir()
+    result = held / "result.json"
+    assert cli.cmd_report(_report_ns(path, defer_mark=True, result_file=str(result))) == 0
+    run = _live(built[0])
+    assert json.loads(result.read_text(encoding="utf-8")) == {
+        "report": str(run.report), "generation_id": run.generation_id, "ticker": "TST",
+        "entry_day": path.stem.split("_", 1)[1],
+        "before_sha256": store.load_v2(path).before_sha256 if v2 else None}
+    # The generation's own report, never the live name another run can take.
+    assert run.report != built[0] and live_name(run.report) == built[0]
+    assert sorted(p.name for p in held.iterdir()) == ["result.json"]  # no temporary left
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_build_that_fails_writes_no_result_file(tmp_path, monkeypatch, v2):
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    cli = _cli()
+
+    def fail():
+        raise RuntimeError("EDGAR down")
+
+    _builds(monkeypatch, cli, fail)
+    result = tmp_path / "result.json"
+    assert cli.cmd_report(_report_ns(path, defer_mark=True, result_file=str(result))) == 1
+    assert not result.exists()
+
+
+def test_a_result_file_that_cannot_be_written_is_published_not_stamped(
+        tmp_path, monkeypatch, capsys):
+    """Written whole or not at all: a failed write leaves no file (and no
+    temporary), and the command says the report is live, exit 9."""
+    import errno
+    from unittest import mock
+
+    path = _either(tmp_path / "entries", monkeypatch, True)
+    cli = _cli()
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    held = tmp_path / "held"
+    held.mkdir()
+    real = cli.write_atomic
+
+    def torn(p, text, **k):
+        def fail(fd):
+            raise OSError(errno.EIO, "fsync failed")
+        with mock.patch.object(os, "fsync", fail):
+            return real(p, text, **k)
+
+    monkeypatch.setattr(cli, "write_atomic", torn)
+    rc = cli.cmd_report(_report_ns(path, defer_mark=True, result_file=str(held / "r.json")))
+    err = capsys.readouterr().err
+    assert rc == 9 and list(held.iterdir()) == []
+    assert f"the report WAS published: generation {_live(built[0]).generation_id}" in err
+    assert "could not be written" in err and "fsync failed" in err
+    assert store.pending_marker(path) is not None and not _is_reported(path)
+
+
+@pytest.mark.parametrize("extra", [{}, {"replay": True, "defer_mark": True}])
+def test_a_result_file_is_only_for_a_deferred_report(tmp_path, monkeypatch, capsys, extra):
+    path = _either(tmp_path / "entries", monkeypatch, True)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    before = path.read_bytes()
+    rc = cli.cmd_report(_report_ns(path, result_file=str(tmp_path / "r.json"), **extra))
+    assert rc == 1 and built == [] and path.read_bytes() == before
+    assert "--result-file" in capsys.readouterr().err
+    assert cli.build_parser().parse_args(
+        ["report", "TST", "--defer-mark", "--result-file", "r.json"]).result_file == "r.json"
+
+
+def test_a_marker_rewrite_that_fails_leaves_the_earlier_marker(tmp_path, monkeypatch):
+    """A marker is rewritten in place (recording the run once published):
+    replaced whole, never removed first, so a write that fails leaves the
+    entry pending as it was, not unmarked."""
+    import errno
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    store.set_report_pending(path, "journal.py report --defer-mark")
+    before = store.pending_marker(path)
+
+    def full(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(store, "_durable_write", full)
+    with pytest.raises(OSError):
+        store.set_report_pending(path, "journal.py report --defer-mark",
+                                 generation_id="a" * 32, report="r.md")
+    assert store.pending_marker(path) == before

@@ -215,3 +215,25 @@ def test_an_audit_of_a_generation_path_creates_nothing_inside_it(tmp_path, monke
         "KTOS_2026-07-31.ledger.json", "KTOS_2026-07-31.md", "KTOS_2026-07-31_audit.md"]
     assert stat.S_IMODE((gen / "KTOS_2026-07-31_audit.md").stat().st_mode) == 0o444
     assert (tmp_path / "KTOS_2026-07-31_audit.md").read_text().endswith("AUDIT")
+
+
+def test_an_audit_of_a_generation_no_longer_live_stays_with_it(tmp_path, monkeypatch, capsys):
+    """Hermes re-audit of 84e65b0, finding 3: the sweep now audits the
+    generation its own report command published, by that generation's path.
+    Rebuilt before the audit even started, the audit still lands on that run
+    (never beside the live one) and exits 1, so the live run is audited too."""
+    from app.services.reporting.report_files import current_generation, read_live
+
+    report, gid = _published(tmp_path, "first")
+    first = current_generation(report)
+    _published(tmp_path, "second")
+    monkeypatch.setattr(
+        run_audit.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="AUDIT", stderr=""),
+    )
+    assert run_audit.run_audit(first / "KTOS_2026-07-31.md") == 1
+    assert (first / "KTOS_2026-07-31_audit.md").read_text() == (
+        f"<!-- generation: {gid} -->\n\nAUDIT")
+    assert not (tmp_path / "KTOS_2026-07-31_audit.md").exists()
+    assert read_live(report).audit is None
+    assert "is not the one audited" in capsys.readouterr().err

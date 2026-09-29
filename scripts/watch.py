@@ -32,7 +32,10 @@ Exit codes (for cron/alerting):
        exits 0; a locked thesis always takes the journal track.
     3  still waiting: no qualifying filing yet (normal for a `--once` poll)
     4  report generated but the audit FAILED — the report is kept for
-       diagnosis, the journal entry is NOT marked reported (retryable)
+       diagnosis, the journal entry is NOT marked reported (retryable).
+       Also: `journal.py report` exited 0 but did not say which report it
+       published (its --result-file missing, unreadable, or naming another
+       ticker, day or run): no report is audited or marked in its place.
     5  case completed (report, audit, mark, re-arm) but the BRIEF failed —
        queued under reports/briefs/.pending/ and retried by every later
        sweep pass until it succeeds; the print is never silently brief-less.
@@ -54,6 +57,14 @@ Exit codes (for cron/alerting):
        so the new report may be live (report_files.PublishInDoubt; the log
        says how to check and how to put the previous run back). Nothing is
        audited or marked, and the row is not re-armed. The most severe code.
+    9  a report WAS published but its journal entry is NOT stamped
+       (`journal.py report`'s own code, passed on: its --result-file could
+       not be written, so which run to audit is not known). Nothing is
+       audited or marked, the entry stays pending, the row is not re-armed,
+       and the next pass rebuilds it. Ranked just below 8: which run is live
+       IS known (the log names it, and the `mark-reported --generation`
+       command that stamps it), but a report went live without its
+       bookkeeping, which is worse than a failure (1) that changed nothing.
 
 Print night vs 10-Q: the engine report needs the quarter's XBRL, so the
 report/audit track fires on the 10-Q/10-K. The brief is a read of the
@@ -67,7 +78,8 @@ apart; for a small cap the 10-Q can be weeks later.
     but the row still names the consumed event and will never fire again
     until it is re-`add`ed — a scheduler must see that.
     `sweep` returns the worst per-name code — worst by severity, not by
-    number: 8 (publish in doubt) > 1 (setup/EDGAR) > 4 (audit failed) >
+    number: 8 (publish in doubt) > 9 (published, not stamped) >
+    1 (setup/EDGAR) > 4 (audit failed) >
     2 (refused) > 5 (brief queued) > 7 (audit abandoned) > 6 (vintage
     stalled) > 0 — except that 3 (waiting) is 0, a sweep already running
     elsewhere is 0 (it just yields), and a child killed by a signal is 1.
@@ -84,8 +96,10 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -109,8 +123,10 @@ from app.services.journal import store
 from app.services.journal.schema_v2 import verify_lock
 from app.services.reporting.report_files import (
     PUBLISH_IN_DOUBT_RC,
+    PUBLISHED_NOT_STAMPED_RC,
     PublishInDoubt,
-    is_live_report,
+    generation_of,
+    live_name,
     own_dir,
     write_atomic,
 )
@@ -168,7 +184,8 @@ AUDIT_ABANDONED_RC = 7
 # by its number — a queued brief (5) must never outrank a failed audit (4) on
 # another name, or an alert keyed on the exit code would miss the audit.
 # A publish in doubt (8) outranks everything: which report is live is unknown.
-SEVERITY_ORDER = (PUBLISH_IN_DOUBT_RC, 1, 4, 2, 5, 7, 6, 0)
+# Published, not stamped (9) next: a report is live without its bookkeeping.
+SEVERITY_ORDER = (PUBLISH_IN_DOUBT_RC, PUBLISHED_NOT_STAMPED_RC, 1, 4, 2, 5, 7, 6, 0)
 
 
 def _worst(codes) -> int:
@@ -256,7 +273,20 @@ def cmd_due(args: argparse.Namespace) -> int:
     return 0
 
 
-def _generate(ticker: str, entry_day: str | None, no_docs: bool) -> int:
+class Generated(NamedTuple):
+    """The run a `journal.py report --defer-mark` child published, as its
+    --result-file says: ``report`` is the report's path in its own
+    generation (no later publish changes it), for the entry of ``ticker``
+    and ``entry_day``."""
+
+    report: Path
+    generation_id: str
+    ticker: str
+    entry_day: str
+    before_sha256: str | None
+
+
+def _generate(ticker: str, entry_day: str | None, no_docs: bool) -> tuple[int, Generated | None]:
     """Shell out to the journal CLI so the thesis-lock, timestamp and hash
     bookkeeping stay in exactly one implementation. Always --fresh: a <24h
     cached EDGAR answer can predate the filing this poll just detected.
@@ -264,15 +294,67 @@ def _generate(ticker: str, entry_day: str | None, no_docs: bool) -> int:
     Always --defer-mark: `reported` is stamped only after the audit succeeds
     (see cmd_poll), so a failed audit leaves the case retryable. --date pins
     generation to the event's linked entry — never "latest entry wins".
+
+    Returns the child's exit code and, when it is 0, the run it published
+    (`_read_result`): the report to audit and the generation to stamp.
+    Hermes re-audit of 84e65b0, finding 3: the report audited was the
+    ticker's newest, another run's if one was published meanwhile. The
+    child writes its run to a --result-file in a directory made for this
+    call alone (``mkdtemp``: private, never reused, removed after), so no
+    earlier run's result can be read as this one's.
     """
+    held = Path(tempfile.mkdtemp(prefix="fqe-report-result-"))
+    result = held / "result.json"
     cmd = [sys.executable, str(ROOT / "scripts" / "journal.py"), "report", ticker,
-           "--fresh", "--defer-mark"]
+           "--fresh", "--defer-mark", "--result-file", str(result)]
     if entry_day:
         cmd += ["--date", entry_day]
     if no_docs:
         cmd.append("--no-docs")
     print(f"  -> {' '.join(cmd[1:])}")
-    return subprocess.run(cmd, cwd=ROOT, env={**os.environ, **_report_owner_env()}).returncode
+    try:
+        rc = subprocess.run(cmd, cwd=ROOT, env={**os.environ, **_report_owner_env()}).returncode
+        return rc, (_read_result(result, ticker, entry_day) if rc == 0 else None)
+    finally:
+        shutil.rmtree(held, ignore_errors=True)
+
+
+def _read_result(result: Path, ticker: str, entry_day: str | None) -> Generated | None:
+    """The run a successful `journal.py report --defer-mark` says it
+    published, or None (said) when it cannot be read or is not the run asked
+    for: another ticker, another entry's day (with ``entry_day`` None, the
+    child's newest entry: its day is the result's), or a report that is not
+    that day's report of that generation. None is never replaced by a guess:
+    the caller audits and marks nothing."""
+    try:
+        doc = json.loads(result.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        why = "it wrote no result file"
+    except (OSError, ValueError) as e:
+        why = f"its result file cannot be read ({e})"
+    else:
+        why = _result_problem(doc, ticker, entry_day)
+        if why is None:
+            return Generated(Path(doc["report"]), doc["generation_id"], doc["ticker"],
+                             doc["entry_day"], doc.get("before_sha256"))
+    print(f"  journal.py report exited 0, but {why}: which report it published is not known, "
+          "so none is audited or marked", file=sys.stderr)
+    return None
+
+
+def _result_problem(doc: object, ticker: str, entry_day: str | None) -> str | None:
+    """Why ``doc`` (a parsed --result-file) is not the run asked for, or None."""
+    if not isinstance(doc, dict):
+        return "its result file is not a JSON object"
+    day = entry_day or doc.get("entry_day")
+    if doc.get("ticker") != ticker or not isinstance(day, str) or doc.get("entry_day") != day:
+        return (f"its result names {doc.get('ticker')} {doc.get('entry_day')}, not {ticker} "
+                f"{entry_day or '(its newest entry)'}")
+    report, gid = doc.get("report"), doc.get("generation_id")
+    if (not isinstance(report, str) or Path(report).name != f"{ticker}_{day}.md"
+            or not isinstance(gid, str) or generation_of(Path(report)) != gid):
+        return f"its result names {report!r}, which is not generation {gid!r} of {ticker}_{day}.md"
+    return None
 
 
 def _report_owner_env() -> dict[str, str]:
@@ -286,10 +368,11 @@ def _report_owner_env() -> dict[str, str]:
     owner = store.ReportOwner.this_process("watch.py", str(SWEEP_LOCK), _OWNER_TOKEN)
     return {store.REPORT_OWNER_ENV: owner.dumps()}
 
-def _mark_reported(ticker: str, entry_day: str | None) -> int:
-    cmd = [sys.executable, str(ROOT / "scripts" / "journal.py"), "mark-reported", ticker]
-    if entry_day:
-        cmd += ["--date", entry_day]
+def _mark_reported(ticker: str, entry_day: str, generation: str) -> int:
+    """Stamp the entry the report was generated for, and only if the run
+    audited is that entry's (`journal.py mark-reported --generation`)."""
+    cmd = [sys.executable, str(ROOT / "scripts" / "journal.py"), "mark-reported", ticker,
+           "--date", entry_day, "--generation", generation]
     print(f"  -> {' '.join(cmd[1:])}")
     return subprocess.run(cmd, cwd=ROOT).returncode
 
@@ -314,18 +397,6 @@ def _generate_auto(ticker: str, no_docs: bool) -> Path | None:
     return out
 
 
-def _latest_report(ticker: str, directory: Path) -> Path | None:
-    """Newest engine report for the ticker in `directory` — never the audit
-    written beside it (`<stem>_audit.md`), which a retry after a failed
-    brief would otherwise hand to the auditor as "the report" — and never a
-    historical replay (`.replay.md`)."""
-    matches = sorted(
-        (p for p in directory.glob(f"{ticker}_*.md") if is_live_report(p) and p.exists()),
-        key=lambda p: p.stat().st_mtime,
-    )
-    return matches[-1] if matches else None
-
-
 def _run_audit(report: Path) -> int:
     """Headless audit loop over a generated report (scripts/run_audit.py)."""
     cmd = [sys.executable, str(ROOT / "scripts" / "run_audit.py"), str(report)]
@@ -334,7 +405,12 @@ def _run_audit(report: Path) -> int:
 
 
 def _audit_attempts_path(report: Path) -> Path:
-    return report.with_name(f"{report.stem}_audit.attempts")
+    """The audit's retry counter, beside the report's LIVE name: the journal
+    track audits the generation it generated (``.generations/<base>/<gen>/``),
+    and a retry rebuilds, a new generation each time; a counter kept in the
+    generation started again at 0 and never capped the audit."""
+    live = live_name(report)
+    return live.with_name(f"{live.stem}_audit.attempts")
 
 
 def _run_audit_capped(report: Path) -> tuple[int, bool]:
@@ -866,40 +942,46 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
         if args.dry_run:
             print("  (dry run — not generating)")
             return 0
-        entry_day = watch.thesis_entry
-        rc = _generate(ticker, entry_day, args.no_docs)
+        rc, made = _generate(ticker, watch.thesis_entry, args.no_docs)
         if rc != 0:
-            # Passed on as it is: 8, a publish in doubt, was said by
-            # journal.py, and nothing is audited or marked after it.
+            # Passed on as it is: 8, a publish in doubt, and 9, published
+            # but not stamped, were said by journal.py, and nothing is
+            # audited or marked after either.
             return rc
+        if made is None:
+            # Hermes re-audit of 84e65b0, finding 3: never the ticker's
+            # newest report in its place, which may be another run's.
+            print("  journal NOT marked reported; the entry stays pending and the next pass "
+                  "rebuilds its report.", file=sys.stderr)
+            return 4
         if args.no_audit:
             # No audit requested — generation completes the case.
-            return _mark_reported(ticker, entry_day)
-        report = _latest_report(ticker, ROOT / "reports")
-        if report is None:
-            print("  generated report not found under reports/ — cannot audit; "
-                  "journal NOT marked reported.", file=sys.stderr)
-            return 4
+            return _mark_reported(ticker, made.entry_day, made.generation_id)
+        # The run this pass generated, in its own generation: a report
+        # published since (another run of this name or of this ticker) is
+        # not it. The audit is kept with that run, and exits 1 if it is no
+        # longer the live one (run_audit.publish_audit).
+        report = made.report
         arc, abandoned = _run_audit_capped(report)
         if arc != 0 and not abandoned:
             # The report stays on disk for diagnosis; the entry stays
             # unmarked so the case is retryable. A cron runner must see
             # this as a failure, not a success with a missing audit.
-            # `--date` whenever the entry is known: without it
-            # `mark-reported` stamps the ticker's NEWEST entry, which need not
-            # be this one (review of the pending marker, rev28c_nodate).
-            day = f" --date {entry_day}" if entry_day else ""
+            # `--date` always: without it `mark-reported` stamps the
+            # ticker's NEWEST entry, which need not be this one (review of
+            # the pending marker, rev28c_nodate).
             print(f"  audit FAILED (exit {arc}); report kept at {report}; "
                   f"journal NOT marked reported — re-run the poll or "
                   f"`run_audit.py {report}` then "
-                  f"`journal.py mark-reported {ticker}{day}`.", file=sys.stderr)
+                  f"`journal.py mark-reported {ticker} --date {made.entry_day} "
+                  f"--generation {made.generation_id}`.", file=sys.stderr)
             return 4
         if abandoned and arc != 0:
             _abandoned_note(ticker, report, arc)
         brief_rc = 0
         if not getattr(args, "no_brief", False):
             brief_rc = _run_brief(ticker, report)
-        rc = _mark_reported(ticker, entry_day)
+        rc = _mark_reported(ticker, made.entry_day, made.generation_id)
         if rc != 0:
             return rc
         if brief_rc != 0:
@@ -1359,7 +1441,9 @@ def _sweep_locked(args: argparse.Namespace) -> int:
 _RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED",
              5: "brief queued", 6: "vintage capture stalled",
              7: "audit ABANDONED (brief built without it)",
-             PUBLISH_IN_DOUBT_RC: "report publish IN DOUBT (the new run may be live)"}
+             PUBLISH_IN_DOUBT_RC: "report publish IN DOUBT (the new run may be live)",
+             PUBLISHED_NOT_STAMPED_RC: "report published but NOT stamped (the log names "
+                                       "the run and the command that stamps it)"}
 
 
 def _rc_words(rc: int) -> str:

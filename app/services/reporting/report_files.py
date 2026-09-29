@@ -54,6 +54,7 @@ import subprocess
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -103,6 +104,11 @@ class PublishInDoubt(RuntimeError):
 # which says a run failed and nothing changed. It is outside every other code
 # those commands use, so an alert can key on it.
 PUBLISH_IN_DOUBT_RC = 8
+# `journal.py report` when its report WAS published and the entry could not
+# be stamped `reported` (Hermes re-audit of 84e65b0, finding 4): not 1 (nothing
+# published), not 8 (which run is live is unknown). The run is known and
+# named, with the `mark-reported --generation` command that stamps it.
+PUBLISHED_NOT_STAMPED_RC = 9
 
 
 class ForeignPointer(OSError):
@@ -320,6 +326,41 @@ class Staged:
     archived: list[Path] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class Published:
+    """One publish, as the process that made it saw it: ``live``, the live
+    name; ``report``, the report's path in its own generation, which no later
+    publish changes; and its ``generation_id``."""
+
+    live: Path
+    report: Path
+    generation_id: str
+
+
+_RECORDING: ContextVar[list[Published] | None] = ContextVar("report_files_recording",
+                                                           default=None)
+
+
+@contextmanager
+def recording() -> Iterator[list[Published]]:
+    """The publishes made inside the block, in order, as `Published`.
+
+    Hermes re-audit of 84e65b0, finding 3: a command that published a report
+    said only its live name, and the sweep chose the report to audit as the
+    ticker's newest (another run's, published meanwhile, was audited and the
+    entry stamped for it). Recorded here, where the publish happens, the
+    generation is the one this command's own publish made, never read back
+    from a live name another run can take in between. A context variable,
+    so a builder's signature does not change and threads (the web UI) do
+    not see each other's."""
+    made: list[Published] = []
+    token = _RECORDING.set(made)
+    try:
+        yield made
+    finally:
+        _RECORDING.reset(token)
+
+
 def _git(*args: str) -> str | None:
     try:
         # errors="replace": with core.quotePath=false git prints a file name
@@ -509,6 +550,9 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None) -> 
         _set_apart(gen)  # never live, or switched back: not a run
         raise
     staged.archived.extend(archived)
+    made = _RECORDING.get()
+    if made is not None:
+        made.append(Published(report, gen / report.name, staged.generation_id))
 
 
 def _set_apart(gen: Path) -> None:
