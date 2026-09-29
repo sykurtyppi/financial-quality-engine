@@ -24,7 +24,12 @@ def test_pit_footprints_is_deprecated_and_no_longer_on_the_report_path():
     from app.services.reporting import report_builder
 
     assert "_pit_footprints(" not in inspect.getsource(report_builder._collect_streams)
-    assert "as_of=report_date" in inspect.getsource(report_builder._collect_streams)
+    source = inspect.getsource(report_builder._collect_streams)
+    assert "as_of=report_date" in source
+    # The restatement scan is cut at `scan_as_of`: the report date unless
+    # the caller mapped the whole payload (`uncut_fundamentals`).
+    assert "scan_as_of = report_date" in source
+    assert "as_of=scan_as_of" in source
     fps = [SimpleNamespace(current_filed=date(2024, 8, 1)),
            SimpleNamespace(current_filed=date(2025, 6, 1))]
     assert [f.current_filed for f in _pit_footprints(fps, date(2025, 1, 15))] == [date(2024, 8, 1)]

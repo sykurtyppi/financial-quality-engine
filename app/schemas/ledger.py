@@ -143,7 +143,9 @@ class LedgerDocument(BaseModel):
     # "|<period end>:<concept>" for each quarter filled from another concept
     # after a tag switch. A field without such quarters is just `tag_used`.
     selections: dict[str, str] = Field(default_factory=dict)
-    # stream -> "checked" | "not run" | "data failure: …" | "internal error: …"
+    # stream -> "checked" | "checked (incomplete: <the scan's coverage>)" (the
+    # restatement scan) | "not compared: …" (vintage) | "not run" |
+    # "data failure: …" | "internal error: …"
     streams: dict[str, str] = Field(default_factory=dict)
     items: list[EvidenceItem] = Field(default_factory=list)
     unsourced: list[Unsourced] = Field(default_factory=list)

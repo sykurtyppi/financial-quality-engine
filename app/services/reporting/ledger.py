@@ -485,7 +485,8 @@ def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
 # --- the document -------------------------------------------------------------
 
 
-def _stream_state(name: str, ran: bool, errors: dict[str, Any], rep: Any = None) -> str:
+def _stream_state(name: str, ran: bool, errors: dict[str, Any], rep: Any = None,
+                  scan: Any = None) -> str:
     if not ran:
         return "not run"
     failure = errors.get(name)
@@ -494,6 +495,11 @@ def _stream_state(name: str, ran: bool, errors: dict[str, Any], rep: Any = None)
         return f"{kind}: {failure}"
     if name == "vintage" and rep is not None and not rep.compared:
         return f"not compared: {rep.no_baseline_reason}"
+    if name == "restatements" and scan is not None and scan.incomplete:
+        # The report says the scan was incomplete (a field it could not
+        # inspect, or a derived-quarter check withheld); a bare "checked"
+        # here told a ledger reader the opposite.
+        return f"checked (incomplete: {scan.coverage_line()})"
     return "checked"
 
 
@@ -557,7 +563,7 @@ def build_ledger(
         coverage=coverage,
         selections=selections,
         streams={
-            name: _stream_state(name, ran, errors, rep)
+            name: _stream_state(name, ran, errors, rep, streams.get("restatements"))
             for name in ("offerings", "restatements", "events", "filing_events", "vintage")
         },
         items=b.items,

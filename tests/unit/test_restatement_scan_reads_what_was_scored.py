@@ -442,3 +442,44 @@ def test_newest_filed_is_the_latest_dated_row_and_skips_what_it_cannot_read():
     assert newest_filed({"facts": {"us-gaap": {"Assets": {"units": {"USD": [
         {"end": "2024-03-31", "val": 1}]}}}}}) is None
     assert newest_filed(_real("CRM")) == _last_filed(_real("CRM"))
+
+
+def test_a_quarter_filled_from_another_concept_is_part_of_the_selection_compared():
+    """Review of #106: the drift comparison looked at the composer and the
+    components only, so a rebuild that dropped a tag-switch fallback (a
+    quarter the report read from another concept) compared as equal."""
+    from app.services.ingestion.restatements import _unordered
+    from app.services.ingestion.selection import SeriesSelection
+
+    plain = SeriesSelection.of("interest_expense", ("us-gaap:InterestExpenseDebt",))
+    filled = SeriesSelection.of("interest_expense", ("us-gaap:InterestExpenseDebt",))
+    # Set directly: the field arrives with the tag-switch fallback (#103).
+    object.__setattr__(filled, "fallbacks",
+                       (("2026-04-30", "us-gaap:InterestExpenseNonoperating"),))
+    assert _unordered(plain) != _unordered(filled)
+    assert _unordered(plain) == _unordered(
+        SeriesSelection.of("interest_expense", ("us-gaap:InterestExpenseDebt",)))
+
+
+def test_the_ledger_says_when_the_scan_was_incomplete():
+    """Review of #106: the report said "derived-quarter check NOT inspected"
+    and qualified "Checked and clean", while the ledger recorded the stream
+    as a bare "checked"."""
+    from types import SimpleNamespace
+
+    from app.services.reporting.ledger import _stream_state
+
+    whole = SimpleNamespace(incomplete=False, coverage_line=lambda: "inspected 20 of 20 fields")
+    held = SimpleNamespace(
+        incomplete=True,
+        coverage_line=lambda: "inspected 20 of 20 fields; derived-quarter check NOT inspected "
+                              "(selection drift: …)",
+    )
+    assert _stream_state("restatements", True, {}, None, whole) == "checked"
+    assert _stream_state("restatements", True, {}, None, held) == (
+        "checked (incomplete: inspected 20 of 20 fields; derived-quarter check NOT "
+        "inspected (selection drift: …))"
+    )
+    # Only the restatement stream reads the scan.
+    assert _stream_state("offerings", True, {}, None, held) == "checked"
+    assert _stream_state("restatements", False, {}, None, held) == "not run"
