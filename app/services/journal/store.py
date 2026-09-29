@@ -10,12 +10,15 @@ Every write is whole or not at all (Hermes audit of the stack): an entry is
 written to a temporary file beside it, fsynced and renamed into place, so a
 process killed mid-write leaves the old entry or the new one — never the
 truncated "reported: 20" a plain ``write_text`` left. Read-modify-write
-updates hold a per-entry lock, so the sweep, the web UI and ``journal.py``
-updating one entry at once never lose one another's change.
+updates hold a per-entry lock across the read, the change and the write (v1:
+``mark_reported`` / ``set_field``; v2: ``update_v2``), so the sweep, the web
+UI and ``journal.py`` updating one entry at once never lose one another's
+change. Entries are UTF-8 on disk and are read as UTF-8, whatever the locale.
 """
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import re
@@ -50,8 +53,11 @@ _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-# A new entry's permissions (an update keeps the entry's own).
-_NEW_ENTRY_MODE = 0o644
+# Where a hard link cannot be made (FAT/exFAT, some SMB and FUSE mounts), a
+# create falls back to a rename after an existence check — still whole, and
+# still no-clobber because every creator holds the entry lock.
+_NO_HARD_LINKS = frozenset(
+    {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK, errno.ENOSYS, errno.EXDEV})
 
 
 @contextmanager
@@ -74,20 +80,31 @@ def _durable_write(path: Path, text: str, *, create: bool = False) -> None:
     fsynced, then renamed over it (``create``: hard-linked into place, which
     fails with FileExistsError rather than replace an entry that appeared in
     the meantime — the no-overwrite rule holds under a race too). The
-    directory is fsynced after, so the new name survives a crash. An update
-    keeps the entry's permissions."""
-    mode = _NEW_ENTRY_MODE if create else stat.S_IMODE(path.stat().st_mode)
+    directory is fsynced after, so the new name survives a crash.
+
+    A new entry gets the permissions the umask gives any new file (0o644, or
+    0o600 under ``umask 077``), as ``write_text`` did; an update keeps the
+    entry's own."""
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # 0o666 on a create: the kernel applies the umask, which is how every
+        # other new file gets its mode (os.umask would be process-wide).
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666 if create else 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp, mode)
         if create:
-            os.link(tmp, path)
+            try:
+                os.link(tmp, path)
+            except OSError as e:
+                if e.errno not in _NO_HARD_LINKS:
+                    raise
+                if path.exists():
+                    raise FileExistsError(path) from None
+                os.replace(tmp, path)
         else:
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
             os.replace(tmp, path)
         dir_fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -199,30 +216,33 @@ def open_entry(
     thesis = thesis or "<one or two sentences: your view BEFORE reading the report>"
     conviction = conviction if conviction is not None else "<1-5>"
     action = action or "<hold / trim / add / avoid / no position>"
-    _durable_write(path, (
-        f"# {t} — {today()}\n"
-        f"opened: {now_iso()}\n"
-        f"reported:\n\n"
-        f"## BEFORE  (write before reading the report)\n"
-        f"thesis: {thesis}\n"
-        f"conviction: {conviction}        # 1 (low) - 5 (high)\n"
-        f"intended_action: {action}\n\n"
-        f"## AFTER  (fill after reading the report)\n"
-        f"impact:                         # any of: {', '.join(IMPACT_CODES)}\n"
-        f"conviction_after:               # 1-5\n"
-        f"what_it_surfaced:\n"
-        f"what_i_disagreed_with:\n\n"
-        f"## OUTCOME  (fill weeks later)\n"
-        f"outcome_date:\n"
-        f"what_happened:\n"
-        f"verdict:                        # helped / neutral / hurt / too_early\n"
-    ), create=True)
+    # Under the lock: a create where no hard link can be made checks, then
+    # renames (`_durable_write`).
+    with _entry_lock(path):
+        _durable_write(path, (
+            f"# {t} — {today()}\n"
+            f"opened: {now_iso()}\n"
+            f"reported:\n\n"
+            f"## BEFORE  (write before reading the report)\n"
+            f"thesis: {thesis}\n"
+            f"conviction: {conviction}        # 1 (low) - 5 (high)\n"
+            f"intended_action: {action}\n\n"
+            f"## AFTER  (fill after reading the report)\n"
+            f"impact:                         # any of: {', '.join(IMPACT_CODES)}\n"
+            f"conviction_after:               # 1-5\n"
+            f"what_it_surfaced:\n"
+            f"what_i_disagreed_with:\n\n"
+            f"## OUTCOME  (fill weeks later)\n"
+            f"outcome_date:\n"
+            f"what_happened:\n"
+            f"verdict:                        # helped / neutral / hurt / too_early\n"
+        ), create=True)
     return path
 
 
 def mark_reported(path: Path) -> None:
     with _entry_lock(path):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         text = re.sub(r"^reported:[ \t]*$", f"reported: {now_iso()}", text, count=1,
                       flags=re.MULTILINE)
         _durable_write(path, text)
@@ -235,7 +255,7 @@ def set_field(path: Path, key: str, value: str) -> None:
     ``\\g`` sequences in user text are treated literally, not as regex refs."""
     value = re.sub(r"\s*\n\s*", " ", value).strip()
     with _entry_lock(path):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         new, n = re.subn(rf"^{re.escape(key)}:.*$", lambda _m: f"{key}: {value}", text,
                          count=1, flags=re.MULTILINE)
         if n:
@@ -243,7 +263,7 @@ def set_field(path: Path, key: str, value: str) -> None:
 
 
 def parse_entry(path: Path) -> dict:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     impact = field(text, "impact")
     return {
         "name": path.stem,
@@ -299,7 +319,8 @@ def save_v2(entry, path: Path | None = None, *, allow_update: bool = False) -> P
     stamping `reported` from the report step) pass `allow_update=True`. Those
     call sites must not change the BEFORE block, and the guard verifies that:
     the incoming entry's `before_sha256` MUST equal the on-disk entry's.
-    Anything else is refused.
+    Anything else is refused. An update of an entry loaded earlier goes
+    through `update_v2`, which re-reads it under the lock.
     """
     from app.services.journal.schema_v2 import (
         render_entry,  # avoid import cycle at load
@@ -344,6 +365,35 @@ def _save_v2_locked(entry, target: Path, allow_update: bool, render_entry) -> Pa
             )
     _durable_write(target, render_entry(entry), create=not existed)
     return target
+
+
+class UpdateRefused(Exception):
+    """An update refused on the entry as it is on disk (`update_v2`): its
+    BEFORE lock is broken, or ``change`` found it no longer applies."""
+
+
+def update_v2(path: Path, change):
+    """Change one v2 entry in place: load it, apply ``change`` (entry -> new
+    entry; it may raise `UpdateRefused`) and save it, all under the entry's
+    lock.
+
+    A command that loaded the entry earlier and saved its own copy would
+    erase whatever another writer saved in between (the review of the Hermes
+    fix: a `resolve --commit` beside the sweep's `mark-reported` lost the
+    `reported` stamp). ``change`` therefore sees the entry as it is on disk
+    now, and must re-check anything it depends on against that entry; the
+    BEFORE lock is re-verified here. Returns the saved entry."""
+    from app.services.journal.schema_v2 import render_entry, verify_lock
+
+    with _entry_lock(path):
+        current = load_v2(path)
+        if not verify_lock(current):
+            raise UpdateRefused(
+                f"LOCK BROKEN — the BEFORE block of {path.name} no longer matches its "
+                "hash; refusing to update a tampered entry.")
+        updated = change(current)
+        _save_v2_locked(updated, path, True, render_entry)
+        return updated
 
 
 def load_v2(path: Path):
