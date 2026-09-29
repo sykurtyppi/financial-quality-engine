@@ -191,12 +191,18 @@ def _write_lock(p: Path):
     NFS mounts, so do not host ``journal/`` on one and expect this guarantee.
     """
     lock_path = p.with_name(p.name + ".lock")
-    with open(lock_path, "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    # Neither truncated nor followed: `open(lock_path, "w")` emptied the file
+    # a symlink planted at this name pointed to; a link now fails (ELOOP)
+    # before anything is written (Hermes audit of 424b0b4, finding 5).
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def add_entry(raw: dict, path: Path | None = None) -> Watch:

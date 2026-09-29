@@ -74,7 +74,9 @@ def _flock(lock: Path) -> Iterator[None]:
     two processes do. `flock` is advisory and not reliable over NFS — the
     same assumption as the watchlist's `_write_lock` and the reports'
     `publish_lock`."""
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+    # O_NOFOLLOW: a link planted at the lock's name fails (ELOOP) rather than
+    # create its target outside the journal (Hermes audit of 424b0b4, finding 5).
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

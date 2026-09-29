@@ -422,7 +422,9 @@ def cmd_digest(args: argparse.Namespace) -> int:
     text = build_digest(paths, since, today)
     out = Path(args.out) if args.out else BRIEFS / f"DIGEST_{today.isoformat()}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text)
+    # Replaced whole: a symlink planted at the name is replaced, never
+    # written through (Hermes audit of 424b0b4, finding 5).
+    write_atomic(out, text)
     print(text)
     print(f"digest -> {out}")
     return 0
