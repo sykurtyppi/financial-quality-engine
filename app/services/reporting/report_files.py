@@ -165,7 +165,8 @@ def _seq(gen: Path) -> int:
 def generations(report: Path) -> list[Path]:
     """Every whole generation of ``report`` kept on disk, in publish order.
     Not the pointer, not a hidden directory (a build or copy interrupted
-    part way), and not a directory holding no report."""
+    part way, or a publish that failed: ``_set_apart``), and not a directory
+    holding no report."""
     home = _home(report)
     if not home.is_dir():
         return []
@@ -181,7 +182,9 @@ def _name_next(report: Path, stamp: str, tag: str) -> str:
     publish even within one second (the first rebuild after this change
     publishes a kept run and a new one in the same call)."""
     home = _home(report)
-    taken = [_seq(d) for d in home.iterdir() if d.is_dir()] if home.is_dir() else []
+    # Not a hidden directory's: a failed publish (``_set_apart``) holds no number.
+    taken = ([_seq(d) for d in home.iterdir() if d.is_dir() and not d.name.startswith(".")]
+             if home.is_dir() else [])
     return f"{stamp}_{max(taken, default=0) + 1:04d}_{tag}"
 
 
@@ -413,10 +416,29 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None) -> 
         p for name in _names(_base(report)).values() if (p := previous / name).exists()]
     gen = home / _name_next(report, _stamp(now), staged.generation_id)
     os.rename(work, gen)
-    _fsync(home)
-    _link_live_names(report)
-    _switch(report, gen, previous, f"publishing {gen.name}")
+    try:
+        _fsync(home)
+        _link_live_names(report)
+        _switch(report, gen, previous, f"publishing {gen.name}")
+    except PublishInDoubt:
+        raise  # the new generation may be live: it stays where the pointer may name it
+    except BaseException:
+        _set_apart(gen)  # never live, or switched back: not a run
+        raise
     staged.archived.extend(archived)
+
+
+def _set_apart(gen: Path) -> None:
+    """A generation whose publish failed, and that is not live (never
+    switched to, or switched back): renamed ``.failed-<name>``, hidden, so
+    it is kept for diagnosis but is not a run — ``generations`` does not
+    list it, ``restore`` cannot name it, and it holds no sequence number
+    (review of the finding-3a fix: it stayed in ``.generations/<base>/``
+    looking like an ordinary archived run). A rename that fails leaves it
+    where it is; the publish's own error is the one raised."""
+    with contextlib.suppress(OSError):
+        os.rename(gen, gen.with_name(f".failed-{gen.name}"))
+        _fsync(gen.parent)
 
 
 def _switch(report: Path, gen: Path | None, previous: Path | None, what: str) -> None:

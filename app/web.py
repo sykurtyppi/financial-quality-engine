@@ -147,26 +147,54 @@ def report_view(request: Request, ticker: str, date: str | None = None,
         # two request threads exclude each other as two processes do.
         with store.report_lock(path):
             if not store.is_reported(path.read_text(encoding="utf-8")):
-                try:
-                    # fresh=True: the first report LOCKS the thesis against
-                    # what was fetched. A <24h EDGAR cache can still hold
-                    # pre-filing data on a filing day; never lock on that.
-                    reporting.build_report(ticker, with_docs=True, report_day=entry["day"],
-                                           fresh=True)
-                    store.mark_reported(path)
-                except PublishInDoubt as e:
-                    # The new report MAY be live (and is what the page below
-                    # shows, if so): said as it is, as a server error, and
-                    # the thesis is not locked.
-                    error, status = f"Report publish IN DOUBT: {e}", 500
-                except Exception as e:  # noqa: BLE001
-                    error = f"Report generation failed: {e}"
+                problem, status = _generate_and_stamp(path, ticker, entry["day"])
+                error = problem or error
     html = _render_report(report_file.read_text()) if report_file.exists() else None
     return templates.TemplateResponse(
         request, "report.html",
         {"entry": store.parse_entry(path), "report_html": html, "error": error},
         status_code=status,
     )
+
+
+def _generate_and_stamp(path: Path, ticker: str, day: str) -> tuple[str | None, int]:
+    """The first view's report of an unstamped v1 entry: built, then the
+    thesis stamped. The caller holds the entry's report lock. Returns the
+    page's error (None) and status."""
+    def cli(command: str) -> str:
+        return f"scripts/journal.py {command} {store.safe_ticker(ticker)} --date {day}"
+
+    pending = store.report_pending(path)
+    if pending is not None:
+        # `journal.py report --defer-mark` published this report and the
+        # sweep is auditing it; it stamps it once the audit passes (review of
+        # the finding-3b fix: the page built and published over the run being
+        # audited, and stamped it). Refused: nothing is built.
+        return (f"This case's report is being audited ({pending}) and is stamped once the "
+                "audit passes; not building another over it. Once the audit has passed: "
+                f"`{cli('mark-reported')}`; to rebuild it on purpose: "
+                f"`{cli('report')} --retry`."), 409
+    try:
+        # fresh=True: the first report LOCKS the thesis against what was
+        # fetched. A <24h EDGAR cache can still hold pre-filing data on a
+        # filing day; never lock on that.
+        reporting.build_report(ticker, with_docs=True, report_day=day, fresh=True)
+    except PublishInDoubt as e:
+        # The new report MAY be live (and is what the page shows, if so):
+        # said as it is, as a server error, and the thesis is not locked.
+        return f"Report publish IN DOUBT: {e}", 500
+    except Exception as e:  # noqa: BLE001
+        return f"Report generation failed: {e}", 200
+    # Not in the build's `try`: a stamp that failed was shown as "Report
+    # generation failed", with the report live.
+    try:
+        store.mark_reported(path)
+    except Exception as e:  # noqa: BLE001
+        return (f"The report was generated and is live (below), but the thesis was NOT "
+                f"stamped reported: {e}. Stamp it with `{cli('mark-reported')}` "
+                "before opening this page again: an unstamped case builds its report "
+                "again."), 500
+    return None, 200
 
 
 _URL_ATTR_RE = re.compile(r'''(\s(?:href|src)\s*=\s*)(["'])([^"']*)\2''', re.I)

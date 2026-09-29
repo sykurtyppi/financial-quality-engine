@@ -15,8 +15,10 @@ updates hold a per-entry lock across the read, the change and the write (v1:
 UI and ``journal.py`` updating one entry at once never lose one another's
 change. Generating an entry's report holds a second, longer lock
 (``report_lock``) from the "not reported yet" check to the stamp, so one
-entry's report is built and published once. Entries are UTF-8 on disk and
-are read as UTF-8, whatever the locale.
+entry's report is built and published once; a report deferred for the
+sweep's audit (``--defer-mark``) stays PENDING (``set_report_pending``)
+until it is stamped, and no plain report is built over it meanwhile.
+Entries are UTF-8 on disk and are read as UTF-8, whatever the locale.
 """
 
 from __future__ import annotations
@@ -94,8 +96,9 @@ def report_lock(path: Path) -> Iterator[None]:
     it) through the build and publish to the ``reported`` stamp; with
     ``--defer-mark``, through the publish, and ``mark-reported`` takes it for
     the stamp. So of two report commands on one entry (the CLI, the web UI,
-    the sweep) the second waits, then finds the entry stamped and refuses
-    before it builds or publishes anything.
+    the sweep) the second waits, then finds the entry stamped (or, after a
+    ``--defer-mark``, its report pending: ``set_report_pending``) and
+    refuses before it builds or publishes anything.
 
     Hermes audit of 424b0b4, finding 3b: two commands at once each checked,
     built and published; the second's stamp was then refused ("already
@@ -107,6 +110,59 @@ def report_lock(path: Path) -> Iterator[None]:
     this one (always in that order, never the other)."""
     with _flock(path.with_name(f".{path.name}.report.lock")):
         yield
+
+
+def _pending_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.report.pending")
+
+
+def set_report_pending(path: Path, by: str) -> None:
+    """Record that ``path``'s report is PENDING its audit: built (or being
+    built) by ``journal.py report --defer-mark`` and not yet stamped. The
+    caller holds ``report_lock``.
+
+    Review of the finding-3b fix: ``--defer-mark`` releases the report lock
+    once it has published, and the sweep then audits that report with the
+    entry unstamped (minutes). A plain ``report`` (or the web page) in that
+    window found "not reported", built, published over the run being
+    audited and stamped; the sweep's audit then failed, or its
+    ``mark-reported`` found "already reported". While this marker is there a
+    plain report refuses (``journal.py report --retry`` overrides it), and
+    ``mark-reported`` clears it once it has stamped.
+
+    A hidden sidecar (``.<name>.report.pending``), written whole: when, who
+    (the command, its pid and host), so a refusal can say what it waits
+    for."""
+    marker = _pending_path(path)
+    text = f"marked {now_iso()} by {by}, pid {os.getpid()} on {os.uname().nodename}\n"
+    _durable_write(marker, text, create=not marker.exists())
+
+
+def report_pending(path: Path) -> str | None:
+    """What ``set_report_pending`` recorded for ``path``, or None when its
+    report is not pending. A marker that is there but cannot be read still
+    pends (fail closed): reading it as "nothing pending" would let a plain
+    report publish over the run the sweep is auditing."""
+    try:
+        return _pending_path(path).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"(the marker {_pending_path(path).name} cannot be read: {e})"
+
+
+def clear_report_pending(path: Path) -> None:
+    """The report is no longer pending (``mark-reported`` stamped it, or a
+    ``--retry`` rebuilt and stamped it). The caller holds ``report_lock``."""
+    try:
+        _pending_path(path).unlink()
+    except FileNotFoundError:
+        return
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)  # the removal survives a crash, as the stamp does
+    finally:
+        os.close(dir_fd)
 
 
 def _durable_write(path: Path, text: str, *, create: bool = False) -> None:
@@ -352,7 +408,9 @@ def save_v2(entry, path: Path | None = None, *, allow_update: bool = False) -> P
     Legitimate updates (persisting a new resolution via `resolve --commit`;
     stamping `reported` from the report step) pass `allow_update=True`. Those
     call sites must not change the BEFORE block, and the guard verifies that:
-    the incoming entry's `before_sha256` MUST equal the on-disk entry's.
+    the incoming entry's `before_sha256` MUST equal the on-disk entry's, and
+    it is held to what `update_v2` holds a change to (the sealed fields as
+    on disk, the lock verified, a `reported` stamp never cleared or moved).
     Anything else is refused. An update of an entry loaded earlier goes
     through `update_v2`, which re-reads it under the lock.
     """
@@ -397,6 +455,12 @@ def _save_v2_locked(entry, target: Path, allow_update: bool, render_entry) -> Pa
                 f"refusing to update {target}: BEFORE hash changed "
                 f"({existing_h} -> {new_h}). Updates must preserve the locked BEFORE block."
             )
+        # Held to what `update_v2` holds its change to (review of the
+        # finding-4 fix): comparing the two hashes alone let a save clear a
+        # `reported` stamp, or write a BEFORE block edited under the stored hash.
+        moved = _moved(existing, entry)
+        if moved:
+            raise ValueError(f"refusing to update {target}: {_refusal(moved)}")
     _durable_write(target, render_entry(entry), create=not existed)
     return target
 
@@ -440,20 +504,37 @@ def update_v2(path: Path, change):
                 "hash; refusing to update a tampered entry.")
         read = current.model_copy(deep=True)
         updated = change(current)
-        moved = [name for name in _SEALED if getattr(updated, name) != getattr(read, name)]
-        if read.reported is not None and updated.reported != read.reported:
-            moved.append("reported")
-        if moved or not verify_lock(updated):
-            raise UpdateRefused(
-                f"{path.name}: the update changed {', '.join(moved) or 'the BEFORE block'}, "
-                "which an update must leave as it is (the lock seals it, the file is named "
-                "for it, or it is a `reported` stamp already made); refusing to save it.")
+        moved = _moved(read, updated)
+        if moved:
+            raise UpdateRefused(f"{path.name}: {_refusal(moved)}")
         _save_v2_locked(updated, path, True, render_entry)
         return updated
 
 
 # What an update of a v2 entry must leave exactly as it read it (`update_v2`).
 _SEALED = ("before", "before_sha256", "locked_at", "opened", "ticker", "day")
+
+
+def _moved(read, updated) -> list[str]:
+    """What ``updated`` changed of ``read`` that no update may: the sealed
+    fields, a `reported` stamp already made, or (named "the BEFORE block")
+    anything that leaves its lock unverified. Empty when it may be saved.
+    Shared by `update_v2` and `save_v2`'s update, so neither is a way round
+    the other."""
+    from app.services.journal.schema_v2 import verify_lock
+
+    moved = [name for name in _SEALED if getattr(updated, name) != getattr(read, name)]
+    if read.reported is not None and updated.reported != read.reported:
+        moved.append("reported")
+    if not moved and not verify_lock(updated):
+        moved.append("the BEFORE block")
+    return moved
+
+
+def _refusal(moved: list[str]) -> str:
+    return (f"the update changed {', '.join(moved)}, which an update must leave as it is "
+            "(the lock seals it, the file is named for it, or it is a `reported` stamp "
+            "already made); refusing to save it.")
 
 
 def load_v2(path: Path):

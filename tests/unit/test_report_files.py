@@ -366,6 +366,15 @@ def _fail_after_the_switch(monkeypatch, report, *, exc=None):
     return hit
 
 
+def _set_apart_as_failed(report, gen, kept):
+    """``gen``, switched back, is kept as ``.failed-<name>`` beside the runs
+    (for diagnosis), and is not one of them."""
+    assert not gen.exists()
+    failed = gen.with_name(f".failed-{gen.name}")
+    assert (failed / report.name).is_file() and generation_of(failed / report.name)
+    assert generations(report) == kept
+
+
 class TestAFailureAfterTheSwitch:
     def test_a_rebuild_is_switched_back_and_says_the_earlier_run_is_live(
             self, tmp_path, monkeypatch):
@@ -379,6 +388,42 @@ class TestAFailureAfterTheSwitch:
         # Report, ledger and the earlier run's audit, byte for byte, at the live names.
         assert _live(tmp_path) == before and len(before) == 3
         assert not _leftovers(tmp_path)
+        _set_apart_as_failed(report, hit[0], [earlier])
+
+    def test_a_run_switched_back_holds_no_place_among_the_runs(self, tmp_path, monkeypatch):
+        """Review of the 3a fix: the rolled-back generation stayed in
+        ``.generations/<base>/`` as an ordinary run: listed, restorable by
+        id, holding a sequence number. It is set apart, hidden, and the next
+        publish takes the number it would have held."""
+        report, earlier = _audited_first_run(tmp_path)
+        hit = _fail_after_the_switch(monkeypatch, report)
+        with pytest.raises(NotPublished):
+            _publish(tmp_path, "second")
+        failed_id = hit[0].name.rsplit("_", 1)[1]
+        with pytest.raises(ValueError, match="0 generations match"):
+            restore(report, failed_id)
+        _publish(tmp_path, "third")  # the injection fires once
+        assert [g.name.split("_")[1] for g in generations(report)] == ["0001", "0002"]
+
+    def test_a_run_that_cannot_be_set_apart_still_says_why_the_publish_failed(
+            self, tmp_path, monkeypatch):
+        """Setting the failed run apart is tidying: if that rename fails too,
+        the publish's own error is the one raised, not the rename's."""
+        import app.services.reporting.report_files as rf
+
+        report, earlier = _audited_first_run(tmp_path)
+        hit = _fail_after_the_switch(monkeypatch, report)
+        real = os.rename
+
+        def rename(src, dst):
+            if Path(dst).name.startswith(".failed-"):
+                raise OSError(errno.EROFS, "injected: cannot set it apart")
+            return real(src, dst)
+
+        monkeypatch.setattr(rf.os, "rename", rename)
+        with pytest.raises(NotPublished, match=f"{earlier.name} is live again"):
+            _publish(tmp_path, "second")
+        assert current_generation(report) == earlier and hit[0].is_dir()
 
     def test_a_first_publish_is_switched_back_to_nothing_live(self, tmp_path, monkeypatch):
         report = tmp_path / NAME
@@ -388,6 +433,7 @@ class TestAFailureAfterTheSwitch:
         assert hit
         assert current_generation(report) is None and read_live(report) is None
         assert not report.exists() and not ledger_path(report).exists()
+        _set_apart_as_failed(report, hit[0], [])
 
     def test_an_interrupt_after_the_switch_is_raised_with_the_earlier_run_live(
             self, tmp_path, monkeypatch):
@@ -395,10 +441,11 @@ class TestAFailureAfterTheSwitch:
         either. It is raised as itself once the earlier run is back."""
         report, earlier = _audited_first_run(tmp_path)
         before = _live(tmp_path)
-        _fail_after_the_switch(monkeypatch, report, exc=KeyboardInterrupt())
+        hit = _fail_after_the_switch(monkeypatch, report, exc=KeyboardInterrupt())
         with pytest.raises(KeyboardInterrupt):
             _publish(tmp_path, "second")
         assert current_generation(report) == earlier and _live(tmp_path) == before
+        _set_apart_as_failed(report, hit[0], [earlier])
 
     def test_a_switch_back_that_fails_says_the_new_run_may_be_live(self, tmp_path, monkeypatch):
         """Never "the earlier run is live" when putting it back failed."""
@@ -422,6 +469,9 @@ class TestAFailureAfterTheSwitch:
         assert f"readlink {rf._pointer(report)}" in str(e.value)
         assert f"restore({str(report)!r}, {earlier.name!r})" in str(e.value)
         assert current_generation(report) != earlier  # it is, in fact
+        # ...so the new run stays where the pointer names it: never set apart.
+        assert current_generation(report).is_dir() and _one_generation(report)
+        assert current_generation(report) in generations(report)
 
     def test_a_switch_back_is_read_back_not_assumed(self, tmp_path, monkeypatch):
         """A put-back that raised nothing but did not take (the pointer still
@@ -554,6 +604,8 @@ def test_a_publish_that_raises_at_any_step_leaves_the_earlier_run_live(tmp_path,
                 state["armed"] = False
                 assert current_generation(report) == earlier, stop
                 assert _live(tmp_path) == before, stop
+                # ...and the run that failed is not kept as one (review of the 3a fix).
+                assert generations(report) == [earlier], stop
                 continue
             finally:
                 state["armed"] = False
