@@ -42,7 +42,7 @@ from app.services.ingestion.edgar_documents import (
 )
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
-from app.services.reporting.report_files import write_atomic
+from app.services.reporting.report_files import own_dir, write_atomic
 from app.services.watch.poller import Filing, recent_filings
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -54,6 +54,15 @@ _NON_NARRATIVE_RE = re.compile(r"table|supplement|slide|presentation|infographic
 _LABEL_CHARS_RE = re.compile(r"[^\w.\-]+")
 _NAME_CHARS_RE = re.compile(r"[^\w .,&'\-]+")
 LABEL_MAX = 60
+
+
+def brief_workdir(ticker: str, event_day: str, root: Path | None = None) -> Path:
+    """``<briefs>/<T>/<day>/``: a brief's sources, its assessment and its
+    build record. Both levels are the engine's own directories, refused
+    when a link (`own_dir`): one planted at either had every source file,
+    ``assessment.json`` and ``built.json`` written wherever it pointed
+    (Hermes audit of 424b0b4, finding 5). ``<briefs>`` is the operator's."""
+    return own_dir(own_dir((root or BRIEFS) / ticker) / event_day)
 
 
 def brief_sha256(brief: Path) -> str | None:
@@ -234,7 +243,7 @@ def collect_sources(
     submissions = client.submissions_by_cik(cik)
     filing = latest_earnings_8k(submissions, accession)
     company = _safe_name(str(submissions.get("name") or ticker)) or ticker
-    workdir = (out_root or BRIEFS) / ticker / filing.filing_date.isoformat()
+    workdir = brief_workdir(ticker, filing.filing_date.isoformat(), out_root)
     workdir.mkdir(parents=True, exist_ok=True)
     src = BriefSources(ticker=ticker, filing=filing, company=company, workdir=workdir)
 

@@ -46,7 +46,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -68,6 +68,7 @@ from app.services.ingestion.restatements import (
     _active_tag,
     _rows,
 )
+from app.services.reporting.report_files import own_dir
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,14 @@ def _sweep_orphans(d: Path, older_than_s: float = 3600.0) -> None:
             pass
 
 
+def _root_markers(cik: int, root: Path | None = None) -> str:
+    """The name prefix of this company's problem-day markers in the store's
+    ROOT (``.busy-CIK##########-<day>``), where they go while its directory
+    is a symlink: refused, it archives nothing, and a marker inside it would
+    be written wherever it points."""
+    return f"{BUSY_PREFIX}{cik_dir(cik, root).name}-"
+
+
 def _record_problem_day(cik: int, day: date, root: Path | None = None) -> None:
     """Record that this DAY archived nothing, without touching lock-protected
     state.
@@ -158,27 +167,49 @@ def _record_problem_day(cik: int, day: date, root: Path | None = None) -> None:
     report twenty-four "problem days" before lunch, and two problem days of
     different kinds — a failed write, then a lock timeout — would report as
     one if each kind kept its own tally.
+
+    A company directory that is a symlink is itself the problem (`_cik_lock`
+    refuses it): the day is recorded beside it, in the store's root, so the
+    VINTAGE_STALE_DAYS alert still fires (review of the finding 5 fix).
     """
     try:
         d = cik_dir(cik, root)
-        d.mkdir(parents=True, exist_ok=True)
+        if d.is_symlink():
+            d.parent.mkdir(parents=True, exist_ok=True)
+            marker = d.parent / f"{_root_markers(cik, root)}{day.isoformat()}"
+        else:
+            d.mkdir(parents=True, exist_ok=True)
+            marker = d / f"{BUSY_PREFIX}{day.isoformat()}"
         # Created if absent, never followed: `touch` created a dangling
         # link's target (and re-dated a live one's) outside the store.
-        os.close(os.open(d / f"{BUSY_PREFIX}{day.isoformat()}",
-                         os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o666))
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o666))
     except OSError:
         pass
 
 
+def _problem_day_markers(cik: int, root: Path | None = None) -> dict[Path, str]:
+    """Each problem-day marker and the day it records: those in the
+    company's directory (unless it is a symlink, never followed) and those
+    recorded in the root while it was one."""
+    d = cik_dir(cik, root)
+    prefix = _root_markers(cik, root)
+    found = {p: p.name.removeprefix(prefix) for p in d.parent.glob(f"{prefix}*")}
+    if not d.is_symlink():
+        found |= {p: p.name.removeprefix(BUSY_PREFIX) for p in d.glob(f"{BUSY_PREFIX}*")}
+    return found
+
+
 def _problem_days(cik: int, root: Path | None = None) -> int:
+    """Distinct problem days: a day recorded in the root while the directory
+    was a link, and again inside once it was not, is one day."""
     try:
-        return sum(1 for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*") if path.is_file())
+        return len({day for p, day in _problem_day_markers(cik, root).items() if p.is_file()})
     except OSError:
         return 0
 
 
 def _clear_problem_days(cik: int, root: Path | None = None) -> None:
-    for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*"):
+    for path in _problem_day_markers(cik, root):
         try:
             path.unlink()
         except OSError:
@@ -214,7 +245,11 @@ def _cik_lock(cik: int, root: Path | None = None, timeout: float | None = None):
     # Read at call time, never bound as a default: a default freezes the
     # module constant at import and cannot be tuned or tested.
     timeout = LOCK_TIMEOUT_S if timeout is None else timeout
-    d = cik_dir(cik, root)
+    # The company's directory is the engine's own, beneath the operator's
+    # store: a symlink there had the lock, the manifest and every snapshot
+    # written wherever it pointed, and is refused (`own_dir`; Hermes audit of
+    # 424b0b4, finding 5).
+    d = own_dir(cik_dir(cik, root))
     d.mkdir(parents=True, exist_ok=True)
     give_up = time.monotonic() + max(timeout, 0.0)
     # Neither truncated nor followed: `open("w")` emptied the file a symlink
@@ -479,7 +514,19 @@ def _store(
     # instant (the watch sweep passes UTC) is converted; a naive one is
     # taken as local.
     today = (now or datetime.now(UTC)).astimezone().date()
-    with _cik_lock(cik, root) as held:
+    with ExitStack() as stack:
+        try:
+            held = stack.enter_context(_cik_lock(cik, root))
+        except OSError as e:
+            # The lock could not even be opened: a link planted at it or at
+            # the company's directory (refused), a directory that cannot be
+            # made. A day that archived nothing like any other, recorded as
+            # one; raised, it escaped the marker, the count stayed 0 and the
+            # VINTAGE_STALE_DAYS alert never fired (review of the finding 5
+            # fix).
+            _record_problem_day(cik, today, root)
+            return Capture(cik, today, None, "", "failed",
+                           f"the capture lock could not be taken: {type(e).__name__}: {e}")
         if not held:
             # Never touch the manifest without its lock. The process holding
             # the lock may be between its own read and atomic replace; even a
@@ -576,7 +623,9 @@ def list_vintages(cik: int, root: Path | None = None) -> list[Path]:
     """Snapshots oldest first, taken from disk rather than the manifest so a
     lost index never hides data that is still there."""
     d = cik_dir(cik, root)
-    if not d.is_dir():
+    if d.is_symlink() or not d.is_dir():
+        # A link at the company's directory is refused, never read through:
+        # its "snapshots" would be taken as what was knowable on a day.
         return []
     return sorted(p for p in d.glob("*.json.gz") if not p.name.startswith("."))
 
