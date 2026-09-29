@@ -216,13 +216,23 @@ _NON_FINITE = pytest.mark.parametrize(
     "value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
 
 
+def _skipped_validation(value: float) -> MetricsBundle:
+    """An OK `cfo_to_net_income` of `value`, built the ways that skip the
+    MetricResult contract (`model_copy(update=...)`, `model_construct`)."""
+    m = _bundle("cfo_to_net_income", 1.0).latest[0].model_copy(update={"value": value})
+    return MetricsBundle.model_construct(latest=[m], history={m.name: [m]})
+
+
 class TestNonFiniteValues:
     """Hermes audit of 424b0b4, finding 7: only a MISSING value was checked.
     NaN compares False against everything, so an OK metric of NaN resolved
     `violated` with `observed=nan` (and +/-inf gave whichever verdict its
     sign happened to), and `resolve --commit` wrote that verdict into the
     journal for good. A number that is not a number is no evidence either
-    way: unresolvable, never met or violated."""
+    way: never met or violated. An engine metric's is terminal
+    (`unresolvable`: deterministic for the inputs as filed); a raw XBRL
+    field's is `pending`, like a missing one — comparative revisions do
+    arrive, and the field is not a computation that can only go one way."""
 
     @_NON_FINITE
     @pytest.mark.parametrize("comparator", [">", "<", "=="])
@@ -238,10 +248,8 @@ class TestNonFiniteValues:
         """`model_copy(update=...)` and `model_construct` do not validate (the
         registry uses the first), so the resolver cannot rely on the
         MetricResult contract alone."""
-        ok = _bundle("cfo_to_net_income", 1.0).latest[0]
-        m = ok.model_copy(update={"value": value})
-        bundle = MetricsBundle.model_construct(latest=[m], history={m.name: [m]})
-        assert bundle.history[m.name][0].status is MetricStatus.OK
+        bundle = _skipped_validation(value)
+        assert bundle.history["cfo_to_net_income"][0].status is MetricStatus.OK
         a = _a(metric="cfo_to_net_income", comparator=">", threshold=0.8)
         r = propose_resolution(a, _ds(_p()), bundle=bundle)
         assert (r.state, r.observed) == ("unresolvable", None)
@@ -252,11 +260,12 @@ class TestNonFiniteValues:
 
     @_NON_FINITE
     @pytest.mark.parametrize("comparator", [">", "<", ">=", "<=", "=="])
-    def test_a_raw_field_is_no_verdict(self, value, comparator):
+    def test_a_raw_field_waits_like_a_missing_one(self, value, comparator):
         r = propose_resolution(_a(comparator=comparator, threshold=100.0),
                                _ds(_p(revenue=value)), assumption_index=2)
-        assert (r.state, r.observed) == ("unresolvable", None)
-        assert r.note == f"XBRL field 'revenue' (FY2026Q2) is not a finite number ({value!r})"
+        assert (r.state, r.observed) == ("pending", None)
+        assert r.note == f"field 'revenue' in FY2026Q2 is not a finite number ({value!r})"
+        assert r.at == date(2026, 6, 30)
         assert r.assumption_index == 2
 
     @_NON_FINITE
@@ -267,13 +276,17 @@ class TestNonFiniteValues:
     def test_a_symbolic_threshold_is_no_verdict(self, value, comparator, keyword):
         a = _a(metric="cfo", comparator=comparator, threshold=keyword)
         r = propose_resolution(a, _ds(_p(cfo=value)))
+        assert (r.state, r.observed) == ("pending", None)
+        a = _a(metric="cfo_to_net_income", comparator=comparator, threshold=keyword)
+        r = propose_resolution(a, _ds(_p()), bundle=_skipped_validation(value))
         assert (r.state, r.observed) == ("unresolvable", None)
 
     def test_a_preregistered_source_does_not_park_it_with_a_nan_observed(self):
         """The source check returns `pending` carrying the observed value;
-        a non-finite one is refused before it."""
+        a non-finite one is refused before it, with its own note."""
         r = propose_resolution(_a(source="10-Q"), _ds(_p(revenue=float("nan"))))
-        assert (r.state, r.observed) == ("unresolvable", None)
+        assert (r.state, r.observed) == ("pending", None)
+        assert r.note == "field 'revenue' in FY2026Q2 is not a finite number (nan)"
 
 
 class TestSourceProvenance:
