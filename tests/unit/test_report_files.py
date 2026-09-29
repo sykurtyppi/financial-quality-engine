@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
@@ -738,10 +739,47 @@ class TestEngineCommitNeverBlocksAPublish:
         git("add", ".")
         git("commit", "-q", "-m", "engine")
         git("config", "core.quotePath", "false")
-        (root / "app" / os.fsdecode(b"caf\xe9.py")).write_text("Y = 1\n")
+        try:
+            (root / "app" / os.fsdecode(b"caf\xe9.py")).write_text("Y = 1\n")
+        except OSError as e:
+            if e.errno != errno.EILSEQ:
+                raise
+            # macOS (APFS) refuses a name that is not valid UTF-8, so no real
+            # checkout there can hold one; the portable test below drives the
+            # same decoding path with a fake git.
+            pytest.skip("this filesystem refuses non-UTF-8 file names (EILSEQ)")
         monkeypatch.setattr(report_files, "_ENGINE_ROOT", root)
         engine_commit.cache_clear()
         assert "uncommitted changes" in engine_commit()
+
+    def test_undecodable_git_output_is_read_not_raised_on_any_platform(
+            self, tmp_path, monkeypatch):
+        """The same defect as above, on every platform: git's own bytes are
+        what `_git` decodes, so a fake git on PATH prints a Latin-1 name raw
+        (Hermes: the real-file version cannot run on macOS, whose filesystem
+        rejects the name before the code under test is reached)."""
+        monkeypatch.delenv(ENGINE_ENV, raising=False)
+        root = tmp_path / "engine"
+        root.mkdir()
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "git"
+        fake.write_text(textwrap.dedent(f"""\
+            #!/bin/sh
+            case "$*" in
+              *--show-toplevel*) printf '%s\\n' '{root}' ;;
+              *rev-parse*) printf 'abcdef123456\\n' ;;
+              *status*) printf '?? app/caf\\351.py\\n' ;;
+              *) exit 1 ;;
+            esac
+            """))
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setattr(report_files, "_ENGINE_ROOT", root)
+        engine_commit.cache_clear()
+        stamp = engine_commit()
+        assert stamp == ("abcdef123456 + uncommitted changes to the engine code "
+                         "(not reproducible from abcdef123456)")
 
     def test_a_stamp_that_cannot_be_read_still_publishes(self, tmp_path, monkeypatch):
         def broken():

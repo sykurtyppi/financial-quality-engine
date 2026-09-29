@@ -1920,6 +1920,45 @@ class TestSeasonCriticalFixes:
         assert watch_cli.cmd_poll(_poll_args()) == 0
         assert not watch_cli._audit_attempts_path(report).exists()
 
+    # --- the counter itself can neither reset nor vanish (Hermes audit) ----
+
+    def _capped(self, monkeypatch, tmp_path, rc: int = 4):
+        report = tmp_path / "NVDA_2026-11-17.md"
+        report.write_text("# report\n")
+        runs: list[Path] = []
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda r: runs.append(r) or rc)
+        return report, runs
+
+    def test_a_garbled_counter_is_spent_not_zero(self, monkeypatch, tmp_path, capsys):
+        """Reading garbage as 0 reopened the cap: every garbled count bought
+        three more paid runs."""
+        report, runs = self._capped(monkeypatch, tmp_path)
+        watch_cli._audit_attempts_path(report).write_text("2\x00\x00")
+        assert watch_cli._run_audit_capped(report) == (0, True)
+        assert runs == []
+        assert "unreadable" in capsys.readouterr().err
+
+    def test_a_count_that_cannot_be_saved_abandons_rather_than_retries_forever(
+            self, monkeypatch, tmp_path, capsys):
+        """The failed save was swallowed ("costs a retry"): with the count
+        never recorded, every hourly pass spent another paid run."""
+        report, runs = self._capped(monkeypatch, tmp_path)
+
+        def refuse(path, text, **kw):
+            raise PermissionError(13, "read-only", str(path))
+        monkeypatch.setattr(watch_cli, "write_atomic", refuse)
+        assert watch_cli._run_audit_capped(report) == (4, True)
+        assert len(runs) == 1
+        assert "could not be recorded" in capsys.readouterr().err
+
+    def test_the_count_is_written_whole(self, monkeypatch, tmp_path):
+        report, _runs = self._capped(monkeypatch, tmp_path)
+        written: list[tuple[Path, str]] = []
+        monkeypatch.setattr(watch_cli, "write_atomic",
+                            lambda path, text, **kw: written.append((path, text)))
+        assert watch_cli._run_audit_capped(report) == (4, False)
+        assert written == [(watch_cli._audit_attempts_path(report), "1\n")]
+
     def test_an_abandoned_audit_completes_the_case(self):
         ref = Decision("refuse", "")
         assert watch_cli._completed(ref, watch_cli.AUDIT_ABANDONED_RC)

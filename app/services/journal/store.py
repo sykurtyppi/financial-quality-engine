@@ -5,11 +5,24 @@ entry opened in one is identical to one opened in the other.
 The one methodological invariant lives here: a report cannot be generated until a
 real BEFORE thesis exists (``has_thesis``), and once generated the entry is
 stamped ``reported`` so it cannot be regenerated (no peek-then-edit).
+
+Every write is whole or not at all (Hermes audit of the stack): an entry is
+written to a temporary file beside it, fsynced and renamed into place, so a
+process killed mid-write leaves the old entry or the new one — never the
+truncated "reported: 20" a plain ``write_text`` left. Read-modify-write
+updates hold a per-entry lock, so the sweep, the web UI and ``journal.py``
+updating one entry at once never lose one another's change.
 """
 
 from __future__ import annotations
 
+import fcntl
+import os
 import re
+import stat
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -35,6 +48,54 @@ _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
 # traversal was blocked in practice (no matching file), but any user-supplied
 # `date=` value reached path construction. Strict ISO-day format only.
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+# A new entry's permissions (an update keeps the entry's own).
+_NEW_ENTRY_MODE = 0o644
+
+
+@contextmanager
+def _entry_lock(path: Path) -> Iterator[None]:
+    """Exclusive, cross-process, for one entry's read-modify-write: a sidecar
+    ``.<name>.lock`` beside it, because the entry itself is replaced (a lock
+    on the old inode would not exclude a writer of the new one). `flock` is
+    advisory and not reliable over NFS — the same assumption as the
+    watchlist's `_write_lock` and the reports' `publish_lock`."""
+    fd = os.open(path.with_name(f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the lock
+
+
+def _durable_write(path: Path, text: str, *, create: bool = False) -> None:
+    """Write ``path`` whole or not at all: a temporary file beside it,
+    fsynced, then renamed over it (``create``: hard-linked into place, which
+    fails with FileExistsError rather than replace an entry that appeared in
+    the meantime — the no-overwrite rule holds under a race too). The
+    directory is fsynced after, so the new name survives a crash. An update
+    keeps the entry's permissions."""
+    mode = _NEW_ENTRY_MODE if create else stat.S_IMODE(path.stat().st_mode)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        if create:
+            os.link(tmp, path)
+        else:
+            os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def safe_ticker(ticker: str) -> str:
@@ -130,7 +191,7 @@ def open_entry(
     ENTRIES.mkdir(parents=True, exist_ok=True)
     path = entry_path(t)
     if path.exists():
-        raise FileExistsError(path)
+        raise FileExistsError(path)  # the common case, said before any work
     # Whitespace-only thesis -> placeholder, so the report lock still refuses it
     # (unifies CLI and web, which both must treat a blank thesis as "no thesis").
     if thesis is not None and not thesis.strip():
@@ -138,7 +199,7 @@ def open_entry(
     thesis = thesis or "<one or two sentences: your view BEFORE reading the report>"
     conviction = conviction if conviction is not None else "<1-5>"
     action = action or "<hold / trim / add / avoid / no position>"
-    path.write_text(
+    _durable_write(path, (
         f"# {t} — {today()}\n"
         f"opened: {now_iso()}\n"
         f"reported:\n\n"
@@ -155,14 +216,16 @@ def open_entry(
         f"outcome_date:\n"
         f"what_happened:\n"
         f"verdict:                        # helped / neutral / hurt / too_early\n"
-    )
+    ), create=True)
     return path
 
 
 def mark_reported(path: Path) -> None:
-    text = path.read_text()
-    text = re.sub(r"^reported:[ \t]*$", f"reported: {now_iso()}", text, count=1, flags=re.MULTILINE)
-    path.write_text(text)
+    with _entry_lock(path):
+        text = path.read_text()
+        text = re.sub(r"^reported:[ \t]*$", f"reported: {now_iso()}", text, count=1,
+                      flags=re.MULTILINE)
+        _durable_write(path, text)
 
 
 def set_field(path: Path, key: str, value: str) -> None:
@@ -171,11 +234,12 @@ def set_field(path: Path, key: str, value: str) -> None:
     structure the parser assumes. A function replacement is used so backslashes or
     ``\\g`` sequences in user text are treated literally, not as regex refs."""
     value = re.sub(r"\s*\n\s*", " ", value).strip()
-    text = path.read_text()
-    new, n = re.subn(rf"^{re.escape(key)}:.*$", lambda _m: f"{key}: {value}", text,
-                     count=1, flags=re.MULTILINE)
-    if n:
-        path.write_text(new)
+    with _entry_lock(path):
+        text = path.read_text()
+        new, n = re.subn(rf"^{re.escape(key)}:.*$", lambda _m: f"{key}: {value}", text,
+                         count=1, flags=re.MULTILINE)
+        if n:
+            _durable_write(path, new)
 
 
 def parse_entry(path: Path) -> dict:
@@ -242,7 +306,16 @@ def save_v2(entry, path: Path | None = None, *, allow_update: bool = False) -> P
     )
 
     target = path or entry_path(entry.ticker, entry.day.isoformat())
-    if target.exists():
+    ENTRIES.mkdir(parents=True, exist_ok=True)
+    # The checks below and the write are one step: another writer between
+    # them could otherwise replace the entry this call just vetted.
+    with _entry_lock(target):
+        return _save_v2_locked(entry, target, allow_update, render_entry)
+
+
+def _save_v2_locked(entry, target: Path, allow_update: bool, render_entry) -> Path:
+    existed = target.exists()
+    if existed:
         if not is_v2(target):
             raise FileExistsError(
                 f"v1 entry exists at {target}; refusing to overwrite. Move or delete it first."
@@ -269,8 +342,7 @@ def save_v2(entry, path: Path | None = None, *, allow_update: bool = False) -> P
                 f"refusing to update {target}: BEFORE hash changed "
                 f"({existing_h} -> {new_h}). Updates must preserve the locked BEFORE block."
             )
-    ENTRIES.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_entry(entry), encoding="utf-8")
+    _durable_write(target, render_entry(entry), create=not existed)
     return target
 
 
