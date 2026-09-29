@@ -81,6 +81,14 @@ _NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([0-9a-f]{6,64}))?(?:-\d+)?\.jso
 # OSError nor ValueError, so it escapes the obvious handler and would reach
 # the CLI as a traceback and the sweep as a lost pass.
 UNREADABLE = (OSError, ValueError, EOFError)
+# What reading AND mapping a stored snapshot can raise when it is not usable
+# as a state: unreadable, or read but built from a shape the mapper does not
+# expect. The SEC shape check passes `{"facts": {"us-gaap": []}}` or a null
+# `units`, and the mapper's `.get` chain then raises AttributeError, not the
+# ValueError `_mapped` absorbs. Only where a stored state is being CHOSEN
+# (the report's legacy walk, the replay's pick) — a payload the report scored
+# was built by the mapper already, and a defect there must still surface.
+UNUSABLE = (*UNREADABLE, TypeError, AttributeError, KeyError)
 # What wrote an observation (Hermes audit of 424b0b4, finding 2). SCORED: the
 # payload a report scored (`store_snapshot`, reached only after the mapper
 # built it). RAW: a fetch archived as it came (`capture` — the watch sweep,
@@ -1080,7 +1088,10 @@ def _change_row(c: VintageChange) -> tuple[str, str, str]:
     if c.scope == "context":
         now += " (before the scored window)"
     elif c.scope == "raw":
-        now += " (raw fact; not a scored figure)"
+        # The raw fallback reads only the tags the engine scores a field
+        # from, so the row IS about a scored field — just not compared as
+        # the mapper builds it (review of 224b896, finding 2).
+        now += " (raw fact of a scored field's tag; not compared as the engine builds it)"
     if c.moved_tag:
         now += f" (now {'built from' if composed else 'tagged'} {c.new_tag})"
     pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
@@ -1193,14 +1204,37 @@ class VintageDiffReport:
     no_baseline_reason: str | None = None
     baseline_note: str | None = None
     # Why scored values were not compared as the engine builds them (a
-    # snapshot the mapper cannot build), when they were not.
+    # snapshot the mapper cannot build), when they were not: the previous ->
+    # newest window, and the thesis-lock window apart. One window compared
+    # as scored says nothing about the other (review of 224b896, finding 2).
     canonical_unavailable: str | None = None
+    baseline_unavailable: str | None = None
     # Raw captures passed over for the baseline (`report_diff`), when any were.
     raw_note: str | None = None
+    # The report named its payload and the store does not hold it: nothing
+    # was compared, and "no baseline yet" would be the wrong reason.
+    payload_missing: bool = False
 
     @property
     def compared(self) -> bool:
         return self.no_baseline_reason is None
+
+    @property
+    def tier1_gap(self) -> str | None:
+        """Why the decision card must list silent revisions as not checked
+        this run, or None when every window was compared as the engine
+        scores it. A window that fell back to raw fact rows promotes nothing
+        (`scope="raw"`), so without this the card read clean over a
+        comparison never made (review of 224b896, finding 2)."""
+        if not self.compared:
+            if self.payload_missing:
+                return "the report's payload is not in the vintage store"
+            return "no vintage baseline yet"
+        if self.canonical_unavailable:
+            return "not compared as scored: a snapshot could not be mapped"
+        if self.baseline_unavailable:
+            return "since the pinned thesis: not compared as scored, a snapshot could not be mapped"
+        return None
 
     def status_line(self) -> str:
         """One line for the data-quality section: exactly what was compared."""
@@ -1209,12 +1243,12 @@ class VintageDiffReport:
         assert self.newest is not None and self.previous is not None
         line = (
             f"compared {self.previous.captured} → {self.newest.captured}: "
-            f"{_count(self.changes_since_previous)}"
+            f"{_count(self.changes_since_previous, self.canonical_unavailable)}"
         )
         if self.changes_since_baseline is not None and self.baseline is not None:
             line += (
                 f"; since pinned thesis {self.baseline.captured}: "
-                f"{_count(self.changes_since_baseline)}"
+                f"{_count(self.changes_since_baseline, self.baseline_unavailable)}"
             )
         if self.baseline_note:
             line += f"; {self.baseline_note}"
@@ -1222,17 +1256,21 @@ class VintageDiffReport:
             line += f"; {self.raw_note}"
         if self.canonical_unavailable:
             line += f"; {self.canonical_unavailable}"
+        if self.baseline_unavailable:
+            line += f"; since the pinned thesis: {self.baseline_unavailable}"
         return line
 
 
-def _count(changes: list[VintageChange]) -> str:
+def _count(changes: list[VintageChange], unavailable: str | None = None) -> str:
     """"N change(s)" counts the silent ones; moves a later filing explains
     are counted apart, so an amendment never reads as a silent change, and
     so are raw fact rows (a snapshot that could not be mapped), which are not
-    changes to a scored figure at all."""
+    changes to a scored figure at all. A window that was not compared as
+    scored (`unavailable`) says so instead of "0 change(s)": its raw rows are
+    never promoted, so a zero there was a count of nothing checked."""
     raw = sum(c.scope == "raw" for c in changes)
     filed = sum(c.explained_by_filing for c in changes if c.scope != "raw")
-    text = f"{len(changes) - raw - filed} change(s)"
+    text = "not compared as scored" if unavailable else f"{len(changes) - raw - filed} change(s)"
     text += f" (+{filed} moved with a later filing, not silent)" if filed else ""
     return text + (f" (+{raw} raw fact row(s), not scored changes)" if raw else "")
 
@@ -1268,6 +1306,7 @@ def report_diff(
     baseline_day: date | None = None,
     since: date | None = None,
     root: Path | None = None,
+    scored_sha: str | None = None,
 ) -> VintageDiffReport:
     """The silent-revision check for a report dated `as_of`.
 
@@ -1291,9 +1330,20 @@ def report_diff(
     the comparison into raw fact rows promoted to Tier 1 though nothing
     scored had moved, and a bare one hid a real revision (additions are
     never reported); taken as the newest, a partial fetch read as scored
-    withdrawals. The newest scored state is the report's own payload, which
-    the report stores before this runs. Raw captures passed over are counted
-    in the status line and stay in the store for `scripts/vintage.py diff`.
+    withdrawals. Raw captures passed over are counted in the status line
+    and stay in the store for `scripts/vintage.py diff`.
+
+    `scored_sha` is the digest of the payload the report scored. That
+    content is scored for this comparison whatever wrote it, and it IS the
+    newest state compared: the report's own `store_snapshot` may not have
+    landed (busy, failed, `--no-vintage`) after the sweep captured the same
+    content as raw, and a replay scores whichever stored state it chose.
+    Left to "the newest scored state", the first compared an older pair and
+    promoted a stale line; the second dropped the replayed payload as raw
+    (review of 224b896, finding 1). When the store does not hold that
+    payload, nothing is compared and the reason says so — never some other
+    pair. Without it (a caller that holds no payload) the newest scored
+    state stands in, as before.
     """
     visible = [
         s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of
@@ -1306,6 +1356,19 @@ def report_diff(
                 "see the Vintage snapshot line)"
             ),
         )
+    top: int | None = None
+    if scored_sha is not None:
+        top = next((i for i in range(len(visible) - 1, -1, -1)
+                    if visible[i].sha256 == scored_sha), None)
+        if top is None:
+            return VintageDiffReport(
+                as_of, None, None, [],
+                no_baseline_reason=(
+                    f"the payload this report scored is not in the vintage store at or "
+                    f"before {as_of} (see the Vintage snapshot line); not compared"
+                ),
+                payload_missing=True,
+            )
     if len(visible) == 1:
         return VintageDiffReport(
             as_of, visible[-1], None, [],
@@ -1315,6 +1378,7 @@ def report_diff(
             ),
         )
     mappable: dict[Path, bool] = {}
+    unusable: set[Path] = set()
 
     def is_scored(obs: VintageObservation) -> bool:
         # A store written before kinds existed (or one whose manifest was
@@ -1325,26 +1389,45 @@ def report_diff(
         # stops at the first mappable state, normally the first looked at,
         # so this costs about one extra build per report. A legacy partial
         # capture that still maps cannot be told apart and is used, as before.
+        # One that cannot be read, or whose odd shape the mapper trips on,
+        # is not a usable state: passed over and counted, not a stream
+        # failure over a snapshot no comparison needed (review of 224b896,
+        # finding 4).
+        if scored_sha is not None and obs.sha256 == scored_sha:
+            return True
         if obs.kind is not None:
             return obs.kind == SCORED
         if obs.path not in mappable:
-            mappable[obs.path] = _mapped(_load_for_diff(obs)) is not None
+            try:
+                mappable[obs.path] = _mapped(_load_for_diff(obs)) is not None
+            except UNUSABLE:
+                mappable[obs.path] = False
+                unusable.add(obs.path)
         return mappable[obs.path]
 
-    top = _newest_scored(visible, is_scored)
-    if top is None:
-        return VintageDiffReport(
-            as_of, visible[-1], None, [],
-            no_baseline_reason=(
-                f"no scored snapshot at or before {as_of}; {len(visible)} raw "
-                "capture(s) not used"
-            ),
+    notes: list[str] = []
+
+    def raw_note() -> str | None:
+        extra = (
+            [f"{len(unusable)} snapshot(s) passed over were unreadable or malformed"]
+            if unusable else []
         )
+        return "; ".join([*notes, *extra]) or None
+
+    if top is None:
+        top = _newest_scored(visible, is_scored)
+        if top is None:
+            reason = (f"no scored snapshot at or before {as_of}; {len(visible)} raw "
+                      "capture(s) not used")
+            return VintageDiffReport(as_of, visible[-1], None, [],
+                                     no_baseline_reason="; ".join(filter(None, [reason, raw_note()])))
+        if top < len(visible) - 1:
+            notes.append(f"{len(visible) - 1 - top} raw capture(s) after "
+                         f"{visible[top].captured} not compared")
+    elif top < len(visible) - 1:
+        notes.append(f"{len(visible) - 1 - top} later snapshot(s) after {visible[top].captured} "
+                     "not compared (not the payload this report scored)")
     newest = visible[top]
-    notes = []
-    if top < len(visible) - 1:
-        notes.append(f"{len(visible) - 1 - top} raw capture(s) after {newest.captured} "
-                     "not compared")
     # Not the newest's own content: a state that went S -> raw -> S has not
     # changed as scored, and comparing it with itself would say "0 changes"
     # about a comparison never made.
@@ -1355,18 +1438,17 @@ def report_diff(
         if earlier:
             notes.insert(0, f"{len(earlier)} raw capture(s) not used as the baseline")
         return VintageDiffReport(as_of, newest, None, [],
-                                 no_baseline_reason="; ".join([reason, *notes]))
+                                 no_baseline_reason="; ".join(filter(None, [reason, raw_note()])))
     previous = earlier[at]
     if at < len(earlier) - 1:
         notes.insert(0, f"{len(earlier) - 1 - at} raw capture(s) since {previous.captured} "
                         "not used as the baseline")
-    raw_note = "; ".join(notes) or None
     new_facts = _load_for_diff(newest)
     scored = diff_scored(_load_for_diff(previous), new_facts, since=since)
     changes, unavailable = scored.changes, scored.canonical_unavailable
     if baseline_day is None:
         return VintageDiffReport(as_of, newest, previous, changes,
-                                 canonical_unavailable=unavailable, raw_note=raw_note)
+                                 canonical_unavailable=unavailable, raw_note=raw_note())
 
     lock_day = baseline_day - timedelta(days=1)
     before_lock = [s for s in visible if date.fromisoformat(s.captured) <= lock_day]
@@ -1379,7 +1461,7 @@ def report_diff(
                 f"no {'scored ' if before_lock else ''}snapshot before the pinned "
                 f"thesis day {baseline_day}; earliest is {visible[0].captured}"
             ),
-            canonical_unavailable=unavailable, raw_note=raw_note,
+            canonical_unavailable=unavailable, raw_note=raw_note(),
         )
     # By content, not identity: a revert (A -> B -> A) is a third observation
     # that reuses A's bytes, and diffing it against the newest A finds nothing.
@@ -1390,7 +1472,7 @@ def report_diff(
         )
         return VintageDiffReport(as_of, newest, previous, changes, baseline,
                                  baseline_note=note, canonical_unavailable=unavailable,
-                                 raw_note=raw_note)
+                                 raw_note=raw_note())
     if baseline.sha256 == previous.sha256:
         note = (
             f"the pinned thesis snapshot ({baseline.captured}) is the previous "
@@ -1398,11 +1480,12 @@ def report_diff(
         )
         return VintageDiffReport(as_of, newest, previous, changes, baseline,
                                  baseline_note=note, canonical_unavailable=unavailable,
-                                 raw_note=raw_note)
+                                 raw_note=raw_note())
     lock = diff_scored(_load_for_diff(baseline), new_facts, since=since)
     return VintageDiffReport(as_of, newest, previous, changes, baseline, lock.changes,
-                             canonical_unavailable=unavailable or lock.canonical_unavailable,
-                             raw_note=raw_note)
+                             canonical_unavailable=unavailable,
+                             baseline_unavailable=lock.canonical_unavailable,
+                             raw_note=raw_note())
 
 
 def silent_revision_tier1_lines(

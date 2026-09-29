@@ -125,34 +125,77 @@ def replay_snapshot(
     """The fundamentals a reader on `as_of` could have had, and a line saying
     where they came from.
 
-    Preferred: the newest companyfacts snapshot the vintage store captured on
-    or before that day — what was actually knowable then, including values the
+    Preferred: a companyfacts snapshot the vintage store captured on or
+    before that day (which one: below) — what was actually knowable then, including values the
     filer has since revised in place. Otherwise today's payload, cut to facts
     filed on or before the day: that undoes later filings but not a value
     revised without a new filing date, and the line says so. Either way the
     mapper applies the same cut (`build_dataset(as_of=)`).
+
+    Which stored snapshot (review of 224b896, finding 1): the newest one a
+    report scored (or one stored before kinds were recorded), falling back to
+    the newest raw capture only when none of those maps. Taking the newest
+    observation of any kind scored a watch-sweep capture — possibly partial,
+    mapped with fields missing — and a bare one failed the whole replay as
+    unmappable though an earlier scored state was stored. A snapshot that
+    cannot be read or mapped is passed over; the line says which kind was
+    used and what newer was not.
     """
     from app.services.ingestion.vintages import (
+        RAW,
+        SCORED,
+        UNUSABLE,
         load_vintage,
-        observation_at_or_before,
         observed_vintages,
     )
 
     cik = client.resolve_cik(ticker)
-    stored = observation_at_or_before(observed_vintages(cik, root), as_of)
-    if stored is not None:
-        facts = load_vintage(stored.path)
+    visible = [s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of]
+    # Indices, not states: one content observed twice on one day is two
+    # equal observations, and "newer" is by position.
+    newest_first = range(len(visible) - 1, -1, -1)
+    failed: set[Path] = set()
+    for i in [i for i in newest_first if visible[i].kind != RAW] + [
+        i for i in newest_first if visible[i].kind == RAW
+    ]:
+        stored = visible[i]
+        if stored.path in failed:
+            continue
+        try:
+            facts = load_vintage(stored.path)
+            dataset, diagnostics = build_dataset(
+                facts, ticker=ticker, n_quarters=n_quarters, sector=sector, as_of=as_of
+            )
+        except UNUSABLE:
+            failed.add(stored.path)
+            continue
+        kind = (
+            "scored by a report" if stored.kind == SCORED
+            else "a raw watch-sweep capture: no snapshot a report scored by then maps"
+            if stored.kind == RAW
+            else "stored before kinds were recorded"
+        )
         source = (
             f"the vintage snapshot captured {stored.captured} "
-            f"(sha {stored.sha256[:12]}), cut to facts filed on or before {as_of}"
+            f"(sha {stored.sha256[:12]}; {kind}), cut to facts filed on or before {as_of}"
         )
-    else:
-        facts = client.company_facts(ticker)
-        source = (
-            f"today's companyfacts cut to facts filed on or before {as_of} — no "
-            "snapshot that old is stored, so a value the filer revised in place "
-            "since then shows as revised"
-        )
+        newer = visible[i + 1:]
+        if newer:
+            bad = sum(s.path in failed for s in newer)
+            raw = sum(s.kind == RAW and s.path not in failed for s in newer)
+            parts = [f"{raw} raw capture(s)" if raw else "", f"{bad} not mappable" if bad else ""]
+            source += (f"; {len(newer)} newer stored snapshot(s) by then not used "
+                       f"({', '.join(p for p in parts if p)})")
+        return DatasetSnapshot(dataset, diagnostics, facts), source
+    facts = client.company_facts(ticker)
+    stored_note = (
+        f"no snapshot stored by then can be mapped ({len(visible)} stored)" if visible
+        else "no snapshot that old is stored"
+    )
+    source = (
+        f"today's companyfacts cut to facts filed on or before {as_of} — {stored_note}, "
+        "so a value the filer revised in place since then shows as revised"
+    )
     dataset, diagnostics = build_dataset(
         facts, ticker=ticker, n_quarters=n_quarters, sector=sector, as_of=as_of
     )
