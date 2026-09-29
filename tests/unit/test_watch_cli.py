@@ -38,6 +38,12 @@ def _poll_args(**over) -> Namespace:
     return Namespace(**base)
 
 
+def _fake_generated(ticker: str, day: str | None):
+    """The run a stubbed `_generate`'s journal child said it published."""
+    return watch_cli.Generated(Path("/tmp/fake_journal.md"), "0" * 32, ticker,
+                               day or "2026-08-26", None)
+
+
 class _FakeClient:
     def __init__(self, *a, **k):
         pass
@@ -92,9 +98,11 @@ def poll_env(monkeypatch, tmp_path):
             thesis_entry="2026-08-26", thesis_sha256="ab" * 32,
         ),
     )
+    # The journal child's result: the run it published, which is audited
+    # and stamped (Hermes re-audit of 84e65b0, finding 3).
     monkeypatch.setattr(
         watch_cli, "_generate",
-        lambda t, day, nd: calls.generate.append((t, day)) or 0,
+        lambda t, day, nd: calls.generate.append((t, day)) or (0, _fake_generated(t, day)),
     )
     monkeypatch.setattr(
         watch_cli, "_generate_auto",
@@ -106,10 +114,7 @@ def poll_env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         watch_cli, "_mark_reported",
-        lambda t, day: calls.marked.append((t, day, len(calls.audit))) or 0,
-    )
-    monkeypatch.setattr(
-        watch_cli, "_latest_report", lambda t, d: Path("/tmp/fake_journal.md")
+        lambda t, day, gen: calls.marked.append((t, day, len(calls.audit))) or 0,
     )
     calls.brief = []
     monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: calls.brief.append((t, p)) or 0)
@@ -318,7 +323,8 @@ class TestFreshPropagation:
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(watch_cli.subprocess, "run", fake_run)
-        assert watch_cli._generate("NVDA", "2026-08-26", no_docs=False) == 0
+        # Exit 0 with no result file written: which run is not known.
+        assert watch_cli._generate("NVDA", "2026-08-26", no_docs=False) == (0, None)
         assert "--fresh" in recorded["cmd"]
         assert "--no-docs" not in recorded["cmd"]
         assert "--defer-mark" in recorded["cmd"]  # mark happens only post-audit
@@ -422,7 +428,7 @@ class TestPollRearm:
 
     def test_failed_generation_returns_its_code_and_audits_nothing(self, poll_env, monkeypatch):
         _force_decision(monkeypatch, "generate")
-        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: 1)
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: (1, None))
         assert watch_cli.cmd_poll(_poll_args()) == 1
         assert poll_env.audit == [] and poll_env.marked == [] and poll_env.rearm == []
 
@@ -438,32 +444,6 @@ class TestPollRearm:
         assert watch_cli._completed(gen, 0) and watch_cli._completed(ref, 0)
         assert not any(watch_cli._completed(d, rc) for d in (gen, ref) for rc in (1, 2, 4))
         assert not watch_cli._completed(wait, 0)
-
-    def test_latest_report_skips_a_run_set_aside(self, tmp_path):
-        from app.services.reporting.report_files import replacing, set_aside
-
-        for day in ("2026-09-01", "2026-09-02"):
-            with replacing(tmp_path / f"NVDA_{day}.md") as staged:
-                staged.ledger.write_text("{}")
-                staged.report.write_text(f"# {day}")
-        set_aside(tmp_path / "NVDA_2026-09-02.md")
-        assert watch_cli._latest_report("NVDA", tmp_path) == tmp_path / "NVDA_2026-09-01.md"
-
-    def test_latest_report_never_returns_the_audit(self, tmp_path):
-        import os
-        import time as _t
-
-        rep = tmp_path / "NVDA_2026-09-01.md"
-        rep.write_text("# report")
-        aud = tmp_path / "NVDA_2026-09-01_audit.md"
-        aud.write_text("# audit")
-        later = _t.time() + 10
-        os.utime(aud, (later, later))  # the audit is the newer file
-        replay = tmp_path / "NVDA_2025-06-30.replay.md"
-        replay.write_text("# historical replay")
-        os.utime(replay, (later + 10, later + 10))  # and a replay newer still
-        assert watch_cli._latest_report("NVDA", tmp_path) == rep
-        assert watch_cli._latest_report("AAPL", tmp_path) is None
 
     def test_strict_refusal_does_not_rearm(self, poll_env, monkeypatch):
         _force_decision(monkeypatch, "refuse")
@@ -805,7 +785,7 @@ class TestBriefHook:
     def test_mark_failure_outranks_a_queued_brief(self, poll_env, monkeypatch):
         _force_decision(monkeypatch, "generate")
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: 2)
-        monkeypatch.setattr(watch_cli, "_mark_reported", lambda t, day: 1)
+        monkeypatch.setattr(watch_cli, "_mark_reported", lambda t, day, gen: 1)
         assert watch_cli.cmd_poll(_poll_args()) == 1
         assert poll_env.rearm == []  # not completed
 
@@ -1927,7 +1907,6 @@ class TestSeasonCriticalFixes:
         report = tmp_path / "NVDA_2026-09-01.md"
         report.write_text("# report")
         monkeypatch.setattr(watch_cli, "_generate_auto", lambda t, nd: report)
-        monkeypatch.setattr(watch_cli, "_latest_report", lambda t, d: report)
         seq = list(codes)
         monkeypatch.setattr(
             watch_cli, "_run_audit",
@@ -2085,7 +2064,8 @@ class TestSeasonCriticalFixes:
 class TestAPublishInDoubt:
     def test_the_journal_track_passes_it_on_and_marks_nothing(self, poll_env, monkeypatch):
         _force_decision(monkeypatch, "generate")
-        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: watch_cli.PUBLISH_IN_DOUBT_RC)
+        monkeypatch.setattr(watch_cli, "_generate",
+                            lambda t, day, nd: (watch_cli.PUBLISH_IN_DOUBT_RC, None))
         assert watch_cli.cmd_poll(_poll_args()) == 8
         assert poll_env.marked == [] and poll_env.audit == [] and poll_env.rearm == []
 
@@ -2108,15 +2088,15 @@ class TestAPublishInDoubt:
         assert all(watch_cli._worst([8, c]) == 8 for c in (0, 1, 2, 3, 4, 5, 6, 7))
         sweep_env.table.update({"AAPL": "generate", "NVDA": "generate"})
         monkeypatch.setattr(watch_cli, "_generate",
-                            lambda t, day, nd: 8 if t == "AAPL" else 1)
+                            lambda t, day, nd: (8 if t == "AAPL" else 1, None))
         assert watch_cli.cmd_sweep(_sweep_args()) == 8
         (title, text), = sweep_env.notified
         assert "AAPL: report publish IN DOUBT" in text
 
     def test_codes_outside_the_severity_order_fall_back_to_the_highest(self):
-        """Every code a pass can return is ranked (8 included); the fallback
-        for any other is the highest of them."""
-        assert watch_cli._worst([9]) == 9 and watch_cli._worst([10, 9]) == 10
+        """Every code a pass can return is ranked (8 and 9 included); the
+        fallback for any other is the highest of them."""
+        assert watch_cli._worst([10]) == 10 and watch_cli._worst([11, 10]) == 11
 
 
 class TestAChildKilledByASignal:
@@ -2143,7 +2123,7 @@ class TestAChildKilledByASignal:
     def test_the_sweep_exits_1_and_names_the_signal(self, sweep_env, monkeypatch):
         rc = self._killed()
         sweep_env.table.update({"AAPL": "generate", "NVDA": "refuse"})
-        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: rc)
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: (rc, None))
         assert watch_cli.cmd_sweep(_sweep_args()) == 1
         (title, text), = sweep_env.notified
         assert f"AAPL: killed by signal {-rc}" in text
@@ -2163,8 +2143,8 @@ class TestTheSweepOwnsTheReportItDefers:
         cmds = []
         monkeypatch.setattr(watch_cli.subprocess, "run", lambda cmd, **kw: seen.append(kw)
                             or cmds.append(cmd) or SimpleNamespace(returncode=0))
-        assert watch_cli._generate("NVDA", "2026-08-26", True) == 0
-        assert watch_cli._generate("NVDA", "2026-08-26", True) == 0
+        assert watch_cli._generate("NVDA", "2026-08-26", True)[0] == 0
+        assert watch_cli._generate("NVDA", "2026-08-26", True)[0] == 0
         assert cmds[0][-3:] == ["--date", "2026-08-26", "--no-docs"]
         owners = [json.loads(kw["env"]["FQE_REPORT_OWNER"]) for kw in seen]
         assert owners[0] == owners[1]  # one owner for the whole run
@@ -2208,32 +2188,33 @@ class TestAReportPendingItsAudit:
                                                        resolve_by=date(2026, 12, 15))]))))
 
     def _journal(self, poll_env, monkeypatch, tmp_path, audits):
-        import os
-        from unittest import mock
-
-        from app.services.journal import store
+        from app.services.journal import reporting, store
+        from app.services.reporting.report_files import replacing
 
         monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
         path = self._entry(store, self.DAY)
-        spec = importlib.util.spec_from_file_location("journal_cli_watch",
-                                                      ROOT / "scripts" / "journal.py")
-        journal = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(journal)
-        report = tmp_path / f"NVDA_{self.DAY}.md"
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        monkeypatch.setattr(reporting, "REPORTS", reports)
+        journal = _journal_module()
         self.journal, self.built = journal, []
-        journal.build_report = lambda *a, **k: self.built.append(a) or (
-            report, "no acute signals")
+
+        def build(*a, **k):
+            self.built.append(a)
+            out = reports / f"NVDA_{k['report_day']}.md"
+            with replacing(out) as staged:  # published, as the real build does
+                staged.report.write_text("# report\n")
+                staged.ledger.write_text("{}")
+            return out, "no acute signals"
+
+        journal.build_report = build
         ns = {"no_docs": True, "fresh": True}
-
-        def generate(t, day, nd):
-            # As `_generate`'s child runs: handed the sweep's identity.
-            with mock.patch.dict(os.environ, watch_cli._report_owner_env()):
-                return journal.cmd_report(Namespace(ticker=t, date=day, defer_mark=True, **ns))
-
-        monkeypatch.setattr(watch_cli, "_generate", generate)
-        monkeypatch.setattr(watch_cli, "_mark_reported", lambda t, day: journal.cmd_mark_reported(
-            Namespace(ticker=t, date=day)))
-        monkeypatch.setattr(watch_cli, "_latest_report", lambda t, d: report)
+        # The sweep's own `journal.py report --defer-mark` and `mark-reported`,
+        # run in this process: the child is handed the sweep's identity and
+        # says which run it published (its --result-file).
+        _journal_in_process(monkeypatch, journal)
+        monkeypatch.setattr(watch_cli, "_generate", _REAL_GENERATE)
+        monkeypatch.setattr(watch_cli, "_mark_reported", _REAL_MARK_REPORTED)
         seq = list(audits)
         monkeypatch.setattr(watch_cli, "_run_audit", lambda p: seq.pop(0) if len(seq) > 1 else seq[0])
         plain = lambda: journal.cmd_report(Namespace(ticker="NVDA", date=self.DAY,  # noqa: E731
@@ -2285,16 +2266,19 @@ class TestAReportPendingItsAudit:
         assert store.load_v2(path).reported is not None and store.report_pending(path) is None
         assert store.load_v2(newer).reported is None
 
-    def test_with_no_entry_pinned_the_hint_names_none(self, poll_env, monkeypatch, capsys):
-        """No `--date` to give (an ad-hoc poll without --entry-day): the
-        report was generated for the newest entry, and the hint says the
-        same command, not `--date None`."""
-        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: 0)
-        monkeypatch.setattr(watch_cli, "_latest_report", lambda t, d: Path("/tmp/r.md"))
+    def test_with_no_entry_pinned_the_hint_names_the_one_generated_for(
+            self, poll_env, monkeypatch, capsys):
+        """No `--date` to give the child (an ad-hoc poll without
+        --entry-day): the report was generated for the newest entry, which
+        the child's result names, and the hint names that entry and run —
+        never `--date None`, nor whichever entry is newest when it is run."""
+        monkeypatch.setattr(watch_cli, "_generate",
+                            lambda t, day, nd: (0, _fake_generated(t, "2026-08-20")))
         monkeypatch.setattr(watch_cli, "_run_audit_capped", lambda report: (4, False))
         watch = _watch("NVDA", thesis_entry=None)
         assert watch_cli._act("NVDA", watch, Decision("generate", "x"), _poll_args()) == 4
-        assert "`journal.py mark-reported NVDA`." in capsys.readouterr().err
+        assert (f"`journal.py mark-reported NVDA --date 2026-08-20 --generation {'0' * 32}`."
+                in capsys.readouterr().err)
 
     def test_a_failed_audit_keeps_it_pending_and_a_plain_report_refused(
             self, poll_env, monkeypatch, tmp_path):
@@ -2340,3 +2324,262 @@ def test_the_abandoned_note_is_only_for_an_audit_that_failed_and_was_abandoned(
     monkeypatch.setattr(watch_cli, "_abandoned_note", lambda *a: notes.append(a))
     watch_cli.cmd_poll(_poll_args())
     assert bool(notes) == noted
+
+
+# --- Hermes re-audit of 84e65b0, finding 3: the report audited is the one generated ------
+# `_act` generated with `journal.py report --defer-mark`, then audited the
+# ticker's NEWEST report by mtime (`_latest_report`) and stamped the pinned
+# entry for it. A same-ticker report published between the two (a manual run,
+# the web UI, another entry's day) was audited instead: Hermes audited
+# NVDA_2026-09-02.md and marked the 2026-09-01 entry. The child now says which
+# report it published (`--result-file`, one temporary per run), the watcher
+# audits exactly that generation, and `mark-reported --generation` stamps only
+# that run.
+
+_REAL_GENERATE = watch_cli._generate  # before poll_env stubs it
+_REAL_MARK_REPORTED = watch_cli._mark_reported  # likewise
+# What chose the report to audit before the fix (the newest by mtime); gone with it.
+_REAL_LATEST_REPORT = getattr(watch_cli, "_latest_report", None)
+
+
+def _journal_module():
+    spec = importlib.util.spec_from_file_location("journal_cli_identity",
+                                                  ROOT / "scripts" / "journal.py")
+    journal = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(journal)
+    return journal
+
+
+def _journal_in_process(monkeypatch, journal, after_report=None):
+    """watch.py's `journal.py` children, run in this process: parsed by
+    journal.py's own parser, with the environment the child is handed."""
+    import os
+    from unittest import mock
+
+    ran: list[list[str]] = []
+
+    def run(cmd, cwd=None, env=None, **kw):
+        assert str(cmd[1]).endswith("journal.py"), cmd
+        ran.append(list(cmd[2:]))
+        args = journal.build_parser().parse_args(cmd[2:])
+        with mock.patch.dict(os.environ, env or {}):
+            rc = args.func(args)
+        if cmd[2] == "report" and after_report is not None:
+            after_report()
+        return SimpleNamespace(returncode=rc)
+
+    monkeypatch.setattr(watch_cli.subprocess, "run", run)
+    return ran
+
+
+class TestTheWatcherAuditsTheReportItGenerated:
+    DAY = "2026-08-26"  # poll_env's pinned thesis entry
+
+    def _setup(self, poll_env, monkeypatch, tmp_path, *, meanwhile_day=None):
+        import os
+        import time
+
+        from app.services.journal import reporting, store
+        from app.services.reporting.report_files import read_live, replacing
+
+        _force_decision(monkeypatch, "generate")
+        monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
+        path = TestAReportPendingItsAudit._entry(store, self.DAY)
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        monkeypatch.setattr(reporting, "REPORTS", reports)
+        journal = _journal_module()
+
+        def publish(day):
+            out = reports / f"NVDA_{day}.md"
+            with replacing(out) as staged:
+                staged.report.write_text(f"# NVDA {day}\n")
+                staged.ledger.write_text("{}")
+            return out
+
+        journal.build_report = lambda ticker, with_docs=True, report_day=None, fresh=False, **k: (
+            publish(report_day), "no acute signals")
+
+        def meanwhile():
+            # Another same-ticker report goes live between the generate and
+            # the audit's choice of report, newer by mtime.
+            other = publish(meanwhile_day)
+            later = time.time() + 60
+            os.utime(read_live(other).report, (later, later))
+
+        ran = _journal_in_process(monkeypatch, journal,
+                                  after_report=meanwhile if meanwhile_day else None)
+        if _REAL_LATEST_REPORT is not None:
+            monkeypatch.setattr(watch_cli, "_latest_report",
+                                lambda t, d: _REAL_LATEST_REPORT(t, reports))
+        monkeypatch.setattr(watch_cli, "_generate", _REAL_GENERATE)
+        monkeypatch.setattr(watch_cli, "_mark_reported", _REAL_MARK_REPORTED)
+        return store, path, reports, ran
+
+    def test_a_report_published_meanwhile_is_not_the_one_audited(
+            self, poll_env, monkeypatch, tmp_path):
+        """Hermes's reproduction: NVDA_2026-09-02.md went live while the
+        pinned entry's report was being generated, and was audited."""
+        from app.services.reporting.report_files import read_live
+
+        store, path, reports, ran = self._setup(poll_env, monkeypatch, tmp_path,
+                                                meanwhile_day="2026-09-02")
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        mine = read_live(reports / f"NVDA_{self.DAY}.md")
+        assert poll_env.audit == [mine.report]  # its own generation, not the newest report
+        assert poll_env.brief == [("NVDA", mine.report)]
+        (mark,) = [argv for argv in ran if argv[0] == "mark-reported"]
+        assert mark[mark.index("--date") + 1] == self.DAY
+        assert mark[mark.index("--generation") + 1] == mine.generation_id
+        assert store.load_v2(path).reported is not None and store.report_pending(path) is None
+
+    def test_a_rebuild_of_its_own_name_meanwhile_is_not_the_one_audited(
+            self, poll_env, monkeypatch, tmp_path):
+        """The same live name rebuilt meanwhile: the run the sweep generated
+        is the one audited (the real audit then keeps its audit with that
+        run and exits 1, as for a rebuild during the audit: run_audit's
+        tests), and the stamp names that run, which the entry's pending
+        marker records."""
+        from app.services.reporting.report_files import generations
+
+        store, path, reports, ran = self._setup(poll_env, monkeypatch, tmp_path,
+                                                meanwhile_day=self.DAY)
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        first, second = generations(reports / f"NVDA_{self.DAY}.md")
+        assert poll_env.audit == [first / f"NVDA_{self.DAY}.md"]
+        (mark,) = [argv for argv in ran if argv[0] == "mark-reported"]
+        assert mark[mark.index("--generation") + 1] in first.name
+
+    def test_the_audit_attempts_counter_is_kept_at_the_live_name(self, tmp_path):
+        """A retry rebuilds the report (a new generation); a counter kept in
+        the generation would start again at 0 and never cap the audit."""
+        from app.services.reporting.report_files import GENERATIONS_DIR
+
+        gen = tmp_path / GENERATIONS_DIR / "NVDA_2026-08-26" / "20260826T000000Z_0001_ab"
+        assert watch_cli._audit_attempts_path(gen / "NVDA_2026-08-26.md") == (
+            tmp_path / "NVDA_2026-08-26_audit.attempts")
+
+
+class TestTheGenerateResultFile:
+    def _run(self, monkeypatch, write):
+        """`_generate` with its child faked: ``write(path)`` is what the
+        child writes to its --result-file."""
+        seen = []
+
+        def run(cmd, **kw):
+            path = Path(cmd[cmd.index("--result-file") + 1])
+            seen.append(path)
+            assert path.parent.is_dir() and not path.exists()  # fresh, never a stale one
+            write(path)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(watch_cli.subprocess, "run", run)
+        return seen
+
+    def _published(self, tmp_path, day="2026-08-26", ticker="NVDA"):
+        from app.services.reporting.report_files import read_live, replacing
+
+        out = tmp_path / "reports" / f"{ticker}_{day}.md"
+        out.parent.mkdir(exist_ok=True)
+        with replacing(out) as staged:
+            staged.report.write_text("# r\n")
+            staged.ledger.write_text("{}")
+        return read_live(out)
+
+    def _doc(self, run, **over):
+        base = {"report": str(run.report), "generation_id": run.generation_id,
+                "ticker": "NVDA", "entry_day": "2026-08-26", "before_sha256": "ab" * 32}
+        base.update(over)
+        return base
+
+    def test_each_run_has_its_own_result_file_removed_after(self, monkeypatch, tmp_path):
+        import json
+
+        run = self._published(tmp_path)
+        docs = [self._doc(run), None]
+
+        def write(path):
+            doc = docs.pop(0)
+            if doc is not None:
+                path.write_text(json.dumps(doc))
+
+        seen = self._run(monkeypatch, write)
+        rc, made = watch_cli._generate("NVDA", "2026-08-26", False)
+        assert rc == 0 and made == watch_cli.Generated(
+            run.report, run.generation_id, "NVDA", "2026-08-26", "ab" * 32)
+        # The second run writes nothing: the first's result is never read as its own.
+        assert watch_cli._generate("NVDA", "2026-08-26", False) == (0, None)
+        assert len(seen) == 2 and seen[0] != seen[1]
+        assert not any(p.exists() or p.parent.exists() for p in seen)
+
+    def test_the_entry_day_of_an_unpinned_run_comes_from_its_result(self, monkeypatch, tmp_path):
+        import json
+
+        run = self._published(tmp_path)
+        self._run(monkeypatch, lambda p: p.write_text(json.dumps(self._doc(run))))
+        rc, made = watch_cli._generate("NVDA", None, False)
+        assert rc == 0 and made.entry_day == "2026-08-26"
+
+    @pytest.mark.parametrize("case", [
+        "missing", "not json", "not an object", "another ticker", "another day",
+        "another report", "another generation", "no day"])
+    def test_a_result_that_is_not_this_run_audits_and_marks_nothing(
+            self, poll_env, monkeypatch, tmp_path, capsys, case):
+        import json
+
+        run = self._published(tmp_path)
+        other = self._published(tmp_path, day="2026-09-02")
+        doc = {"missing": None, "not json": "{", "not an object": "[]",
+               "another ticker": self._doc(run, ticker="AAPL"),
+               "another day": self._doc(run, entry_day="2026-09-02"),
+               "another report": self._doc(other, entry_day="2026-08-26"),
+               "another generation": self._doc(run, generation_id=other.generation_id),
+               "no day": self._doc(run, entry_day=None)}[case]
+
+        def write(path):
+            if doc is not None:
+                path.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+
+        monkeypatch.setattr(watch_cli, "_generate", _REAL_GENERATE)
+        self._run(monkeypatch, write)
+        # "no day": an unpinned run, whose day can only come from the result.
+        watch = (_watch("NVDA", thesis_entry=None) if case == "no day"
+                 else watch_cli._find_watch("NVDA"))
+        assert watch_cli._act("NVDA", watch, Decision("generate", "x"), _poll_args()) == 4
+        err = capsys.readouterr().err
+        assert poll_env.audit == [] and poll_env.marked == []
+        assert "journal.py report exited 0, but" in err
+        assert "none is audited or marked" in err and "NOT marked reported" in err
+
+    def test_with_no_audit_an_unidentified_run_is_not_marked(self, poll_env, monkeypatch):
+        _force_decision(monkeypatch, "generate")
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: (0, None))
+        assert watch_cli.cmd_poll(_poll_args(no_audit=True)) == 4
+        assert poll_env.marked == []
+
+    def test_mark_reported_is_pinned_to_the_entry_and_the_generation(self, monkeypatch):
+        cmds = []
+        monkeypatch.setattr(watch_cli.subprocess, "run",
+                            lambda cmd, **kw: cmds.append(cmd) or SimpleNamespace(returncode=0))
+        assert watch_cli._mark_reported("NVDA", "2026-08-26", "c" * 32) == 0
+        assert cmds[0][2:] == ["mark-reported", "NVDA", "--date", "2026-08-26",
+                               "--generation", "c" * 32]
+
+
+class TestPublishedNotStamped:
+    """Hermes re-audit of 84e65b0, finding 4: `journal.py report` exits 9
+    when its report went live and the entry could not be stamped."""
+
+    def test_nine_is_ranked_below_a_publish_in_doubt_and_above_everything_else(self):
+        assert watch_cli.PUBLISHED_NOT_STAMPED_RC == 9
+        assert watch_cli._worst([9, 8]) == 8
+        assert all(watch_cli._worst([9, c]) == 9 for c in (0, 1, 2, 3, 4, 5, 6, 7, -9))
+        assert watch_cli.SEVERITY_ORDER[:3] == (8, 9, 1)
+
+    def test_nine_is_named_in_the_notification(self, sweep_env, monkeypatch):
+        sweep_env.table.update({"AAPL": "generate"})
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: (9, None))
+        assert watch_cli.cmd_sweep(_sweep_args()) == 9
+        (title, text), = sweep_env.notified
+        assert "AAPL: report published but NOT stamped" in text
+        assert watch_cli._rc_words(9).startswith("report published but NOT stamped")

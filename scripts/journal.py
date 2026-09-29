@@ -28,16 +28,35 @@ PENDING its audit until `mark-reported`: meanwhile a plain `report` refuses
 the marker's owner (the sweep that is auditing it) is gone; `--retry
 --force` whatever the owner.
 
+`report --defer-mark --result-file PATH` (the sweep's) also writes, once
+its report is published, which run that is: JSON with `report` (the
+report's path in its own generation, `reports/.generations/<T>_<day>/<gen>/
+<T>_<day>.md`, which no later publish changes), `generation_id`, `ticker`,
+`entry_day` and `before_sha256` (null for a v1 entry). Written whole, and
+only then: after a failure there is none. Refused without `--defer-mark`
+(a plain report stamps the entry itself; nothing waits to read the file).
+`mark-reported --generation ID` stamps the entry only if ID is its run: the
+live report named for the entry carries it, or the entry's pending marker
+records it; the sweep always passes it.
+
 Exit codes: 0 done · 1 refused or failed (nothing published, nothing
 stamped) · 8 (`report`) the report's publish is IN DOUBT: it failed and
 could not be undone, so the new report may be live; the entry is NOT stamped
-and the message says how to check and how to put the previous run back.
+and the message says how to check and how to put the previous run back ·
+9 (`report`) the report WAS published but the entry is NOT stamped (the
+stamp failed: a full disk, a denied write, the journal folder gone; or,
+with `--defer-mark`, its result file could not be written): the message
+names the run and the command that stamps it, `journal.py mark-reported T
+--date D --generation G`, and the entry is left pending so a plain `report`
+refuses rather than build again.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,7 +65,7 @@ sys.path.insert(0, str(ROOT))
 from datetime import UTC, datetime
 
 from app.services.journal import store
-from app.services.journal.reporting import build_report
+from app.services.journal.reporting import build_report, report_path
 from app.services.journal.schema_v2 import (
     Assumption,
     BeforeBlock,
@@ -56,7 +75,15 @@ from app.services.journal.schema_v2 import (
     open_assumption_indices,
     verify_lock,
 )
-from app.services.reporting.report_files import PUBLISH_IN_DOUBT_RC, PublishInDoubt
+from app.services.reporting.report_files import (
+    PUBLISH_IN_DOUBT_RC,
+    PUBLISHED_NOT_STAMPED_RC,
+    Published,
+    PublishInDoubt,
+    read_live,
+    recording,
+    write_atomic,
+)
 
 
 def cmd_open(args: argparse.Namespace) -> int:
@@ -129,13 +156,30 @@ def _refused_as_pending(path: Path, args: argparse.Namespace) -> bool:
     state = (f"Its owner may still be at work on it ({at_work})." if at_work
              else "Its owner is gone.")
     print(said + state + " Not building another over it. Once the audit has passed: "
-          f"`journal.py mark-reported {ticker} --date {day}`; to rebuild it on purpose "
-          f"instead: `journal.py report {ticker} --date {day} --retry`.", file=sys.stderr)
+          f"`journal.py mark-reported {ticker} --date {day}{_flag(pending.generation_id)}`; "
+          f"to rebuild it on purpose instead: `journal.py report {ticker} --date {day} "
+          "--retry`.", file=sys.stderr)
     return True
 
 
+def _flag(generation_id: str | None) -> str:
+    """`mark-reported`'s ``--generation``, when the run is known."""
+    return "" if generation_id is None else f" --generation {generation_id}"
+
+
+def _which(made: Published | None, out: Path) -> str:
+    """The run a report command published, as its messages name it."""
+    if made is None:
+        return f"{out} (its generation could not be read)"
+    return f"generation {made.generation_id} at {made.report}"
+
+
 def _build_marked(path: Path, args: argparse.Namespace, build):
-    """``build()`` (the report's build and publish) for a report command.
+    """``build()`` (the report's build and publish) for a report command,
+    returning its ``(out, distress)`` and the run it published (`Published`,
+    as `report_files.recording` saw the publish; None if it saw none of
+    ``out``).
+
     With `--defer-mark` the entry is marked PENDING first, for this run's
     owner (before the build, so a command killed part way, its report
     perhaps live, leaves it pending), and the mark is taken back if the
@@ -154,7 +198,9 @@ def _build_marked(path: Path, args: argparse.Namespace, build):
         if had is None or had.owner is None or had.owner.token != me.token:
             store.set_report_pending(path, _DEFERRED, me)
     try:
-        return build()
+        with recording() as published:
+            out, distress = build()
+        return out, distress, next((p for p in reversed(published) if p.live == out), None)
     except PublishInDoubt:
         raise
     except Exception:
@@ -188,6 +234,89 @@ def _stamp_reported(entry):
     if entry.reported is not None:
         raise store.UpdateRefused("already reported.")
     return entry.model_copy(update={"reported": datetime.now(UTC)})
+
+
+# Who a pending marker names when a plain report's stamp failed (`_not_stamped`).
+_STAMP_FAILED = "journal.py report (its report was published; the stamp failed)"
+
+
+def _not_stamped(path: Path, out: Path, made: Published | None, e: Exception) -> int:
+    """A plain report whose stamp failed AFTER its publish (Hermes re-audit of
+    84e65b0, finding 4): an OSError (a full disk, a denied write, an fsync
+    that failed, the journal folder removed) was raised as a traceback, the
+    report live and the entry unstamped, and a retry believed nothing had
+    happened, so it built and published again.
+
+    Said as it is, exit 9 (`PUBLISHED_NOT_STAMPED_RC`): the run that is live,
+    that the entry is not stamped and why, and the command that stamps it.
+    The entry is left PENDING, recording that run, so a plain `report`
+    refuses and names the same command instead of building again; if the
+    marker cannot be written either, that is said. Any exception is
+    caught, since the report is live whatever raised; one that is neither
+    the disk's (OSError) nor the entry's (ValueError: unreadable, or
+    changed under its lock) is a defect, and its traceback is printed too,
+    never hidden behind the message."""
+    ticker, day = path.stem.split("_", 1)
+    if not isinstance(e, (OSError, ValueError)):
+        traceback.print_exc()
+    print(f"{path.name}: the report WAS published: {_which(made, out)}; but the entry is "
+          f"NOT stamped reported: {type(e).__name__}: {e}", file=sys.stderr)
+    gid = None if made is None else made.generation_id
+    try:
+        store.set_report_pending(path, _STAMP_FAILED, generation_id=gid,
+                                 report=None if made is None else str(made.report))
+        kept = ("It is left PENDING: a plain `report` of it refuses rather than build and "
+                "publish again.")
+    except OSError as e2:
+        kept = (f"And its pending marker could not be written either ({type(e2).__name__}: "
+                f"{e2}): a plain `report` of it would build and publish again.")
+    print(kept + " Once the cause is fixed, stamp it: `python scripts/journal.py "
+          f"mark-reported {ticker} --date {day}{_flag(gid)}`.", file=sys.stderr)
+    return PUBLISHED_NOT_STAMPED_RC
+
+
+def _deferred(path: Path, args: argparse.Namespace, out: Path, distress: str,
+              made: Published | None, before_sha256: str | None) -> int:
+    """The end of a ``--defer-mark`` report that published: nothing stamped
+    (the watch flow marks only AFTER a successful audit, so a failed audit
+    leaves the case retryable), the run recorded in the entry's pending
+    marker, and, with ``--result-file``, written there for the sweep (Hermes
+    re-audit of 84e65b0, finding 3: it audited the ticker's newest report,
+    another run's if one was published meanwhile, and stamped the entry for
+    it). A result file that cannot be written, or a run that cannot be
+    named, is exit 9: the report is live, and the sweep must not guess
+    which. A marker that cannot record the run is said, not fatal: the
+    stamp then accepts the run only while it is the live report."""
+    ticker, day = path.stem.split("_", 1)
+    if made is not None:
+        try:
+            store.set_report_pending(path, _DEFERRED, store.report_owner(),
+                                     generation_id=made.generation_id, report=str(made.report))
+        except OSError as e:
+            print(f"{path.name}: its pending marker could not record {made.generation_id} "
+                  f"({e}); `mark-reported --generation` takes it while it is the live "
+                  "report.", file=sys.stderr)
+    print(f"distress: {distress} -> {out}")
+    result = getattr(args, "result_file", None)
+    if result:
+        problem = "its generation could not be read" if made is None else None
+        if made is not None:
+            try:
+                write_atomic(Path(result), json.dumps({
+                    "report": str(made.report), "generation_id": made.generation_id,
+                    "ticker": ticker, "entry_day": day, "before_sha256": before_sha256,
+                }) + "\n")
+            except OSError as e:
+                problem = f"its result file {result} could not be written ({e})"
+        if problem is not None:
+            print(f"{path.name}: the report WAS published: {_which(made, out)}; but {problem}. "
+                  "The entry is NOT stamped and stays pending.", file=sys.stderr)
+            return PUBLISHED_NOT_STAMPED_RC
+    gid = None if made is None else made.generation_id
+    print("reported NOT stamped (--defer-mark) — run "
+          f"`journal.py mark-reported {ticker} --date {day}{_flag(gid)}` "
+          "once the audit succeeds.")
+    return 0
 
 
 def _cmd_report_v2(path, args: argparse.Namespace) -> int:
@@ -230,7 +359,7 @@ def _report_v2_locked(path, args: argparse.Namespace) -> int:
         return 1
     print("Generating report...")
     try:
-        out, distress = _build_marked(path, args, lambda: build_report(
+        out, distress, made = _build_marked(path, args, lambda: build_report(
             entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat(),
             fresh=getattr(args, "fresh", True),
         ))
@@ -240,13 +369,7 @@ def _report_v2_locked(path, args: argparse.Namespace) -> int:
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
     if getattr(args, "defer_mark", False):
-        # The watch flow marks only AFTER a successful audit: a failed audit
-        # must leave the case retryable. Report exists; `reported` does not.
-        print(f"distress: {distress} -> {out}")
-        print("reported NOT stamped (--defer-mark) — run "
-              f"`journal.py mark-reported {entry.ticker} --date {entry.day.isoformat()}` "
-              "once the audit succeeds.")
-        return 0
+        return _deferred(path, args, out, distress, made, entry.before_sha256)
     # update_v2 re-reads the entry under its lock, so a write made while the
     # report built is kept; save_v2 still verifies the BEFORE hash.
     try:
@@ -254,6 +377,8 @@ def _report_v2_locked(path, args: argparse.Namespace) -> int:
     except store.UpdateRefused as e:
         print(f"{path.name}: {e}", file=sys.stderr)
         return 1
+    except Exception as e:  # noqa: BLE001 - the report is live: said, exit 9 (_not_stamped)
+        return _not_stamped(path, out, made, e)
     _no_longer_pending(path)  # a --retry over a pending report: reported now
     print(f"Report stamped at {updated.reported.isoformat()}.")
     print(f"distress: {distress} -> {out}")
@@ -293,6 +418,11 @@ def _cmd_replay(path: Path, args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
+    if getattr(args, "result_file", None) and (
+            not getattr(args, "defer_mark", False) or getattr(args, "replay", False)):
+        print("--result-file is written by a `report --defer-mark` only (the sweep's, "
+              "whose audit and stamp read it); nothing built.", file=sys.stderr)
+        return 1
     try:
         path = store.find_entry(args.ticker, args.date)
     except ValueError as e:
@@ -326,7 +456,7 @@ def _report_v1_locked(path: Path, args: argparse.Namespace) -> int:
     print("Generating report...")
     try:
         entry = store.parse_entry(path)
-        out, distress = _build_marked(path, args, lambda: build_report(
+        out, distress, made = _build_marked(path, args, lambda: build_report(
             args.ticker, with_docs=not args.no_docs, report_day=entry["day"],
             fresh=getattr(args, "fresh", True),
         ))
@@ -336,13 +466,11 @@ def _report_v1_locked(path: Path, args: argparse.Namespace) -> int:
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
     if getattr(args, "defer_mark", False):
-        print(f"distress: {distress} -> {out}")
-        day = path.stem.split("_", 1)[1]
-        print("reported NOT stamped (--defer-mark) — run "
-              f"`journal.py mark-reported {args.ticker.upper()} --date {day}` "
-              "once the audit succeeds.")
-        return 0
-    store.mark_reported(path)
+        return _deferred(path, args, out, distress, made, None)  # v1: no BEFORE hash
+    try:
+        store.mark_reported(path)
+    except Exception as e:  # noqa: BLE001 - the report is live: said, exit 9 (_not_stamped)
+        return _not_stamped(path, out, made, e)
     _no_longer_pending(path)  # a --retry over a pending report: reported now
     print(f"Thesis locked at {store.now_iso()}.")
     print(f"distress: {distress} -> {out}")
@@ -851,7 +979,12 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
     """Stamp `reported` on an entry whose report was generated with
     --defer-mark. Kept separate so the watch flow can order it strictly AFTER
     a successful audit — report-then-mark, never mark-then-hope. Once it has
-    stamped, the report no longer pends its audit (its marker is removed)."""
+    stamped, the report no longer pends its audit (its marker is removed).
+
+    ``--generation`` (the watch flow always passes the run it audited):
+    stamped only if that run is the entry's (`_is_the_entrys_run`). A stamp
+    that fails (OSError) is said with its reason, exit 1, never a traceback
+    (Hermes re-audit of 84e65b0, finding 4)."""
     try:
         path = store.find_entry(args.ticker, args.date)
     except ValueError as e:
@@ -864,11 +997,42 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
     # Under the report lock (finding 3b): a stamp made while a `report`
     # command is still building made that command's own stamp fail, with its
     # report live. It waits for the report instead, and then finds its stamp.
-    with store.report_lock(path):
-        return _mark_reported_locked(path)
+    try:
+        with store.report_lock(path):
+            return _mark_reported_locked(path, getattr(args, "generation", None))
+    except OSError as e:
+        print(f"{path.name}: NOT stamped: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
 
 
-def _mark_reported_locked(path: Path) -> int:
+def _is_the_entrys_run(path: Path, generation: str | None) -> bool:
+    """May ``mark-reported --generation`` stamp ``path``? Yes without it (by
+    hand, as before); with it, only when that run is the entry's: its pending
+    marker records it (the run its `--defer-mark` published, whatever is
+    live by now), or the live report named for the entry carries it.
+
+    Hermes re-audit of 84e65b0, finding 3: the sweep audited the ticker's
+    newest report, another run's, and stamped the entry for it. Refused
+    (said, False): nothing is stamped and the entry stays pending."""
+    if generation is None:
+        return True
+    pending = store.pending_marker(path)
+    if pending is not None and pending.generation_id == generation:
+        return True
+    ticker, day = path.stem.split("_", 1)
+    live = read_live(report_path(ticker, day))
+    carried = None if live is None else live.generation_id
+    if carried == generation:
+        return True
+    recorded = None if pending is None else pending.generation_id
+    print(f"{path.name}: NOT stamped: generation {generation} is not this entry's report "
+          f"(the live {ticker}_{day}.md carries {carried or 'none'}; its pending marker "
+          f"records {recorded or 'none'}). Audit the entry's own run, or rebuild it: "
+          f"`journal.py report {ticker} --date {day} --retry`.", file=sys.stderr)
+    return False
+
+
+def _mark_reported_locked(path: Path, generation: str | None) -> int:
     if store.is_v2(path):
         entry = store.load_v2(path)
         if not verify_lock(entry):
@@ -877,6 +1041,8 @@ def _mark_reported_locked(path: Path) -> int:
             return 1
         if entry.reported is not None:
             print(f"{path.name}: already reported.", file=sys.stderr)
+            return 1
+        if not _is_the_entrys_run(path, generation):
             return 1
         try:
             updated = store.update_v2(path, _stamp_reported)
@@ -889,6 +1055,8 @@ def _mark_reported_locked(path: Path) -> int:
     text = path.read_text(encoding="utf-8")
     if store.is_reported(text):
         print(f"{path.name}: already reported.", file=sys.stderr)
+        return 1
+    if not _is_the_entrys_run(path, generation):
         return 1
     store.mark_reported(path)
     _no_longer_pending(path)
@@ -943,6 +1111,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "still be at work (its pid running, the sweep lock held, or "
                             "it cannot be checked) — only when you are sure it is not "
                             "auditing this report")
+    p_rep.add_argument("--result-file", dest="result_file", metavar="PATH",
+                       help="with --defer-mark: once published, write which run it is "
+                            "(JSON: report, generation_id, ticker, entry_day, "
+                            "before_sha256) to PATH, whole — the sweep audits and "
+                            "stamps exactly that run")
     p_rep.add_argument("--replay", action="store_true",
                        help="historical replay as of the entry's day -> T_DAY.replay.md; "
                             "never stamps or edits the entry")
@@ -953,6 +1126,10 @@ def build_parser() -> argparse.ArgumentParser:
                             help="stamp `reported` after a deferred (--defer-mark) report")
     p_mark.add_argument("ticker")
     p_mark.add_argument("--date")
+    p_mark.add_argument("--generation", metavar="ID",
+                        help="stamp only if this run (a report generation id) is the "
+                             "entry's: its live report carries it, or its pending "
+                             "marker records it")
     p_mark.set_defaults(func=cmd_mark_reported)
 
     p_out = sub.add_parser("outcome", help="record what actually happened, weeks later")
