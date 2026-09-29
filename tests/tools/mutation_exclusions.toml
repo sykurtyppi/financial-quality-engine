@@ -69,14 +69,6 @@ reason = "Trail rows come in exactly two shapes: `_trail` builds 4-tuples (filed
 
 [[exclusion]]
 kind = "equivalent"
-path = "app/services/ingestion/companyfacts_mapper.py"
-operator = "continue"
-source = "except (KeyError, ValueError, TypeError): continue"
-function = "_collect"
-reason = "The `continue` is the last statement of the loop body: after the handler runs, `pass` falls through to the next iteration exactly as `continue` jumps to it."
-
-[[exclusion]]
-kind = "equivalent"
 path = "app/services/ingestion/restatements.py"
 operator = "continue"
 source = "except (KeyError, ValueError, TypeError): continue"

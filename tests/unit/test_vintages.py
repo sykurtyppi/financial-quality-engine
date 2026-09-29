@@ -871,3 +871,23 @@ class TestCensusBacklog:
         ]}}}}}
         assert v._filing(facts, "us-gaap:Assets", "USD", date(2026, 6, 30)) == (
             date(2026, 8, 1), "b", "10-Q/A", None)
+
+
+class TestNonFiniteValues:
+    """Review of deb6364, finding 1: the mapper drops a fact whose value is
+    not a finite number (not reported). The vintage diff compares the
+    figure a report would show, so it must drop it too: it reported a
+    revision of 1000 to nan (pct nan) that no report would ever show."""
+
+    @pytest.mark.parametrize("bad", [float("nan"), "NaN", float("inf")], ids=["nan", "NaN-str", "inf"])
+    def test_a_later_non_finite_filing_is_not_a_revision(self, bad):
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1")])
+        after = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1"),
+                        ("2026-06-30", "2026-11-01", bad, "10-K", "acc-2")])
+        assert v.diff_vintages(before, after) == []
+
+    @pytest.mark.parametrize("bad", [float("nan"), "NaN", float("inf")], ids=["nan", "NaN-str", "inf"])
+    def test_a_figure_left_only_as_a_non_number_is_withdrawn(self, bad):
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1")])
+        after = _facts([("2026-06-30", "2026-11-01", bad, "10-K", "acc-2")])
+        assert [c.kind for c in v.diff_vintages(before, after)] == ["withdrawn"]

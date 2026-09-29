@@ -40,6 +40,7 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -791,6 +792,11 @@ def _series(facts: dict, scored_only: bool,
                 val = float(row["val"])
                 start = _parse_date(row["start"]) if row.get("start") else None
             except (KeyError, TypeError, ValueError):
+                continue
+            if not math.isfinite(val):
+                # Not a reported number: the mapper drops it (`_collect`), so
+                # no report shows it and it is no revision here (review of
+                # deb6364, finding 1).
                 continue
             k = (field, start, end)
             prev = out.get(k)

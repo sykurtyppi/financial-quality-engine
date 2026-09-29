@@ -329,3 +329,21 @@ class TestPointInTime:
     def test_without_as_of_the_latest_filing_still_wins(self):
         fps = detect_restatements(self._facts(self.ROWS), period_since=date(2021, 1, 1))
         assert len(fps) == 1 and fps[0].current_filed == date(2026, 2, 1)
+
+
+class TestNonFiniteValues:
+    """Review of deb6364, finding 1: the mapper drops a fact whose value is
+    not a finite number (not reported), so the figure it scores is the last
+    real one. This detector reads the same facts and must stand on the same
+    figure: it reported the 100 -> 150 restatement as 100 -> nan."""
+
+    @pytest.mark.parametrize("bad", [float("nan"), "NaN", float("inf")], ids=["nan", "NaN-str", "inf"])
+    def test_a_later_non_finite_filing_is_not_the_current_value(self, bad):
+        fj = _facts({"Assets": [
+            _fact("2024-12-31", 100.0, "2025-02-01", "10-K", accn="A"),
+            _fact("2024-12-31", 150.0, "2025-06-01", "10-K/A", accn="B"),
+            _fact("2024-12-31", bad, "2026-02-01", "10-K", accn="C"),
+        ]})
+        fps = detect_restatements(fj, period_since=date(2021, 1, 1))
+        assert [(fp.original_value, fp.current_value, fp.current_filed) for fp in fps] == [
+            (100.0, 150.0, date(2025, 6, 1))]

@@ -31,6 +31,7 @@ timeline rendered as a report section (matches ROADMAP_2026Q3 P1-F done-when).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -338,8 +339,15 @@ def _trail(
     for e in _eligible_rows(facts_json, taxonomy, tag, unit, as_of):
         try:
             key = (_parse_date(e["start"]) if "start" in e else None, _parse_date(e["end"]))
+            val = float(e["val"])
+            if not math.isfinite(val):
+                # Not a reported number: the mapper's `_collect` drops it (and
+                # says so), so a later NaN never becomes the current value it
+                # scores — nor, here, the "restated" one (review of deb6364,
+                # finding 1).
+                continue
             rows.setdefault(key, []).append(
-                (_parse_date(e["filed"]), float(e["val"]), e.get("form", ""), e.get("accn", ""))
+                (_parse_date(e["filed"]), val, e.get("form", ""), e.get("accn", ""))
             )
         except (KeyError, ValueError, TypeError):
             continue

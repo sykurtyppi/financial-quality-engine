@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -71,7 +72,8 @@ _RETRY_AFTER_CAP_S = 60.0
 #   Its files (and the hold-off's, below) are opened O_NOFOLLOW: a symlink
 #   planted at any of their names must not have its target overwritten (or
 #   created); pacing then falls back to process-wide like any other failure
-#   to use the file.
+#   to use the file. So is anything there that is not a regular file (a
+#   FIFO's read would block holding both locks).
 #
 # A caller RESERVES its slot under the locks (`start = max(now, last + i)`,
 # then `last = start`) and sleeps until it OUTSIDE them, so waiters queue in
@@ -103,8 +105,10 @@ _RETRY_AFTER_CAP_S = 60.0
 # into a 5 s hold-off (review of 2025f74). Kept one number, the schedule
 # still carries the hold-off in the form that module honours; it never reads
 # `_HOLD_STATE`. Both files are read and written under the same sidecar
-# flock, opened the same no-follow way, and fall back the same way. The hold
-# file holds an end only while it binds, and is empty otherwise.
+# flock and opened the same no-follow way. A hold file that cannot be used
+# costs only the shared hold-off — the schedule is still shared, and this
+# process's own hold-off still binds it (review of deb6364, finding 3). The
+# hold file holds an end only while it binds, and is empty otherwise.
 _pace_lock = threading.Lock()
 _last_start = 0.0  # time.monotonic() of the last reserved request start
 _blocked_until = 0.0  # time.monotonic() before which no request may start
@@ -164,19 +168,39 @@ def _open_state(path: Path) -> int:
     a symlink at `path` (ELOOP, an OSError, if one is there). Where the
     platform has no O_NOFOLLOW the file is not opened at all — the caller
     falls back to process-wide pacing rather than risk writing through a
-    link."""
+    link.
+
+    Anything at `path` that is not a regular file is refused the same way
+    (review of deb6364, finding 3): a FIFO there opened fine and then hung
+    `os.read` with `_pace_lock` and the flock held, stalling every request in
+    the process and every process sharing the directory. O_NONBLOCK keeps the
+    open itself from waiting on one (POSIX leaves O_RDWR on a FIFO
+    undefined); it changes nothing for a regular file."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise OSError(errno.ENOTSUP, "no O_NOFOLLOW: cannot open the pacing state safely",
                       str(path))
-    return os.open(path, os.O_RDWR | os.O_CREAT | nofollow, 0o644)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | nofollow, 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file: cannot hold the pacing state",
+                          str(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 @contextmanager
 def _locked_state(cache_dir: Path):
     """The shared state's descriptors, `(schedule, hold)`, under their
-    flock. Raises OSError when the state cannot be locked or opened
-    (read-only cache, no lock support, a symlink at any of the three names).
+    flock. Raises OSError when the lock or the schedule cannot be used
+    (read-only cache, no lock support, a symlink or a non-file at either
+    name). A hold file that cannot be opened is `None`: the schedule is
+    still shared and only the hold-off falls back to this process's own
+    (`_warn_unshared`); dropping both, as it did, sent the whole schedule
+    process-wide over the newer, lesser file (review of deb6364, finding 3).
+    Called under `_pace_lock`, like every use of the state.
 
     The lock is a sidecar, following `watch/watchlist.py` `_write_lock` and
     `reporting/report_files.py` `publish_lock`, and carries the same
@@ -191,11 +215,17 @@ def _locked_state(cache_dir: Path):
         fcntl.flock(fd, fcntl.LOCK_EX)
         state = _open_state(cache_dir / _RATE_STATE)
         try:
-            hold = _open_state(cache_dir / _HOLD_STATE)
+            hold: int | None
+            try:
+                hold = _open_state(cache_dir / _HOLD_STATE)
+            except OSError as e:
+                _warn_unshared(cache_dir, e, hold_only=True)
+                hold = None
             try:
                 yield state, hold
             finally:
-                os.close(hold)
+                if hold is not None:
+                    os.close(hold)
         finally:
             os.close(state)
     finally:
@@ -212,16 +242,18 @@ def _read_number(fd: int) -> float | None:
         return None
 
 
-def _read_state(state: int, hold: int) -> tuple[float | None, float | None, float, float]:
+def _read_state(state: int, hold: int | None) -> tuple[float | None, float | None, float, float]:
     """`(last_w, blocked_w, now_m, now_w)` from the locked state: the stored
     start and hold-off end, each None when absent, garbled or not credible
-    (past the cap, or a hold-off already over), and the clocks.
+    (past the cap, or a hold-off already over) — the end also when there is
+    no usable hold file — and the clocks.
 
     The clocks are read AFTER the file I/O: a slot dated before a slow read
     (a loaded disk, a first-use create) would already be in the past when
     the request went out, starting it late and leaving the next caller less
     than an interval behind it."""
-    last_w, blocked_w = _read_number(state), _read_number(hold)
+    last_w = _read_number(state)
+    blocked_w = None if hold is None else _read_number(hold)
     now_m, now_w = time.monotonic(), time.time()
     if last_w is not None and not (math.isfinite(last_w)
                                    and last_w - now_w <= _SHARED_AHEAD_CAP_S):
@@ -239,25 +271,53 @@ def _update_shared(
     """Read-modify-write the shared state under its flock: `step(last_w,
     blocked_w, now_m, now_w)` returns the new stored start and hold-off end
     from the stored ones (see `_read_state`) and the clocks. Returns
-    `(new_w, now_m, now_w)`. OSError as `_locked_state`.
+    `(new_w, now_m, now_w)`. OSError as `_locked_state`, or when a write
+    fails.
 
-    Both files are rewritten in place, each through the descriptor of its
-    own no-follow open (never a path-based write, which would follow a link
-    swapped in after the open): every reader holds the lock, and a write
-    torn by a crash reads as garbage, which restarts that value (one
-    unpaced request, or a hold-off forgotten by other processes) rather than
-    failing a fetch. The hold-off's end is written only while it is still
-    ahead, and the file emptied otherwise (see the pacing notes above)."""
+    The hold-off's end is written only while it is still ahead, and the file
+    emptied otherwise (see the pacing notes above) — and it is written
+    FIRST: a failure after it leaves a hold-off recorded with the schedule
+    unpushed, which still binds every reservation (`_reserve_shared` starts
+    none before it); the other way round, requests that had already reserved
+    were never told (review of deb6364, finding 2). How each file is
+    rewritten: `_store`."""
     with _locked_state(cache_dir) as (state, hold):
         last_w, blocked_w, now_m, now_w = _read_state(state, hold)
         new_w, blocked_w = step(last_w, blocked_w, now_m, now_w)
-        for fd, text in (
-            (state, repr(new_w)),
-            (hold, repr(blocked_w) if blocked_w is not None and blocked_w > now_w else ""),
-        ):
-            os.ftruncate(fd, 0)
-            os.pwrite(fd, text.encode("ascii"), 0)
+        if hold is not None:
+            _store(hold, repr(blocked_w) if blocked_w is not None and blocked_w > now_w else "")
+        _store(state, repr(new_w))
         return new_w, now_m, now_w
+
+
+def _store(fd: int, text: str) -> None:
+    """Rewrite one pacing file in place, through the descriptor of its own
+    no-follow open (never a path-based write, which would follow a link
+    swapped in after the open), so that no crash, full disk or short write
+    can leave it EMPTY. Truncating first and writing second did, on every
+    reservation: a SIGKILL or ENOSPC between the two erased a live hold-off
+    for every other process (review of deb6364, finding 2).
+
+    A value already stored is not rewritten at all, so a reservation, which
+    moves only the schedule, never touches the hold file. A new value is
+    written over the old from offset 0 and only then cut to its length. The
+    values are `repr`s of epoch seconds — same integer width, then a
+    fraction — and a hold-off's end only ever moves later, so an
+    interruption between the two leaves the new digits followed by the
+    old's tail (a value at or just past the new end), and a short write,
+    reported and NOT cut to length (cut, a file shorter than the new text
+    would be padded with NULs), leaves the new digits over the old's tail
+    (a value no earlier than the old end). Either way the file reads as a
+    number no earlier than the old one — for the hold file, a hold-off that
+    still binds — where an empty or garbled one restarts that value (every
+    reader holds the lock; garbage never fails a fetch). Emptying the hold
+    file (a hold-off over) is the truncate alone."""
+    data = text.encode("ascii")
+    if os.pread(fd, len(data) + 1, 0) == data:
+        return
+    if os.pwrite(fd, data, 0) != len(data):
+        raise OSError(errno.EIO, "short write to the pacing state")
+    os.ftruncate(fd, len(data))
 
 
 def _reserve_shared(
@@ -281,13 +341,22 @@ def _reserve_shared(
     return now_m + (start_w - now_w)
 
 
-def _warn_unshared(cache_dir: Path, e: OSError) -> None:
+def _warn_unshared(cache_dir: Path, e: OSError, hold_only: bool = False) -> None:
     """Never fail a fetch over pacing: the caller falls back to this
-    process's schedule. Said once per directory, not per request. Called
-    under `_pace_lock`, which guards the set."""
-    key = str(cache_dir)
-    if key not in _shared_pacing_warned:
-        _shared_pacing_warned.add(key)
+    process's schedule — or, `hold_only`, to this process's hold-off alone,
+    the schedule still shared. Each said once per directory, not per
+    request. Called under `_pace_lock`, which guards the set."""
+    key = f"{cache_dir}\0{_HOLD_STATE}" if hold_only else str(cache_dir)
+    if key in _shared_pacing_warned:
+        return
+    _shared_pacing_warned.add(key)
+    if hold_only:
+        logger.warning(
+            "SEC Retry-After hold-offs are process-wide only for cache %s: cannot "
+            "share them with other processes (%s); the request schedule is still shared",
+            cache_dir, e,
+        )
+    else:
         logger.warning(
             "SEC request pacing is process-wide only for cache %s: "
             "cannot share its schedule with other processes (%s)", cache_dir, e,
