@@ -328,8 +328,12 @@ def test_the_skewed_rebuild_of_each_real_filer_is_refused():
         "AAPL": "selection drift: the scan's rebuild selected nothing for intangible_assets "
                 "where the report used us-gaap:IntangibleAssetsNetExcludingGoodwill",
         "KO": "selection drift: the scan's rebuild selected LongTermDebtNoncurrent+",
-        "CRM": "quarter drift: the scan's rebuild covers 8 quarter(s) ending 2024-04-30 to "
-               "2026-01-31 where the report scored 8 quarter(s) ending 2024-07-31 to 2026-04-30",
+        # The evening before CRM's newest 10-Q the rebuild has neither that
+        # quarter nor the tag-switch fallback (#103) the report read it from;
+        # the selection is compared first, and names the fallback.
+        "CRM": "selection drift: the scan's rebuild selected us-gaap:InterestExpenseDebt for "
+               "interest_expense where the report used us-gaap:InterestExpenseDebt"
+               "|2026-04-30:us-gaap:InterestExpenseNonoperating",
     }
     for ticker, reason in expected.items():
         facts = _real(ticker)

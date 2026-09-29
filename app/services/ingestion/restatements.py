@@ -932,7 +932,9 @@ def derived_revisions(
 def _label(selection: SeriesSelection | str | None) -> str:
     if selection is None:
         return "nothing"
-    return selection.tag_used if isinstance(selection, SeriesSelection) else selection
+    # `label` names a tag-switch fallback too: drift in a fallback alone
+    # would otherwise read "selected X … where the report used X".
+    return selection.label if isinstance(selection, SeriesSelection) else selection
 
 
 def _rebuild_drift(
