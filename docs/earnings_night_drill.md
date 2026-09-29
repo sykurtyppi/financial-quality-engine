@@ -113,19 +113,22 @@ Found while the drill was being built. Fixed alongside it:
   complete and fsynced: a publisher killed at any point (not only one that
   raises) leaves the earlier run live or the new one, never one's report
   beside the other's ledger. A publish that raises leaves the earlier run
-  live (Hermes audit of 424b0b4, finding 3a): everything that can fail runs
-  before the swap, and a failure after it (the directory's fsync) swaps the
-  earlier run back and reads the pointer back before saying so; if that
-  swap back fails too, the error says the new run may be live
-  (`PublishInDoubt`), never that the earlier one is. The re-audit found
-  the version before this replaced the ledger and the report in two steps,
-  and a process killed between them split them. Publishes of one report
-  are serialized by a lock (`reports/.staging/<base>.lock`); readers take
-  none. `read_live` pins one generation and returns its own paths, which
-  no publish changes, so `earnings_brief` hands its model the pinned
-  report and audit, and `run_audit.py` audits the pinned report and writes
-  the audit into that generation: a report rebuilt mid-audit never gets
-  the earlier run's audit.
+  live (Hermes audit of 424b0b4, finding 3a): everything that can fail
+  runs before the swap, and a failure after it (the directory's fsync)
+  swaps the earlier run back and reads the pointer back before saying so;
+  if that swap back fails too, the error says the new run may be live
+  (`PublishInDoubt`), never that the earlier one is, and names how to
+  check and how to put the earlier run back; `generate_report.py`,
+  `journal.py report` and `watch.py` exit 8 on it, and a journal entry is
+  never stamped after one. The re-audit found the version before this
+  replaced the ledger and the report in two steps, and a process killed
+  between them split them. Publishes of one report are serialized by a
+  lock (`reports/.staging/<base>.lock`); readers take none. `read_live`
+  pins one generation and returns its own paths, which no publish changes,
+  so `earnings_brief` hands its model the pinned report and audit, and
+  `run_audit.py` audits the pinned report and writes the audit into that
+  generation: a report rebuilt mid-audit never gets the earlier run's
+  audit.
 - **A payload that cannot be mapped crashed.** Too little history raised a
   `ValueError` traceback (exit 1). Now `generate_report.py` prints
   `error: <T>: …` and `no report written: …`, and exits 2, the same

@@ -21,6 +21,11 @@ timestamps, so hindsight cannot leak backward.
 
 A browser UI over the identical entry files: `.venv/bin/uvicorn app.web:app`.
 Core logic lives in app/services/journal/ so the CLI and the web UI never diverge.
+
+Exit codes: 0 done · 1 refused or failed (nothing published, nothing
+stamped) · 8 (`report`) the report's publish is IN DOUBT: it failed and
+could not be undone, so the new report may be live; the entry is NOT stamped
+and the message says how to check and how to put the previous run back.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from app.services.journal.schema_v2 import (
     open_assumption_indices,
     verify_lock,
 )
+from app.services.reporting.report_files import PUBLISH_IN_DOUBT_RC, PublishInDoubt
 
 
 def cmd_open(args: argparse.Namespace) -> int:
@@ -60,6 +66,15 @@ def cmd_open(args: argparse.Namespace) -> int:
     print("Write your BEFORE block now (thesis + conviction), THEN run:")
     print(f"    journal.py report {args.ticker.upper()}")
     return 0
+
+
+def _publish_in_doubt(e: PublishInDoubt) -> int:
+    """A report whose publish ended in doubt: said as it is (not as "Report
+    generation failed", which means nothing changed), with its own exit
+    code, and the entry never stamped."""
+    print(f"Report publish IN DOUBT: {e}", file=sys.stderr)
+    print("reported NOT stamped.", file=sys.stderr)
+    return PUBLISH_IN_DOUBT_RC
 
 
 def _stamp_reported(entry):
@@ -110,6 +125,8 @@ def _report_v2_locked(path, args: argparse.Namespace) -> int:
             entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat(),
             fresh=getattr(args, "fresh", True),
         )
+    except PublishInDoubt as e:
+        return _publish_in_doubt(e)
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1
@@ -156,6 +173,8 @@ def _cmd_replay(path: Path, args: argparse.Namespace) -> int:
             ticker, with_docs=not args.no_docs, report_day=day,
             fresh=getattr(args, "fresh", True), replay=True,
         )
+    except PublishInDoubt as e:
+        return _publish_in_doubt(e)
     except Exception as e:  # noqa: BLE001
         print(f"Replay failed: {e}", file=sys.stderr)
         return 1
@@ -199,6 +218,8 @@ def _report_v1_locked(path: Path, args: argparse.Namespace) -> int:
             args.ticker, with_docs=not args.no_docs, report_day=entry["day"],
             fresh=getattr(args, "fresh", True),
         )
+    except PublishInDoubt as e:
+        return _publish_in_doubt(e)
     except Exception as e:  # noqa: BLE001
         print(f"Report generation failed: {e}", file=sys.stderr)
         return 1

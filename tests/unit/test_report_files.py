@@ -418,6 +418,9 @@ class TestAFailureAfterTheSwitch:
                            "pointer back.*: the NEW generation .* may be live") as e:
             _publish(tmp_path, "second")
         assert not isinstance(e.value, NotPublished)
+        # ...and how to check, and how to put the earlier run back.
+        assert f"readlink {rf._pointer(report)}" in str(e.value)
+        assert f"restore({str(report)!r}, {earlier.name!r})" in str(e.value)
         assert current_generation(report) != earlier  # it is, in fact
 
     def test_a_switch_back_is_read_back_not_assumed(self, tmp_path, monkeypatch):
@@ -447,8 +450,10 @@ class TestAFailureAfterTheSwitch:
             return real(self, *a, **k)
 
         monkeypatch.setattr(rf.Path, "unlink", unlink)
-        with pytest.raises(rf.PublishInDoubt, match="may be live"):
+        with pytest.raises(rf.PublishInDoubt, match="may be live") as e:
             _publish(tmp_path, "first")
+        # No earlier run to put back: taking the new one off is the way back.
+        assert f"set_aside({str(report)!r})" in str(e.value)
 
     def test_the_earlier_runs_audit_is_gone_before_the_switch(self, tmp_path, monkeypatch):
         """The audit's live name resolves through the pointer: left in place
@@ -497,9 +502,10 @@ class TestAFailureAfterTheSwitch:
         monkeypatch.setattr(rf, "_symlink", lambda link, target: (
             None if target == earlier.name else real(link, target)))
         with pytest.raises(rf.PublishInDoubt, match="setting it aside failed .* the run may "
-                           "be set aside, with no run live"):
+                           "be set aside, with no run live") as e:
             set_aside(report)
         assert current_generation(report) is None
+        assert f"restore({str(report)!r}, {earlier.name!r})" in str(e.value)
 
     def test_set_aside_is_switched_back(self, tmp_path, monkeypatch):
         report, earlier = _audited_first_run(tmp_path)
@@ -1031,3 +1037,26 @@ class TestEngineCommitNeverBlocksAPublish:
                              text=True, timeout=60, env={**os.environ, ENGINE_ENV: "abc1234"})
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip() == "1"
+
+
+def test_generate_report_says_a_publish_in_doubt_with_its_own_exit_code(monkeypatch, capsys):
+    """Follow-up to finding 3a: `PublishInDoubt` is not a `NotPublished`, so
+    `generate_report.py` let it out as a traceback (exit 1)."""
+    import importlib.util
+
+    from app.services.reporting.report_files import PUBLISH_IN_DOUBT_RC, PublishInDoubt
+
+    spec = importlib.util.spec_from_file_location("generate_report_cli",
+                                                  ROOT / "scripts" / "generate_report.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+
+    def main():
+        raise PublishInDoubt("AAPL_x.md: publishing g failed, and switching back failed: "
+                             "the NEW generation g may be live.")
+
+    monkeypatch.setattr(cli, "main", main)
+    assert cli._main() == PUBLISH_IN_DOUBT_RC == 8
+    err = capsys.readouterr().err
+    assert "the NEW generation g may be live" in err
+    assert "no report published" not in err  # that is NotPublished's line, not this one's

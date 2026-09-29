@@ -9,10 +9,13 @@ documents -> markdown report under reports/.
 Report assembly lives in app/services/reporting/report_builder.build_report, the
 single builder shared by the CLI, journal, and API (review finding 1).
 
-Exit codes: 0 report written; 2 the fundamentals could not be acquired or
-mapped; 3 the run was not whole and nothing was published; 4 (--as-of only)
-the mapper trips on a stored snapshot a report scored — the message names
-it; move it aside to replay from an older state.
+Exit codes: 0 report published · 2 no report written (SEC could not supply
+the fundamentals, or they could not be mapped) · 3 no report published (the
+run was not whole, or the publish was refused; the previous run stays live) ·
+4 (--as-of only) the mapper trips on a stored snapshot a report scored — the
+message names it; move it aside to replay from an older state · 8 the publish
+is IN DOUBT: it failed and could not be undone, so the new run may be live —
+the message says how to check and how to put the previous run back.
 """
 
 from __future__ import annotations
@@ -36,7 +39,12 @@ from app.services.ingestion.edgar_adapter import (
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.reporting.report_builder import build_report, ledger_path
-from app.services.reporting.report_files import NotPublished, replacing
+from app.services.reporting.report_files import (
+    PUBLISH_IN_DOUBT_RC,
+    NotPublished,
+    PublishInDoubt,
+    replacing,
+)
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -190,6 +198,11 @@ def _main() -> int:
         print(f"error: {e}", file=sys.stderr)
         print("no report published; the previous run (if any) stays live.", file=sys.stderr)
         return 3
+    except PublishInDoubt as e:
+        # Not a NotPublished: the new run MAY be live. Said as it is, never
+        # as a traceback, and with its own code.
+        print(f"error: {e}", file=sys.stderr)
+        return PUBLISH_IN_DOUBT_RC
     except SecClientError as e:
         print(f"error: {e}", file=sys.stderr)
         print("no report written: the fundamentals could not be acquired. Retry, or "

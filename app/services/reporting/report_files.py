@@ -90,7 +90,18 @@ class NotPublished(RuntimeError):
 class PublishInDoubt(RuntimeError):
     """A change to the live names that failed after the pointer was switched,
     and whose switch back failed too: the NEW generation may be live. Not a
-    `NotPublished`, whose handlers tell the operator the earlier run is."""
+    `NotPublished`, whose handlers tell the operator the earlier run is. Its
+    message says how to check which run is live and how to put the earlier
+    one back; every command that publishes prints it as it is and exits
+    `PUBLISH_IN_DOUBT_RC`, and never stamps a journal entry ``reported``
+    after one."""
+
+
+# The exit code of every command that publishes a report (generate_report.py,
+# journal.py report, watch.py poll/sweep) when a publish ended in doubt: not 1,
+# which says a run failed and nothing changed. It is outside every other code
+# those commands use, so an alert can key on it.
+PUBLISH_IN_DOUBT_RC = 8
 
 
 def _base(report: Path) -> str:
@@ -472,9 +483,14 @@ def _switch_back(report: Path, gen: Path | None, previous: Path | None, what: st
         why, cause = f"switching back did not take (the pointer names {back})", failure
     maybe = (f"the NEW generation {gen.name} may be live" if gen is not None
              else "the run may be set aside, with no run live")
+    # How to put it right, named in full: this is read by an operator at the
+    # end of a failed command, not by code.
+    fix = (f"report_files.restore({str(report)!r}, {previous.name!r}) makes {previous.name} "
+           "live again" if previous is not None else
+           f"report_files.set_aside({str(report)!r}) takes the new run off the live names")
     raise PublishInDoubt(
         f"{report.name}: {what} failed ({type(failure).__name__}: {failure}), and {why}: "
-        f"{maybe}. Read {pointer} before assuming which run is.") from cause
+        f"{maybe}. Check which run is live with `readlink {pointer}`; {fix}.") from cause
 
 
 def _link_live_names(report: Path) -> None:

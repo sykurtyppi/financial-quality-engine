@@ -132,7 +132,12 @@ no thesis (`--no-auto` only; act now) · `3` nothing yet (`--once` only) ·
 `7` the audit failed three times and was ABANDONED — the brief was built
 without it and the row re-armed ·
 `1` gave up, EDGAR failed, the watch has no event identity (re-`add` it), or
-the row could not be re-armed after a completed case.
+the row could not be re-armed after a completed case ·
+`8` the report's publish is IN DOUBT: it failed and could not be undone, so
+the new report may be live. Nothing was audited or marked; the log says how
+to check (`readlink` the generation pointer) and how to put the previous run
+back (`report_files.restore`). `generate_report.py` and `journal.py report`
+exit 8 on it too, and it outranks every other code in a `sweep`.
 
 **4. After it generates — read, then fill AFTER**
 
