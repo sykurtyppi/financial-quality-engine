@@ -303,8 +303,12 @@ def _seed(tmp_path, monkeypatch, *, reported: bool, metrics: tuple[str, ...] = (
     return store.save_v2(entry)
 
 
-def _meanwhile(monkeypatch, change):
-    """After the command's first load, another writer saves ``change``."""
+def _meanwhile(monkeypatch, change, *, by_hand: bool = False):
+    """After the command's first load, another writer saves ``change`` (with
+    ``by_hand``, writes it to the file as a hand edit would: the store saves
+    no entry whose lock does not verify)."""
+    from app.services.journal.schema_v2 import render_entry
+
     real = store.load_v2
     fired: list[int] = []
 
@@ -312,7 +316,10 @@ def _meanwhile(monkeypatch, change):
         e = real(p)
         if not fired:
             fired.append(1)
-            store.save_v2(change(real(p)), p, allow_update=True)
+            if by_hand:
+                p.write_text(render_entry(change(real(p))), encoding="utf-8")
+            else:
+                store.save_v2(change(real(p)), p, allow_update=True)
         return e
 
     monkeypatch.setattr(store, "load_v2", load)
@@ -423,7 +430,7 @@ def test_an_update_refuses_a_before_block_tampered_meanwhile(tmp_path, monkeypat
 
     path = _seed(tmp_path, monkeypatch, reported=False)
     _meanwhile(monkeypatch, lambda e: e.model_copy(update={"before": e.before.model_copy(
-        update={"thesis": "rewritten after the fact"})}))
+        update={"thesis": "rewritten after the fact"})}), by_hand=True)
     assert _cli().cmd_mark_reported(argparse.Namespace(ticker="TST", date="2026-07-27")) == 1
     entry = store.load_v2(path)
     assert entry.reported is None
@@ -513,6 +520,38 @@ def test_an_update_that_changes_the_locked_entry_is_refused_and_writes_nothing(
         store.update_v2(path, callback)
     assert path.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".md")) == [path.name]
+
+
+_SAVE_REFUSED = {**{name: change for name, (change, _) in _REFUSED.items()},
+                 "reported cleared": lambda e: e.model_copy(update={"reported": None}),
+                 "reported moved": lambda e: e.model_copy(update={
+                     "reported": e.reported.replace(year=2020)})}
+
+
+@pytest.mark.parametrize("change", list(_SAVE_REFUSED), ids=list(_SAVE_REFUSED))
+def test_a_save_over_an_entry_is_held_to_what_an_update_is(tmp_path, monkeypatch, change):
+    """`save_v2(..., allow_update=True)` compared only the two `before_sha256`
+    fields: it could clear a `reported` stamp, or save a BEFORE block edited
+    under the stored hash, every change `update_v2` refuses (review of the
+    finding-4 fix). It is held to the same check, against the entry on disk."""
+    path = _seed(tmp_path, monkeypatch, reported=True)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="changed"):
+        store.save_v2(_SAVE_REFUSED[change](store.load_v2(path)), path, allow_update=True)
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".md")) == [path.name]
+
+
+def test_a_save_that_leaves_the_lock_and_the_stamp_alone_is_saved(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    now = datetime.now(UTC)
+    store.save_v2(store.load_v2(path).model_copy(update={"reported": now}), path,
+                  allow_update=True)  # a stamp may be made
+    store.save_v2(_disagree(store.load_v2(path)), path, allow_update=True)  # and kept
+    entry = store.load_v2(path)
+    assert entry.reported == now and entry.after.what_i_disagreed_with == "written meanwhile"
 
 
 def test_an_update_that_leaves_the_lock_alone_is_saved(tmp_path, monkeypatch):
@@ -692,6 +731,258 @@ def test_a_deferred_report_leaves_the_case_retryable_and_markable(tmp_path, monk
     assert store.load_v2(path).reported is None
     assert cli.cmd_mark_reported(argparse.Namespace(ticker="TST", date="2026-07-27")) == 0
     assert store.load_v2(path).reported is not None
+
+
+# --- review of the 3b fix: a report while the sweep audits the deferred one ------------
+# `report --defer-mark` released the report lock once it had published, and
+# the entry stayed unstamped while the sweep audited that report (minutes).
+# A plain `journal.py report` in that window took the lock, found "not
+# reported", built, published over the run being audited and stamped: the
+# sweep's audit then failed (the live run was no longer the audited one) or
+# its `mark-reported` found "already reported". A deferred report now leaves
+# the entry's report PENDING (a marker beside it) until `mark-reported`; a
+# plain report refuses while it is, unless told `--retry`.
+
+
+def _either(tmp_path, monkeypatch, v2):
+    if v2:
+        return _seed(tmp_path, monkeypatch, reported=False)
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    return store.open_entry("TST", thesis="a real thesis")
+
+
+def _is_reported(path):
+    if store.is_v2(path):
+        return store.load_v2(path).reported is not None
+    return store.is_reported(path.read_text(encoding="utf-8"))
+
+
+def _report_ns(path, **kw):
+    import argparse
+
+    return argparse.Namespace(**{"ticker": "TST", "date": path.stem.split("_", 1)[1],
+                                 "no_docs": True, "defer_mark": False, **kw})
+
+
+def _mark_ns(path):
+    import argparse
+
+    return argparse.Namespace(ticker="TST", date=path.stem.split("_", 1)[1])
+
+
+def _builds(monkeypatch, cli, fail=None):
+    built: list[tuple] = []
+
+    def build(*a, **k):
+        built.append(a)
+        if fail is not None:
+            fail()
+        return Path("x.md"), "no acute signals"
+
+    monkeypatch.setattr(cli, "build_report", build)
+    return built
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_report_while_the_sweep_audits_is_refused_and_the_sweep_marks_it(
+        tmp_path, monkeypatch, capsys, v2):
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0  # the sweep
+    # ... which now audits that report, the report lock released ...
+    capsys.readouterr()
+    assert cli.cmd_report(_report_ns(path)) == 1  # the operator
+    err = capsys.readouterr().err
+    assert len(built) == 1, "a second report was built over the one being audited"
+    assert not _is_reported(path)
+    assert "being audited" in err
+    # Both ways out are named as commands that run, pinned to this entry.
+    import re
+    import shlex
+
+    named = [cli.build_parser().parse_args(shlex.split(c))
+             for c in re.findall(r"`journal\.py ([^`]+)`", err)]
+    assert [(n.cmd, n.ticker, n.date) for n in named] == [
+        ("mark-reported", "TST", path.stem.split("_", 1)[1]),
+        ("report", "TST", path.stem.split("_", 1)[1])]
+    assert named[1].retry and not named[1].defer_mark
+    assert cli.cmd_mark_reported(_mark_ns(path)) == 0  # the sweep, once the audit passed
+    assert _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_retry_rebuilds_a_pending_report_on_purpose(tmp_path, monkeypatch, capsys, v2):
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 0
+    assert len(built) == 2 and _is_reported(path)
+    assert store.report_pending(path) is None  # the case is reported: nothing pends
+    # The sweep's stamp then finds it done, as any stamp made meanwhile.
+    assert cli.cmd_mark_reported(_mark_ns(path)) == 1
+    assert "already reported" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_the_sweeps_own_retry_is_allowed_and_keeps_the_marker(tmp_path, monkeypatch, v2):
+    """A failed audit leaves the case retryable: the next pass reports it
+    again with --defer-mark, which the marker does not stop."""
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    first = store.report_pending(path)
+    assert first is not None and "--defer-mark" in first
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    assert len(built) == 2 and store.report_pending(path) == first
+    assert not _is_reported(path)
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_the_marker_is_there_before_the_build_starts(tmp_path, monkeypatch, v2):
+    """A deferred report killed part way (its report perhaps live) leaves
+    the entry pending, not open to a plain report."""
+    path = _either(tmp_path, monkeypatch, v2)
+    cli, seen = _cli(), []
+    monkeypatch.setattr(cli, "build_report", lambda *a, **k: seen.append(
+        store.report_pending(path)) or (Path("x.md"), "no acute signals"))
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    assert seen and seen[0] is not None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_deferred_report_that_published_nothing_leaves_nothing_pending(
+        tmp_path, monkeypatch, v2):
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+
+    def fail():
+        raise RuntimeError("EDGAR down")
+
+    _builds(monkeypatch, cli, fail)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 1
+    assert store.report_pending(path) is None
+    built = _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path)) == 0 and len(built) == 1
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_retry_that_published_nothing_keeps_the_earlier_marker(tmp_path, monkeypatch, v2):
+    """The run already published is still the one pending its audit."""
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+    _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    first = store.report_pending(path)
+
+    def fail():
+        raise RuntimeError("EDGAR down")
+
+    _builds(monkeypatch, cli, fail)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 1
+    assert store.report_pending(path) == first
+    assert cli.cmd_report(_report_ns(path)) == 1
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_deferred_publish_in_doubt_leaves_the_report_pending(tmp_path, monkeypatch, v2):
+    """The new run may be live and was never audited: a plain report must
+    not publish over it unasked."""
+    from app.services.reporting.report_files import PUBLISH_IN_DOUBT_RC
+
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+    monkeypatch.setattr(cli, "build_report", _in_doubt)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == PUBLISH_IN_DOUBT_RC
+    assert store.report_pending(path) is not None
+    built = _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path)) == 1 and built == []
+
+
+@pytest.mark.parametrize("when", ["before its check", "meanwhile"])
+def test_a_stamp_that_is_refused_leaves_the_report_pending(tmp_path, monkeypatch, when):
+    """`mark-reported` clears the marker only once it has stamped: not when
+    it finds the lock broken, nor when the stamp itself is refused (the
+    lock broken after its check, by hand)."""
+    from app.services.journal.schema_v2 import render_entry
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    cli = _cli()
+    _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+
+    def tamper(e):
+        return e.model_copy(update={"before": e.before.model_copy(
+            update={"thesis": "rewritten after the fact"})})
+
+    if when == "meanwhile":
+        _meanwhile(monkeypatch, tamper, by_hand=True)
+    else:
+        path.write_text(render_entry(tamper(store.load_v2(path))), encoding="utf-8")
+    assert cli.cmd_mark_reported(_mark_ns(path)) == 1
+    assert store.report_pending(path) is not None
+    assert store.load_v2(path).reported is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_plain_report_with_nothing_pending_writes_no_marker(tmp_path, monkeypatch, v2):
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+    _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path)) == 0
+    assert store.report_pending(path) is None and _is_reported(path)
+
+
+def test_a_marker_that_cannot_be_removed_after_the_stamp_is_said_not_raised(
+        tmp_path, monkeypatch, capsys):
+    """The stamp is made: `mark-reported` must not read as failed to the
+    sweep, and a marker beside a stamped entry stops nothing."""
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    cli = _cli()
+    _builds(monkeypatch, cli)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+
+    def cannot(p):
+        raise PermissionError(13, "read-only directory")
+
+    monkeypatch.setattr(store, "clear_report_pending", cannot)
+    assert cli.cmd_mark_reported(_mark_ns(path)) == 0
+    assert "pending marker could not be removed" in capsys.readouterr().err
+    assert _is_reported(path)
+    assert cli.cmd_report(_report_ns(path)) == 1  # refused as reported, the marker aside
+
+
+def test_the_marker_is_a_hidden_sidecar_written_whole(tmp_path, monkeypatch):
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    store.set_report_pending(path, "journal.py report --defer-mark")
+    marker = path.with_name(f".{path.name}.report.pending")
+    assert marker.is_file() and "journal.py report --defer-mark" in marker.read_text()
+    assert store.report_pending(path) == marker.read_text(encoding="utf-8").strip()
+    assert _leftovers(tmp_path) == [] and store.list_entries() == [path]
+    store.clear_report_pending(path)
+    assert not marker.exists() and store.report_pending(path) is None
+    store.clear_report_pending(path)  # nothing pending: nothing to do
+
+
+def test_a_marker_that_cannot_be_read_still_pends(tmp_path, monkeypatch):
+    """Fail closed: a marker that is there but unreadable is not "nothing"."""
+    import errno
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    store.set_report_pending(path, "journal.py report --defer-mark")
+    marker = path.with_name(f".{path.name}.report.pending")
+    real = Path.read_text
+
+    def read_text(self, *a, **k):
+        if self == marker:
+            raise OSError(errno.EIO, "injected")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    pending = store.report_pending(path)
+    assert pending is not None and "cannot be read" in pending
 
 
 # --- follow-up: a `reported` stamp, once made, stays -----------------------------------

@@ -2050,6 +2050,86 @@ class TestAPublishInDoubt:
         assert watch_cli._worst([9]) == 9 and watch_cli._worst([10, 9]) == 10
 
 
+# --- review of the 3b fix: the entry's report is PENDING while the sweep audits it --------
+# `journal.py report --defer-mark` leaves a marker that makes a plain
+# `journal.py report` (or the web page) refuse until `mark-reported`. Here
+# the sweep's own flow, with the journal commands run for real: every way a
+# pass ends either stamps (and clears the marker) or leaves the case
+# retryable with the marker kept.
+
+
+class TestAReportPendingItsAudit:
+    DAY = "2026-08-26"  # poll_env's pinned thesis entry
+
+    def _journal(self, poll_env, monkeypatch, tmp_path, audits):
+        from datetime import date, datetime
+
+        from app.services.journal import store
+        from app.services.journal.schema_v2 import (
+            Assumption,
+            BeforeBlock,
+            EntryV2,
+            lock_entry,
+        )
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
+        path = store.save_v2(lock_entry(EntryV2(
+            ticker="NVDA", day=date.fromisoformat(self.DAY),
+            opened=datetime(2026, 8, 26, 9, tzinfo=UTC),
+            before=BeforeBlock(thesis="data-center demand holds", conviction=3,
+                               intended_action="hold",
+                               assumptions=[Assumption(metric="revenue", comparator=">",
+                                                       threshold=1.0, window="FY2026Q2",
+                                                       source="10-Q",
+                                                       resolve_by=date(2026, 9, 15))]))))
+        spec = importlib.util.spec_from_file_location("journal_cli_watch",
+                                                      ROOT / "scripts" / "journal.py")
+        journal = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(journal)
+        report = tmp_path / f"NVDA_{self.DAY}.md"
+        journal.build_report = lambda *a, **k: (report, "no acute signals")
+        ns = {"no_docs": True, "fresh": True}
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: journal.cmd_report(
+            Namespace(ticker=t, date=day, defer_mark=True, **ns)))
+        monkeypatch.setattr(watch_cli, "_mark_reported", lambda t, day: journal.cmd_mark_reported(
+            Namespace(ticker=t, date=day)))
+        monkeypatch.setattr(watch_cli, "_latest_report", lambda t, d: report)
+        seq = list(audits)
+        monkeypatch.setattr(watch_cli, "_run_audit", lambda p: seq.pop(0) if len(seq) > 1 else seq[0])
+        plain = lambda: journal.cmd_report(Namespace(ticker="NVDA", date=self.DAY,  # noqa: E731
+                                                     defer_mark=False, **ns))
+        return store, path, plain
+
+    def test_a_failed_audit_keeps_it_pending_and_a_plain_report_refused(
+            self, poll_env, monkeypatch, tmp_path):
+        _force_decision(monkeypatch, "generate")
+        store, path, plain = self._journal(poll_env, monkeypatch, tmp_path, [4])
+        assert watch_cli.cmd_poll(_poll_args()) == 4
+        assert store.load_v2(path).reported is None and store.report_pending(path) is not None
+        assert plain() == 1
+
+    def test_a_passing_audit_stamps_it_and_clears_the_marker(
+            self, poll_env, monkeypatch, tmp_path):
+        _force_decision(monkeypatch, "generate")
+        store, path, _ = self._journal(poll_env, monkeypatch, tmp_path, [4, 0])
+        assert watch_cli.cmd_poll(_poll_args()) == 4  # a failed audit first: the retry
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert store.load_v2(path).reported is not None and store.report_pending(path) is None
+
+    def test_an_abandoned_audit_stamps_it_and_clears_the_marker(
+            self, poll_env, monkeypatch, tmp_path):
+        """Abandoning the audit completes the case (the brief is built
+        without it): it is stamped like a passed one, so nothing stays
+        pending to block the operator."""
+        _force_decision(monkeypatch, "generate")
+        store, path, _ = self._journal(poll_env, monkeypatch, tmp_path, [4])
+        for _ in range(watch_cli.AUDIT_MAX_ATTEMPTS - 1):
+            assert watch_cli.cmd_poll(_poll_args()) == 4
+            assert store.report_pending(path) is not None
+        assert watch_cli.cmd_poll(_poll_args()) == watch_cli.AUDIT_ABANDONED_RC
+        assert store.load_v2(path).reported is not None and store.report_pending(path) is None
+
+
 @pytest.mark.parametrize("action", ["generate", "refuse"])
 @pytest.mark.parametrize("capped, noted", [((0, False), False), ((0, True), False),
                                            ((4, True), True)])

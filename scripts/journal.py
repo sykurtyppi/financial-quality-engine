@@ -22,6 +22,10 @@ timestamps, so hindsight cannot leak backward.
 A browser UI over the identical entry files: `.venv/bin/uvicorn app.web:app`.
 Core logic lives in app/services/journal/ so the CLI and the web UI never diverge.
 
+`journal.py report --defer-mark` (the sweep's) leaves the case's report
+PENDING its audit until `mark-reported`: meanwhile a plain `report` refuses
+(the web report page too), and `report --retry` rebuilds it on purpose.
+
 Exit codes: 0 done · 1 refused or failed (nothing published, nothing
 stamped) · 8 (`report`) the report's publish is IN DOUBT: it failed and
 could not be undone, so the new report may be live; the entry is NOT stamped
@@ -77,6 +81,63 @@ def _publish_in_doubt(e: PublishInDoubt) -> int:
     return PUBLISH_IN_DOUBT_RC
 
 
+# Who a pending marker names (store.set_report_pending).
+_DEFERRED = "journal.py report --defer-mark"
+
+
+def _refused_as_pending(path: Path, args: argparse.Namespace) -> bool:
+    """A plain `report` of an entry whose report is PENDING its audit: said,
+    and refused (True). Review of the finding-3b fix: `--defer-mark`
+    releases the report lock once it has published, and the sweep audits
+    that report with the entry unstamped; a plain report in that window
+    built, published over the run being audited and stamped, and the
+    sweep's audit or `mark-reported` then failed. `--defer-mark` itself (the
+    sweep's own retry) and `--retry` (a rebuild on purpose) go ahead."""
+    pending = store.report_pending(path)
+    if pending is None or getattr(args, "defer_mark", False) or getattr(args, "retry", False):
+        return False
+    ticker, day = path.stem.split("_", 1)
+    print(f"{path.name}: this case's report is being audited ({pending}) and is stamped "
+          "once its audit passes. Not building another over it. Once the audit has passed: "
+          f"`journal.py mark-reported {ticker} --date {day}`; to rebuild it on purpose "
+          f"instead: `journal.py report {ticker} --date {day} --retry`.", file=sys.stderr)
+    return True
+
+
+def _build_marked(path: Path, args: argparse.Namespace, build):
+    """``build()`` (the report's build and publish) for a report command.
+    With `--defer-mark` the entry is marked PENDING first (before the build,
+    so a command killed part way, its report perhaps live, leaves it
+    pending), and the mark it made is taken back if the build raises: a
+    build that raises published nothing (`report_files`), except a publish
+    in doubt, whose new run may be live and unaudited, which stays pending.
+    A marker already there (the sweep's retry after a failed audit) is kept:
+    the run it names is still the one pending."""
+    made = getattr(args, "defer_mark", False) and store.report_pending(path) is None
+    if made:
+        store.set_report_pending(path, _DEFERRED)
+    try:
+        return build()
+    except PublishInDoubt:
+        raise
+    except Exception:
+        if made:
+            store.clear_report_pending(path)
+        raise
+
+
+def _no_longer_pending(path: Path) -> None:
+    """After the stamp: the entry's report no longer pends its audit. A
+    marker that cannot be removed is said, not raised (the stamp is made,
+    and the sweep must not read a failure): beside a stamped entry it stops
+    nothing, since every report path refuses a stamped entry first."""
+    try:
+        store.clear_report_pending(path)
+    except OSError as e:
+        print(f"{path.name}: stamped, but its pending marker could not be removed ({e}); "
+              "it has no effect on a stamped entry.", file=sys.stderr)
+
+
 def _stamp_reported(entry):
     """Stamp `reported` on the entry as it is on disk — once: a stamp another
     writer made meanwhile is kept, and the update refused."""
@@ -96,7 +157,9 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     finding 3b): the entry is read and checked only once the lock is held,
     so a second command waits for the first, finds its stamp and refuses
     before it builds; ``--defer-mark`` releases the lock once the report is
-    published, and ``mark-reported`` takes it again for the stamp."""
+    published, and ``mark-reported`` takes it again for the stamp. In
+    between the report is PENDING its audit, and a plain report refuses
+    (``_refused_as_pending``; ``--retry`` overrides)."""
     with store.report_lock(path):
         return _report_v2_locked(path, args)
 
@@ -119,12 +182,14 @@ def _report_v2_locked(path, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if _refused_as_pending(path, args):
+        return 1
     print("Generating report...")
     try:
-        out, distress = build_report(
+        out, distress = _build_marked(path, args, lambda: build_report(
             entry.ticker, with_docs=not args.no_docs, report_day=entry.day.isoformat(),
             fresh=getattr(args, "fresh", True),
-        )
+        ))
     except PublishInDoubt as e:
         return _publish_in_doubt(e)
     except Exception as e:  # noqa: BLE001
@@ -145,6 +210,7 @@ def _report_v2_locked(path, args: argparse.Namespace) -> int:
     except store.UpdateRefused as e:
         print(f"{path.name}: {e}", file=sys.stderr)
         return 1
+    _no_longer_pending(path)  # a --retry over a pending report: reported now
     print(f"Report stamped at {updated.reported.isoformat()}.")
     print(f"distress: {distress} -> {out}")
     print(f"\nNow fill the AFTER block: `journal.py after {entry.ticker} --impact CODE "
@@ -211,13 +277,15 @@ def _report_v1_locked(path: Path, args: argparse.Namespace) -> int:
         print("This case's report was already generated; not regenerating "
               "(prevents peeking-then-editing).", file=sys.stderr)
         return 1
+    if _refused_as_pending(path, args):
+        return 1
     print("Generating report...")
     try:
         entry = store.parse_entry(path)
-        out, distress = build_report(
+        out, distress = _build_marked(path, args, lambda: build_report(
             args.ticker, with_docs=not args.no_docs, report_day=entry["day"],
             fresh=getattr(args, "fresh", True),
-        )
+        ))
     except PublishInDoubt as e:
         return _publish_in_doubt(e)
     except Exception as e:  # noqa: BLE001
@@ -231,6 +299,7 @@ def _report_v1_locked(path: Path, args: argparse.Namespace) -> int:
               "once the audit succeeds.")
         return 0
     store.mark_reported(path)
+    _no_longer_pending(path)  # a --retry over a pending report: reported now
     print(f"Thesis locked at {store.now_iso()}.")
     print(f"distress: {distress} -> {out}")
     print(f"\nNow read the report and fill the AFTER block in {path}")
@@ -736,7 +805,8 @@ def cmd_tally(args: argparse.Namespace) -> int:
 def cmd_mark_reported(args: argparse.Namespace) -> int:
     """Stamp `reported` on an entry whose report was generated with
     --defer-mark. Kept separate so the watch flow can order it strictly AFTER
-    a successful audit — report-then-mark, never mark-then-hope."""
+    a successful audit — report-then-mark, never mark-then-hope. Once it has
+    stamped, the report no longer pends its audit (its marker is removed)."""
     try:
         path = store.find_entry(args.ticker, args.date)
     except ValueError as e:
@@ -768,6 +838,7 @@ def _mark_reported_locked(path: Path) -> int:
         except store.UpdateRefused as e:
             print(f"{path.name}: {e}", file=sys.stderr)
             return 1
+        _no_longer_pending(path)  # stamped: the audited report no longer pends
         print(f"Report stamped at {updated.reported.isoformat()}.")
         return 0
     text = path.read_text(encoding="utf-8")
@@ -775,6 +846,7 @@ def _mark_reported_locked(path: Path) -> int:
         print(f"{path.name}: already reported.", file=sys.stderr)
         return 1
     store.mark_reported(path)
+    _no_longer_pending(path)
     print(f"Reported stamped at {store.now_iso()}.")
     return 0
 
@@ -816,6 +888,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--defer-mark", action="store_true",
                        help="generate but do NOT stamp `reported` — the watch flow "
                             "stamps only after a successful audit (mark-reported)")
+    p_rep.add_argument("--retry", action="store_true",
+                       help="build even though a --defer-mark report of this entry is "
+                            "pending its audit (the sweep's): a deliberate rebuild, "
+                            "stamped as a plain report is")
     p_rep.add_argument("--replay", action="store_true",
                        help="historical replay as of the entry's day -> T_DAY.replay.md; "
                             "never stamps or edits the entry")

@@ -226,6 +226,42 @@ def test_a_publish_in_doubt_is_said_plainly_and_nothing_is_stamped(client, monke
     assert not store.parse_entry(path)["is_reported"]
 
 
+def test_the_report_page_refuses_while_the_sweep_audits_that_report(client, monkeypatch):
+    """Review of the 3b fix: the sweep's `journal.py report --defer-mark`
+    releases the report lock once it publishes, and audits the report with
+    the entry unstamped. The page found "not reported", built, published over
+    the run being audited and stamped. It refuses while the report is
+    pending, says why and what to run, and builds nothing."""
+    path = _seed("KO", "steady staple", 3, "hold")
+    built = []
+    monkeypatch.setattr(reporting, "build_report", lambda *a, **k: built.append(a))
+    store.set_report_pending(path, "journal.py report --defer-mark")
+    r = client.get("/report/KO")
+    assert r.status_code == 409
+    assert "being audited" in r.text and "mark-reported KO" in r.text and "--retry" in r.text
+    assert built == [] and not store.parse_entry(path)["is_reported"]
+    assert store.report_pending(path) is not None
+
+
+def test_a_stamp_that_fails_says_the_report_is_live_but_not_stamped(client, monkeypatch):
+    """The stamp shared the build's `try`: a stamp that failed was shown as
+    "Report generation failed" (with a 200) though the report was live. It
+    is said as it is: live, not stamped, and how to stamp it."""
+    path = _seed("KO", "steady staple", 3, "hold")
+
+    def refuse(p):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store, "mark_reported", refuse)
+    r = client.get("/report/KO")
+    assert r.status_code == 500
+    assert "generation failed" not in r.text
+    assert "is live" in r.text and "NOT stamped" in r.text and "No space left" in r.text
+    assert "mark-reported KO" in r.text
+    assert "KO report" in r.text  # the live report is shown
+    assert not store.parse_entry(path)["is_reported"]
+
+
 def test_report_for_dated_entry_reads_same_file_it_generates(client):
     _seed("KO", "steady staple", 3, "hold")
     p = store.find_entry("KO")

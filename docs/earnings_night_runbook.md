@@ -332,15 +332,34 @@ never a second generate+audit of the same print. A sweep holds the lock for
 its whole pass, so during a multi-name earnings night a manual `poll` may
 wait for several audits.
 
-One entry's report is also built once whatever runs it: `journal.py report`,
-the web UI's report page and `journal.py mark-reported` hold the entry's
-report lock (`journal/entries/.<T>_<day>.md.report.lock`) from the "not
-reported yet" check to the `reported` stamp (`--defer-mark`: to the publish).
-A second `journal.py report` of the same entry waits for the first and,
-once that one has stamped, refuses ("already generated", exit 1) before
-building or publishing anything; a deferred report stamps nothing, so the
-case stays retryable as the sweep needs. Before this (Hermes audit of 424b0b4, finding 3b) both built and
-published, and the second's report was live though its command failed.
+No second report is built over one entry's report while it is in use:
+`journal.py report`, the web UI's report page and `journal.py mark-reported`
+hold the entry's report lock (`journal/entries/.<T>_<day>.md.report.lock`)
+from the "not reported yet" check to the `reported` stamp (`--defer-mark`:
+to the publish). A second `journal.py report` of the same entry waits for
+the first and, once that one has stamped, refuses ("already generated",
+exit 1) before building or publishing anything. Before this (Hermes audit
+of 424b0b4, finding 3b) both built and published, and the second's report
+was live though its command failed.
+
+A deferred report (the sweep's `report --defer-mark`) stamps nothing, so
+the case stays retryable, but between its publish and the sweep's
+`mark-reported` the report is being audited: the command leaves the entry
+PENDING (`journal/entries/.<T>_<day>.md.report.pending`, which says when
+and by which process). While it is there a plain `journal.py report` and
+the web report page refuse (exit 1 / HTTP 409, naming both ways out);
+the sweep's own retry (`--defer-mark` again, after a failed audit) goes
+ahead and keeps it; `mark-reported` removes it once it has stamped. Every
+way a sweep pass ends either stamps (audit passed, or ABANDONED: exit 7
+still completes the case) or leaves the case retryable and pending (exit 4,
+the audit failed). If you give up on a pending case by hand, either stamp
+the report that was audited, `journal.py mark-reported <T> --date <day>`,
+or rebuild it on purpose, `journal.py report <T> --date <day> --retry`
+(built and stamped as a plain report). A deferred report whose build
+fails (nothing published) makes nothing pending that was not pending
+before; one whose publish is IN DOUBT (exit 8) stays pending, since its
+new run may be live and was never audited. The sweep's retry after a
+failed audit does rebuild the report, on purpose.
 
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.
