@@ -95,8 +95,12 @@ def revision_index(scan: Any = None, vintage: Any = None) -> RevisionIndex:
         windows.append((vintage.changes_since_previous, older))
         for changes, since in windows:
             for c in changes:
+                # A figure now built from other concepts is a change of
+                # composition, not a revision: Tier 1 skips it, and so must
+                # the card's "reads a revised figure" (review of 626ca1b,
+                # finding 1).
                 if (c.kind != "revised" or c.new_value is None or c.scope != "scored"
-                        or c.explained_by_filing):
+                        or c.explained_by_filing or c.moved_tag):
                     continue
                 # A scored change carries the quarter's own values, whatever
                 # fact the quarter was read from: never a longer period's.

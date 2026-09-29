@@ -35,6 +35,23 @@ class DatasetSnapshot:
     company_facts: dict
 
 
+class ScoredSnapshotUnmappable(RuntimeError):
+    """The mapper tripped (TypeError / AttributeError / KeyError) on a stored
+    snapshot a report scored, during a historical replay. The mapper built
+    that payload when the report scored it, so this is a defect, not a data
+    gap, and it is not passed over — but a bare traceback named neither the
+    snapshot nor the way out (review of 626ca1b, finding 2). Not a
+    ValueError, so no caller reads it as an unmappable payload."""
+
+    def __init__(self, path: Path, captured: str, kind: str, cause: BaseException):
+        self.path, self.captured, self.kind, self.cause = path, captured, kind, cause
+        super().__init__(
+            f"mapper defect on a snapshot a report scored: {path} (captured {captured}, kind "
+            f"{kind}): {type(cause).__name__}: {cause}; move it aside to replay from an "
+            "older state"
+        )
+
+
 def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
     """Read the filing index once for a whole report, or return None.
 
@@ -143,7 +160,7 @@ def replay_snapshot(
     A snapshot a report scored was built by the mapper already, so only an
     unreadable or unmappable one is passed over: a TypeError / AttributeError
     / KeyError there is a mapper defect and raises (review of c131583,
-    finding 3).
+    finding 3), as `ScoredSnapshotUnmappable`, naming the snapshot.
     """
     from app.services.ingestion.vintages import (
         RAW,
@@ -178,6 +195,10 @@ def replay_snapshot(
                            stored.captured, stored.kind or "unrecorded", type(e).__name__, e)
             failed.add(stored.path)
             continue
+        except UNUSABLE as e:
+            # Only a SCORED state reaches here (every other kind skips
+            # UNUSABLE): a mapper defect on a payload a report scored.
+            raise ScoredSnapshotUnmappable(stored.path, stored.captured, SCORED, e) from e
         kind = (
             "scored by a report" if stored.kind == SCORED
             else "a raw watch-sweep capture: no snapshot a report scored by then maps"

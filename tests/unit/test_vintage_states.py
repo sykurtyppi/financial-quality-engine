@@ -26,7 +26,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.schemas.ledger import ValidationStatus
@@ -812,9 +812,9 @@ def test_a_mapped_sweep_capture_is_the_lock_baseline_when_no_report_predates_it(
             "uncalibrated)") in report
     assert "not checked this run: silent revisions" not in report
     assert ("- Silent-revision check: compared 2024-12-29 → 2024-12-31: 0 change(s); since "
-            "pinned thesis 2024-12-27, a sweep capture (mapped): 1 change(s)\n") in report
-    assert ("**Since the pinned thesis was locked** (2024-12-27, a sweep capture (mapped)):"
-            in report)
+            "pinned thesis 2024-12-27, a sweep capture (mapped, complete): 1 change(s)\n") in report
+    assert ("**Since the pinned thesis was locked** (2024-12-27, a sweep capture (mapped, "
+            "complete)):" in report)
     # The ledger: the vintage stream checked, the one promoted fact VALIDATED.
     assert doc["streams"]["vintage"] == "checked"
     assert _silent_items(doc) == [
@@ -836,7 +836,8 @@ def test_no_mappable_capture_before_the_thesis_day_leaves_the_lock_window_not_ch
     assert f"⚠ not checked this run: silent revisions ({gap})" in report
     assert doc["streams"]["vintage"] == f"checked (incomplete: {gap})"
     assert (f"- Silent-revision check: compared 2024-12-29 → 2024-12-31: 0 change(s); since the "
-            f"pinned thesis not compared as scored: {why}\n") in report
+            f"pinned thesis not compared as scored: {why}; 1 capture(s) before the thesis day "
+            "not usable as the lock baseline (1 unmappable)\n") in report
     assert f"**Since the pinned thesis was locked:** Not compared as scored: {why}." in report
     assert "Silent revision:" not in report and _silent_items(doc) == []
 
@@ -854,7 +855,7 @@ def test_the_lock_baseline_capture_is_the_newest_that_maps(tmp_path, caplog):
         rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=D1.date(), root=root,
                           scored_sha=v.digest_of(s2))
     assert rep.baseline.captured == "2024-12-25"
-    assert rep.baseline_source == "a sweep capture (mapped)"
+    assert rep.baseline_source == "a sweep capture (mapped, complete)"
     assert [(c.field_name, c.scope, round(c.pct_change, 6))
             for c in rep.changes_since_baseline] == [("total_assets", "scored", 0.2)]
     assert rep.tier1_gap is None and rep.baseline_unavailable is None
@@ -945,7 +946,7 @@ def test_a_mapper_defect_on_a_scored_snapshot_surfaces_in_the_replay(tmp_path, m
         return real(facts, **kw)
 
     monkeypatch.setattr(edgar_adapter, "build_dataset", defect)
-    with pytest.raises(TypeError, match="unsupported operand"):
+    with pytest.raises(edgar_adapter.ScoredSnapshotUnmappable, match="unsupported operand"):
         edgar_adapter.replay_snapshot(_Client(s2), "XYZ", D3.date(), root=tmp_path)
     # A legacy state (nothing says a report scored it) is still passed over — logged.
     _drop_kinds(tmp_path)
@@ -1041,3 +1042,545 @@ def test_no_vintage_help_says_what_the_check_then_shows(monkeypatch, capsys):
     assert ("--no-vintage do not archive the scored companyfacts payload to data/vintages/ "
             "(the silent-revision check then reads 'not compared' unless the store already "
             "holds identical content)") in text
+
+
+# --- review of 626ca1b ------------------------------------------------------------
+#
+# 1. A capture that MAPS but is incomplete was accepted as the lock baseline: one
+#    missing Assets, or the latest quarters, hid a real +20% revision and read
+#    clean; a newer partial capture beat an older complete one; one missing a
+#    D&A component made 8 recomposed "changes" and false "reads a revised
+#    figure" card notes. A capture is now the lock baseline only if it covers
+#    the scored comparison.
+# 2. A mapper defect on a scored snapshot ended the replay in a traceback that
+#    did not name the snapshot.
+# 3. An old scored state beat a covering capture the day before the lock, so a
+#    pre-lock revision read as one since the lock.
+# 4. The lock walk mapped every capture before the day, uncached.
+# 5. Captures the walk skipped because they do not map were neither logged
+#    nor counted.
+
+D20, D21, D22 = (datetime(2024, 12, d, 12, tzinfo=UTC) for d in (20, 21, 22))
+LOCK = date(2024, 12, 28)
+
+
+def _with(facts: dict, concept: str) -> dict:
+    """The same payload plus an unscored concept: new content, no scored change."""
+    out = copy.deepcopy(facts)
+    out["facts"]["us-gaap"][concept] = {"units": {"USD": [
+        {"end": "2024-06-30", "val": 1, "fy": 2024, "fp": "Q2", "form": "10-Q",
+         "filed": "2024-08-09", "accn": "x"}]}}
+    return out
+
+
+def _drop_quarters(facts: dict, ends) -> dict:
+    """A fetch cut short: every concept's rows for `ends` missing."""
+    out = copy.deepcopy(facts)
+    iso = {e.isoformat() for e in ends}
+    for tags in out["facts"].values():
+        for concept in tags.values():
+            for rows in concept["units"].values():
+                rows[:] = [r for r in rows if r["end"] not in iso]
+    return out
+
+
+def _lock_run(root: Path, pre: list[tuple[datetime, dict]], s1: dict, s2: dict):
+    """Captures `pre` before the thesis day, S1 scored on the 29th, S2 on the
+    31st; the report streams for S2 with the thesis locked on LOCK."""
+    for at, facts in pre:
+        capture(_Client(facts), "XYZ", now=at, root=root, force=True)
+    store_snapshot(CIK, s1, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    _s, _e, tier1, errors, _t, _scan, rep = _collect_streams(
+        _Client(s2), "XYZ", REPORT_DAY, company_facts=s2, vintage_root=root, baseline_day=LOCK)
+    assert errors["vintage"] is None, errors
+    return rep, [line for line in tier1 if line.startswith("Silent revision")]
+
+
+INCOMPLETE_GAP = "since the pinned thesis: not compared as scored, incomplete sweep capture(s) only"
+
+
+def _assert_not_checked(rep, stored: int = 1) -> None:
+    assert rep.baseline is None and rep.changes_since_baseline is None
+    assert rep.baseline_unavailable == (
+        "no snapshot before the pinned thesis day 2024-12-28 covers the scored comparison: "
+        f"incomplete sweep capture(s) only ({stored} stored before it, none scored by a report)")
+    assert rep.tier1_gap == INCOMPLETE_GAP
+    assert ledger._stream_state("vintage", True, {}, rep) == f"checked (incomplete: {INCOMPLETE_GAP})"
+
+
+@pytest.mark.parametrize("partial", [
+    pytest.param(lambda s: _strip(s, ["Assets"]), id="missing-assets"),
+    pytest.param(lambda s: _drop_quarters(s, QUARTER_ENDS[-3:]), id="missing-recent-quarters"),
+])
+def test_an_incomplete_capture_is_not_the_lock_baseline(tmp_path, partial, caplog):
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)  # the truth: +20% since the lock
+    cut = partial(s0)
+    assert v._mapped(cut) is not None  # it maps: 626ca1b took it as the baseline
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep, tier1 = _lock_run(tmp_path, [(D20, cut)], bumped, _with(bumped, "U"))
+    _assert_not_checked(rep)
+    assert tier1 == []  # nothing to promote: the lock window was not compared
+    assert rep.raw_note == (
+        "1 capture(s) before the thesis day not usable as the lock baseline (1 incomplete)")
+    assert "0 change(s); since the pinned thesis not compared as scored" in rep.status_line()
+    assert any("passed over for the thesis-lock baseline: incomplete" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_an_older_complete_capture_beats_a_newer_partial_one(tmp_path):
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    rep, tier1 = _lock_run(tmp_path, [(D20, s0), (D21, _strip(s0, ["Assets"]))],
+                           bumped, _with(bumped, "U"))
+    assert rep.baseline.captured == "2024-12-20"
+    assert rep.baseline_source == "a sweep capture (mapped, complete)"
+    assert [(c.field_name, c.key.end, round(c.pct_change, 6))
+            for c in rep.changes_since_baseline] == [("total_assets", PERIOD, 0.2)]
+    assert len(tier1) == 1 and "between snapshots 2024-12-20 and 2024-12-31" in tier1[0]
+    assert rep.tier1_gap is None
+    assert rep.raw_note == (
+        "1 capture(s) before the thesis day not usable as the lock baseline (1 incomplete)")
+
+
+def test_a_capture_missing_a_component_is_not_the_lock_baseline(tmp_path):
+    # No figure moved: the capture lacks one D&A component, so the mapper
+    # built D&A from depreciation alone there. 626ca1b compared it and read
+    # eight "changes" and "reads a revised figure" card notes.
+    from app.services.reporting.revised_inputs import revision_index
+
+    s0 = _every_field(composites=True)
+    cut = _strip(s0, ["AmortizationOfIntangibleAssets"])
+    assert v._mapped(cut) is not None
+    rep, tier1 = _lock_run(tmp_path, [(D20, cut)], s0, _with(s0, "U"))
+    _assert_not_checked(rep)
+    assert tier1 == [] and not revision_index(None, rep)
+
+
+def test_a_capture_taken_before_a_quarter_was_filed_covers_without_it(tmp_path):
+    # Coverage is judged against what the scored state held the day before
+    # the capture (`build_dataset(as_of=)`): a quarter filed later is not a
+    # gap. The 2024-09-30 quarter is filed 2024-11-09.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    early = datetime(2024, 10, 1, 12, tzinfo=UTC)
+    rep, tier1 = _lock_run(tmp_path, [(early, _drop_quarters(s0, QUARTER_ENDS[-2:]))],
+                           bumped, _with(bumped, "U"))
+    assert rep.baseline.captured == "2024-10-01" and rep.raw_note is None
+    assert [(c.field_name, c.key.end) for c in rep.changes_since_baseline] == [
+        ("total_assets", PERIOD)]
+    assert len(tier1) == 1
+
+
+def test_the_nearest_state_before_the_lock_is_the_baseline(tmp_path):
+    # The +20% was public before the lock: the sweep captured it on the 27th.
+    # The scored state from June is older; the capture is nearer and covers
+    # the comparison, so nothing moved since the lock.
+    s0 = _every_field(composites=False)
+    pre = _bump(s0, "Assets", PERIOD, factor=1.2)
+    root = tmp_path
+    store_snapshot(CIK, s0, now=datetime(2024, 6, 1, 12, tzinfo=UTC), root=root)
+    capture(_Client(pre), "XYZ", now=D27, root=root)
+    s1, s2 = _with(pre, "V"), _with(pre, "U")
+    store_snapshot(CIK, s1, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    _s, _e, tier1, errors, _t, _scan, rep = _collect_streams(
+        _Client(s2), "XYZ", REPORT_DAY, company_facts=s2, vintage_root=root, baseline_day=LOCK)
+    assert rep.baseline.captured == "2024-12-27"
+    assert rep.baseline_source == "a sweep capture (mapped, complete)"
+    assert rep.changes_since_baseline == []
+    assert [line for line in tier1 if line.startswith("Silent revision")] == []
+    assert rep.status_line() == (
+        "compared 2024-12-29 → 2024-12-31: 0 change(s); since pinned thesis 2024-12-27, a "
+        "sweep capture (mapped, complete): 0 change(s)")
+    # A scored state nearer than any covering capture is the baseline, unlabelled.
+    root2 = tmp_path / "scored_nearer"
+    capture(_Client(pre), "XYZ", now=D20, root=root2)
+    store_snapshot(CIK, s0, now=D27, root=root2)
+    store_snapshot(CIK, s1, now=D2, root=root2)
+    store_snapshot(CIK, s2, now=D4, root=root2)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=root2,
+                      scored_sha=v.digest_of(s2))
+    assert rep.baseline.captured == "2024-12-27" and rep.baseline_source is None
+    assert [c.field_name for c in rep.changes_since_baseline] == ["total_assets"]
+
+
+def _counting(monkeypatch) -> list[int]:
+    built: list[int] = []
+    real = v.build_dataset
+    monkeypatch.setattr(v, "build_dataset", lambda *a, **k: built.append(1) or real(*a, **k))
+    return built
+
+
+def test_the_lock_walk_maps_each_content_once(tmp_path, monkeypatch, caplog):
+    # 40 captures alternating between two unmappable contents, then the one
+    # complete capture: each content is mapped once, not once per capture.
+    s0 = _every_field(composites=True)
+    t0 = datetime(2024, 10, 1, 12, tzinfo=UTC)
+    capture(_Client(s0), "XYZ", now=t0, root=tmp_path)
+    for i in range(1, 41):
+        facts = _partial(s0) if i % 2 else dict(_partial(s0), entityName="y")
+        capture(_Client(facts), "XYZ", now=t0 + timedelta(days=i), root=tmp_path, force=True)
+    s1, s2 = _with(s0, "V"), _with(s0, "U")
+    store_snapshot(CIK, s1, now=D2, root=tmp_path)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    built = _counting(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                          scored_sha=v.digest_of(s2))
+    assert rep.baseline.captured == "2024-10-01"
+    assert rep.raw_note == (
+        "40 capture(s) before the thesis day not usable as the lock baseline (40 unmappable)")
+    # Two unmappable contents, the complete capture, the scored state as of
+    # its day, and the two diffs' four builds.
+    assert len(built) == 8
+    # Every capture passed over is logged, a memo hit too.
+    assert sum("passed over for the thesis-lock baseline" in r.getMessage()
+               for r in caplog.records) == 40
+
+
+def test_the_lock_walk_is_bounded(tmp_path, monkeypatch):
+    s0 = _every_field(composites=True)
+    t0 = datetime(2024, 10, 1, 12, tzinfo=UTC)
+    capture(_Client(s0), "XYZ", now=t0, root=tmp_path)
+    for i in range(1, 21):  # twenty distinct contents, none of which maps
+        capture(_Client(dict(_partial(s0), entityName=f"x{i}")), "XYZ",
+                now=t0 + timedelta(days=i), root=tmp_path)
+    s1, s2 = _with(s0, "V"), _with(s0, "U")
+    store_snapshot(CIK, s1, now=D2, root=tmp_path)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    built = _counting(monkeypatch)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                      scored_sha=v.digest_of(s2))
+    tries = v.LOCK_CAPTURES_EXAMINED
+    assert len(built) == tries + 2  # the previous -> newest diff's two builds
+    assert rep.baseline is None and rep.baseline_unavailable == (
+        f"no snapshot before the pinned thesis day 2024-12-28 was usable among the {tries} "
+        "examined (21 stored before it, none scored by a report)")
+    assert rep.raw_note == (
+        f"{tries} capture(s) before the thesis day not usable as the lock baseline ({tries} "
+        f"unmappable); {21 - tries} older capture(s) before the thesis day not examined (at "
+        f"most {tries} per report)")
+    assert rep.tier1_gap == (
+        "since the pinned thesis: not compared as scored, no snapshot examined before the "
+        "thesis day could be used")
+
+
+def test_an_unmappable_capture_before_the_lock_is_logged_and_counted(tmp_path, caplog):
+    s0 = _every_field(composites=False)
+    s1 = _with(s0, "V")
+    older = _bump(s0, "Assets", PERIOD, factor=0.8)
+    root = tmp_path
+    capture(_Client(older), "XYZ", now=D20, root=root)
+    partial = capture(_Client(_partial(s0)), "XYZ", now=D22, root=root)  # ValueError: None
+    bare = capture(_Client(_bare()), "XYZ", now=D24, root=root)
+    store_snapshot(CIK, s0, now=D2, root=root)
+    store_snapshot(CIK, s1, now=D4, root=root)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=root,
+                          scored_sha=v.digest_of(s1))
+    assert rep.baseline.captured == "2024-12-20"
+    assert rep.raw_note == (
+        "2 capture(s) before the thesis day not usable as the lock baseline (2 unmappable)")
+    assert rep.status_line().endswith(rep.raw_note)
+    for c in (partial, bare):
+        assert c.path is not None
+        assert any(c.path.name in r.getMessage() and "does not map" in r.getMessage()
+                   for r in caplog.records)
+
+
+def _recomposed(tmp_path: Path):
+    """Between two SCORED states the filer dropped a D&A component: D&A is
+    built from depreciation alone now — a change of composition."""
+    s0 = _every_field(composites=True)
+    s1 = _strip(s0, ["AmortizationOfIntangibleAssets"])
+    store_snapshot(CIK, s0, now=D2, root=tmp_path)
+    store_snapshot(CIK, s1, now=D4, root=tmp_path)
+    rep = report_diff(CIK, as_of=REPORT_DAY, root=tmp_path, scored_sha=v.digest_of(s1))
+    moved = [c for c in rep.changes_since_previous if c.moved_tag]
+    assert moved and len(moved) == len(rep.changes_since_previous)
+    return rep, moved
+
+
+def test_a_recomposed_figure_is_not_counted_as_a_change(tmp_path):
+    # Listed with its new composition, never "N change(s)".
+    rep, moved = _recomposed(tmp_path)
+    assert rep.status_line() == (
+        f"compared 2024-12-29 → 2024-12-31: 0 change(s) (+{len(moved)} built from other "
+        "concepts: a change of composition, not a revision)")
+
+
+def test_a_recomposed_figure_is_not_a_revised_input(tmp_path):
+    # The card's "reads a revised figure" notes skip it, as Tier 1 does.
+    from app.services.reporting.revised_inputs import revision_index
+
+    rep, _moved = _recomposed(tmp_path)
+    assert not revision_index(None, rep)
+
+
+def _defect_on(monkeypatch, facts: dict) -> None:
+    real = edgar_adapter.build_dataset
+
+    def defect(f, **kw):
+        if v.digest_of(f) == v.digest_of(facts):
+            raise TypeError("unsupported operand type(s) for +: 'NoneType' and 'float'")
+        return real(f, **kw)
+
+    monkeypatch.setattr(edgar_adapter, "build_dataset", defect)
+
+
+def test_a_scored_snapshot_the_replay_cannot_map_is_named(tmp_path, monkeypatch):
+    s1, s2, _s3 = _three_states()
+    store_snapshot(CIK, s1, now=D1, root=tmp_path)
+    stored = store_snapshot(CIK, s2, now=D2, root=tmp_path)
+    _defect_on(monkeypatch, s2)
+    with pytest.raises(edgar_adapter.ScoredSnapshotUnmappable) as caught:
+        edgar_adapter.replay_snapshot(_Client(s2), "XYZ", D3.date(), root=tmp_path)
+    e = caught.value
+    assert stored.path is not None
+    assert (e.path, e.captured, e.kind) == (stored.path, "2024-12-29", "scored")
+    assert isinstance(e.__cause__, TypeError) and not isinstance(e, ValueError)
+    assert str(e) == (
+        f"mapper defect on a snapshot a report scored: {stored.path} (captured 2024-12-29, "
+        "kind scored): TypeError: unsupported operand type(s) for +: 'NoneType' and 'float'; "
+        "move it aside to replay from an older state")
+
+
+def test_generate_report_as_of_names_the_scored_snapshot_and_exits_4(tmp_path, monkeypatch,
+                                                                      capsys):
+    from app.services.journal import reporting as journal_reporting
+    from scripts import generate_report
+
+    s1, s2, _s3 = _three_states()
+    store_snapshot(CIK, s1, now=D1, root=tmp_path)
+    stored = store_snapshot(CIK, s2, now=D2, root=tmp_path)
+    _defect_on(monkeypatch, s2)
+    monkeypatch.setattr(v, "VINTAGES", tmp_path)
+    monkeypatch.setattr(journal_reporting, "SecClient", lambda fresh=False: _Client(s2))
+    monkeypatch.setattr(generate_report, "ROOT", tmp_path)
+    monkeypatch.setattr(generate_report.sys, "argv",
+                        ["generate_report.py", "xyz", "--as-of", "2024-12-30", "--no-docs"])
+    assert generate_report._main() == generate_report.EXIT_SCORED_SNAPSHOT == 4
+    err = capsys.readouterr().err
+    assert stored.path is not None
+    assert err == (
+        f"error: XYZ: mapper defect on a snapshot a report scored: {stored.path} (captured "
+        "2024-12-29, kind scored): TypeError: unsupported operand type(s) for +: 'NoneType' "
+        "and 'float'; move it aside to replay from an older state\n")
+
+
+def test_journal_replay_names_the_scored_snapshot(tmp_path, monkeypatch, capsys):
+    import argparse
+    from types import SimpleNamespace
+
+    from scripts import journal
+
+    e = edgar_adapter.ScoredSnapshotUnmappable(
+        tmp_path / "2024-12-29-abc.json.gz", "2024-12-29", "scored", TypeError("boom"))
+    monkeypatch.setattr(journal.store, "find_entry", lambda t, d: tmp_path / "XYZ_x.md")
+    monkeypatch.setattr(journal.store, "is_v2", lambda p: True)
+    monkeypatch.setattr(journal.store, "load_v2",
+                        lambda p: SimpleNamespace(ticker="XYZ", day=REPORT_DAY))
+    monkeypatch.setattr(journal, "verify_lock", lambda entry: True)
+
+    def raises(*a, **k):
+        raise e
+
+    monkeypatch.setattr(journal, "build_report", raises)
+    args = argparse.Namespace(ticker="XYZ", date=None, no_docs=True, replay=True, fresh=False)
+    assert journal.cmd_report(args) == 1
+    assert capsys.readouterr().err == f"Replay failed: {e}\n"
+    assert str(e).startswith("mapper defect on a snapshot a report scored: ")
+
+
+def test_the_not_checked_text_states_the_capture_rule(tmp_path):
+    rep = report_diff(CIK, as_of=REPORT_DAY, root=tmp_path)  # nothing stored
+    section = " ".join(_silent_revisions_section(rep).split())
+    assert "never compared" not in section
+    assert ("(a raw watch-sweep capture never stands in for either; one is compared only as "
+            "the thesis-lock baseline, when it is the nearest state before the thesis day and "
+            "holds every figure the scored comparison reads)") in section
+
+
+def test_a_capture_fetched_after_a_filing_that_day_covers(tmp_path):
+    # KO's 10-K filed 2025-02-20 moves interest expense to another concept
+    # for three quarters: a sweep fetch that day, after the filing, is
+    # complete, yet differs from the scored state as of the day before. The
+    # fetch time is known only to the day, so the day itself counts too.
+    from app.services.ingestion.companyfacts_mapper import _visible_as_of
+
+    ko = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    fetched = _visible_as_of(ko, date(2025, 2, 20))
+    ref = v._mapped(ko, as_of=date(2025, 2, 19))
+    assert v._coverage_gaps(v._mapped(fetched), ref)  # the day before alone rejects it
+    at = [datetime(2025, 2, d, 12, tzinfo=UTC) for d in (20, 23, 24)]
+    capture(_Client(fetched, 21344), "KO", now=at[0], root=tmp_path)
+    store_snapshot(21344, _with(ko, "V"), now=at[1], root=tmp_path)
+    store_snapshot(21344, _with(ko, "U"), now=at[2], root=tmp_path)
+    rep = report_diff(21344, as_of=date(2025, 2, 24), baseline_day=date(2025, 2, 22),
+                      root=tmp_path, scored_sha=v.digest_of(_with(ko, "U")))
+    assert rep.baseline.captured == "2025-02-20" and rep.baseline_source == v.SWEEP_BASELINE
+    assert rep.raw_note is None and rep.baseline_unavailable is None
+
+
+def test_share_counts_are_not_part_of_coverage(tmp_path):
+    # Split-adjusted fields are never compared (`diff_scored` skips them), so
+    # a capture without them misses nothing the lock window reads.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    cut = _strip(s0, ["WeightedAverageNumberOfDilutedSharesOutstanding"])
+    rep, tier1 = _lock_run(tmp_path, [(D20, cut)], bumped, _with(bumped, "U"))
+    assert rep.baseline.captured == "2024-12-20" and rep.raw_note is None
+    assert len(tier1) == 1
+
+
+def test_a_quarter_older_than_the_compared_span_is_not_a_gap(tmp_path):
+    # The capture lacks 2023-06-30 altogether; the report compares quarters
+    # from `since` on only, so that quarter is outside the comparison.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    capture(_Client(_drop_quarters(s0, [QUARTER_ENDS[5]])), "XYZ", now=D20, root=tmp_path)
+    store_snapshot(CIK, bumped, now=D2, root=tmp_path)
+    store_snapshot(CIK, _with(bumped, "U"), now=D4, root=tmp_path)
+
+    def lock(since):
+        return report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                           since=since, scored_sha=v.digest_of(_with(bumped, "U")))
+
+    assert lock(None).baseline is None  # compared from the capture's first quarter: a gap
+    assert lock(QUARTER_ENDS[5]).baseline is None  # a quarter ending on `since` is compared
+    rep = lock(date(2023, 7, 1))
+    assert rep.baseline.captured == "2024-12-20"
+    assert [c.field_name for c in rep.changes_since_baseline] == ["total_assets"]
+
+
+def test_the_reference_is_the_nearest_scored_state_after_the_lock(tmp_path):
+    # A raw capture on the thesis day itself is not what the pre-lock capture
+    # is checked against: the scored state of the 29th is.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    rep, tier1 = _lock_run(tmp_path, [(D20, s0), (D1, _bare())], bumped, _with(bumped, "U"))
+    assert rep.baseline.captured == "2024-12-20" and rep.baseline_source == v.SWEEP_BASELINE
+    assert len(tier1) == 1
+
+
+def test_the_scored_state_is_built_once_per_day_checked(tmp_path, monkeypatch):
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    capture(_Client(s0), "XYZ", now=D20, root=tmp_path)
+    for concept in ("Assets", "Goodwill", "InventoryNet"):  # three partial fetches on the 22nd
+        capture(_Client(_strip(s0, [concept])), "XYZ", now=D22, root=tmp_path, force=True)
+    s2 = _with(bumped, "U")
+    store_snapshot(CIK, bumped, now=D2, root=tmp_path)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    built = _counting(monkeypatch)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                      scored_sha=v.digest_of(s2))
+    assert rep.baseline.captured == "2024-12-20"
+    assert rep.raw_note == (
+        "3 capture(s) before the thesis day not usable as the lock baseline (3 incomplete)")
+    # Four captures; the scored state as of the 21st, the 22nd and the 19th;
+    # the two diffs' four builds.
+    assert len(built) == 4 + 3 + 4
+
+
+def test_a_capture_fetched_before_that_days_filing_is_checked_once(tmp_path, monkeypatch):
+    # The day before is checked first: a fetch that preceded the day's
+    # filing matches it, and the same-day state is never built.
+    from app.services.ingestion.companyfacts_mapper import _visible_as_of
+
+    ko = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    capture(_Client(_visible_as_of(ko, date(2025, 2, 19)), 21344), "KO",
+            now=datetime(2025, 2, 20, 12, tzinfo=UTC), root=tmp_path)
+    s1, s2 = _with(ko, "V"), _with(ko, "U")
+    store_snapshot(21344, s1, now=datetime(2025, 2, 23, 12, tzinfo=UTC), root=tmp_path)
+    store_snapshot(21344, s2, now=datetime(2025, 2, 24, 12, tzinfo=UTC), root=tmp_path)
+    built = _counting(monkeypatch)
+    rep = report_diff(21344, as_of=date(2025, 2, 24), baseline_day=date(2025, 2, 22),
+                      root=tmp_path, scored_sha=v.digest_of(s2))
+    assert rep.baseline.captured == "2025-02-20" and rep.raw_note is None
+    assert len(built) == 1 + 1 + 4  # the capture, the state as of the 19th, the two diffs
+
+
+def test_a_legacy_state_passed_over_by_both_walks_is_logged_once(tmp_path, caplog):
+    s1, s2 = _scenario_b()
+    store_snapshot(CIK, s1, now=D24, root=tmp_path)
+    odd = store_snapshot(CIK, ODD, now=D26, root=tmp_path)
+    store_snapshot(CIK, s2, now=D2, root=tmp_path)
+    _drop_kinds(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path)
+    assert (rep.previous.captured, rep.baseline.captured) == ("2024-12-24", "2024-12-24")
+    assert odd.path is not None
+    assert sum(odd.path.name in r.getMessage() for r in caplog.records) == 1
+
+
+def test_a_capture_missing_its_own_first_quarter_of_a_field_is_incomplete(tmp_path):
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    cut = copy.deepcopy(s0)
+    first = v._mapped(s0).window[0]
+    for rows in cut["facts"]["us-gaap"]["Goodwill"]["units"].values():
+        rows[:] = [r for r in rows if r["end"] != first.isoformat()]
+    mapped = v._mapped(cut)
+    assert mapped.window[0] == first and first not in mapped.values["goodwill"]
+    rep, tier1 = _lock_run(tmp_path, [(D20, cut)], bumped, _with(bumped, "U"))
+    _assert_not_checked(rep)
+
+
+def test_coverage_is_judged_against_the_state_after_the_lock_not_the_newest(tmp_path):
+    # The filer dropped a D&A component after the scored state of the 29th:
+    # the newest builds D&A from depreciation alone. The capture matches the
+    # state nearest after the lock, so it covers; its D&A rows against the
+    # newest are a change of composition, not counted, and the revision is
+    # still found.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    newest = _strip(bumped, ["AmortizationOfIntangibleAssets"])
+    rep, tier1 = _lock_run(tmp_path, [(D20, s0)], bumped, newest)
+    assert rep.baseline.captured == "2024-12-20" and rep.baseline_source == v.SWEEP_BASELINE
+    assert len(tier1) == 1 and "total_assets" in tier1[0]
+    assert "since pinned thesis 2024-12-20, a sweep capture (mapped, complete): 1 change(s) (+" in (
+        rep.status_line())
+
+
+def test_a_capture_is_not_checked_against_a_scored_state_of_its_own_day(tmp_path):
+    # The 27th holds a scored state (D&A from depreciation alone, as the
+    # filer then reported it) and, observed after it, a complete sweep
+    # capture: the nearer state is the capture, checked against the scored
+    # state after the thesis day — not the earlier one of its own day.
+    s0 = _every_field(composites=True)
+    root = tmp_path
+    store_snapshot(CIK, _strip(s0, ["AmortizationOfIntangibleAssets"]), now=D27, root=root)
+    capture(_Client(s0), "XYZ", now=D27, root=root, force=True)
+    s1, s2 = _with(s0, "V"), _with(s0, "U")
+    store_snapshot(CIK, s1, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=root,
+                      scored_sha=v.digest_of(s2))
+    assert rep.baseline.captured == "2024-12-27" and rep.baseline_source == v.SWEEP_BASELINE
+    assert rep.changes_since_baseline == []
+
+
+def test_a_scored_state_past_the_bound_is_still_the_baseline(tmp_path):
+    # The bound limits mapper builds, not the walk: an older scored state
+    # costs nothing to accept, and the captures not examined are counted.
+    s0 = _every_field(composites=False)
+    t0 = datetime(2024, 10, 1, 12, tzinfo=UTC)
+    store_snapshot(CIK, s0, now=t0, root=tmp_path)
+    for i in range(1, 13):
+        capture(_Client(dict(_partial(s0), entityName=f"x{i}")), "XYZ",
+                now=t0 + timedelta(days=i), root=tmp_path)
+    s2 = _bump(s0, "Assets", PERIOD, factor=1.2)
+    store_snapshot(CIK, _with(s2, "V"), now=D2, root=tmp_path)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                      scored_sha=v.digest_of(s2))
+    tries = v.LOCK_CAPTURES_EXAMINED
+    assert rep.baseline.captured == "2024-10-01" and rep.baseline_source is None
+    assert [c.field_name for c in rep.changes_since_baseline] == ["total_assets"]
+    assert rep.raw_note.endswith(
+        f"{tries} capture(s) before the thesis day not usable as the lock baseline ({tries} "
+        f"unmappable); {12 - tries} older capture(s) before the thesis day not examined (at "
+        f"most {tries} per report)")
