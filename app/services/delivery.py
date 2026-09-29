@@ -23,6 +23,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from app.services.reporting.report_files import existing_mode
+
 DROP_ENV = "FQE_BRIEF_DROP"
 NO_NOTIFY_ENV = "FQE_NO_NOTIFY"
 ICLOUD_DRIVE = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
@@ -47,7 +49,9 @@ def publish(brief: Path, dest_root: Path | None = None) -> Path | None:
 
     Copied to a temporary name beside it and renamed over it: a symlink
     planted at the name is replaced, never written through, and the synced
-    folder never holds half a brief (Hermes audit of 424b0b4, finding 5)."""
+    folder never holds half a brief (Hermes audit of 424b0b4, finding 5).
+    The copy it replaces keeps its mode, as the copy written over it in
+    place did: a brief made 0o640 there stays 0o640."""
     root = dest_root if dest_root is not None else drop_folder()
     if root is None:
         return None
@@ -56,6 +60,9 @@ def publish(brief: Path, dest_root: Path | None = None) -> Path | None:
     tmp = root / f".{brief.name}.{uuid.uuid4().hex[:8]}.tmp"
     try:
         shutil.copyfile(brief, tmp)
+        mode = existing_mode(dest)
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)

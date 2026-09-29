@@ -79,6 +79,7 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_pit_agreement.py", "tests/unit/test_vintage_capture_from_reports.py",
         "tests/unit/test_vintage_amendment.py", "tests/unit/test_tag_switch_fallback.py",
         "tests/unit/test_vintage_cli.py", "tests/unit/test_vintage_states.py",
+        "tests/unit/test_symlink_containment.py",
     )),
     Target("app/services/backtesting/pit.py", (
         "tests/unit/test_pit_agreement.py", "tests/unit/test_build_dataset_as_of.py",
@@ -110,7 +111,7 @@ TARGETS: tuple[Target, ...] = (
     )),
     Target("app/services/reporting/report_files.py", (
         "tests/unit/test_report_files.py", "tests/unit/test_earnings_brief.py",
-        "tests/unit/test_watch_cli.py",
+        "tests/unit/test_watch_cli.py", "tests/unit/test_symlink_containment.py",
     )),
     Target("app/services/journal/resolver.py", (
         "tests/unit/test_journal_resolver.py", "tests/unit/test_assumption_vocabulary.py",

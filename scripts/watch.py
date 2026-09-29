@@ -111,6 +111,7 @@ from app.services.reporting.report_files import (
     PUBLISH_IN_DOUBT_RC,
     PublishInDoubt,
     is_live_report,
+    own_dir,
     write_atomic,
 )
 from app.services.watch import watchlist as wl
@@ -417,18 +418,38 @@ def _run_brief(ticker: str, report: Path | None) -> int:
     print(f"  -> {' '.join(cmd[1:])}")
     rc = subprocess.run(cmd, cwd=ROOT).returncode
     target = NO_REPORT_MARK if report is None else str(report)
-    if rc != 0:
-        prior = _queue_read(ticker, target)
-        attempts = (prior[1] + 1) if prior and prior[0] == target else 1
-        _queue_write(ticker, target, attempts)  # a new failure re-arms the alert
-        print(f"  brief FAILED (exit {rc}) — queued at {_queue_path(ticker, target)} "
-              f"(attempt {attempts}) and retried on the next sweep pass (or run "
-              f"`earnings_brief.py {' '.join(cmd[2:])}` by hand).", file=sys.stderr)
-    else:
-        _queue_clear(ticker, target)
-        if report is not None:
-            _queue_clear(ticker, NO_REPORT_MARK)
+    try:
+        if rc != 0:
+            prior = _queue_read(ticker, target)
+            attempts = (prior[1] + 1) if prior and prior[0] == target else 1
+            _queue_write(ticker, target, attempts)  # a new failure re-arms the alert
+            print(f"  brief FAILED (exit {rc}) — queued at {_queue_path(ticker, target)} "
+                  f"(attempt {attempts}) and retried on the next sweep pass (or run "
+                  f"`earnings_brief.py {' '.join(cmd[2:])}` by hand).", file=sys.stderr)
+        else:
+            _queue_clear(ticker, target)
+            if report is not None:
+                _queue_clear(ticker, NO_REPORT_MARK)
+    except OSError as e:
+        # The queue cannot be used (`.pending` a link, refused; a full disk).
+        # Said here with the build's own outcome, and never 0, rather than
+        # raised out of `_act` before the journal entry is marked reported.
+        outcome = (f"the brief FAILED (exit {rc}) and is NOT queued" if rc else
+                   "the brief was built, but its queue entry could not be cleared")
+        print(f"  brief queue {BRIEF_PENDING} unusable ({type(e).__name__}: {e}) — "
+              f"{outcome}; fix the queue directory, then run "
+              f"`earnings_brief.py {' '.join(cmd[2:])}` by hand if needed.", file=sys.stderr)
+        return rc or BRIEF_PENDING_RC
     return rc
+
+
+def _pending() -> Path:
+    """The brief queue's directory, refused when it is a symlink
+    (`own_dir`): with ``.pending`` a link out, a failed build's marker was
+    written, a success's removed, and every file the retry could not parse
+    as a marker deleted, in the directory it named (Hermes audit of 424b0b4,
+    finding 5)."""
+    return own_dir(BRIEF_PENDING)
 
 
 def _queue_path(ticker: str, target: str) -> Path:
@@ -442,12 +463,12 @@ def _queue_path(ticker: str, target: str) -> Path:
     (``safe_ticker``), so ``<TICKER>__*`` never matches another ticker's
     markers, nor the legacy bare ``<TICKER>`` one."""
     key = PRINT_NIGHT_KEY if target == NO_REPORT_MARK else Path(target).stem
-    return BRIEF_PENDING / f"{ticker}{QUEUE_SEP}{key}"
+    return _pending() / f"{ticker}{QUEUE_SEP}{key}"
 
 
 def _legacy_path(ticker: str) -> Path:
     """The ticker-keyed marker written before the queue was per event."""
-    return BRIEF_PENDING / ticker
+    return _pending() / ticker
 
 
 class _Marker(NamedTuple):
@@ -511,7 +532,7 @@ def _queue_markers(ticker: str) -> list[Path]:
     ticker-only one if one is still on disk. Parseable or not — the retry
     must see an unreadable marker to remove it. Never a write_atomic
     temporary (``.<name>.<hex>.tmp``), which starts with a dot."""
-    found = sorted(p for p in BRIEF_PENDING.glob(f"{ticker}{QUEUE_SEP}*") if p.is_file())
+    found = sorted(p for p in _pending().glob(f"{ticker}{QUEUE_SEP}*") if p.is_file())
     legacy = _legacy_path(ticker)
     return found + ([legacy] if legacy.is_file() else [])
 
@@ -547,7 +568,7 @@ def _queue_write(ticker: str, target: str, attempts: int, alerted: str = "", *,
     fsynced and renamed over the marker, so a kill mid-write leaves the old
     marker or the new one, never the torn one a plain write left. Empty
     fields are not written."""
-    BRIEF_PENDING.mkdir(parents=True, exist_ok=True)
+    _pending().mkdir(parents=True, exist_ok=True)
     fields = {"alerted": alerted, "gave_up": gave_up, "accession": accession}
     body = f"{target}\nattempts={attempts}\n" + "".join(
         f"{name}={value}\n" for name, value in fields.items() if value)

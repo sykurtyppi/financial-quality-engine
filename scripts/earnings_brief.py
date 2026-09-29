@@ -52,6 +52,7 @@ from app.services.brief.sources import (
     BriefSources,
     SourceFile,
     brief_sha256,
+    brief_workdir,
     collect_sources,
     read_build_record,
 )
@@ -151,8 +152,10 @@ def write_built_meta(ticker: str, event_day: str, *, kind: str, accession: str,
     bytes as read back here: the record vouches for that brief only. Written
     atomically and LAST, after the brief and its assessment, so a kill at
     any point leaves either this build's record beside this build's brief,
-    or an older record whose hash no longer matches, which reads as none."""
-    p = built_meta_path(ticker, event_day, root)
+    or an older record whose hash no longer matches, which reads as none.
+    Into the brief's own work directory, never through a link planted
+    there (`brief_workdir`)."""
+    p = brief_workdir(ticker, event_day, root) / BUILT_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
     write_atomic(p, json.dumps({
         "kind": kind, "accession": accession,
@@ -422,9 +425,15 @@ def cmd_digest(args: argparse.Namespace) -> int:
     text = build_digest(paths, since, today)
     out = Path(args.out) if args.out else BRIEFS / f"DIGEST_{today.isoformat()}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    # Replaced whole: a symlink planted at the name is replaced, never
-    # written through (Hermes audit of 424b0b4, finding 5).
-    write_atomic(out, text)
+    if args.out:
+        # The operator's own path, written through as it stands: a link they
+        # keep there (to a synced file) stays a link, a FIFO or a device a
+        # stream. Replacing a file whole is for the engine's own name.
+        out.write_text(text)
+    else:
+        # The engine's own name, replaced whole: a symlink planted there is
+        # replaced, never written through (Hermes audit of 424b0b4, finding 5).
+        write_atomic(out, text)
     print(text)
     print(f"digest -> {out}")
     return 0
