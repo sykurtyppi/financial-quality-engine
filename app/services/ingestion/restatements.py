@@ -968,7 +968,10 @@ def _rebuild_drift(
 
 def _unordered(selection: SeriesSelection | str | None) -> tuple | None:
     if isinstance(selection, SeriesSelection):
-        return (selection.composer, *sorted(selection.components))
+        # A quarter filled from another concept (`fallbacks`, when the
+        # selection carries them) is part of what the report read.
+        fallbacks = tuple(getattr(selection, "fallbacks", ()))
+        return (selection.composer, *sorted(selection.components), fallbacks)
     return None if selection is None else tuple(sorted(selection.split("+")))
 
 

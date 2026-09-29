@@ -145,7 +145,12 @@ TICKERS = ["AAPL", "KO", "CRM"]
 def test_every_claim_is_sourced_and_every_source_exists(ticker, tmp_path):
     doc, _report, result, ds, diag, facts, root = _run(ticker, tmp_path)
     assert doc.unsourced == []
-    assert set(doc.streams.values()) == {"checked"}
+    # Every stream ran. The restatement scan of these trimmed fixtures is
+    # incomplete (fields with no mapped series), and the ledger says so as
+    # the report does, rather than a bare "checked" (review of #106).
+    assert {k: v for k, v in doc.streams.items() if k != "restatements"} == dict.fromkeys(
+        ("offerings", "events", "filing_events", "vintage"), "checked")
+    assert doc.streams["restatements"].startswith("checked (incomplete: inspected ")
     kinds = {(i.plane.value, i.kind) for i in doc.items}
     assert {
         ("accounting", "metric"), ("accounting", "restatement_footprint"),
