@@ -313,13 +313,14 @@ class TestFreshPropagation:
     def test_journal_generate_always_passes_fresh(self, monkeypatch):
         recorded = {}
 
-        def fake_run(cmd, cwd=None):
+        def fake_run(cmd, cwd=None, env=None):
             recorded["cmd"] = cmd
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(watch_cli.subprocess, "run", fake_run)
         assert watch_cli._generate("NVDA", "2026-08-26", no_docs=False) == 0
         assert "--fresh" in recorded["cmd"]
+        assert "--no-docs" not in recorded["cmd"]
         assert "--defer-mark" in recorded["cmd"]  # mark happens only post-audit
         assert recorded["cmd"][recorded["cmd"].index("--date") + 1] == "2026-08-26"
 
@@ -2050,6 +2051,62 @@ class TestAPublishInDoubt:
         assert watch_cli._worst([9]) == 9 and watch_cli._worst([10, 9]) == 10
 
 
+class TestAChildKilledByASignal:
+    """rev28c_signal: a child killed by a signal (OOM, SIGKILL) returns a
+    negative code, which `_worst` ranked below 0: beside a name that waited
+    or completed, the sweep exited 0 with that entry left pending."""
+
+    @staticmethod
+    def _killed() -> int:
+        import subprocess
+        import sys
+
+        return subprocess.run([sys.executable, "-c",
+                               "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
+                              ).returncode
+
+    def test_it_counts_as_an_error(self):
+        rc = self._killed()
+        assert rc < 0
+        assert watch_cli._worst([rc, 3]) == 1 and watch_cli._worst([rc, 0]) == 1
+        assert watch_cli._worst([rc]) == 1 and watch_cli._worst([rc, 4]) == 1
+        assert watch_cli._worst([rc, 8]) == 8 and watch_cli._worst([-1, 5]) == 1
+
+    def test_the_sweep_exits_1_and_names_the_signal(self, sweep_env, monkeypatch):
+        rc = self._killed()
+        sweep_env.table.update({"AAPL": "generate", "NVDA": "refuse"})
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: rc)
+        assert watch_cli.cmd_sweep(_sweep_args()) == 1
+        (title, text), = sweep_env.notified
+        assert f"AAPL: killed by signal {-rc}" in text
+
+
+class TestTheSweepOwnsTheReportItDefers:
+    """The pending marker names the sweep (or poll) that will audit the
+    report, not the `journal.py report --defer-mark` child, which exits
+    once it has published: `_generate` hands the child its identity."""
+
+    def test_generate_hands_its_child_the_sweeps_identity(self, monkeypatch, tmp_path):
+        import json
+        import os
+
+        monkeypatch.setattr(watch_cli, "SWEEP_LOCK", tmp_path / "sweep.lock")
+        seen = []
+        cmds = []
+        monkeypatch.setattr(watch_cli.subprocess, "run", lambda cmd, **kw: seen.append(kw)
+                            or cmds.append(cmd) or SimpleNamespace(returncode=0))
+        assert watch_cli._generate("NVDA", "2026-08-26", True) == 0
+        assert watch_cli._generate("NVDA", "2026-08-26", True) == 0
+        assert cmds[0][-3:] == ["--date", "2026-08-26", "--no-docs"]
+        owners = [json.loads(kw["env"]["FQE_REPORT_OWNER"]) for kw in seen]
+        assert owners[0] == owners[1]  # one owner for the whole run
+        assert owners[0]["pid"] == os.getpid() and owners[0]["host"] == os.uname().nodename
+        assert owners[0]["lock"] == str(watch_cli.SWEEP_LOCK) and len(owners[0]["token"]) >= 16
+        assert all(kw["env"]["PATH"] == os.environ["PATH"] for kw in seen)  # the rest as is
+        assert "FQE_REPORT_OWNER" not in os.environ  # handed to the child only
+        assert all(kw["cwd"] == watch_cli.ROOT for kw in seen)
+
+
 # --- review of the 3b fix: the entry's report is PENDING while the sweep audits it --------
 # `journal.py report --defer-mark` leaves a marker that makes a plain
 # `journal.py report` (or the web page) refuse until `mark-reported`. Here
@@ -2061,10 +2118,10 @@ class TestAPublishInDoubt:
 class TestAReportPendingItsAudit:
     DAY = "2026-08-26"  # poll_env's pinned thesis entry
 
-    def _journal(self, poll_env, monkeypatch, tmp_path, audits):
+    @staticmethod
+    def _entry(store, day: str):
         from datetime import date, datetime
 
-        from app.services.journal import store
         from app.services.journal.schema_v2 import (
             Assumption,
             BeforeBlock,
@@ -2072,25 +2129,40 @@ class TestAReportPendingItsAudit:
             lock_entry,
         )
 
-        monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
-        path = store.save_v2(lock_entry(EntryV2(
-            ticker="NVDA", day=date.fromisoformat(self.DAY),
-            opened=datetime(2026, 8, 26, 9, tzinfo=UTC),
+        d = date.fromisoformat(day)
+        return store.save_v2(lock_entry(EntryV2(
+            ticker="NVDA", day=d, opened=datetime(d.year, d.month, d.day, 9, tzinfo=UTC),
             before=BeforeBlock(thesis="data-center demand holds", conviction=3,
                                intended_action="hold",
                                assumptions=[Assumption(metric="revenue", comparator=">",
                                                        threshold=1.0, window="FY2026Q2",
                                                        source="10-Q",
-                                                       resolve_by=date(2026, 9, 15))]))))
+                                                       resolve_by=date(2026, 12, 15))]))))
+
+    def _journal(self, poll_env, monkeypatch, tmp_path, audits):
+        import os
+        from unittest import mock
+
+        from app.services.journal import store
+
+        monkeypatch.setattr(store, "ENTRIES", tmp_path / "entries")
+        path = self._entry(store, self.DAY)
         spec = importlib.util.spec_from_file_location("journal_cli_watch",
                                                       ROOT / "scripts" / "journal.py")
         journal = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(journal)
         report = tmp_path / f"NVDA_{self.DAY}.md"
-        journal.build_report = lambda *a, **k: (report, "no acute signals")
+        self.journal, self.built = journal, []
+        journal.build_report = lambda *a, **k: self.built.append(a) or (
+            report, "no acute signals")
         ns = {"no_docs": True, "fresh": True}
-        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: journal.cmd_report(
-            Namespace(ticker=t, date=day, defer_mark=True, **ns)))
+
+        def generate(t, day, nd):
+            # As `_generate`'s child runs: handed the sweep's identity.
+            with mock.patch.dict(os.environ, watch_cli._report_owner_env()):
+                return journal.cmd_report(Namespace(ticker=t, date=day, defer_mark=True, **ns))
+
+        monkeypatch.setattr(watch_cli, "_generate", generate)
         monkeypatch.setattr(watch_cli, "_mark_reported", lambda t, day: journal.cmd_mark_reported(
             Namespace(ticker=t, date=day)))
         monkeypatch.setattr(watch_cli, "_latest_report", lambda t, d: report)
@@ -2099,6 +2171,62 @@ class TestAReportPendingItsAudit:
         plain = lambda: journal.cmd_report(Namespace(ticker="NVDA", date=self.DAY,  # noqa: E731
                                                      defer_mark=False, **ns))
         return store, path, plain
+
+    def test_a_retry_by_hand_during_the_audit_is_refused(self, poll_env, monkeypatch, tmp_path):
+        """rev28c_pid, end to end: while the sweep audits the report (its
+        `journal.py report --defer-mark` child long gone), the operator's
+        `--retry` is refused; the audit passes and the sweep stamps the
+        report it audited."""
+        import os
+        from unittest import mock
+
+        _force_decision(monkeypatch, "generate")
+        store, path, _ = self._journal(poll_env, monkeypatch, tmp_path, [0])
+        retried = []
+
+        def audit(report):
+            with mock.patch.dict(os.environ):
+                os.environ.pop("FQE_REPORT_OWNER", None)  # the operator's shell
+                retried.append(self.journal.cmd_report(Namespace(
+                    ticker="NVDA", date=self.DAY, defer_mark=False, retry=True,
+                    no_docs=True, fresh=True)))
+            return 0
+
+        monkeypatch.setattr(watch_cli, "_run_audit", audit)
+        assert watch_cli.cmd_poll(_poll_args()) == 0
+        assert retried == [1] and len(self.built) == 1
+        assert store.load_v2(path).reported is not None and store.report_pending(path) is None
+
+    def test_a_failed_audit_names_the_entry_to_stamp(
+            self, poll_env, monkeypatch, tmp_path, capsys):
+        """rev28c_nodate: the exit-4 message named `journal.py mark-reported
+        NVDA` without `--date`, which stamps the ticker's NEWEST entry: here
+        a later one, never reported, and not the one whose report was
+        audited (left unstamped and pending)."""
+        import re
+        import shlex
+
+        _force_decision(monkeypatch, "generate")
+        store, path, _ = self._journal(poll_env, monkeypatch, tmp_path, [4])
+        newer = self._entry(store, "2026-09-01")
+        assert watch_cli.cmd_poll(_poll_args()) == 4
+        hints = re.findall(r"`journal\.py (mark-reported [^`]+)`", capsys.readouterr().err)
+        assert len(hints) == 1
+        assert self.journal.cmd_mark_reported(
+            self.journal.build_parser().parse_args(shlex.split(hints[0]))) == 0
+        assert store.load_v2(path).reported is not None and store.report_pending(path) is None
+        assert store.load_v2(newer).reported is None
+
+    def test_with_no_entry_pinned_the_hint_names_none(self, poll_env, monkeypatch, capsys):
+        """No `--date` to give (an ad-hoc poll without --entry-day): the
+        report was generated for the newest entry, and the hint says the
+        same command, not `--date None`."""
+        monkeypatch.setattr(watch_cli, "_generate", lambda t, day, nd: 0)
+        monkeypatch.setattr(watch_cli, "_latest_report", lambda t, d: Path("/tmp/r.md"))
+        monkeypatch.setattr(watch_cli, "_run_audit_capped", lambda report: (4, False))
+        watch = _watch("NVDA", thesis_entry=None)
+        assert watch_cli._act("NVDA", watch, Decision("generate", "x"), _poll_args()) == 4
+        assert "`journal.py mark-reported NVDA`." in capsys.readouterr().err
 
     def test_a_failed_audit_keeps_it_pending_and_a_plain_report_refused(
             self, poll_env, monkeypatch, tmp_path):

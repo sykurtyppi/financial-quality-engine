@@ -235,10 +235,18 @@ def test_the_report_page_refuses_while_the_sweep_audits_that_report(client, monk
     path = _seed("KO", "steady staple", 3, "hold")
     built = []
     monkeypatch.setattr(reporting, "build_report", lambda *a, **k: built.append(a))
+    import json
+    import os
+
+    monkeypatch.setenv("FQE_REPORT_OWNER", json.dumps({  # as the sweep's child records it
+        "name": "watch.py", "pid": 4242, "host": os.uname().nodename,
+        "token": "0123456789abcdef", "lock": "/j/sweep.lock"}))
     store.set_report_pending(path, "journal.py report --defer-mark")
     r = client.get("/report/KO")
     assert r.status_code == 409
-    assert "being audited" in r.text and "mark-reported KO" in r.text and "--retry" in r.text
+    assert "pending (being audited by the sweep, or left by an interrupted run" in r.text
+    assert "pid 4242" in r.text and "/j/sweep.lock" in r.text  # its owner, shown
+    assert "mark-reported KO" in r.text and "--retry" in r.text
     assert built == [] and not store.parse_entry(path)["is_reported"]
     assert store.report_pending(path) is not None
 
@@ -464,6 +472,9 @@ class TestV2ReadOnly:
         loc = client.get("/report/MXL").headers["location"]
         r = client.get(loc)
         assert r.status_code == 200 and "preregistered (v2) case" in r.text
+        # The command named is the entry's: without --date, the newest entry's.
+        day = store.find_entry("MXL").stem.split("_", 1)[1]
+        assert f"scripts/journal.py report MXL --date {day}" in r.text
 
 
 def test_one_unreadable_entry_does_not_lose_every_other_case(client, monkeypatch):

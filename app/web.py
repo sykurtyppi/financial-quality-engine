@@ -128,7 +128,8 @@ def report_view(request: Request, ticker: str, date: str | None = None,
         return RedirectResponse(
             "/?error=" + quote_plus(
                 f"{store.safe_ticker(ticker)} is a preregistered (v2) case. The web UI shows "
-                "it read-only; generate its report with `scripts/journal.py report` so the "
+                "it read-only; generate its report with `scripts/journal.py report "
+                f"{store.safe_ticker(ticker)} --date {path.stem.split('_', 1)[1]}` so the "
                 "lock is verified."),
             status_code=303)
     entry = store.parse_entry(path)
@@ -170,10 +171,11 @@ def _generate_and_stamp(path: Path, ticker: str, day: str) -> tuple[str | None, 
         # sweep is auditing it; it stamps it once the audit passes (review of
         # the finding-3b fix: the page built and published over the run being
         # audited, and stamped it). Refused: nothing is built.
-        return (f"This case's report is being audited ({pending}) and is stamped once the "
-                "audit passes; not building another over it. Once the audit has passed: "
-                f"`{cli('mark-reported')}`; to rebuild it on purpose: "
-                f"`{cli('report')} --retry`."), 409
+        return (f"This case's report is pending (being audited by the sweep, or left by an "
+                f"interrupted run): {pending}. It is stamped once the audit passes; not "
+                f"building another over it. Once the audit has passed: "
+                f"`{cli('mark-reported')}`; to rebuild it on purpose (once its owner is "
+                f"gone): `{cli('report')} --retry`."), 409
     try:
         # fresh=True: the first report LOCKS the thesis against what was
         # fetched. A <24h EDGAR cache can still hold pre-filing data on a

@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -816,7 +817,9 @@ def test_retry_rebuilds_a_pending_report_on_purpose(tmp_path, monkeypatch, capsy
     path = _either(tmp_path, monkeypatch, v2)
     cli = _cli()
     built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=_dead_pid())  # the sweep that deferred it has exited
     assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    _by_hand(monkeypatch)
     assert cli.cmd_report(_report_ns(path, retry=True)) == 0
     assert len(built) == 2 and _is_reported(path)
     assert store.report_pending(path) is None  # the case is reported: nothing pends
@@ -835,8 +838,10 @@ def test_the_sweeps_own_retry_is_allowed_and_keeps_the_marker(tmp_path, monkeypa
     assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
     first = store.report_pending(path)
     assert first is not None and "--defer-mark" in first
+    inode = path.with_name(f".{path.name}.report.pending").stat().st_ino
     assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
     assert len(built) == 2 and store.report_pending(path) == first
+    assert path.with_name(f".{path.name}.report.pending").stat().st_ino == inode  # kept
     assert not _is_reported(path)
 
 
@@ -955,11 +960,25 @@ def test_a_marker_that_cannot_be_removed_after_the_stamp_is_said_not_raised(
 
 
 def test_the_marker_is_a_hidden_sidecar_written_whole(tmp_path, monkeypatch):
+    import json
+
     path = _seed(tmp_path, monkeypatch, reported=False)
+    _by_hand(monkeypatch)
     store.set_report_pending(path, "journal.py report --defer-mark")
     marker = path.with_name(f".{path.name}.report.pending")
-    assert marker.is_file() and "journal.py report --defer-mark" in marker.read_text()
-    assert store.report_pending(path) == marker.read_text(encoding="utf-8").strip()
+    doc = json.loads(marker.read_text(encoding="utf-8"))
+    assert doc["by"] == "journal.py report --defer-mark" and doc["marked"]
+    owner = store.ReportOwner.loads(doc["owner"])
+    assert owner == store.report_owner() and owner.pid == os.getpid() and owner.lock is None
+    assert store.report_pending(path) == (
+        f"marked {doc['marked']} by journal.py report --defer-mark, for "
+        f"{owner.name}, pid {owner.pid} on {owner.host}")
+    assert store.pending_marker(path) == (store.report_pending(path), owner)
+    handed = _owner(monkeypatch, pid=4242, lock=tmp_path / "sweep.lock")  # the sweep's child
+    store.set_report_pending(path, "journal.py report --defer-mark")  # replaced whole
+    assert store.pending_marker(path).owner == store.ReportOwner(**handed)
+    assert store.report_pending(path).endswith(
+        f", for watch.py, pid 4242 on {handed['host']}, under the sweep lock {handed['lock']}")
     assert _leftovers(tmp_path) == [] and store.list_entries() == [path]
     store.clear_report_pending(path)
     assert not marker.exists() and store.report_pending(path) is None
@@ -973,16 +992,435 @@ def test_a_marker_that_cannot_be_read_still_pends(tmp_path, monkeypatch):
     path = _seed(tmp_path, monkeypatch, reported=False)
     store.set_report_pending(path, "journal.py report --defer-mark")
     marker = path.with_name(f".{path.name}.report.pending")
-    real = Path.read_text
+    real = os.open
 
-    def read_text(self, *a, **k):
-        if self == marker:
+    def cannot(p, *a, **k):
+        if Path(p) == marker:
             raise OSError(errno.EIO, "injected")
-        return real(self, *a, **k)
+        return real(p, *a, **k)
 
-    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(os, "open", cannot)
+    pending = store.pending_marker(path)
+    assert pending is not None and "cannot be read" in pending.text and pending.owner is None
+    monkeypatch.setattr(os, "open", real)
+    marker.write_bytes(b"\xff\xfe not UTF-8")
+    pending = store.pending_marker(path)
+    assert pending is not None and "cannot be read" in pending.text and pending.owner is None
+
+
+# --- review of the pending marker: it names its OWNER, the sweep ------------------------
+# The marker named the pid of the `journal.py report --defer-mark` child, which
+# exits as soon as it has published: for the whole audit it protects, the pid
+# it named was dead. An operator checking it read it as stale and took the
+# named way out, `--retry`, which built and published over the run being
+# audited and stamped it (the sweep's audit then failed, or its
+# `mark-reported` found "already reported"); a `--defer-mark` run by hand did
+# the same. watch.py now hands its child an owner (its own pid, host, a token
+# and the sweep lock) that the marker records; `--retry` and a `--defer-mark`
+# of another owner go ahead only once that owner is demonstrably gone (its pid
+# not running on this host and the sweep lock free), `--retry --force` on
+# purpose.
+
+_OWNER_ENV = "FQE_REPORT_OWNER"
+
+
+def _dead_pid() -> int:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def _owner(monkeypatch, *, pid: int, lock: Path | None = None, host: str | None = None) -> dict:
+    """What follows runs as the child of a sweep (watch.py `_generate`), whose
+    identity it is handed. The format is the contract between the two."""
+    import json
+    import uuid
+
+    owner = {"name": "watch.py", "pid": pid, "host": host or os.uname().nodename,
+             "token": uuid.uuid4().hex, "lock": None if lock is None else str(lock)}
+    monkeypatch.setenv(_OWNER_ENV, json.dumps(owner))
+    return owner
+
+
+def _by_hand(monkeypatch):
+    """What follows is run by hand: no sweep handed it anything."""
+    monkeypatch.delenv(_OWNER_ENV, raising=False)
+
+
+@contextmanager
+def _held(lock: Path):
+    """The sweep lock, held as a running sweep or poll holds it."""
+    import fcntl
+
+    with open(lock, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def test_the_marker_names_the_sweep_not_its_child_and_a_retry_waits_for_it(
+        tmp_path, monkeypatch, capsys):
+    """rev28c_pid: the sweep's `journal.py report --defer-mark` is a child
+    process, gone before the audit starts. The marker must name the sweep
+    (here: this process, auditing), and `--retry` refuse while it runs."""
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    lock = tmp_path / "sweep.lock"
+    _owner(monkeypatch, pid=os.getpid(), lock=lock)
+    child = textwrap.dedent(f"""\
+        import importlib.util, sys
+        from pathlib import Path
+        sys.path.insert(0, {str(ROOT)!r})
+        from app.services.journal import store
+        store.ENTRIES = Path({str(tmp_path)!r})
+        spec = importlib.util.spec_from_file_location("j", {str(ROOT / "scripts" / "journal.py")!r})
+        j = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(j)
+        j.build_report = lambda *a, **k: (Path("x.md"), "no acute signals")
+        sys.argv = ["journal.py", "report", "TST", "--date", "2026-07-27", "--no-docs",
+                    "--defer-mark"]
+        sys.exit(j.main())
+        """)
+    done = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True,
+                          timeout=60, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    assert done.returncode == 0, done.stderr
     pending = store.report_pending(path)
-    assert pending is not None and "cannot be read" in pending
+    assert pending is not None and f"pid {os.getpid()}" in pending and str(lock) in pending
+    _by_hand(monkeypatch)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    capsys.readouterr()
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 1  # the sweep is auditing it
+    err = capsys.readouterr().err
+    assert built == [] and not _is_reported(path)
+    assert "pending (being audited by the sweep, or left by an interrupted run)" in err
+    assert f"pid {os.getpid()}" in err and "is running" in err
+    import re
+    import shlex
+
+    forced = [cli.build_parser().parse_args(shlex.split(c))
+              for c in re.findall(r"`journal\.py ([^`]+)`", err)]
+    assert [(n.cmd, n.date, n.retry, n.force) for n in forced] == [
+        ("report", "2026-07-27", True, True)]
+    assert cli.cmd_report(_report_ns(path, retry=True, force=True)) == 0  # on purpose
+    assert len(built) == 1 and _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_retry_waits_while_the_sweep_lock_is_held(tmp_path, monkeypatch, capsys, v2):
+    """The sweep that marked it is gone, but a sweep or poll holds the lock
+    it ran under: it may be the one retrying this case. `--retry` waits."""
+    path = _either(tmp_path, monkeypatch, v2)
+    lock = tmp_path / "sweep.lock"
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=_dead_pid(), lock=lock)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    _by_hand(monkeypatch)
+    capsys.readouterr()
+    with _held(lock):
+        assert cli.cmd_report(_report_ns(path, retry=True)) == 1
+        assert f"the sweep lock {lock} is held" in capsys.readouterr().err
+    assert len(built) == 1 and not _is_reported(path)
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 0  # released: gone
+    assert len(built) == 2 and _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+@pytest.mark.parametrize("lock", ["none", "missing", "free"])
+def test_a_retry_goes_ahead_once_the_owner_is_gone(tmp_path, monkeypatch, capsys, v2, lock):
+    path = _either(tmp_path, monkeypatch, v2)
+    lock_path = None if lock == "none" else tmp_path / "sweep.lock"
+    if lock == "free":
+        lock_path.write_text("")
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=_dead_pid(), lock=lock_path)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    _by_hand(monkeypatch)
+    capsys.readouterr()
+    assert cli.cmd_report(_report_ns(path)) == 1  # a plain report: refused all the same
+    assert "Its owner is gone." in capsys.readouterr().err and len(built) == 1
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 0
+    assert len(built) == 2 and _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("marker", ["another host", "garbage", "the older format",
+                                    "no pid", "pid 0", "pid true", "token 7", "name 7",
+                                    "host 7", "lock 7", "a list"])
+def test_an_owner_that_cannot_be_checked_holds_a_retry(tmp_path, monkeypatch, capsys, marker):
+    """Fail closed: an owner this host cannot check (another host, a marker
+    that does not say who) is not "gone". `--retry --force` still goes."""
+    import json
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=_dead_pid(), host="elsewhere" if marker == "another host" else None)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    raw = path.with_name(f".{path.name}.report.pending")
+    edits = {"garbage": "{not json", "the older format":
+             f"marked {store.now_iso()} by journal.py report --defer-mark, pid 1 on here\n",
+             "a list": "[]"}
+    for field, value in (("no pid", None), ("pid 0", 0), ("pid true", True),
+                         ("token 7", 7), ("name 7", 7), ("host 7", 7), ("lock 7", 7)):
+        if marker == field:
+            doc = json.loads(raw.read_text(encoding="utf-8"))
+            doc["owner"][field.split()[-1] if field.startswith("no") else field.split()[0]] = value
+            edits[marker] = json.dumps(doc)
+    if marker in edits:
+        raw.write_text(edits[marker], encoding="utf-8")
+    _by_hand(monkeypatch)
+    capsys.readouterr()
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 1
+    err = capsys.readouterr().err
+    assert "--force" in err and len(built) == 1
+    assert ("cannot be checked" in err) == (marker == "another host")
+    assert ("does not say who" in err) == (marker != "another host")
+    assert cli.cmd_report(_report_ns(path, retry=True, force=True)) == 0
+    assert len(built) == 2 and _is_reported(path)
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_defer_mark_by_hand_is_refused_while_the_sweep_audits(
+        tmp_path, monkeypatch, capsys, v2):
+    """rev28c_defer_by_hand: a `--defer-mark` of another owner, run while
+    the sweep audits, built and published over the run being audited."""
+    path = _either(tmp_path, monkeypatch, v2)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=os.getpid(), lock=tmp_path / "sweep.lock")  # auditing now
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    first = path.with_name(f".{path.name}.report.pending").read_bytes()
+    _by_hand(monkeypatch)
+    capsys.readouterr()
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 1
+    err = capsys.readouterr().err
+    assert len(built) == 1, "a second report was built over the one being audited"
+    assert "being audited by the sweep" in err and f"pid {os.getpid()}" in err
+    assert f"may still be at work on it (watch.py, pid {os.getpid()}, is running)" in err
+    assert path.with_name(f".{path.name}.report.pending").read_bytes() == first
+    for flags in ({"defer_mark": True, "force": True}, {"force": True}):  # --force: --retry's
+        assert cli.cmd_report(_report_ns(path, **flags)) == 1
+    assert len(built) == 1
+    assert cli.cmd_mark_reported(_mark_ns(path)) == 0  # the sweep, once the audit passed
+    assert _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_defer_mark_by_hand_waits_for_the_sweep_lock(tmp_path, monkeypatch, capsys, v2):
+    path = _either(tmp_path, monkeypatch, v2)
+    lock = tmp_path / "sweep.lock"
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=_dead_pid(), lock=lock)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    _by_hand(monkeypatch)
+    with _held(lock):
+        assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 1
+    assert len(built) == 1
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0  # gone: goes ahead
+    assert len(built) == 2 and not _is_reported(path)
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_the_next_sweeps_retry_goes_ahead_and_takes_the_marker(tmp_path, monkeypatch, v2):
+    """A failed audit (exit 4) leaves the case pending; the NEXT pass is a
+    new sweep process, holding the sweep lock itself. Its retry goes ahead
+    (the marker's owner is gone), and the marker then names the new sweep."""
+    path = _either(tmp_path, monkeypatch, v2)
+    lock = tmp_path / "sweep.lock"
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=_dead_pid(), lock=lock)  # the pass that failed its audit
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    now = _owner(monkeypatch, pid=os.getpid(), lock=lock)  # the next pass
+    with _held(lock):
+        assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    assert len(built) == 2 and not _is_reported(path)
+    _by_hand(monkeypatch)
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 1  # the new sweep is auditing
+    assert f"pid {now['pid']}" in store.report_pending(path) and len(built) == 2
+
+
+@pytest.mark.parametrize("kind", ["dangling symlink", "symlink to a marker", "directory"])
+def test_a_marker_that_is_not_a_regular_file_still_pends(tmp_path, monkeypatch, capsys, kind):
+    """rev28c_symlink: a dangling symlink at the marker's name read as
+    "nothing pending" (fail open), and every `--defer-mark` then failed to
+    create the marker ("Report generation failed", for ever). Whatever is
+    there that is not a regular file pends, is named, and is never followed;
+    a `--defer-mark` refuses it cleanly and `--retry --force` replaces it."""
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    marker = path.with_name(f".{path.name}.report.pending")
+    if kind == "directory":
+        marker.mkdir()
+    else:
+        target = tmp_path / "elsewhere"
+        if kind == "symlink to a marker":
+            _owner(monkeypatch, pid=_dead_pid())
+            store.set_report_pending(target, "journal.py report --defer-mark")
+            target = target.with_name(f".{target.name}.report.pending")
+        os.symlink(target, marker)
+    pending = store.report_pending(path)
+    assert pending is not None and marker.name in pending and "not a regular file" in pending
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    capsys.readouterr()
+    assert cli.cmd_report(_report_ns(path)) == 1
+    _owner(monkeypatch, pid=_dead_pid())
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 1  # the sweep's
+    err = capsys.readouterr().err
+    assert marker.name in err and "Report generation failed" not in err
+    _by_hand(monkeypatch)
+    assert cli.cmd_report(_report_ns(path, retry=True)) == 1
+    assert built == [] and not _is_reported(path)
+    assert cli.cmd_report(_report_ns(path, retry=True, force=True)) == 0
+    assert len(built) == 1 and _is_reported(path)
+    assert os.path.lexists(marker) == (kind == "directory")  # said, not raised
+
+
+def test_a_marker_swapped_for_a_symlink_after_its_check_is_not_followed(tmp_path, monkeypatch):
+    """The marker is opened O_NOFOLLOW: one replaced by a symlink between
+    its `lstat` and its read still pends, owner unknown; one removed in
+    that moment is not pending."""
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    marker = path.with_name(f".{path.name}.report.pending")
+    target = tmp_path / "other.md"
+    _owner(monkeypatch, pid=_dead_pid())
+    store.set_report_pending(target, "journal.py report --defer-mark")
+    real_marker = target.with_name(f".{target.name}.report.pending")
+    os.symlink(real_marker, marker)
+    real = os.lstat
+    monkeypatch.setattr(os, "lstat", lambda p, *a, **k: real(real_marker if Path(p) == marker
+                                                             else p, *a, **k))
+    pending = store.pending_marker(path)
+    assert pending is not None and pending.owner is None and "cannot be read" in pending.text
+    marker.unlink()
+    monkeypatch.setattr(os, "lstat", lambda p, *a, **k: real(real_marker if Path(p) == marker
+                                                             else p, *a, **k))
+    assert store.pending_marker(path) is None
+
+
+def test_a_marker_that_does_not_parse_is_quoted_in_part(tmp_path, monkeypatch):
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    path.with_name(f".{path.name}.report.pending").write_text("x" * 300, encoding="utf-8")
+    text = store.report_pending(path)
+    assert repr("x" * 200) in text and "x" * 201 not in text
+
+
+class TestIsTheOwnerAtWork:
+    """`store.owner_at_work` directly: what counts as gone, what does not."""
+
+    def _me(self, lock=None):
+        return store.ReportOwner("me", os.getpid(), os.uname().nodename, "mine",
+                                 None if lock is None else str(lock))
+
+    def _gone(self, lock=None):
+        return store.ReportOwner("watch.py", _dead_pid(), os.uname().nodename, "theirs",
+                                 None if lock is None else str(lock))
+
+    def test_a_pid_of_another_user_is_running(self, monkeypatch):
+        def denied(pid, sig):
+            raise PermissionError(1, "Operation not permitted")
+
+        owner = self._gone()
+        monkeypatch.setattr(os, "kill", denied)
+        assert store.owner_at_work(owner, me=self._me()) == f"watch.py, pid {owner.pid}, is running"
+
+    def test_a_lock_that_cannot_be_opened_cannot_be_checked(self, tmp_path):
+        (tmp_path / "file").write_text("")
+        owner = self._gone(tmp_path / "file" / "sweep.lock")  # ENOTDIR
+        why = store.owner_at_work(owner, me=self._me())
+        assert why is not None and why.startswith(f"the sweep lock {owner.lock} cannot be checked")
+
+    def test_a_lock_that_cannot_be_probed_cannot_be_checked(self, tmp_path, monkeypatch):
+        import errno
+        import fcntl
+
+        lock = tmp_path / "sweep.lock"
+        lock.write_text("")
+
+        def broken(fd, op):
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        monkeypatch.setattr(fcntl, "flock", broken)
+        why = store.owner_at_work(self._gone(lock), me=self._me())
+        assert why == (f"the sweep lock {lock} cannot be checked "
+                       f"([Errno {errno.ENOLCK}] No locks available)")
+
+    def test_another_probe_is_not_a_sweep(self, tmp_path):
+        """The probe takes a SHARED lock, as a second probe does at the same
+        moment: only a sweep's (exclusive) lock is "held"."""
+        import fcntl
+
+        lock = tmp_path / "sweep.lock"
+        lock.write_text("")
+        with open(lock) as fh:
+            fcntl.flock(fh, fcntl.LOCK_SH)
+            assert store.owner_at_work(self._gone(lock), me=self._me()) is None
+        with _held(lock):
+            assert "is held" in store.owner_at_work(self._gone(lock), me=self._me())
+            # ... but not by the sweep asking, whose own lock it is.
+            assert store.owner_at_work(self._gone(lock), me=self._me(lock)) is None
+
+
+def test_a_retry_forced_with_defer_mark_replaces_a_marker_that_is_not_a_file(
+        tmp_path, monkeypatch):
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    marker = path.with_name(f".{path.name}.report.pending")
+    os.symlink(tmp_path / "nowhere", marker)
+    cli = _cli()
+    built = _builds(monkeypatch, cli)
+    _owner(monkeypatch, pid=_dead_pid())
+    assert cli.cmd_report(_report_ns(path, retry=True, force=True, defer_mark=True)) == 0
+    assert len(built) == 1 and not _is_reported(path)
+    assert not marker.is_symlink() and marker.is_file()
+    assert "pid" in store.report_pending(path)
+
+
+def test_a_marker_that_cannot_be_taken_back_leaves_the_builds_error_said(
+        tmp_path, monkeypatch, capsys):
+    """If taking back the mark raises, the build's own error is still what
+    is said, and the entry stays pending (fail closed)."""
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    cli = _cli()
+
+    def fail():
+        raise RuntimeError("EDGAR down")
+
+    def cannot(p):
+        raise PermissionError(13, "read-only directory")
+
+    _builds(monkeypatch, cli, fail)
+    monkeypatch.setattr(store, "clear_report_pending", cannot)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 1
+    err = capsys.readouterr().err
+    assert "Report generation failed: EDGAR down" in err
+    assert "could not be taken back" in err and "read-only directory" in err
+    assert store.report_pending(path) is not None
+
+
+def test_the_hints_to_report_name_the_entry(tmp_path, monkeypatch, capsys):
+    """rev28c_nodate, the same omission elsewhere: a hint to run `report`
+    without `--date` runs it on the ticker's NEWEST entry, whichever that is."""
+    import argparse
+    import re
+    import shlex
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    cli = _cli()
+    capsys.readouterr()
+    assert cli.cmd_after(argparse.Namespace(ticker="TST", date="2026-07-27",
+                                            impact="no_value", conviction_after=None,
+                                            surfaced=None, disagreed=None)) == 1
+    opened = cli.cmd_open(argparse.Namespace(ticker="NEW", thesis="a thesis",
+                                             conviction=None, action=None))
+    assert opened == 0
+    out = capsys.readouterr()
+    hints = re.findall(r"`journal\.py (report [^`]+)`", out.err)
+    hints += re.findall(r"^\s+journal\.py (report .+)$", out.out, re.M)
+    named = [cli.build_parser().parse_args(shlex.split(h)) for h in hints]
+    assert [(n.ticker, n.date) for n in named] == [
+        ("TST", "2026-07-27"), ("NEW", store.find_entry("NEW").stem.split("_", 1)[1])]
+    assert path.exists()
 
 
 # --- follow-up: a `reported` stamp, once made, stays -----------------------------------
