@@ -611,6 +611,33 @@ class TestSweep:
         assert sweep_env.generate == [] and sweep_env.generate_auto == []
         assert sweep_env.rearm == []
 
+    @pytest.mark.parametrize("timeout, slept", [(1.25, [0.5, 0.5, 0.25]), (0, [])])
+    def test_the_lock_wait_is_paced_and_ends_at_the_deadline(self, tmp_path, monkeypatch,
+                                                            timeout, slept):
+        # The activity lock on a fake clock: held elsewhere, it is retried
+        # every LOCK_RETRY_S, the last sleep cut to what is left, and reaching
+        # the deadline yields False at once — the sweep's timeout 0 never
+        # sleeps at all. (Before the tests below that hold the lock on the
+        # real clock: a wait that never ends hangs them rather than failing.)
+        import fcntl
+
+        clock, naps = [100.0], []
+
+        def sleep(s):
+            naps.append(s)
+            clock[0] += s
+            assert len(naps) < 10, "the wait never reached its deadline"
+
+        monkeypatch.setattr(watch_cli, "SWEEP_LOCK", tmp_path / "sweep.lock")
+        monkeypatch.setattr(watch_cli, "LOCK_RETRY_S", 0.5)
+        monkeypatch.setattr(watch_cli, "time", SimpleNamespace(monotonic=lambda: clock[0],
+                                                               sleep=sleep))
+        with open(watch_cli.SWEEP_LOCK, "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            with watch_cli._activity_lock(timeout=timeout) as held:
+                assert held is False
+        assert naps == slept
+
     def test_concurrent_sweep_yields(self, sweep_env, capsys):
         import fcntl
 

@@ -1223,7 +1223,9 @@ def _overdue_to_alert(tickers: list[str], today: date) -> list[str]:
     # without bound as the watchlist changes.
     try:
         OVERDUE_ALERTS.parent.mkdir(parents=True, exist_ok=True)
-        OVERDUE_ALERTS.write_text(json.dumps({t: stamp for t in tickers}, indent=2) + "\n")
+        # Replaced whole, never written through a symlink planted at the name
+        # (Hermes audit of 424b0b4, finding 5).
+        write_atomic(OVERDUE_ALERTS, json.dumps({t: stamp for t in tickers}, indent=2) + "\n")
     except OSError:
         pass
     return fresh
@@ -1249,10 +1251,14 @@ def _activity_lock(*, timeout: float):
     """
     SWEEP_LOCK.parent.mkdir(parents=True, exist_ok=True)
     give_up = time.monotonic() + max(timeout, 0.0)
-    with open(SWEEP_LOCK, "w") as lock_fh:
+    # Neither truncated nor followed: `open(SWEEP_LOCK, "w")` emptied the
+    # file a symlink planted at this name pointed to. A link now fails
+    # (ELOOP) and the pass writes nothing (Hermes audit of 424b0b4, finding 5).
+    lock_fd = os.open(SWEEP_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
         while True:
             try:
-                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() >= give_up:
@@ -1262,7 +1268,9 @@ def _activity_lock(*, timeout: float):
         try:
             yield True
         finally:
-            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:

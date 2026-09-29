@@ -638,12 +638,18 @@ def _publication_lock(path: Path):
     is not reliable over NFS, and there is no Windows implementation.
     """
     lock_path = path.with_name(f".{path.name}.lock")
-    with open(lock_path, "a+b") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    # Not followed: a link planted at the lock's name fails (ELOOP) rather
+    # than create its target outside the cache (Hermes audit of 424b0b4,
+    # finding 5), as the pacing state's `_open_state` already does.
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _archive_has_text(path: Path) -> bool:

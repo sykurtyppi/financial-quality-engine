@@ -42,6 +42,7 @@ from app.services.ingestion.edgar_documents import (
 )
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
+from app.services.reporting.report_files import write_atomic
 from app.services.watch.poller import Filing, recent_filings
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -261,7 +262,10 @@ def collect_sources(
         role = "release" if not release_done else "exhibit"
         out = workdir / (f"release_{dtype.replace('.', '_')}.txt" if role == "release"
                          else f"exhibit_{dtype.replace('.', '_')}.txt")
-        out.write_text(text)
+        # Every source file is written whole (`write_atomic`): a symlink
+        # planted at one of these names is replaced, never written through
+        # (Hermes audit of 424b0b4, finding 5).
+        write_atomic(out, text)
         src.files.append(SourceFile(role, out, f"{dtype} {dname} ({words} words)"))
         release_done = True
     if not release_done:
@@ -287,7 +291,7 @@ def collect_sources(
         else:
             label, text = got
             out = workdir / "prior_release.txt"
-            out.write_text(text)
+            write_atomic(out, text)
             src.files.append(SourceFile(
                 "prior_release", out,
                 f"PRIOR quarter's release, 8-K {prior.accession} filed {prior.filing_date} — "
@@ -302,7 +306,7 @@ def collect_sources(
         if not transcript.is_file():
             raise BriefSourceError(f"transcript not found: {transcript}")
         out = workdir / "transcript.txt"
-        out.write_text(transcript.read_text(errors="replace"))
+        write_atomic(out, transcript.read_text(errors="replace"))
         src.files.append(SourceFile(
             "transcript", out, f"call transcript ({_safe_label(transcript.name)})"))
     else:
@@ -338,7 +342,7 @@ def collect_sources(
             src.assumptions_origin = DERIVED
     if items:
         out = workdir / "assumptions.txt"
-        out.write_text(render_for_brief(ticker, items, origin=origin, details=details))
+        write_atomic(out, render_for_brief(ticker, items, origin=origin, details=details))
         whose = ("holder-authored" if origin == HOLDER
                  else "ENGINE-DERIVED from filed history, not holder-authored")
         src.files.append(SourceFile(

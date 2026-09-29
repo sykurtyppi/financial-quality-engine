@@ -120,12 +120,39 @@ def _companions(report: Path) -> dict[str, Path]:
     return {role: report.with_name(name) for role, name in _names(_base(report)).items()}
 
 
+def _own_dir(d: Path) -> Path:
+    """``d``, a directory this module creates inside the reports directory
+    (``.staging``, ``.generations``, ``.generations/<base>``), refused when
+    it is a symlink: everything read or written under it, generations and
+    the pointer included, would be wherever the link points (Hermes audit of
+    424b0b4, finding 5). The reports directory itself may be a link; it is
+    the operator's to place."""
+    if d.is_symlink():
+        raise OSError(errno.ELOOP, f"{d} is a symlink, not the directory this engine "
+                      "created there; it is never followed")
+    return d
+
+
 def _home(report: Path) -> Path:
-    return report.parent / GENERATIONS_DIR / _base(report)
+    return _own_dir(_own_dir(report.parent / GENERATIONS_DIR) / _base(report))
 
 
 def _pointer(report: Path) -> Path:
     return _home(report) / CURRENT
+
+
+def _generation_dir(report: Path, name: str) -> Path | None:
+    """``name`` as one of ``report``'s generation directories, or None when
+    it cannot be one: a generation is a plain name in ``.generations/<base>/``
+    (all the pointer is ever written with) and a real directory, never a
+    symlink. Anything else was not written by this engine, and following it
+    read, and wrote an audit, outside the reports directory (Hermes audit of
+    424b0b4, finding 5: a pointer aimed at ``/elsewhere`` pinned it as the
+    live run and ``publish_audit`` wrote ``<base>_audit.md`` into it)."""
+    gen = _home(report) / name
+    if name in ("", ".", "..") or "/" in name or gen.is_symlink():
+        return None
+    return gen
 
 
 def live_name(path: Path) -> Path:
@@ -142,7 +169,10 @@ def current_generation(report: Path) -> Path | None:
     when none is live (never published, set aside, or from before
     generations). Only a missing pointer reads as none: any other failure to
     read it (permission, I/O) raises rather than being taken for "nothing
-    published" (Hermes re-audit F2)."""
+    published" (Hermes re-audit F2), and so does a pointer that does not
+    name one of its generations (``_generation_dir``): it is never followed
+    out of the reports directory, and never read as "nothing published"
+    either. ``restore`` writes the pointer anew."""
     pointer = _pointer(report)
     try:
         target = os.readlink(pointer)
@@ -153,7 +183,13 @@ def current_generation(report: Path) -> Path | None:
             raise OSError(e.errno, f"{pointer} is not a symlink: the reports directory was "
                           "copied with its links dereferenced; copy it with `cp -a`") from e
         raise
-    return _home(report) / target
+    gen = _generation_dir(report, target)
+    if gen is None or not gen.is_dir():
+        raise OSError(errno.EINVAL, f"{pointer} -> {target!r} names no generation directory "
+                      "beside it: not a pointer this engine wrote, or its generation was "
+                      "removed. It is not followed; `restore` a kept generation, or remove "
+                      "the pointer by hand to publish afresh")
+    return gen
 
 
 def _seq(gen: Path) -> int:
@@ -235,9 +271,12 @@ def publish_lock(report: Path) -> Iterator[None]:
     changes. It is a sidecar in the staging directory; ``flock`` is
     advisory and unreliable over NFS, so the reports directory must be
     local, as the watchlist's lock already assumes."""
-    lock = report.parent / STAGING_DIR / f"{_base(report)}.lock"
+    lock = _own_dir(report.parent / STAGING_DIR) / f"{_base(report)}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+    # O_NOFOLLOW: a link planted at the lock's name fails (ELOOP) rather than
+    # create its target outside the directory (Hermes audit of 424b0b4,
+    # finding 5).
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -390,7 +429,7 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
     it from under another still building there (round-9 audit F1).
     """
     gid = uuid.uuid4().hex
-    work = report.parent / STAGING_DIR / gid
+    work = _own_dir(report.parent / STAGING_DIR) / gid
     work.mkdir(parents=True)
     names = _names(_base(report))
     staged = Staged(report=work / names["report"], ledger=work / names["ledger"],
@@ -662,7 +701,14 @@ def read_live(report: Path) -> LiveRun | None:
     run is live. Given a generation's own path, that generation is read
     (live or not). Files from before generations are read at their live
     names, and a report and ledger that both name no generation still pair."""
-    gen = report.parent if live_name(report) != report else current_generation(report)
+    gen: Path | None
+    if live_name(report) != report:
+        gen = _generation_dir(live_name(report), report.parent.name)
+        if gen is None:
+            raise OSError(errno.EINVAL, f"{report.parent} is not a generation this engine "
+                          "wrote (a symlink, or not a plain name)")
+    else:
+        gen = current_generation(report)
     if gen is None and report.is_symlink():
         return None  # the live names exist but name no run (set aside)
     paths = (_companions(report) if gen is None

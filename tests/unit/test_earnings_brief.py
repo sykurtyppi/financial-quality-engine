@@ -125,6 +125,16 @@ class TestCollectSources:
         assert any("no call transcript" in d for d in src.diagnostics)
         assert src.company == "NVIDIA CORP" and src.event_day == "2026-08-26"
 
+    def test_an_exhibit_at_the_word_floor_is_narrative(self, archive, tmp_path):
+        archive["q2pr.htm"] = "<p>" + " ".join(["word"] * bs.MIN_EXHIBIT_WORDS) + "</p>"
+        archive["cfo.htm"] = "<p>" + " ".join(["word"] * (bs.MIN_EXHIBIT_WORDS - 1)) + "</p>"
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path)
+        release = next(f for f in src.files if f.role == "release")
+        assert release.path.name == "release_EX-99_1.txt"
+        assert f"({bs.MIN_EXHIBIT_WORDS} words)" in release.label
+        assert not any(f.role == "exhibit" and "EX-99_2" in f.path.name for f in src.files)
+        assert any(f"cfo.htm: {bs.MIN_EXHIBIT_WORDS - 1} words" in d for d in src.diagnostics)
+
     def test_transcript_auto_discovered_by_print_date(self, archive, tmp_path):
         folder = tmp_path / "NVDA"
         folder.mkdir()
@@ -207,7 +217,18 @@ class TestCollectSources:
         src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
                                  assumptions_root=tmp_path / "none", derive=False)
         assert not any(x.role == "assumptions" for x in src.files)
-        assert any("no standing assumptions on file for NVDA" in d for d in src.diagnostics)
+        # Not derived, so the diagnostic says nothing of a derivation.
+        assert any(d.startswith("no standing assumptions on file for NVDA — ")
+                   for d in src.diagnostics)
+
+    def test_a_derivation_that_found_nothing_says_so(self, archive, tmp_path, monkeypatch):
+        # Ran and found nothing (a quiet company) reads differently from
+        # broke (the next test): the grep for one must not find the other.
+        monkeypatch.setattr(bs, "derive_for_ticker", lambda t, *, as_of, client=None: [])
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "none")
+        (d,) = [d for d in src.diagnostics if "no standing assumptions" in d]
+        assert "its filed history supports none" in d and "could not run" not in d
 
     def test_a_failed_derivation_is_a_diagnostic_not_a_lost_brief(self, archive, tmp_path,
                                                                   monkeypatch):
@@ -222,6 +243,8 @@ class TestCollectSources:
         assert any(x.role == "release" for x in src.files)
         assert not any(x.role == "assumptions" for x in src.files)
         assert any("companyfacts unreachable" in d for d in src.diagnostics)
+        (d,) = [d for d in src.diagnostics if "no standing assumptions" in d]
+        assert "derivation could not run" in d and "supports none" not in d
 
     def test_report_and_audit_attached_when_present(self, archive, tmp_path):
         rep = tmp_path / "NVDA_2026-08-26.md"

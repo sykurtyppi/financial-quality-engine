@@ -44,6 +44,7 @@ import math
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -161,7 +162,10 @@ def _record_problem_day(cik: int, day: date, root: Path | None = None) -> None:
     try:
         d = cik_dir(cik, root)
         d.mkdir(parents=True, exist_ok=True)
-        (d / f"{BUSY_PREFIX}{day.isoformat()}").touch(exist_ok=True)
+        # Created if absent, never followed: `touch` created a dangling
+        # link's target (and re-dated a live one's) outside the store.
+        os.close(os.open(d / f"{BUSY_PREFIX}{day.isoformat()}",
+                         os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o666))
     except OSError:
         pass
 
@@ -213,10 +217,15 @@ def _cik_lock(cik: int, root: Path | None = None, timeout: float | None = None):
     d = cik_dir(cik, root)
     d.mkdir(parents=True, exist_ok=True)
     give_up = time.monotonic() + max(timeout, 0.0)
-    with (d / LOCK).open("w") as fh:
+    # Neither truncated nor followed: `open("w")` emptied the file a symlink
+    # planted at this name pointed to. A link now raises (ELOOP), as any
+    # other failure to open the lock does, and nothing is written (Hermes
+    # audit of 424b0b4, finding 5).
+    fd = os.open(d / LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
         while True:
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except OSError:
                 if time.monotonic() >= give_up:
@@ -226,7 +235,9 @@ def _cik_lock(cik: int, root: Path | None = None, timeout: float | None = None):
         try:
             yield True
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _entry_for(path: Path) -> dict:
@@ -329,9 +340,18 @@ def _last_seen(man: dict) -> str:
     return man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
 
 
+def _tmp_beside(path: Path) -> Path:
+    """A temporary name beside ``path``: the pid, as before, and a random
+    part. The pid and the content digest alone made it predictable, and
+    ``open("w")`` truncated and filled the target of a symlink planted there,
+    outside the store (Hermes audit of 424b0b4, finding 5). Still ``.*.tmp``,
+    which ``_sweep_orphans`` clears."""
+    return path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+
+
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = _tmp_beside(path)
     try:
         with tmp.open("w") as fh:
             fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -515,7 +535,7 @@ def _store(
             pass  # the write below will fail too and is the one that matters
 
         out = _free_path(cik_dir(cik, root), today, sha)
-        tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+        tmp = _tmp_beside(out)
         try:
             # mtime=0: the archive bytes depend only on the content, so an
             # unchanged document cannot look changed to anything comparing files.
