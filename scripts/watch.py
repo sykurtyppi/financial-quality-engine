@@ -314,9 +314,23 @@ def _run_audit_capped(report: Path) -> tuple[int, bool]:
     """
     marker = _audit_attempts_path(report)
     try:
-        prior = int(marker.read_text().strip())
-    except (OSError, ValueError):
-        prior = 0
+        raw: str | None = marker.read_text()
+    except FileNotFoundError:
+        raw = None
+    except OSError as e:
+        # A counter that cannot be read cannot cap anything: fail closed.
+        print(f"  audit attempts for {report.name} cannot be read ({e}); not spending "
+              "another paid run", file=sys.stderr)
+        return 0, True
+    try:
+        prior = 0 if raw is None else int(raw.strip())
+    except ValueError:
+        # Reading garbage as 0 re-opened the cap (Hermes audit of the stack).
+        # The counter is written whole now, so this is a hand edit: treat it
+        # as spent, say so, and let deleting the file reset it on purpose.
+        print(f"  audit attempts for {report.name} unreadable ({raw!r}); treating the "
+              f"audit as abandoned — delete {marker} to allow retries", file=sys.stderr)
+        prior = AUDIT_MAX_ATTEMPTS
     if prior >= AUDIT_MAX_ATTEMPTS:
         # Already given up (a re-arm that failed can bring us back here).
         # Spend nothing; the exit code 0 says only "no run was made".
@@ -327,9 +341,14 @@ def _run_audit_capped(report: Path) -> tuple[int, bool]:
         return 0, False
     attempts = prior + 1
     try:
-        marker.write_text(f"{attempts}\n")
-    except OSError:
-        pass  # losing the count costs a retry, never correctness
+        # Whole or not at all: a torn count read as 0 and reset the cap.
+        write_atomic(marker, f"{attempts}\n")
+    except OSError as e:
+        # Unrecorded, every later pass would spend another paid run on this
+        # report, without limit. Give up on it now instead, and say why.
+        print(f"  audit attempt {attempts} for {report.name} could not be recorded ({e}); "
+              "abandoning the audit rather than retrying without a limit", file=sys.stderr)
+        return arc, True
     return arc, attempts >= AUDIT_MAX_ATTEMPTS
 
 
