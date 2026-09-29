@@ -61,7 +61,8 @@ def main() -> int:
     parser.add_argument(
         "--as-of", metavar="YYYY-MM-DD", type=date.fromisoformat,
         help="historical replay: rebuild the report as of this day (newest stored "
-             "snapshot by then, else today's facts cut there) -> reports/T_D.replay.md",
+             "snapshot a report scored by then, else today's facts cut there) "
+             "-> reports/T_D.replay.md",
     )
     args = parser.parse_args()
     ticker = args.ticker.upper()

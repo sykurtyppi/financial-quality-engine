@@ -86,7 +86,8 @@ def build_report(
     at or before the lock. It still never sets ``generated_on`` (below).
 
     ``replay`` rebuilds the report AS OF ``report_day`` instead (historical
-    replay): fundamentals from the newest vintage snapshot captured by then,
+    replay): fundamentals from the newest vintage snapshot a report scored by
+    then (a mappable raw capture only when none maps — `replay_snapshot`),
     else today's payload cut there; documents filed by then; every evidence
     stream cut there (they all anchor on ``generated_on``, which a replay sets
     to that day). The report opens with a replay banner and is written to

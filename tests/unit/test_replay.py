@@ -159,7 +159,7 @@ def test_the_replay_is_the_report_that_day_with_a_banner(monkeypatch, tmp_path):
     _store(base, date(2026, 5, 1))
     out, _ = _replay(monkeypatch, tmp_path, live=amended)
     ds, diag = build_dataset(base, "KO", as_of=DAY)
-    source = f"the vintage snapshot captured 2026-05-01 (sha {read_manifest(CIK)['snapshots'][0]['sha256'][:12]}), cut to facts filed on or before {DAY}"
+    source = f"the vintage snapshot captured 2026-05-01 (sha {read_manifest(CIK)['snapshots'][0]['sha256'][:12]}; scored by a report), cut to facts filed on or before {DAY}"
     direct, _ = build_report(
         analyze(ds), ds, generated_on=DAY.isoformat(), coverage=diag.coverage(),
         field_tags=diag.selected_series(), client=_Client(amended), ticker="KO",

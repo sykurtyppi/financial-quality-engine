@@ -430,6 +430,7 @@ def _collect_streams(
 
     def vintage() -> _Staged:
         from app.services.ingestion.vintages import (
+            digest_of,
             report_diff,
             silent_revision_tier1_lines,
         )
@@ -440,8 +441,12 @@ def _collect_streams(
         # only revisions to periods a reader still holds in mind.
         since = date(report_date.year - 3, 1, 1)
         floor = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
+        # The payload this report scored, by digest: it is the newest state
+        # compared, whatever wrote it to the store, or the section says it
+        # is not stored (review of 224b896, finding 1).
         vintage_diff = report_diff(
-            cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root
+            cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root,
+            scored_sha=digest_of(company_facts) if company_facts is not None else None,
         )
         out = _Staged(result=vintage_diff)
         out.evidence["vintage"] = vintage_diff
@@ -460,11 +465,21 @@ def _collect_streams(
             windows.append((vintage_diff.changes_since_baseline, baseline.captured, newest.captured))
         if vintage_diff.compared and previous is not None and newest is not None:
             windows.append((vintage_diff.changes_since_previous, previous.captured, newest.captured))
+        # A fact is "promoted" once a window actually put it on the card. Every
+        # key the lock window listed used to count — a raw row (never
+        # promoted) or a move below the threshold since the lock suppressed a
+        # real Tier-1 revision in previous -> newest while the ledger marked
+        # it VALIDATED (review of 224b896, finding 3).
         promoted: set[tuple] = set()
         for changes, older, newer in windows:
-            fresh = [c for c in changes if (c.field_name, c.key.start, c.key.end) not in promoted]
-            out.tier1 += silent_revision_tier1_lines(fresh, older, newer, period_since=floor)
-            promoted |= {(c.field_name, c.key.start, c.key.end) for c in changes}
+            for c in changes:
+                key = (c.field_name, c.key.start, c.key.end)
+                if key in promoted:
+                    continue
+                lines = silent_revision_tier1_lines([c], older, newer, period_since=floor)
+                if lines:
+                    out.tier1 += lines
+                    promoted.add(key)
         return out
 
     takedowns = run("offerings", offerings) or []
@@ -699,9 +714,11 @@ def build_report(
             tier1_unavailable.append("8-K 4.01 and NT filing events" + _why("filing_events"))
         if errors["vintage"] is not None:
             tier1_unavailable.append("silent revisions (vintage diff)" + _why("vintage"))
-        elif vintage_diff is not None and not vintage_diff.compared:
-            # Two snapshots did not exist yet: not a failure, still not checked.
-            tier1_unavailable.append("silent revisions (no vintage baseline yet)")
+        elif vintage_diff is not None and vintage_diff.tier1_gap is not None:
+            # Not a failure, still not checked: two snapshots did not exist
+            # yet, the report's payload is not stored, or a window fell back
+            # to raw rows that nothing promotes (review of 224b896, finding 2).
+            tier1_unavailable.append(f"silent revisions ({vintage_diff.tier1_gap})")
 
     # Capital-markets was actually checked iff a client ran offerings without error.
     capital_markets_checked = (

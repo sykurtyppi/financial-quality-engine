@@ -497,6 +497,10 @@ def _stream_state(name: str, ran: bool, errors: dict[str, Any], rep: Any = None,
         return f"{kind}: {failure}"
     if name == "vintage" and rep is not None and not rep.compared:
         return f"not compared: {rep.no_baseline_reason}"
+    if name == "vintage" and rep is not None and rep.tier1_gap is not None:
+        # Compared, but a window only as raw fact rows nothing promotes: a
+        # bare "checked" read as a clean check (review of 224b896, finding 2).
+        return f"checked (incomplete: {rep.tier1_gap})"
     if name == "restatements" and scan is not None and scan.incomplete:
         # The report says the scan was incomplete (a field it could not
         # inspect, or a derived-quarter check withheld); a bare "checked"
