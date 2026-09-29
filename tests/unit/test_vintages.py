@@ -722,14 +722,16 @@ class TestMutationBacklog:
         # or records a duplicate.
         man: dict = {}
         d1, d2 = date(2026, 9, 19), date(2026, 9, 20)
-        v._observe(man, d1, "a")
-        v._observe(man, d1, "a")  # same day, same content: once
-        v._observe(man, d1, "b")  # same day, new content: a transition
-        v._observe(man, d2, "b")  # next day, same content: observed again
+        v._observe(man, d1, "a", v.RAW)
+        v._observe(man, d1, "a", v.RAW)  # same day, same content: once
+        v._observe(man, d1, "b", v.SCORED)  # same day, new content: a transition
+        v._observe(man, d2, "b", v.RAW)  # next day, same content: observed again
+        v._observe(man, d2, "b", v.SCORED)  # ... then scored: upgraded, not repeated
+        v._observe(man, d2, "b", v.RAW)  # ... and never downgraded
         assert man["observations"] == [
-            {"date": "2026-09-19", "sha256": "a"},
-            {"date": "2026-09-19", "sha256": "b"},
-            {"date": "2026-09-20", "sha256": "b"},
+            {"date": "2026-09-19", "sha256": "a", "kind": "raw"},
+            {"date": "2026-09-19", "sha256": "b", "kind": "scored"},
+            {"date": "2026-09-20", "sha256": "b", "kind": "scored"},
         ]
 
     def test_a_full_tie_keeps_the_first_row_as_the_mapper_does(self):

@@ -486,19 +486,24 @@ def _silent_revisions_section(rep) -> str:
     if not rep.compared:
         lines.append(
             f"Not checked: {rep.no_baseline_reason}. Two distinct companyfacts "
-            f"snapshots taken at or before {rep.as_of} are needed to diff; the store "
-            "fills as reports and the watch sweep run, and nothing can be back-filled."
+            f"snapshots a report scored, taken at or before {rep.as_of}, are needed to "
+            "diff (a raw watch-sweep capture is never compared); the store fills as "
+            "reports run, and nothing can be back-filled."
         )
         return "\n".join(lines)
     lines.append(
         "_Prior-period figures that changed or disappeared between the two most "
-        f"recent distinct companyfacts snapshots taken at or before {rep.as_of}. "
+        "recent distinct companyfacts snapshots a report scored, taken at or before "
+        f"{rep.as_of} (a raw watch-sweep capture is never compared). "
         "Facts added for new periods are not listed. A figure that moved with a later "
         "filing still carried beside the original is listed apart (the restatement "
         "scan reads those from filing history); the rest has no such filing behind "
         "it — read the filing before calling any of it a restatement._"
     )
     lines.append("")
+    if rep.raw_note:
+        lines.append(f"_{rep.raw_note}._")
+        lines.append("")
     lines.append(render_changes(rep.changes_since_previous, rep.previous.captured, rep.newest.captured))
     if rep.changes_since_baseline is not None and rep.baseline is not None:
         lines.append(f"**Since the pinned thesis was locked** ({rep.baseline.captured}):")

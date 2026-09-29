@@ -42,6 +42,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
@@ -80,6 +81,14 @@ _NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([0-9a-f]{6,64}))?(?:-\d+)?\.jso
 # OSError nor ValueError, so it escapes the obvious handler and would reach
 # the CLI as a traceback and the sweep as a lost pass.
 UNREADABLE = (OSError, ValueError, EOFError)
+# What wrote an observation (Hermes audit of 424b0b4, finding 2). SCORED: the
+# payload a report scored (`store_snapshot`, reached only after the mapper
+# built it). RAW: a fetch archived as it came (`capture` — the watch sweep,
+# `scripts/vintage.py capture`), never mapped and possibly partial: a bare
+# `{"cik", "entityName"}` passes the SEC shape check. The report's
+# silent-revision baseline is a scored state; a raw one is kept for the CLI.
+SCORED = "scored"
+RAW = "raw"
 
 
 def cik_dir(cik: int, root: Path | None = None) -> Path:
@@ -271,18 +280,26 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
     return data
 
 
-def _observe(man: dict, day: date, sha: str) -> None:
-    """Record WHICH document was live on which day.
+def _observe(man: dict, day: date, sha: str, kind: str) -> None:
+    """Record WHICH document was live on which day, and what wrote it.
 
     Content is stored once, so a document that goes A, then B, then back to A
     leaves two files and no way to tell B was ever live — the archive would
     imply A had stood the whole time. The snapshots are the data; this is the
     order they were seen in, and it cannot be reconstructed later.
+
+    `kind` is SCORED or RAW. A repeat of the last observation records nothing
+    new but may upgrade it: the sweep fetched the document, then a report
+    scored the identical payload. Never the other way — content a report
+    scored stays scored however often the sweep fetches it again
+    (`observed_vintages` reads the kind per content).
     """
     obs = man.setdefault("observations", [])
     if obs and obs[-1].get("sha256") == sha and obs[-1].get("date") == day.isoformat():
+        if kind == SCORED:
+            obs[-1]["kind"] = SCORED
         return
-    obs.append({"date": day.isoformat(), "sha256": sha})
+    obs.append({"date": day.isoformat(), "sha256": sha, "kind": kind})
 
 
 def _last_seen(man: dict) -> str:
@@ -372,7 +389,8 @@ def capture(
     no request. Callers that already hold the payload use `store_snapshot`.
     """
     cik = client.resolve_cik(ticker)
-    return _store(cik, lambda: client.company_facts_by_cik(cik), now=now, root=root, force=force)
+    return _store(cik, lambda: client.company_facts_by_cik(cik), now=now, root=root,
+                  force=force, kind=RAW)
 
 
 def store_snapshot(
@@ -400,8 +418,11 @@ def store_snapshot(
     two older snapshots and said nothing had changed. Content addressing
     still stores an identical payload only once. (`force` is kept for API
     compatibility; it has nothing left to override.)
+
+    Recorded as SCORED: this is the state the report's silent-revision
+    baseline may be taken from; a `capture` of the same content is upgraded.
     """
-    return _store(cik, lambda: facts, now=now, root=root, force=True)
+    return _store(cik, lambda: facts, now=now, root=root, force=True, kind=SCORED)
 
 
 def _store(
@@ -411,10 +432,11 @@ def _store(
     now: datetime | None,
     root: Path | None,
     force: bool,
+    kind: str,
 ) -> Capture:
     """The lock / daily-gate / dedupe / atomic-write core shared by `capture`
     and `store_snapshot`. `load` is invoked only once the gate has decided a
-    document is actually needed."""
+    document is actually needed; `kind` is what the observation records."""
     # The LOCAL calendar day, however the instant is expressed. Reports date
     # themselves with the local `date.today()` and read the store "as of"
     # that day; stamping snapshots in UTC put an evening (US) capture on
@@ -453,7 +475,7 @@ def _store(
         known = {s.get("sha256") for s in man["snapshots"]}
         observed = man.get("observations") or []
         last_seen = observed[-1].get("sha256") if observed else None
-        _observe(man, today, sha)
+        _observe(man, today, sha, kind)
         if sha in known:
             man["problem_days"] = 0
             _write_json_atomic(_manifest_path(cik, root), man)
@@ -526,11 +548,17 @@ def list_vintages(cik: int, root: Path | None = None) -> list[Path]:
 
 @dataclass(frozen=True)
 class VintageObservation:
-    """One distinct content state in the order it was observed."""
+    """One distinct content state in the order it was observed.
+
+    `kind`: SCORED when a report scored this content (on any observation of
+    it), RAW when only `capture` ever recorded it, None when the store
+    predates kinds (or lost its manifest) and nothing says — `report_diff`
+    then decides by whether the snapshot maps."""
 
     captured: str
     sha256: str
     path: Path
+    kind: str | None = None
 
 
 def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObservation]:
@@ -552,6 +580,21 @@ def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObserva
     man = read_manifest(cik, root)
     by_sha: dict[str, Path] = {}
     sha_by_name: dict[str, str] = {}
+    # Kind is a property of the CONTENT: a document a report scored is
+    # scored on every day it was observed, and a sweep fetching it again
+    # never downgrades it. An observation written before kinds existed
+    # leaves its content unknown rather than raw — it may well have been a
+    # report's payload.
+    seen: dict[str | None, set[str | None]] = {}
+    for observation in man.get("observations", []):
+        seen.setdefault(observation.get("sha256"), set()).add(observation.get("kind"))
+
+    def kind_of(sha: str | None) -> str | None:
+        kinds = seen.get(sha, set())
+        if SCORED in kinds:
+            return SCORED
+        return RAW if kinds == {RAW} else None
+
     for entry in man.get("snapshots", []):
         sha, name = entry.get("sha256"), entry.get("file")
         if name:
@@ -568,11 +611,12 @@ def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObserva
         captured = observation.get("date")
         if not path or not captured or (out and out[-1].sha256 == sha):
             continue
-        out.append(VintageObservation(captured, sha, path))
+        out.append(VintageObservation(captured, sha, path, kind_of(sha)))
 
     if not out:
         return [
-            VintageObservation(snapshot_day(path), sha_by_name.get(path.name, ""), path)
+            VintageObservation(snapshot_day(path), sha_by_name.get(path.name, ""), path,
+                               kind_of(sha_by_name.get(path.name)))
             for path in paths
         ]
 
@@ -583,7 +627,8 @@ def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObserva
     for path in paths:
         if path not in represented:
             out.append(VintageObservation(
-                snapshot_day(path), sha_by_name.get(path.name, ""), path
+                snapshot_day(path), sha_by_name.get(path.name, ""), path,
+                kind_of(sha_by_name.get(path.name)),
             ))
     out.sort(key=lambda item: item.captured)  # stable: observed same-day order is preserved
     return out
@@ -642,6 +687,9 @@ class VintageChange:
     # "scored": a figure the engine scores, compared as it scores it.
     # "context": a raw fact of a scored tag for a period older than the
     # reported window — shown, never promoted.
+    # "raw": a raw fact row returned because a snapshot could not be mapped
+    # (`diff_scored`'s fallback) — not a change to a scored figure; shown,
+    # never promoted or validated.
     scope: str = "scored"
     original_retained: bool = False
 
@@ -922,15 +970,21 @@ def diff_scored(
     A quarter whose value was built differently in the two snapshots
     (another strategy or other components) is a change of composition:
     reported with the new composition, never promoted.
+
+    When either snapshot cannot be mapped the raw fact rows are all there
+    is, and they are returned with `scope="raw"`: still listed, never a
+    scored change. Left `"scored"`, a partial fetch's missing concepts read
+    as scored withdrawals and a raw tag the engine does not score reached
+    Tier 1 and the ledger's VALIDATED (Hermes audit of 424b0b4, finding 2).
     """
     raw = diff_vintages(older, newer, materiality_pct=materiality_pct, since=since)
     a, b = _mapped(older), _mapped(newer)
     if a is None or b is None:
         which = "older" if a is None else "newer"
         return ScoredDiff(
-            raw,
+            [replace(c, scope="raw") for c in raw],
             f"scored values not compared as the engine builds them: the {which} snapshot "
-            "could not be mapped (raw facts only)",
+            "could not be mapped (raw fact rows only, not scored changes)",
         )
     window_start = min(b.window, default=None)
 
@@ -1025,6 +1079,8 @@ def _change_row(c: VintageChange) -> tuple[str, str, str]:
     now = "withdrawn" if c.kind == "withdrawn" else f"{c.new_value:,.0f}"
     if c.scope == "context":
         now += " (before the scored window)"
+    elif c.scope == "raw":
+        now += " (raw fact; not a scored figure)"
     if c.moved_tag:
         now += f" (now {'built from' if composed else 'tagged'} {c.new_tag})"
     pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
@@ -1139,6 +1195,8 @@ class VintageDiffReport:
     # Why scored values were not compared as the engine builds them (a
     # snapshot the mapper cannot build), when they were not.
     canonical_unavailable: str | None = None
+    # Raw captures passed over for the baseline (`report_diff`), when any were.
+    raw_note: str | None = None
 
     @property
     def compared(self) -> bool:
@@ -1160,6 +1218,8 @@ class VintageDiffReport:
             )
         if self.baseline_note:
             line += f"; {self.baseline_note}"
+        if self.raw_note:
+            line += f"; {self.raw_note}"
         if self.canonical_unavailable:
             line += f"; {self.canonical_unavailable}"
         return line
@@ -1167,10 +1227,14 @@ class VintageDiffReport:
 
 def _count(changes: list[VintageChange]) -> str:
     """"N change(s)" counts the silent ones; moves a later filing explains
-    are counted apart, so an amendment never reads as a silent change."""
-    filed = sum(c.explained_by_filing for c in changes)
-    text = f"{len(changes) - filed} change(s)"
-    return text + (f" (+{filed} moved with a later filing, not silent)" if filed else "")
+    are counted apart, so an amendment never reads as a silent change, and
+    so are raw fact rows (a snapshot that could not be mapped), which are not
+    changes to a scored figure at all."""
+    raw = sum(c.scope == "raw" for c in changes)
+    filed = sum(c.explained_by_filing for c in changes if c.scope != "raw")
+    text = f"{len(changes) - raw - filed} change(s)"
+    text += f" (+{filed} moved with a later filing, not silent)" if filed else ""
+    return text + (f" (+{raw} raw fact row(s), not scored changes)" if raw else "")
 
 
 def _load_for_diff(obs: VintageObservation) -> dict:
@@ -1185,6 +1249,18 @@ def _load_for_diff(obs: VintageObservation) -> dict:
         ) from e
 
 
+def _newest_scored(
+    states: list[VintageObservation], is_scored: Callable[[VintageObservation], bool]
+) -> int | None:
+    """Index of the newest state in `states` (observation order) that
+    `is_scored` accepts. An index, not the state: one content observed twice
+    on one day is two equal observations."""
+    for i in range(len(states) - 1, -1, -1):
+        if is_scored(states[i]):
+            return i
+    return None
+
+
 def report_diff(
     cik: int,
     *,
@@ -1197,16 +1273,27 @@ def report_diff(
 
     Only observations captured on or before `as_of` are visible — the one
     place the report's date bounds this store, so a historical replay passes
-    a past date and gets the trail as it stood. The newest visible state is
-    diffed against the previous one; with a `baseline_day` (the pinned
-    thesis day on the journal track) the newest is also diffed against the
-    last observation captured BEFORE that day, unless that is already one of
-    the two. Strictly before: snapshots are dated by day, so one captured on
-    the lock day may postdate the lock, and a revision it carried would be
-    absorbed into the baseline and never reported. Erring the other way
-    re-reports at most one day of pre-lock changes. An unreadable snapshot raises `ExternalPayloadError`: that is a
-    data failure for the caller's stream containment, not a "no baseline"
-    state.
+    a past date and gets the trail as it stood. The newest visible SCORED
+    state is diffed against the newest earlier scored one of different
+    content; with a `baseline_day` (the pinned thesis day on the journal
+    track) the newest is also diffed against the last scored observation
+    captured BEFORE that day, unless that is already one of the two.
+    Strictly before: snapshots are dated by day, so one captured on the lock
+    day may postdate the lock, and a revision it carried would be absorbed
+    into the baseline and never reported. Erring the other way re-reports at
+    most one day of pre-lock changes. An unreadable snapshot raises
+    `ExternalPayloadError`: that is a data failure for the caller's stream
+    containment, not a "no baseline" state.
+
+    Scored states only (Hermes audit of 424b0b4, finding 2). A raw capture
+    — the watch sweep's fetch, never mapped, possibly partial — replaced the
+    state a report scored: taken as the baseline, an unmappable one turned
+    the comparison into raw fact rows promoted to Tier 1 though nothing
+    scored had moved, and a bare one hid a real revision (additions are
+    never reported); taken as the newest, a partial fetch read as scored
+    withdrawals. The newest scored state is the report's own payload, which
+    the report stores before this runs. Raw captures passed over are counted
+    in the status line and stay in the store for `scripts/vintage.py diff`.
     """
     visible = [
         s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of
@@ -1227,23 +1314,72 @@ def report_diff(
                 "to diff against yet"
             ),
         )
-    newest, previous = visible[-1], visible[-2]
+    mappable: dict[Path, bool] = {}
+
+    def is_scored(obs: VintageObservation) -> bool:
+        # A store written before kinds existed (or one whose manifest was
+        # rebuilt from disk) does not say what wrote a state, so decide by
+        # whether the mapper builds it — the test `diff_scored` applies
+        # anyway. Treating unknown as raw would leave every existing store
+        # without a baseline until two new reports had been scored; the walk
+        # stops at the first mappable state, normally the first looked at,
+        # so this costs about one extra build per report. A legacy partial
+        # capture that still maps cannot be told apart and is used, as before.
+        if obs.kind is not None:
+            return obs.kind == SCORED
+        if obs.path not in mappable:
+            mappable[obs.path] = _mapped(_load_for_diff(obs)) is not None
+        return mappable[obs.path]
+
+    top = _newest_scored(visible, is_scored)
+    if top is None:
+        return VintageDiffReport(
+            as_of, visible[-1], None, [],
+            no_baseline_reason=(
+                f"no scored snapshot at or before {as_of}; {len(visible)} raw "
+                "capture(s) not used"
+            ),
+        )
+    newest = visible[top]
+    notes = []
+    if top < len(visible) - 1:
+        notes.append(f"{len(visible) - 1 - top} raw capture(s) after {newest.captured} "
+                     "not compared")
+    # Not the newest's own content: a state that went S -> raw -> S has not
+    # changed as scored, and comparing it with itself would say "0 changes"
+    # about a comparison never made.
+    earlier = [s for s in visible[:top] if not (s.sha256 and s.sha256 == newest.sha256)]
+    at = _newest_scored(earlier, is_scored)
+    if at is None:
+        reason = f"no earlier scored snapshot to diff the newest ({newest.captured}) against"
+        if earlier:
+            notes.insert(0, f"{len(earlier)} raw capture(s) not used as the baseline")
+        return VintageDiffReport(as_of, newest, None, [],
+                                 no_baseline_reason="; ".join([reason, *notes]))
+    previous = earlier[at]
+    if at < len(earlier) - 1:
+        notes.insert(0, f"{len(earlier) - 1 - at} raw capture(s) since {previous.captured} "
+                        "not used as the baseline")
+    raw_note = "; ".join(notes) or None
     new_facts = _load_for_diff(newest)
     scored = diff_scored(_load_for_diff(previous), new_facts, since=since)
     changes, unavailable = scored.changes, scored.canonical_unavailable
     if baseline_day is None:
         return VintageDiffReport(as_of, newest, previous, changes,
-                                 canonical_unavailable=unavailable)
+                                 canonical_unavailable=unavailable, raw_note=raw_note)
 
-    baseline = observation_at_or_before(visible, baseline_day - timedelta(days=1))
+    lock_day = baseline_day - timedelta(days=1)
+    before_lock = [s for s in visible if date.fromisoformat(s.captured) <= lock_day]
+    lock_at = _newest_scored(before_lock, is_scored)
+    baseline = None if lock_at is None else before_lock[lock_at]
     if baseline is None:
         return VintageDiffReport(
             as_of, newest, previous, changes,
             baseline_note=(
-                f"no snapshot before the pinned thesis day {baseline_day}; "
-                f"earliest is {visible[0].captured}"
+                f"no {'scored ' if before_lock else ''}snapshot before the pinned "
+                f"thesis day {baseline_day}; earliest is {visible[0].captured}"
             ),
-            canonical_unavailable=unavailable,
+            canonical_unavailable=unavailable, raw_note=raw_note,
         )
     # By content, not identity: a revert (A -> B -> A) is a third observation
     # that reuses A's bytes, and diffing it against the newest A finds nothing.
@@ -1253,17 +1389,20 @@ def report_diff(
             "snapshot; nothing to compare since the lock"
         )
         return VintageDiffReport(as_of, newest, previous, changes, baseline,
-                                 baseline_note=note, canonical_unavailable=unavailable)
+                                 baseline_note=note, canonical_unavailable=unavailable,
+                                 raw_note=raw_note)
     if baseline.sha256 == previous.sha256:
         note = (
             f"the pinned thesis snapshot ({baseline.captured}) is the previous "
             "snapshot; one comparison covers both"
         )
         return VintageDiffReport(as_of, newest, previous, changes, baseline,
-                                 baseline_note=note, canonical_unavailable=unavailable)
+                                 baseline_note=note, canonical_unavailable=unavailable,
+                                 raw_note=raw_note)
     lock = diff_scored(_load_for_diff(baseline), new_facts, since=since)
     return VintageDiffReport(as_of, newest, previous, changes, baseline, lock.changes,
-                             canonical_unavailable=unavailable or lock.canonical_unavailable)
+                             canonical_unavailable=unavailable or lock.canonical_unavailable,
+                             raw_note=raw_note)
 
 
 def silent_revision_tier1_lines(
