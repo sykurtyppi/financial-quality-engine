@@ -14,7 +14,11 @@ why the sweep captures from the day this lands. Nothing here can be
 back-filled — an uncaptured quarter is gone.
 
 Exit codes: 0 done (a diff with changes also exits 0 — a revision is a
-finding, not an error), 1 setup or EDGAR failure, 2 nothing to compare.
+finding, not an error), 1 setup or EDGAR failure, or a capture that
+archived nothing ("failed", said with why), 2 nothing to compare. A capture
+another process holds the lock for ("busy", said with which lock) exits 0:
+the holder — the sweep, usually — is archiving the same document, and a
+lock that stays wedged is a problem day the sweep's stale alert counts.
 """
 
 from __future__ import annotations
@@ -70,6 +74,14 @@ def cmd_capture(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001 — one bad name must not end the batch
             print(f"{ticker}: {type(e).__name__}: {e}", file=sys.stderr)
             worst = 1
+            continue
+        if res.problem:
+            # Why, not just "failed": `capture` returns a failure it once
+            # raised (a lock that cannot be opened), and the bare reason and
+            # exit 0 hid it (review of the finding 5 fix).
+            print(f"{t}: {res.describe()}", file=sys.stderr)
+            if res.reason == "failed":
+                worst = 1
             continue
         where = f" -> {res.path.name} ({res.path.stat().st_size / 1024:.0f} KB)" if res.wrote else ""
         print(f"{t}: {res.reason}{where}")
