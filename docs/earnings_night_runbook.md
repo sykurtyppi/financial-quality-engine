@@ -138,13 +138,20 @@ the new report may be live. Nothing was audited or marked; the log says how
 to check (`readlink` the generation pointer) and how to put the previous run
 back (`report_files.restore`). `generate_report.py` and `journal.py report`
 exit 8 on it too, and it outranks every other code in a `sweep` ·
-`9` a report WAS published but its journal entry is NOT stamped (`journal.py
-report`'s own code: the stamp failed after the publish — a full disk, a
-denied write, the journal folder gone — or the sweep's child could not write
-which run it published). The message names the run and the command that
-stamps it, `journal.py mark-reported <T> --date <day> --generation <id>`;
-the entry is left pending, so a plain `report` refuses instead of building
-again. Ranked just below `8` in a `sweep`.
+`9` a report WAS published but its journal entry is NOT stamped
+(`journal.py report`'s own code). From a `poll` or `sweep`: the child could
+not write which run it published, so the report is NOT audited — do not
+stamp it by hand (that would skip its audit); the entry stays pending and
+the next pass rebuilds and audits it. From a plain `journal.py report`: the
+stamp failed after the publish (a full disk, a denied write, the journal
+folder gone) or was refused (the BEFORE block edited while it built); the
+message names the run and the command that stamps it, `journal.py
+mark-reported <T> --date <day> --generation <id>` (for a refused stamp,
+once `journal.py verify` passes again), and the entry is left pending so a
+plain `report` refuses instead of building again. Ranked just below `8` in a
+`sweep`. A stamp whose write raised only after it was in place (the
+directory's fsync) is a stamp: said, with its durability unconfirmed, exit
+`0`.
 
 The sweep audits and stamps exactly the report its own `journal.py report
 --defer-mark` published: the child writes that run (its generation's own
@@ -371,9 +378,11 @@ HTTP 409, saying the report is "pending (being audited by the sweep, or
 left by an interrupted run)", naming its owner and both ways out);
 `mark-reported` removes it once it has stamped. Every way a sweep pass ends
 either stamps (audit passed, or ABANDONED: exit 7 still completes the case)
-or leaves the case retryable and pending (exit 4, the audit failed; exit 8,
-a publish in doubt, whose new run may be live and was never audited; or a
-sweep killed part way). The sweep's next pass retries it (`--defer-mark`
+or leaves the case retryable and pending (exit 4, the audit failed, or the
+child did not say which report it published; exit 8, a publish in doubt,
+whose new run may be live and was never audited; exit 9, published but the
+child could not write which run, so it was never audited; or a sweep killed
+part way). The sweep's next pass retries it (`--defer-mark`
 again, which takes the marker over: its owner, the earlier pass, is gone).
 
 If you give up on a pending case by hand, first check the owner the refusal

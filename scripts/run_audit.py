@@ -67,6 +67,17 @@ def run_audit(report_path: Path, timeout: float = DEFAULT_TIMEOUT_S) -> int:
     if live is None:
         print(f"No such report: {report_path}", file=sys.stderr)
         return 1
+    if (live.generation_dir is not None
+            and current_generation(live_name(report_path)) != live.generation_dir):
+        # Named by a generation's own path that is no longer live (rebuilt,
+        # set aside or restored since): the check after the audit would
+        # discard it as not the live run's, so the paid run is not made for
+        # it (review of 6563168). The check after the audit stays: a rebuild
+        # can still land while it runs.
+        print(f"{live_name(report_path).name}'s live run is not {live.generation_dir.name} "
+              "(rebuilt, set aside or restored since it was named): no audit run; audit the "
+              "live run.", file=sys.stderr)
+        return 1
     ticker = report_path.stem.split("_")[0]
     # The pinned file, not the live name: a rebuild during the audit must not
     # change what the auditor reads.
