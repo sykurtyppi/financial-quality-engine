@@ -278,7 +278,7 @@ def _cli():
     return _journal
 
 
-def _seed(tmp_path, monkeypatch, *, reported: bool):
+def _seed(tmp_path, monkeypatch, *, reported: bool, metrics: tuple[str, ...] = ("revenue",)):
     from datetime import UTC, date, datetime
 
     from app.services.journal.schema_v2 import (
@@ -292,10 +292,11 @@ def _seed(tmp_path, monkeypatch, *, reported: bool):
     entry = lock_entry(EntryV2(
         ticker="TST", day=date(2026, 7, 27), opened=datetime(2026, 7, 27, 9, tzinfo=UTC),
         before=BeforeBlock(thesis="a real thesis", conviction=3, intended_action="hold",
-                           assumptions=[Assumption(metric="revenue", comparator=">",
+                           assumptions=[Assumption(metric=m, comparator=">",
                                                    threshold=1.0, window="FY2026Q2",
                                                    source="10-Q",
-                                                   resolve_by=date(2026, 8, 15))])))
+                                                   resolve_by=date(2026, 8, 15))
+                                        for m in metrics])))
     if reported:
         entry = entry.model_copy(update={"reported": datetime.now(UTC)})
     return store.save_v2(entry)
@@ -427,3 +428,31 @@ def test_an_update_refuses_a_before_block_tampered_meanwhile(tmp_path, monkeypat
     assert entry.reported is None
     with pytest.raises(store.UpdateRefused, match="LOCK BROKEN"):
         store.update_v2(path, lambda e: e)
+
+
+def test_resolve_commits_only_terminal_proposals_and_says_what_it_left(
+        tmp_path, monkeypatch, capsys):
+    """`pending` is never written (it would close the assumption); the
+    command names what it committed and what it left for retry."""
+    import argparse
+
+    from app.services.formulas import registry
+    from app.services.ingestion import edgar_adapter
+    from app.services.journal import resolver
+    from app.services.journal.schema_v2 import Resolution
+
+    path = _seed(tmp_path, monkeypatch, reported=True, metrics=("revenue", "cfo", "net_income"))
+    monkeypatch.setattr(edgar_adapter, "fetch_dataset", lambda t: (None, None))
+    monkeypatch.setattr(registry, "compute_metrics", lambda ds: None)
+    monkeypatch.setattr(resolver, "propose_resolution",
+                        lambda a, ds, b, assumption_index: Resolution(
+                            assumption_index=assumption_index,
+                            state="met" if assumption_index == 0 else "pending",
+                            observed=2.0, note="from the 10-Q" if assumption_index == 0 else None))
+    assert _cli().cmd_resolve(argparse.Namespace(ticker="TST", date="2026-07-27",
+                                                 commit=True)) == 0
+    out = capsys.readouterr().out
+    assert "note: from the 10-Q" in out
+    assert "committed 1 terminal resolution(s)" in out
+    assert "left 2 pending for retry" in out
+    assert [(r.assumption_index, r.state) for r in store.load_v2(path).resolutions] == [(0, "met")]
