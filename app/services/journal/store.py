@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import json
 import os
 import re
 import stat
@@ -33,6 +34,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[3]
 ENTRIES = ROOT / "journal" / "entries"
@@ -116,10 +118,74 @@ def _pending_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.report.pending")
 
 
-def set_report_pending(path: Path, by: str) -> None:
+# The identity of whoever will audit (and stamp) a report deferred for its
+# audit, handed by watch.py to its `journal.py report --defer-mark` child in
+# this environment variable (JSON: ReportOwner). Absent (a command run by
+# hand), the owner is the command itself.
+REPORT_OWNER_ENV = "FQE_REPORT_OWNER"
+_PROCESS_TOKEN = uuid.uuid4().hex  # this command's run, told apart from a reused pid
+
+
+class ReportOwner(NamedTuple):
+    """Who a pending report waits for: ``name`` (for people), its ``pid`` on
+    ``host``, a ``token`` naming this one run of it, and the sweep ``lock``
+    it holds while it acts (None: it holds none)."""
+
+    name: str
+    pid: int
+    host: str
+    token: str
+    lock: str | None = None
+
+    @classmethod
+    def this_process(cls, name: str, lock: str | None = None,
+                     token: str = _PROCESS_TOKEN) -> ReportOwner:
+        return cls(name, os.getpid(), os.uname().nodename, token, lock)
+
+    def dumps(self) -> str:
+        return json.dumps(self._asdict())
+
+    @classmethod
+    def loads(cls, raw: object) -> ReportOwner | None:
+        """The owner ``raw`` (JSON text, or its parsed dict) names, or None
+        when it does not say who, fully and in kind."""
+        try:
+            doc = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            return None
+        if not isinstance(doc, dict):
+            return None
+        pid, lock = doc.get("pid"), doc.get("lock")
+        if not (type(pid) is int and pid > 0 and (lock is None or isinstance(lock, str))
+                and all(isinstance(doc.get(k), str) for k in ("name", "host", "token"))):
+            return None
+        return cls(doc["name"], pid, doc["host"], doc["token"], lock)
+
+    def describe(self) -> str:
+        where = f", under the sweep lock {self.lock}" if self.lock else ""
+        return f"{self.name}, pid {self.pid} on {self.host}{where}"
+
+
+class Pending(NamedTuple):
+    """An entry's pending report: what its marker says (``text``), and its
+    ``owner`` (None when the marker does not say who)."""
+
+    text: str
+    owner: ReportOwner | None
+
+
+def report_owner() -> ReportOwner:
+    """The owner a ``--defer-mark`` run records: the one watch.py handed it
+    (``REPORT_OWNER_ENV``), or, run by hand, this command."""
+    handed = ReportOwner.loads(os.environ.get(REPORT_OWNER_ENV))
+    return handed or ReportOwner.this_process("journal.py report --defer-mark (run by hand)")
+
+
+def set_report_pending(path: Path, by: str, owner: ReportOwner | None = None) -> None:
     """Record that ``path``'s report is PENDING its audit: built (or being
-    built) by ``journal.py report --defer-mark`` and not yet stamped. The
-    caller holds ``report_lock``.
+    built) by ``journal.py report --defer-mark`` and not yet stamped, for
+    ``owner`` (default: ``report_owner()``), the run that will audit and
+    stamp it. The caller holds ``report_lock``.
 
     Review of the finding-3b fix: ``--defer-mark`` releases the report lock
     once it has published, and the sweep then audits that report with the
@@ -127,28 +193,123 @@ def set_report_pending(path: Path, by: str) -> None:
     window found "not reported", built, published over the run being
     audited and stamped; the sweep's audit then failed, or its
     ``mark-reported`` found "already reported". While this marker is there a
-    plain report refuses (``journal.py report --retry`` overrides it), and
-    ``mark-reported`` clears it once it has stamped.
+    plain report refuses (``journal.py report --retry`` overrides it once
+    its owner is gone), and ``mark-reported`` clears it once it has stamped.
 
-    A hidden sidecar (``.<name>.report.pending``), written whole: when, who
-    (the command, its pid and host), so a refusal can say what it waits
-    for."""
+    It named the pid of the ``--defer-mark`` command, which exits as soon as
+    it has published: during the whole audit the pid was dead, the marker
+    looked stale, and the ``--retry`` it pointed to published over the run
+    being audited. It names the owner, the sweep (watch.py hands its child
+    its identity), whose pid runs, and whose sweep lock is held, until the
+    audit is done (``owner_at_work``).
+
+    A hidden sidecar (``.<name>.report.pending``), JSON, written whole. What
+    is there already is replaced (a ``--defer-mark`` retry takes over the
+    marker of an owner that is gone); something that is not a regular file
+    is removed first (only a ``--retry --force`` gets that far: every other
+    path refuses it), since a rename cannot replace a directory."""
     marker = _pending_path(path)
-    text = f"marked {now_iso()} by {by}, pid {os.getpid()} on {os.uname().nodename}\n"
-    _durable_write(marker, text, create=not marker.exists())
-
-
-def report_pending(path: Path) -> str | None:
-    """What ``set_report_pending`` recorded for ``path``, or None when its
-    report is not pending. A marker that is there but cannot be read still
-    pends (fail closed): reading it as "nothing pending" would let a plain
-    report publish over the run the sweep is auditing."""
+    owner = owner or report_owner()
+    text = json.dumps({"marked": now_iso(), "by": by, "owner": owner._asdict()}) + "\n"
     try:
-        return _pending_path(path).read_text(encoding="utf-8").strip()
+        regular = stat.S_ISREG(os.lstat(marker).st_mode)
+    except FileNotFoundError:
+        _durable_write(marker, text, create=True)
+        return
+    if not regular:
+        os.unlink(marker)  # a directory raises here: said by the caller, nothing built
+        _durable_write(marker, text, create=True)
+        return
+    _durable_write(marker, text)
+
+
+def pending_marker(path: Path) -> Pending | None:
+    """What ``set_report_pending`` recorded for ``path``, or None when its
+    report is not pending. Whatever is at the marker's name pends (fail
+    closed): a marker that cannot be read, does not parse, or is not a
+    regular file (a symlink is never followed) is still pending, owner
+    unknown. Reading one as "nothing pending" let a plain report publish over
+    the run the sweep is auditing, and a dangling symlink there then failed
+    every ``--defer-mark`` creating the marker (review of the pending
+    marker, rev28c_symlink)."""
+    marker = _pending_path(path)
+    try:
+        mode = os.lstat(marker).st_mode
     except FileNotFoundError:
         return None
     except OSError as e:
-        return f"(the marker {_pending_path(path).name} cannot be read: {e})"
+        return Pending(f"(the marker {marker.name} cannot be read: {e})", None)
+    if not stat.S_ISREG(mode):
+        kind = "a symlink" if stat.S_ISLNK(mode) else "something else"
+        return Pending(f"(the marker {marker.name} is not a regular file but {kind}; "
+                       "check it, then remove it by hand)", None)
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return None  # removed since (a stamp): nothing pending
+    except (OSError, UnicodeDecodeError) as e:
+        return Pending(f"(the marker {marker.name} cannot be read: {e})", None)
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        doc = None
+    owner = ReportOwner.loads(doc.get("owner")) if isinstance(doc, dict) else None
+    if owner is None:
+        return Pending(f"(the marker {marker.name} does not say who owns it: "
+                       f"{raw.strip()[:200]!r})", None)
+    return Pending(f"marked {doc.get('marked')} by {doc.get('by')}, for {owner.describe()}",
+                   owner)
+
+
+def report_pending(path: Path) -> str | None:
+    """``pending_marker(path)``'s text, or None when nothing is pending."""
+    pending = pending_marker(path)
+    return None if pending is None else pending.text
+
+
+def owner_at_work(owner: ReportOwner | None, *, me: ReportOwner) -> str | None:
+    """Why ``owner`` may still be at work on the report it left pending (the
+    sweep auditing it), or None when it is demonstrably gone: its pid is not
+    running on this host, and the sweep lock it ran under is free. An owner
+    this host cannot check (unknown, another host) is not "gone" (fail
+    closed; ``--retry --force`` overrides).
+
+    ``me``, the owner asking: a sweep's child does not probe the sweep lock
+    its own sweep holds (the next pass's retry of a case the pass before it
+    left pending). The probe is a non-blocking shared ``flock`` on its own
+    descriptor, released at once: it never waits, and a sweep that starts at
+    that instant yields (exit 0) as it would to any other."""
+    if owner is None:
+        return "the marker does not say who owns it"
+    if owner.host != os.uname().nodename:
+        return f"its owner ran on {owner.host}, which cannot be checked from here"
+    try:
+        os.kill(owner.pid, 0)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        return f"{owner.name}, pid {owner.pid}, is running"  # another user's
+    else:
+        return f"{owner.name}, pid {owner.pid}, is running"
+    if owner.lock is None or me.lock == owner.lock:
+        return None
+    try:
+        fd = os.open(owner.lock, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"the sweep lock {owner.lock} cannot be checked ({e})"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return f"the sweep lock {owner.lock} is held (a sweep or poll is running)"
+    except OSError as e:
+        return f"the sweep lock {owner.lock} cannot be checked ({e})"
+    finally:
+        os.close(fd)  # closing releases the probe's lock
+    return None
 
 
 def clear_report_pending(path: Path) -> None:

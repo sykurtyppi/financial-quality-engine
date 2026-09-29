@@ -345,21 +345,35 @@ was live though its command failed.
 A deferred report (the sweep's `report --defer-mark`) stamps nothing, so
 the case stays retryable, but between its publish and the sweep's
 `mark-reported` the report is being audited: the command leaves the entry
-PENDING (`journal/entries/.<T>_<day>.md.report.pending`, which says when
-and by which process). While it is there a plain `journal.py report` and
-the web report page refuse (exit 1 / HTTP 409, naming both ways out);
-the sweep's own retry (`--defer-mark` again, after a failed audit) goes
-ahead and keeps it; `mark-reported` removes it once it has stamped. Every
-way a sweep pass ends either stamps (audit passed, or ABANDONED: exit 7
-still completes the case) or leaves the case retryable and pending (exit 4,
-the audit failed). If you give up on a pending case by hand, either stamp
-the report that was audited, `journal.py mark-reported <T> --date <day>`,
-or rebuild it on purpose, `journal.py report <T> --date <day> --retry`
-(built and stamped as a plain report). A deferred report whose build
-fails (nothing published) makes nothing pending that was not pending
-before; one whose publish is IN DOUBT (exit 8) stays pending, since its
-new run may be live and was never audited. The sweep's retry after a
-failed audit does rebuild the report, on purpose.
+PENDING (`journal/entries/.<T>_<day>.md.report.pending`, which says when,
+and which run OWNS it: the sweep or poll that will audit and stamp it — its
+pid and host, and the sweep lock it holds — not the short-lived
+`journal.py` child, which exits as soon as it has published). While it is
+there a plain `journal.py report` and the web report page refuse (exit 1 /
+HTTP 409, saying the report is "pending (being audited by the sweep, or
+left by an interrupted run)", naming its owner and both ways out);
+`mark-reported` removes it once it has stamped. Every way a sweep pass ends
+either stamps (audit passed, or ABANDONED: exit 7 still completes the case)
+or leaves the case retryable and pending (exit 4, the audit failed; exit 8,
+a publish in doubt, whose new run may be live and was never audited; or a
+sweep killed part way). The sweep's next pass retries it (`--defer-mark`
+again, which takes the marker over: its owner, the earlier pass, is gone).
+
+If you give up on a pending case by hand, first check the owner the refusal
+names. While it may still be at work — its pid running on this host, or
+the sweep lock (`journal/sweep.lock`) held by any sweep or poll — a
+`--retry` (and a `--defer-mark` run by hand) is refused: rebuilding would
+publish over the report being audited. Once it is gone, either stamp the
+report that was audited, `journal.py mark-reported <T> --date <day>`, or
+rebuild it on purpose, `journal.py report <T> --date <day> --retry` (built
+and stamped as a plain report). Only if you are sure the owner is not
+auditing this report (a pid reused by another process, an owner on another
+host, a marker that does not say who owns it — a symlink or anything but a
+plain file there counts as pending), `--retry --force`. A deferred report
+whose build fails (nothing published) makes nothing pending that was not
+pending before. Before this, the marker named the `journal.py` child, dead
+throughout the audit, so it looked stale and `--retry` published over the
+run being audited (review of the pending marker).
 
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.

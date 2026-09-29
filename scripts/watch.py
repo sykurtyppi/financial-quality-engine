@@ -69,8 +69,9 @@ apart; for a small cap the 10-Q can be weeks later.
     `sweep` returns the worst per-name code — worst by severity, not by
     number: 8 (publish in doubt) > 1 (setup/EDGAR) > 4 (audit failed) >
     2 (refused) > 5 (brief queued) > 7 (audit abandoned) > 6 (vintage
-    stalled) > 0 — except that 3 (waiting) is 0 and a sweep already running
-    elsewhere is 0 (it just yields). A name still waiting more than OVERDUE_DAYS past its print hint
+    stalled) > 0 — except that 3 (waiting) is 0, a sweep already running
+    elsewhere is 0 (it just yields), and a child killed by a signal is 1.
+    A name still waiting more than OVERDUE_DAYS past its print hint
     is named on stderr on every pass, --verbose or not, AND notified once a
     day: "waiting" must not hide a mis-armed row, and stderr alone is a
     channel nobody reads.
@@ -81,10 +82,12 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
 import re
 import subprocess
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -125,6 +128,9 @@ POLITE_INTERVAL_S = 300
 AUTO_DIR = ROOT / "reports" / "auto"
 PORTFOLIO = ROOT / "journal" / "portfolio.txt"
 SWEEP_LOCK = ROOT / "journal" / "sweep.lock"
+# This run of watch.py, as the owner of the reports it defers for its audit
+# (`_report_owner_env`): one token for all its children.
+_OWNER_TOKEN = uuid.uuid4().hex
 # The brief queue: one marker per EVENT, `<TICKER>__<key>` (see `_queue_path`),
 # holding a target line, `attempts=` and `alerted=`. It was one marker per
 # TICKER, so a success for one quarter deleted another quarter's entry, a
@@ -165,8 +171,11 @@ SEVERITY_ORDER = (PUBLISH_IN_DOUBT_RC, 1, 4, 2, 5, 7, 6, 0)
 
 
 def _worst(codes) -> int:
-    """Worst sweep code by severity; 3 (still waiting) counts as 0."""
-    codes = {0 if c == 3 else c for c in codes}
+    """Worst sweep code by severity; 3 (still waiting) counts as 0, and a
+    child killed by a signal (subprocess's negative code) as 1: ranked as
+    itself, below 0, it let a sweep exit 0 with that name's case unfinished
+    (review of the pending marker, rev28c_signal)."""
+    codes = {1 if c < 0 else 0 if c == 3 else c for c in codes}
     return next((c for c in SEVERITY_ORDER if c in codes), max(codes, default=0))
 AUTO_BANNER = (
     "> **AUTO-GENERATED AUDIT ARTIFACT** — no blind thesis was locked before "
@@ -262,8 +271,19 @@ def _generate(ticker: str, entry_day: str | None, no_docs: bool) -> int:
     if no_docs:
         cmd.append("--no-docs")
     print(f"  -> {' '.join(cmd[1:])}")
-    return subprocess.run(cmd, cwd=ROOT).returncode
+    return subprocess.run(cmd, cwd=ROOT, env={**os.environ, **_report_owner_env()}).returncode
 
+
+def _report_owner_env() -> dict[str, str]:
+    """This run as the OWNER of the report its `--defer-mark` child leaves
+    pending (store.set_report_pending), in the child's environment only: the
+    marker named the child, which exits once it has published, so for the
+    whole audit the pid it named was dead and the report looked abandoned
+    (review of the pending marker, rev28c_pid). This process audits and
+    stamps it, holding SWEEP_LOCK meanwhile; `journal.py report --retry`
+    waits for both to be gone."""
+    owner = store.ReportOwner.this_process("watch.py", str(SWEEP_LOCK), _OWNER_TOKEN)
+    return {store.REPORT_OWNER_ENV: owner.dumps()}
 
 def _mark_reported(ticker: str, entry_day: str | None) -> int:
     cmd = [sys.executable, str(ROOT / "scripts" / "journal.py"), "mark-reported", ticker]
@@ -831,10 +851,14 @@ def _act(ticker: str, watch: wl.Watch, decision, args: argparse.Namespace) -> in
             # The report stays on disk for diagnosis; the entry stays
             # unmarked so the case is retryable. A cron runner must see
             # this as a failure, not a success with a missing audit.
+            # `--date` whenever the entry is known: without it
+            # `mark-reported` stamps the ticker's NEWEST entry, which need not
+            # be this one (review of the pending marker, rev28c_nodate).
+            day = f" --date {entry_day}" if entry_day else ""
             print(f"  audit FAILED (exit {arc}); report kept at {report}; "
                   f"journal NOT marked reported — re-run the poll or "
                   f"`run_audit.py {report}` then "
-                  f"`journal.py mark-reported {ticker}`.", file=sys.stderr)
+                  f"`journal.py mark-reported {ticker}{day}`.", file=sys.stderr)
             return 4
         if abandoned and arc != 0:
             _abandoned_note(ticker, report, arc)
@@ -1289,16 +1313,20 @@ _RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED",
              PUBLISH_IN_DOUBT_RC: "report publish IN DOUBT (the new run may be live)"}
 
 
+def _rc_words(rc: int) -> str:
+    return f"killed by signal {-rc}" if rc < 0 else str(_RC_WORDS.get(rc, rc))
+
+
 def _notify_problems(sync_rc: int, acted: dict, args: argparse.Namespace,
                      *, overdue: list[str] | None = None) -> None:
     """One notification per pass that needs a human — never for a clean
     pass (a finished brief announces itself when it is written)."""
     if args.dry_run:
         return
-    problems = [f"{t}: {_RC_WORDS.get(rc, rc)}" for t, rc in acted.items() if rc != 0]
+    problems = [f"{t}: {_rc_words(rc)}" for t, rc in acted.items() if rc != 0]
     problems += [f"{t}: overdue — check the row" for t in (overdue or [])]
     if sync_rc != 0:
-        problems.insert(0, f"portfolio sync: {_RC_WORDS.get(sync_rc, sync_rc)}")
+        problems.insert(0, f"portfolio sync: {_rc_words(sync_rc)}")
     if problems and not notify("FQE sweep needs attention", "; ".join(problems)):
         print("notification NOT delivered (osascript unavailable, FQE_NO_NOTIFY set, or no "
               "login session) — read this log: " + "; ".join(problems), file=sys.stderr)

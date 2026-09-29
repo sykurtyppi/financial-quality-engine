@@ -24,7 +24,9 @@ Core logic lives in app/services/journal/ so the CLI and the web UI never diverg
 
 `journal.py report --defer-mark` (the sweep's) leaves the case's report
 PENDING its audit until `mark-reported`: meanwhile a plain `report` refuses
-(the web report page too), and `report --retry` rebuilds it on purpose.
+(the web report page too), and `report --retry` rebuilds it on purpose once
+the marker's owner (the sweep that is auditing it) is gone; `--retry
+--force` whatever the owner.
 
 Exit codes: 0 done · 1 refused or failed (nothing published, nothing
 stamped) · 8 (`report`) the report's publish is IN DOUBT: it failed and
@@ -68,7 +70,8 @@ def cmd_open(args: argparse.Namespace) -> int:
         return 1
     print(f"Opened {path}")
     print("Write your BEFORE block now (thesis + conviction), THEN run:")
-    print(f"    journal.py report {args.ticker.upper()}")
+    ticker, day = path.stem.split("_", 1)  # this entry, not the ticker's newest
+    print(f"    journal.py report {ticker} --date {day}")
     return 0
 
 
@@ -83,22 +86,49 @@ def _publish_in_doubt(e: PublishInDoubt) -> int:
 
 # Who a pending marker names (store.set_report_pending).
 _DEFERRED = "journal.py report --defer-mark"
+_PENDING = "pending (being audited by the sweep, or left by an interrupted run)"
 
 
 def _refused_as_pending(path: Path, args: argparse.Namespace) -> bool:
-    """A plain `report` of an entry whose report is PENDING its audit: said,
-    and refused (True). Review of the finding-3b fix: `--defer-mark`
-    releases the report lock once it has published, and the sweep audits
-    that report with the entry unstamped; a plain report in that window
-    built, published over the run being audited and stamped, and the
-    sweep's audit or `mark-reported` then failed. `--defer-mark` itself (the
-    sweep's own retry) and `--retry` (a rebuild on purpose) go ahead."""
-    pending = store.report_pending(path)
-    if pending is None or getattr(args, "defer_mark", False) or getattr(args, "retry", False):
+    """A report of an entry whose report is PENDING its audit: said, and
+    refused (True), unless it may go ahead. Review of the finding-3b fix:
+    `--defer-mark` releases the report lock once it has published, and the
+    sweep audits that report with the entry unstamped; a plain report in
+    that window built, published over the run being audited and stamped, and
+    the sweep's audit or `mark-reported` then failed. A plain report always
+    refuses.
+
+    `--retry` (a rebuild on purpose) and `--defer-mark` go ahead only once
+    the marker's owner is gone (`store.owner_at_work`), or `--defer-mark` of
+    that same owner: the marker named the `--defer-mark` child, dead while
+    the sweep audited, so `--retry` (and a `--defer-mark` run by hand) built
+    over the run being audited (review of the pending marker, rev28c_pid,
+    rev28c_defer_by_hand). The sweep's retry on its next pass is a new
+    process holding the sweep lock itself: the owner it finds is gone.
+    `--retry --force` goes ahead whatever the owner."""
+    pending = store.pending_marker(path)
+    if pending is None:
+        return False
+    retry, defer = getattr(args, "retry", False), getattr(args, "defer_mark", False)
+    if retry and getattr(args, "force", False):
+        return False
+    me = store.report_owner()
+    if defer and pending.owner is not None and pending.owner.token == me.token:
+        return False  # its own retry, in the same run
+    at_work = store.owner_at_work(pending.owner, me=me)
+    if (retry or defer) and at_work is None:
         return False
     ticker, day = path.stem.split("_", 1)
-    print(f"{path.name}: this case's report is being audited ({pending}) and is stamped "
-          "once its audit passes. Not building another over it. Once the audit has passed: "
+    said = f"{path.name}: this case's report is {_PENDING}: {pending.text}. "
+    if retry:
+        print(said + f"Its owner may still be at work on it: {at_work}; a rebuild now would "
+              "publish over the report it is auditing. Wait for it to finish, or, if you are "
+              "sure it is not auditing this report: "
+              f"`journal.py report {ticker} --date {day} --retry --force`.", file=sys.stderr)
+        return True
+    state = (f"Its owner may still be at work on it ({at_work})." if at_work
+             else "Its owner is gone.")
+    print(said + state + " Not building another over it. Once the audit has passed: "
           f"`journal.py mark-reported {ticker} --date {day}`; to rebuild it on purpose "
           f"instead: `journal.py report {ticker} --date {day} --retry`.", file=sys.stderr)
     return True
@@ -106,23 +136,37 @@ def _refused_as_pending(path: Path, args: argparse.Namespace) -> bool:
 
 def _build_marked(path: Path, args: argparse.Namespace, build):
     """``build()`` (the report's build and publish) for a report command.
-    With `--defer-mark` the entry is marked PENDING first (before the build,
-    so a command killed part way, its report perhaps live, leaves it
-    pending), and the mark it made is taken back if the build raises: a
-    build that raises published nothing (`report_files`), except a publish
-    in doubt, whose new run may be live and unaudited, which stays pending.
-    A marker already there (the sweep's retry after a failed audit) is kept:
-    the run it names is still the one pending."""
-    made = getattr(args, "defer_mark", False) and store.report_pending(path) is None
-    if made:
-        store.set_report_pending(path, _DEFERRED)
+    With `--defer-mark` the entry is marked PENDING first, for this run's
+    owner (before the build, so a command killed part way, its report
+    perhaps live, leaves it pending), and the mark is taken back if the
+    build raises and nothing was pending before: a build that raises
+    published nothing (`report_files`), except a publish in doubt, whose new
+    run may be live and unaudited, which stays pending. A marker already
+    there (the sweep's retry after a failed audit) stays pending: the run
+    it names is still live; it names this owner from now on (the one that
+    went ahead is gone, or is this one)."""
+    defer = getattr(args, "defer_mark", False)
+    made = False
+    if defer:
+        had = store.pending_marker(path)
+        made = had is None
+        me = store.report_owner()
+        if had is None or had.owner is None or had.owner.token != me.token:
+            store.set_report_pending(path, _DEFERRED, me)
     try:
         return build()
     except PublishInDoubt:
         raise
     except Exception:
         if made:
-            store.clear_report_pending(path)
+            try:
+                store.clear_report_pending(path)
+            except OSError as e:
+                # Said, not raised: the build's own error is the one the
+                # caller says (it was masked). The entry stays pending: fail
+                # closed, as a marker that cannot be read.
+                print(f"{path.name}: its pending marker could not be taken back ({e}); "
+                      "the entry stays pending.", file=sys.stderr)
         raise
 
 
@@ -339,7 +383,8 @@ def _resolve_v2_or_exit(args: argparse.Namespace) -> tuple[object, object] | int
         return 1
     if entry.reported is None:
         print(f"{path.name}: report not yet generated — run "
-              f"`journal.py report {args.ticker.upper()}` first. AFTER/OUTCOME "
+              f"`journal.py report {entry.ticker} --date {entry.day.isoformat()}` first. "
+              "AFTER/OUTCOME "
               f"only make sense POST-report; filling them beforehand would "
               f"corrupt the causal chain the whole journal measures.",
               file=sys.stderr)
@@ -891,7 +936,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--retry", action="store_true",
                        help="build even though a --defer-mark report of this entry is "
                             "pending its audit (the sweep's): a deliberate rebuild, "
-                            "stamped as a plain report is")
+                            "stamped as a plain report is. Refused while the marker's "
+                            "owner (the sweep) may still be auditing it")
+    p_rep.add_argument("--force", action="store_true",
+                       help="with --retry: rebuild even though the marker's owner may "
+                            "still be at work (its pid running, the sweep lock held, or "
+                            "it cannot be checked) — only when you are sure it is not "
+                            "auditing this report")
     p_rep.add_argument("--replay", action="store_true",
                        help="historical replay as of the entry's day -> T_DAY.replay.md; "
                             "never stamps or edits the entry")
