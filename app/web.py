@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.services.journal import reporting, store
-from app.services.reporting.report_files import PublishInDoubt
+from app.services.reporting.report_files import PublishInDoubt, recording
 
 BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
@@ -180,7 +180,8 @@ def _generate_and_stamp(path: Path, ticker: str, day: str) -> tuple[str | None, 
         # fresh=True: the first report LOCKS the thesis against what was
         # fetched. A <24h EDGAR cache can still hold pre-filing data on a
         # filing day; never lock on that.
-        reporting.build_report(ticker, with_docs=True, report_day=day, fresh=True)
+        with recording() as published:
+            reporting.build_report(ticker, with_docs=True, report_day=day, fresh=True)
     except PublishInDoubt as e:
         # The new report MAY be live (and is what the page shows, if so):
         # said as it is, as a server error, and the thesis is not locked.
@@ -192,11 +193,38 @@ def _generate_and_stamp(path: Path, ticker: str, day: str) -> tuple[str | None, 
     try:
         store.mark_reported(path)
     except Exception as e:  # noqa: BLE001
-        return (f"The report was generated and is live (below), but the thesis was NOT "
-                f"stamped reported: {e}. Stamp it with `{cli('mark-reported')}` "
-                "before opening this page again: an unstamped case builds its report "
-                "again."), 500
+        return _not_stamped(path, e, published[-1] if published else None,
+                            cli("mark-reported"))
     return None, 200
+
+
+def _not_stamped(path: Path, e: Exception, made, mark: str) -> tuple[str, int]:
+    """The page's stamp raised after its report went live; as `journal.py
+    report` says it (review of 6563168, finding 4: the page left nothing
+    pending, so opening it again built and published over the live run).
+    A stamp in place on disk (its directory's fsync failed after the rename)
+    is a stamp, said with its durability unconfirmed. Otherwise the entry is
+    left PENDING, recording ``made`` (the run the build published, its only
+    publish), so the page refuses to build again, and the command to stamp
+    it names that run."""
+    landed = store.reported_on_disk(path)
+    if landed is not None:
+        return (f"The thesis is stamped reported ({landed}), but its write raised after "
+                f"the stamp was in place ({e}): the stamp could not be confirmed durable. "
+                "Check the disk."), 200
+    gen = "" if made is None else f" --generation {made.generation_id}"
+    try:
+        store.set_report_pending(
+            path, "the web report page (its report was published; the stamp failed)",
+            store.ReportOwner.this_process("the web report page"),
+            generation_id=None if made is None else made.generation_id,
+            report=None if made is None else str(made.report))
+        kept = "It is left pending: this page will not build it again."
+    except OSError as e2:
+        kept = (f"Its pending marker could not be written either ({e2}): opening this page "
+                "again builds its report again.")
+    return (f"The report was generated and is live (below), but the thesis was NOT "
+            f"stamped reported: {e}. {kept} Stamp it with `{mark}{gen}`."), 500
 
 
 _URL_ATTR_RE = re.compile(r'''(\s(?:href|src)\s*=\s*)(["'])([^"']*)\2''', re.I)

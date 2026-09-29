@@ -61,10 +61,12 @@ Exit codes (for cron/alerting):
        (`journal.py report`'s own code, passed on: its --result-file could
        not be written, so which run to audit is not known). Nothing is
        audited or marked, the entry stays pending, the row is not re-armed,
-       and the next pass rebuilds it. Ranked just below 8: which run is live
-       IS known (the log names it, and the `mark-reported --generation`
-       command that stamps it), but a report went live without its
+       and the next pass rebuilds and audits it: do NOT stamp it by hand,
+       which would skip its audit. Ranked just below 8: which run is live IS
+       known (the log names it), but a report went live without its
        bookkeeping, which is worse than a failure (1) that changed nothing.
+       (A plain `journal.py report` exits 9 too, and there the log names the
+       `mark-reported --generation` command that stamps it.)
 
 Print night vs 10-Q: the engine report needs the quarter's XBRL, so the
 report/audit track fires on the 10-Q/10-K. The brief is a read of the
@@ -303,7 +305,14 @@ def _generate(ticker: str, entry_day: str | None, no_docs: bool) -> tuple[int, G
     call alone (``mkdtemp``: private, never reused, removed after), so no
     earlier run's result can be read as this one's.
     """
-    held = Path(tempfile.mkdtemp(prefix="fqe-report-result-"))
+    try:
+        held = Path(tempfile.mkdtemp(prefix="fqe-report-result-"))
+    except OSError as e:
+        # An ordinary failure for this name, not a traceback out of the pass
+        # (review of 6563168): nothing is generated without a result file.
+        print(f"  cannot make a directory for journal.py's result file ({e}); "
+              "nothing generated", file=sys.stderr)
+        return 1, None
     result = held / "result.json"
     cmd = [sys.executable, str(ROOT / "scripts" / "journal.py"), "report", ticker,
            "--fresh", "--defer-mark", "--result-file", str(result)]
@@ -1442,8 +1451,9 @@ _RC_WORDS = {1: "error", 2: "refused (no thesis)", 4: "audit FAILED",
              5: "brief queued", 6: "vintage capture stalled",
              7: "audit ABANDONED (brief built without it)",
              PUBLISH_IN_DOUBT_RC: "report publish IN DOUBT (the new run may be live)",
-             PUBLISHED_NOT_STAMPED_RC: "report published but NOT stamped (the log names "
-                                       "the run and the command that stamps it)"}
+             PUBLISHED_NOT_STAMPED_RC: "report published but NOT stamped (not audited: the "
+                                       "next pass rebuilds and audits it; do not stamp it "
+                                       "by hand)"}
 
 
 def _rc_words(rc: int) -> str:

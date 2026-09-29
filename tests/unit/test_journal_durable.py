@@ -1614,6 +1614,8 @@ def test_a_stamp_that_fails_after_the_publish_is_exit_9_and_recoverable(
     assert "left PENDING" in err
     assert not _is_reported(path)
     assert store.pending_marker(path).generation_id == run.generation_id
+    # Its owner is this plain report, said as one (review of 6563168).
+    assert store.pending_marker(path).owner.name == "journal.py report"
     # A plain retry refuses, naming the command that stamps the published run.
     assert cli.cmd_report(_report_ns(path)) == 1 and len(built) == 1
     err = capsys.readouterr().err
@@ -1848,3 +1850,154 @@ def test_a_marker_rewrite_that_fails_leaves_the_earlier_marker(tmp_path, monkeyp
         store.set_report_pending(path, "journal.py report --defer-mark",
                                  generation_id="a" * 32, report="r.md")
     assert store.pending_marker(path) == before
+
+
+# --- review of 6563168: a stamp that landed, a stamp refused, the sweep's exit 9 ---------
+# 1. `_durable_write` renames the stamped entry into place, then fsyncs the
+#    directory: a directory fsync that failed (EIO) raised with the entry
+#    STAMPED, and `report` said exit 9 "NOT stamped", wrote a pending marker
+#    beside the stamped entry and named a `mark-reported` that then refused
+#    ("already reported") and left the marker for good; `mark-reported` said
+#    "NOT stamped", exit 1. A stamp that raised is now read back: on disk, it is
+#    a stamp (said, its durability unconfirmed; exit 0; nothing left pending).
+# 2. A v2 stamp REFUSED after the publish (the BEFORE block edited while the
+#    report built) was exit 1, "nothing published", saying nothing of the live
+#    report and leaving nothing pending. It is exit 9 like any stamp that failed.
+# 3. Exit 9 from the sweep's `--result-file` named no stamp command, while every
+#    doc said the log names one; for the sweep, the next pass rebuilds and audits.
+
+
+def _dir_fsync_fails(monkeypatch, path: Path) -> None:
+    """The directory fsync after the stamp's rename fails (EIO), during the
+    stamp only: the entry is stamped on disk, its durability unconfirmed."""
+    import errno
+    import stat as _stat
+
+    name = "update_v2" if store.is_v2(path) else "mark_reported"
+    real, real_fsync = getattr(store, name), os.fsync
+    armed: list[int] = []
+
+    def fsync(fd):
+        if armed and _stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "directory fsync failed")
+        return real_fsync(fd)
+
+    def stamp(p, *a, **k):
+        armed.append(1)
+        try:
+            return real(p, *a, **k)
+        finally:
+            armed.clear()
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(store, name, stamp)
+
+
+@pytest.mark.parametrize("command", ["report", "mark-reported"])
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_a_stamp_whose_directory_fsync_fails_is_a_stamp_said_as_unconfirmed(
+        tmp_path, monkeypatch, capsys, v2, command):
+    import argparse
+
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    cli = _cli()
+    _by_hand(monkeypatch)
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    if command == "mark-reported":
+        assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+        gid = _live(built[0]).generation_id
+    _dir_fsync_fails(monkeypatch, path)
+    capsys.readouterr()
+    if command == "report":
+        rc = cli.cmd_report(_report_ns(path))
+    else:
+        rc = cli.cmd_mark_reported(argparse.Namespace(
+            ticker="TST", date=path.stem.split("_", 1)[1], generation=gid))
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "NOT stamped" not in err
+    assert "stamped, but" in err and "could not be confirmed durable" in err
+    assert "directory fsync failed" in err
+    assert _is_reported(path) and store.report_pending(path) is None
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_already_reported_clears_a_marker_left_for_the_same_run(tmp_path, monkeypatch, v2):
+    """A marker beside a stamped entry (left by a stamp reported as failed
+    that had landed) is cleared by the `mark-reported --generation` naming
+    its run; one naming another run is left as it is."""
+    import argparse
+
+    path = _either(tmp_path / "entries", monkeypatch, v2)
+    day = path.stem.split("_", 1)[1]
+    cli = _cli()
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    assert cli.cmd_report(_report_ns(path, defer_mark=True)) == 0
+    gid = _live(built[0]).generation_id
+    if v2:
+        store.update_v2(path, cli._stamp_reported)
+    else:
+        store.mark_reported(path)
+
+    def mark(g):
+        return cli.cmd_mark_reported(argparse.Namespace(ticker="TST", date=day, generation=g))
+
+    assert mark("f" * 32) == 1 and store.pending_marker(path).generation_id == gid
+    assert mark(gid) == 1  # already reported, as it says
+    assert store.report_pending(path) is None
+
+
+def test_a_stamp_refused_after_the_publish_is_published_not_stamped(
+        tmp_path, monkeypatch, capsys):
+    """rev31c_refused_after_publish: the BEFORE block edited by hand while the
+    report built. The stamp refuses (the lock is broken), with the report
+    live: exit 9, said, pending; `mark-reported` refuses too until the entry
+    is restored, and the message says so rather than name it bare."""
+    from app.services.journal.schema_v2 import render_entry
+
+    path = _either(tmp_path / "entries", monkeypatch, True)
+    day = path.stem.split("_", 1)[1]
+    cli = _cli()
+    _by_hand(monkeypatch)
+    _, built = _publishing(monkeypatch, cli, tmp_path)
+    real_build = cli.build_report
+    original = path.read_text(encoding="utf-8")
+
+    def build(*a, **k):
+        out = real_build(*a, **k)
+        e = store.load_v2(path)
+        path.write_text(render_entry(e.model_copy(update={"before": e.before.model_copy(
+            update={"thesis": "edited while it built"})})), encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(cli, "build_report", build)
+    assert cli.cmd_report(_report_ns(path)) == 9
+    err = capsys.readouterr().err
+    run = _live(built[0])
+    assert f"the report WAS published: generation {run.generation_id} at {run.report}" in err
+    assert "LOCK BROKEN" in err
+    assert f"`journal.py verify TST --date {day}`" in err
+    assert "refuses it too until the entry is restored" in err
+    assert store.pending_marker(path).generation_id == run.generation_id
+    path.write_text(original, encoding="utf-8")  # restored (git)
+    (hint,) = [n for n in _hinted(cli, err) if n.cmd == "mark-reported"]
+    assert hint.generation == run.generation_id
+    assert cli.cmd_mark_reported(hint) == 0 and store.report_pending(path) is None
+
+
+def test_the_sweeps_exit_9_says_the_next_pass_rebuilds_and_names_no_stamp(
+        tmp_path, monkeypatch, capsys):
+    """rev31c_exit9_msg: with --defer-mark the report is unaudited, so a stamp
+    by hand would skip its audit; the message says what happens instead."""
+    path = _either(tmp_path / "entries", monkeypatch, True)
+    day = path.stem.split("_", 1)[1]
+    cli = _cli()
+    _publishing(monkeypatch, cli, tmp_path)
+    rc = cli.cmd_report(_report_ns(path, defer_mark=True,
+                                   result_file=str(tmp_path / "no-such-dir" / "r.json")))
+    out = capsys.readouterr()
+    assert rc == 9
+    assert "mark-reported" not in out.err + out.out
+    assert "Do not stamp it by hand: it is not audited" in out.err
+    assert "the sweep's next pass rebuilds and audits it" in out.err
+    assert f"`journal.py report TST --date {day} --retry`" in out.err

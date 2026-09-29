@@ -334,6 +334,29 @@ def owner_at_work(owner: ReportOwner | None, *, me: ReportOwner) -> str | None:
     return None
 
 
+def reported_on_disk(path: Path, at: datetime | None = None) -> str | None:
+    """The ``reported`` stamp ``path`` carries on disk now (v2: only ``at``,
+    when given: the stamp a command wrote), or None: none, or the entry
+    cannot be read.
+
+    Read after a stamp that RAISED (review of 6563168, finding 1):
+    `_durable_write` renames the new entry into place, then fsyncs the
+    directory, and a directory fsync that fails raises with the entry
+    stamped. Taken for "not stamped", the stamp was reported as failed, a
+    pending marker was written beside a stamped entry, and the `mark-reported`
+    named to recover was refused ("already reported"). The CLI and the web
+    page both read the stamp back here, so they cannot disagree."""
+    try:
+        if is_v2(path):
+            reported = load_v2(path).reported
+            if reported is None or (at is not None and reported != at):
+                return None
+            return reported.isoformat()
+        return field(path.read_text(encoding="utf-8"), "reported")
+    except (OSError, ValueError):
+        return None
+
+
 def clear_report_pending(path: Path) -> None:
     """The report is no longer pending (``mark-reported`` stamped it, or a
     ``--retry`` rebuilt and stamped it). The caller holds ``report_lock``."""

@@ -487,3 +487,78 @@ def test_one_unreadable_entry_does_not_lose_every_other_case(client, monkeypatch
     r = client.get("/")
     assert r.status_code == 200 and "KO" in r.text
     assert store.tally()["unreadable"] == ["ZZZ_2026-07-29.md"]
+
+
+# --- review of 6563168 (rev31c_web_parity): the page's stamp failure left nothing ---------
+# pending, so the next load built and published again over the live report,
+# where `journal.py report` leaves the entry pending and names the run to stamp.
+
+
+def _publishing_build(monkeypatch, builds):
+    from app.services.reporting.report_files import replacing
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False):
+        out = reporting.report_path(ticker, report_day)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with replacing(out) as staged:
+            staged.report.write_text(f"# {ticker} report\n")
+            staged.ledger.write_text("{}")
+        builds.append(out)
+        return out, "no acute signals"
+
+    monkeypatch.setattr(reporting, "build_report", build)
+
+
+def test_a_stamp_failure_on_the_page_leaves_the_report_pending(client, monkeypatch):
+    from app.services.reporting.report_files import read_live
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    builds: list = []
+    _publishing_build(monkeypatch, builds)
+    real_mark, fired = store.mark_reported, []
+
+    def once(p):
+        if not fired:
+            fired.append(1)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_mark(p)
+
+    monkeypatch.setattr(store, "mark_reported", once)
+    r = client.get("/report/KO")
+    gid = read_live(builds[0]).generation_id
+    assert r.status_code == 500
+    assert "NOT stamped" in r.text and "No space left on device" in r.text
+    assert f"mark-reported KO --date {path.stem.split('_', 1)[1]} --generation {gid}" in r.text
+    pending = store.pending_marker(path)
+    assert pending is not None and pending.generation_id == gid
+    assert client.get("/report/KO").status_code == 409  # not built again
+    assert len(builds) == 1 and not store.parse_entry(path)["is_reported"]
+
+
+def test_a_stamp_that_landed_on_the_page_is_a_stamp(client, monkeypatch):
+    """The stamp renamed into place, then its directory fsync failed: the
+    thesis IS locked. Said, with a warning, and nothing left pending."""
+    import stat
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    _publishing_build(monkeypatch, [])
+    real_mark, real_fsync, armed = store.mark_reported, os.fsync, []
+
+    def fsync(fd):
+        if armed and stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "directory fsync failed")
+        return real_fsync(fd)
+
+    def mark(p):
+        armed.append(1)
+        try:
+            return real_mark(p)
+        finally:
+            armed.clear()
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(store, "mark_reported", mark)
+    r = client.get("/report/KO")
+    assert r.status_code == 200
+    assert "could not be confirmed durable" in r.text
+    assert store.parse_entry(path)["is_reported"] and store.report_pending(path) is None

@@ -2583,3 +2583,35 @@ class TestPublishedNotStamped:
         (title, text), = sweep_env.notified
         assert "AAPL: report published but NOT stamped" in text
         assert watch_cli._rc_words(9).startswith("report published but NOT stamped")
+
+
+# --- review of 6563168 -------------------------------------------------------------------
+
+
+def test_a_temporary_directory_that_cannot_be_made_is_an_ordinary_failure(
+        poll_env, monkeypatch, capsys):
+    """`mkdtemp` failing (a full or read-only /tmp) was a traceback out of the
+    poll; it is exit 1 for that name, nothing generated."""
+    import errno
+
+    def cannot(**kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    ran = []
+    monkeypatch.setattr(watch_cli.tempfile, "mkdtemp", cannot)
+    monkeypatch.setattr(watch_cli.subprocess, "run", lambda *a, **k: ran.append(a))
+    assert _REAL_GENERATE("NVDA", "2026-08-26", False) == (1, None)
+    assert ran == []
+    assert "No space left on device" in capsys.readouterr().err
+    _force_decision(monkeypatch, "generate")
+    monkeypatch.setattr(watch_cli, "_generate", _REAL_GENERATE)
+    assert watch_cli.cmd_poll(_poll_args()) == 1
+    assert poll_env.audit == [] and poll_env.marked == []
+
+
+def test_nine_in_a_notification_says_both_ways_it_ends():
+    """rev31c_exit9_msg: a plain report's 9 names the stamp command; the
+    sweep's is rebuilt and audited by its next pass, never stamped by hand."""
+    words = watch_cli._rc_words(9)
+    assert words.startswith("report published but NOT stamped")
+    assert "the next pass rebuilds and audits it" in words
