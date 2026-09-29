@@ -278,7 +278,8 @@ def _cli():
     return _journal
 
 
-def _seed(tmp_path, monkeypatch, *, reported: bool, metrics: tuple[str, ...] = ("revenue",)):
+def _seed(tmp_path, monkeypatch, *, reported: bool, metrics: tuple[str, ...] = ("revenue",),
+          threshold: float = 1.0):
     from datetime import UTC, date, datetime
 
     from app.services.journal.schema_v2 import (
@@ -293,7 +294,7 @@ def _seed(tmp_path, monkeypatch, *, reported: bool, metrics: tuple[str, ...] = (
         ticker="TST", day=date(2026, 7, 27), opened=datetime(2026, 7, 27, 9, tzinfo=UTC),
         before=BeforeBlock(thesis="a real thesis", conviction=3, intended_action="hold",
                            assumptions=[Assumption(metric=m, comparator=">",
-                                                   threshold=1.0, window="FY2026Q2",
+                                                   threshold=threshold, window="FY2026Q2",
                                                    source="10-Q",
                                                    resolve_by=date(2026, 8, 15))
                                         for m in metrics])))
@@ -456,3 +457,238 @@ def test_resolve_commits_only_terminal_proposals_and_says_what_it_left(
     assert "committed 1 terminal resolution(s)" in out
     assert "left 2 pending for retry" in out
     assert [(r.assumption_index, r.state) for r in store.load_v2(path).resolutions] == [(0, "met")]
+
+
+# --- Hermes audit of 424b0b4, finding 4: `update_v2` saves only a locked entry ---------
+# `update_v2` verified the lock of the entry it READ, then saved whatever the
+# callback returned; the save compared only the `before_sha256` fields. A
+# callback that edited the BEFORE block (keeping the stored hash) wrote an
+# entry whose lock no longer verified; one that moved the ticker or day wrote
+# a file whose name no longer matched its entry.
+
+
+def _rehashed(e):
+    """A BEFORE block edited and re-hashed: consistent with itself, and a
+    different preregistration from the one on disk."""
+    from app.services.journal.schema_v2 import hash_before
+
+    before = e.before.model_copy(update={"thesis": "rewritten after the fact"})
+    return e.model_copy(update={"before": before, "before_sha256": hash_before(before)})
+
+
+def _in_place(e):
+    """The same, done to the entry ``update_v2`` handed over and returned as
+    itself: compared with that object, nothing would look changed."""
+    from app.services.journal.schema_v2 import hash_before
+
+    e.before.thesis = "rewritten in place"
+    e.before_sha256 = hash_before(e.before)
+    return e
+
+
+_REFUSED = {  # what the callback does -> (it, what the refusal names)
+    "before thesis, stored hash kept": (lambda e: e.model_copy(update={
+        "before": e.before.model_copy(update={"thesis": "rewritten after the fact"})}),
+        "before"),
+    "before and its hash": (_rehashed, "before, before_sha256"),
+    "before, in place": (_in_place, "before, before_sha256"),
+    "before_sha256": (lambda e: e.model_copy(update={"before_sha256": "0" * 64}),
+                      "before_sha256"),
+    "locked_at": (lambda e: e.model_copy(update={"locked_at": e.locked_at.replace(year=2020)}),
+                  "locked_at"),
+    "opened": (lambda e: e.model_copy(update={"opened": e.opened.replace(year=2020)}), "opened"),
+    "ticker": (lambda e: e.model_copy(update={"ticker": "OTHER"}), "ticker"),
+    "day": (lambda e: e.model_copy(update={"day": e.day.replace(day=28)}), "day"),
+}
+
+
+@pytest.mark.parametrize("change", list(_REFUSED), ids=list(_REFUSED))
+def test_an_update_that_changes_the_locked_entry_is_refused_and_writes_nothing(
+        tmp_path, monkeypatch, change):
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    before = path.read_bytes()
+    callback, named = _REFUSED[change]
+    with pytest.raises(store.UpdateRefused, match=f"the update changed {named}, which the lock "
+                       "seals or the file is named for; refusing to save"):
+        store.update_v2(path, callback)
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".md")) == [path.name]
+
+
+def test_an_update_that_leaves_the_lock_alone_is_saved(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.services.journal.schema_v2 import verify_lock
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    now = datetime.now(UTC)
+    saved = store.update_v2(path, lambda e: _disagree(e).model_copy(update={"reported": now}))
+    entry = store.load_v2(path)
+    assert entry == saved and verify_lock(entry) and entry.reported == now
+    assert entry.after.what_i_disagreed_with == "written meanwhile"
+
+
+def test_a_before_block_that_compares_equal_but_hashes_differently_is_refused(
+        tmp_path, monkeypatch):
+    """Equal is not enough: -0.0 == 0.0, but the hash reads the JSON, where
+    they differ. The lock itself is verified on what would be saved."""
+    path = _seed(tmp_path, monkeypatch, reported=False, threshold=0.0)
+    before = path.read_bytes()
+
+    def negative_zero(e):
+        a = e.before.assumptions[0].model_copy(update={"threshold": -0.0})
+        return e.model_copy(update={"before": e.before.model_copy(update={"assumptions": [a]})})
+
+    with pytest.raises(store.UpdateRefused, match="changed the BEFORE block"):
+        store.update_v2(path, negative_zero)
+    assert path.read_bytes() == before
+
+
+# --- Hermes audit of 424b0b4, finding 3b: two `report` commands on one entry ----------
+# Each command checked "not reported", built and published its report, then
+# stamped. Run twice at once on one unstamped entry, both built and published;
+# the second's stamp was refused ("already reported", exit 1) with its report
+# the live one (v1 stamped twice and said nothing). A report command now holds
+# the entry's REPORT lock from the check through the stamp: the second waits,
+# then finds the entry stamped and refuses before building anything.
+
+_REPORTER = textwrap.dedent("""\
+    import importlib.util, os, sys, time
+    from pathlib import Path
+    sys.path.insert(0, {root!r})
+    from app.services.journal import store
+    store.ENTRIES = Path({entries!r})
+    spec = importlib.util.spec_from_file_location("journal_cli", {journal!r})
+    journal = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(journal)
+    calls = Path({calls!r})
+
+    def build(ticker, **kw):
+        (calls / str(os.getpid())).write_text(ticker)
+        # Wait a while (never forever) for the rival to build too: unlocked it
+        # does, and both publish; locked it is waiting for this command.
+        deadline = time.monotonic() + 3
+        while len(list(calls.iterdir())) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return Path("x.md"), "no acute signals"
+
+    journal.build_report = build
+    sys.argv = ["journal.py", *sys.argv[1:]]
+    sys.exit(journal.main())
+    """)
+
+
+def _race(tmp_path, *argv):
+    calls = tmp_path / "calls"
+    calls.mkdir()
+    script = _REPORTER.format(root=str(ROOT), entries=str(store.ENTRIES), calls=str(calls),
+                              journal=str(ROOT / "scripts" / "journal.py"))
+    procs = [subprocess.Popen([sys.executable, "-c", script, *argv], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True,
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+             for _ in range(2)]
+    done = [(p.wait(timeout=60), *p.communicate()) for p in procs]
+    return sorted(done), sorted(p.name for p in calls.iterdir())
+
+
+def test_two_v2_report_commands_build_once(tmp_path, monkeypatch):
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    done, built = _race(tmp_path, "report", "TST", "--date", "2026-07-27", "--no-docs")
+    assert [rc for rc, _, _ in done] == [0, 1], done
+    assert "already generated" in done[1][2]
+    assert len(built) == 1, "the refused command built (and published) a report"
+    assert store.load_v2(path).reported is not None
+
+
+def test_two_v1_report_commands_build_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ENTRIES", tmp_path)
+    path = store.open_entry("TST", thesis="a real thesis")
+    done, built = _race(tmp_path, "report", "TST", "--no-docs")
+    assert [rc for rc, _, _ in done] == [0, 1], done
+    assert "already generated" in done[1][2]
+    assert len(built) == 1
+    assert store.is_reported(path.read_text(encoding="utf-8"))
+
+
+def _stamp(path):
+    """Stamp ``path`` as a rival report command would have."""
+    from datetime import UTC, datetime
+
+    if store.is_v2(path):
+        store.update_v2(path, lambda e: e.model_copy(update={"reported": datetime.now(UTC)}))
+    else:
+        store.mark_reported(path)
+
+
+def _stamped_while_waiting(monkeypatch, path):
+    """The report lock, as a command that waited for it finds it: the
+    command it waited for has stamped the entry meanwhile."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def lock(p):
+        assert p == path
+        _stamp(path)
+        yield
+
+    monkeypatch.setattr(store, "report_lock", lock, raising=False)
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+@pytest.mark.parametrize("defer", [False, True], ids=["stamp", "defer-mark"])
+def test_the_report_lock_is_taken_before_the_reported_check(tmp_path, monkeypatch, v2, defer):
+    import argparse
+
+    if v2:
+        path = _seed(tmp_path, monkeypatch, reported=False)
+    else:
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        path = store.open_entry("TST", thesis="a real thesis")
+    cli, built = _cli(), []
+    monkeypatch.setattr(cli, "build_report", lambda *a, **k: built.append(a) or (
+        Path("x.md"), "no acute signals"))
+    _stamped_while_waiting(monkeypatch, path)
+    assert cli.cmd_report(argparse.Namespace(
+        ticker="TST", date=path.stem.split("_", 1)[1], no_docs=True, defer_mark=defer)) == 1
+    assert built == []
+
+
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+def test_mark_reported_waits_for_a_report_in_progress(tmp_path, monkeypatch, v2):
+    """The sweep's `mark-reported` beside a `report` still building: it
+    stamped first, and the report command's own stamp was then refused with
+    its report live. It now waits for the report lock, then finds the stamp."""
+    import argparse
+    import threading
+
+    if v2:
+        path = _seed(tmp_path, monkeypatch, reported=False)
+    else:
+        monkeypatch.setattr(store, "ENTRIES", tmp_path)
+        path = store.open_entry("TST", thesis="a real thesis")
+    cli, order = _cli(), []
+    ns = argparse.Namespace(ticker="TST", date=path.stem.split("_", 1)[1])
+    marker = threading.Thread(target=lambda: order.append(cli.cmd_mark_reported(ns)))
+    with store.report_lock(path):  # a report command, building
+        marker.start()
+        marker.join(0.5)
+        assert marker.is_alive(), "mark-reported did not wait for the report in progress"
+        _stamp(path)
+        order.append("stamped by the report command")
+    marker.join(30)
+    assert order == ["stamped by the report command", 1]
+
+
+def test_a_deferred_report_leaves_the_case_retryable_and_markable(tmp_path, monkeypatch):
+    """The watch flow: `report --defer-mark`, the audit, then `mark-reported`.
+    The report lock is released when the deferred command returns."""
+    import argparse
+
+    path = _seed(tmp_path, monkeypatch, reported=False)
+    cli = _cli()
+    monkeypatch.setattr(cli, "build_report", lambda *a, **k: (Path("x.md"), "no acute signals"))
+    ns = argparse.Namespace(ticker="TST", date="2026-07-27", no_docs=True, defer_mark=True)
+    assert cli.cmd_report(ns) == 0 and cli.cmd_report(ns) == 0  # retryable
+    assert store.load_v2(path).reported is None
+    assert cli.cmd_mark_reported(argparse.Namespace(ticker="TST", date="2026-07-27")) == 0
+    assert store.load_v2(path).reported is not None

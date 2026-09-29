@@ -327,6 +327,16 @@ never a second generate+audit of the same print. A sweep holds the lock for
 its whole pass, so during a multi-name earnings night a manual `poll` may
 wait for several audits.
 
+One entry's report is also built once whatever runs it: `journal.py report`,
+the web UI's report page and `journal.py mark-reported` hold the entry's
+report lock (`journal/entries/.<T>_<day>.md.report.lock`) from the "not
+reported yet" check to the `reported` stamp (`--defer-mark`: to the publish).
+A second `journal.py report` of the same entry waits for the first and,
+once that one has stamped, refuses ("already generated", exit 1) before
+building or publishing anything; a deferred report stamps nothing, so the
+case stays retryable as the sweep needs. Before this (Hermes audit of 424b0b4, finding 3b) both built and
+published, and the second's report was live though its command failed.
+
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.
 

@@ -331,6 +331,233 @@ def test_two_processes_publishing_one_report_leave_one_whole_generation(tmp_path
     assert not _leftovers(tmp_path)
 
 
+# --- Hermes audit of 424b0b4, finding 3a: a failure after the switch -------------------
+# The publish swapped the pointer, then fsynced the directory and re-linked the
+# audit. Either failing raised (the command said "failed", `NotPublished`'s
+# handler said "the previous run stays live") with the NEW generation live. A
+# raised error must mean the earlier generation is live.
+
+AUDIT = "AAPL_2026-09-26_audit.md"
+
+
+def _audited_first_run(tmp_path):
+    """A live first run with its audit linked at the live name."""
+    report, first = _publish(tmp_path, "first")
+    (current_generation(report) / AUDIT).write_text(
+        f"<!-- generation: {first.generation_id} -->\n\n# first audit")
+    report_files.link_audit(report)
+    return report, current_generation(report)
+
+
+def _fail_after_the_switch(monkeypatch, report, *, exc=None):
+    """The first ``_fsync`` once the pointer names a generation other than the
+    one live now (None too: a set-aside) raises; ``hit`` records it."""
+    import app.services.reporting.report_files as rf
+
+    live, real, hit = current_generation(report), rf._fsync, []
+
+    def fsync(path):
+        if not hit and current_generation(report) != live:
+            hit.append(current_generation(report))
+            raise exc if exc is not None else OSError(errno.EIO, "injected: fsync after the switch")
+        return real(path)
+
+    monkeypatch.setattr(rf, "_fsync", fsync)
+    return hit
+
+
+class TestAFailureAfterTheSwitch:
+    def test_a_rebuild_is_switched_back_and_says_the_earlier_run_is_live(
+            self, tmp_path, monkeypatch):
+        report, earlier = _audited_first_run(tmp_path)
+        before = _live(tmp_path)
+        hit = _fail_after_the_switch(monkeypatch, report)
+        with pytest.raises(NotPublished, match=f"{earlier.name} is live again"):
+            _publish(tmp_path, "second")
+        assert hit and hit[0] != earlier, "the failure was meant to follow the switch"
+        assert current_generation(report) == earlier
+        # Report, ledger and the earlier run's audit, byte for byte, at the live names.
+        assert _live(tmp_path) == before and len(before) == 3
+        assert not _leftovers(tmp_path)
+
+    def test_a_first_publish_is_switched_back_to_nothing_live(self, tmp_path, monkeypatch):
+        report = tmp_path / NAME
+        hit = _fail_after_the_switch(monkeypatch, report)
+        with pytest.raises(NotPublished, match="no run is live"):
+            _publish(tmp_path, "first")
+        assert hit
+        assert current_generation(report) is None and read_live(report) is None
+        assert not report.exists() and not ledger_path(report).exists()
+
+    def test_an_interrupt_after_the_switch_is_raised_with_the_earlier_run_live(
+            self, tmp_path, monkeypatch):
+        """Not only an error: a Ctrl-C there must not leave the new run live
+        either. It is raised as itself once the earlier run is back."""
+        report, earlier = _audited_first_run(tmp_path)
+        before = _live(tmp_path)
+        _fail_after_the_switch(monkeypatch, report, exc=KeyboardInterrupt())
+        with pytest.raises(KeyboardInterrupt):
+            _publish(tmp_path, "second")
+        assert current_generation(report) == earlier and _live(tmp_path) == before
+
+    def test_a_switch_back_that_fails_says_the_new_run_may_be_live(self, tmp_path, monkeypatch):
+        """Never "the earlier run is live" when putting it back failed."""
+        import app.services.reporting.report_files as rf
+
+        report, earlier = _audited_first_run(tmp_path)
+        _fail_after_the_switch(monkeypatch, report)
+        real = rf._symlink
+
+        def symlink(link, target):
+            if target == earlier.name:
+                raise OSError(errno.EIO, "injected: cannot put the pointer back")
+            return real(link, target)
+
+        monkeypatch.setattr(rf, "_symlink", symlink)
+        with pytest.raises(rf.PublishInDoubt, match="switching back failed .*cannot put the "
+                           "pointer back.*: the NEW generation .* may be live") as e:
+            _publish(tmp_path, "second")
+        assert not isinstance(e.value, NotPublished)
+        assert current_generation(report) != earlier  # it is, in fact
+
+    def test_a_switch_back_is_read_back_not_assumed(self, tmp_path, monkeypatch):
+        """A put-back that raised nothing but did not take (the pointer still
+        names the new run) is caught by reading the pointer back."""
+        import app.services.reporting.report_files as rf
+
+        report, earlier = _audited_first_run(tmp_path)
+        _fail_after_the_switch(monkeypatch, report)
+        real = rf._symlink
+        monkeypatch.setattr(rf, "_symlink", lambda link, target: (
+            None if target == earlier.name else real(link, target)))
+        with pytest.raises(rf.PublishInDoubt, match="did not take .*: the NEW generation"):
+            _publish(tmp_path, "second")
+
+    def test_a_first_publish_whose_switch_back_fails_says_the_new_run_may_be_live(
+            self, tmp_path, monkeypatch):
+        import app.services.reporting.report_files as rf
+
+        report = tmp_path / NAME
+        _fail_after_the_switch(monkeypatch, report)
+        real = rf.Path.unlink
+
+        def unlink(self, *a, **k):
+            if self.name == rf.CURRENT:
+                raise OSError(errno.EIO, "injected: cannot remove the pointer")
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(rf.Path, "unlink", unlink)
+        with pytest.raises(rf.PublishInDoubt, match="may be live"):
+            _publish(tmp_path, "first")
+
+    def test_the_earlier_runs_audit_is_gone_before_the_switch(self, tmp_path, monkeypatch):
+        """The audit's live name resolves through the pointer: left in place
+        across the switch it named the new run's audit, which does not exist.
+        It is removed before the switch, the safe direction (the earlier run
+        briefly shown without its audit, never beside another run's)."""
+        import app.services.reporting.report_files as rf
+
+        report, earlier = _audited_first_run(tmp_path)
+        audit, real, seen = report.with_name(AUDIT), rf._symlink, []
+
+        def symlink(link, target):
+            if link.name == rf.CURRENT and target != earlier.name:
+                seen.append(audit.is_symlink())
+            return real(link, target)
+
+        monkeypatch.setattr(rf, "_symlink", symlink)
+        _publish(tmp_path, "second")
+        assert seen == [False]
+        assert not audit.is_symlink() and current_generation(report) != earlier
+
+    def test_restore_is_switched_back(self, tmp_path, monkeypatch):
+        report, earlier = _audited_first_run(tmp_path)
+        _publish(tmp_path, "second")
+        second = current_generation(report)
+        before = _live(tmp_path)
+        _fail_after_the_switch(monkeypatch, report)
+        with pytest.raises(NotPublished, match=f"{second.name} is live again"):
+            restore(report, earlier.name)
+        assert current_generation(report) == second and _live(tmp_path) == before
+
+    def test_a_restore_relinks_the_restored_runs_audit(self, tmp_path):
+        report, earlier = _audited_first_run(tmp_path)
+        _publish(tmp_path, "second")
+        assert not report.with_name(AUDIT).exists()
+        restore(report, earlier.name)
+        assert report.with_name(AUDIT).read_text().endswith("# first audit")
+
+    def test_a_set_aside_whose_switch_back_fails_says_it_may_be_set_aside(
+            self, tmp_path, monkeypatch):
+        import app.services.reporting.report_files as rf
+
+        report, earlier = _audited_first_run(tmp_path)
+        _fail_after_the_switch(monkeypatch, report)
+        real = rf._symlink
+        monkeypatch.setattr(rf, "_symlink", lambda link, target: (
+            None if target == earlier.name else real(link, target)))
+        with pytest.raises(rf.PublishInDoubt, match="setting it aside failed .* the run may "
+                           "be set aside, with no run live"):
+            set_aside(report)
+        assert current_generation(report) is None
+
+    def test_set_aside_is_switched_back(self, tmp_path, monkeypatch):
+        report, earlier = _audited_first_run(tmp_path)
+        before = _live(tmp_path)
+        hit = _fail_after_the_switch(monkeypatch, report)
+        with pytest.raises(NotPublished, match=f"{earlier.name} is live again"):
+            set_aside(report)
+        assert hit == [None]
+        assert current_generation(report) == earlier and _live(tmp_path) == before
+
+
+_OS_OPS = ("open", "fsync", "rename", "replace", "symlink", "unlink", "readlink", "chmod")
+
+
+def _failing_at(stop):
+    """A wrapper for filesystem calls whose ``stop``-th call, while
+    ``state["armed"]``, raises EIO."""
+    state = {"calls": 0, "armed": True}
+
+    def wrap(real):
+        def op(*a, **k):
+            if state["armed"]:
+                state["calls"] += 1
+                if state["calls"] == stop:
+                    raise OSError(errno.EIO, f"injected at call {stop}")
+            return real(*a, **k)
+        return op
+    return state, wrap
+
+
+def test_a_publish_that_raises_at_any_step_leaves_the_earlier_run_live(tmp_path, monkeypatch):
+    """Every filesystem call a publish makes, failed in turn: whatever raised,
+    the earlier run is live, byte for byte (its audit too). The kill test
+    above covers a process that dies; this one a process that lives on to
+    say it failed."""
+    report, earlier = _audited_first_run(tmp_path)
+    before = _live(tmp_path)
+    for stop in range(1, 400):
+        state, failing = _failing_at(stop)
+        with monkeypatch.context() as m:
+            for name in _OS_OPS:
+                m.setattr(os, name, failing(getattr(os, name)))
+            try:
+                _publish(tmp_path, f"try {stop}")
+            except Exception:  # noqa: BLE001 - any failure at all
+                state["armed"] = False
+                assert current_generation(report) == earlier, stop
+                assert _live(tmp_path) == before, stop
+                continue
+            finally:
+                state["armed"] = False
+        assert current_generation(report) != earlier and _one_generation(report)
+        break
+    else:
+        pytest.fail("the publish never completed")
+    assert stop > 10, "the injection never reached the publish"
+
+
 # --- the re-audit, F2 and F3: readers --------------------------------------------------
 
 

@@ -75,7 +75,18 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     JSON-front-matter entry, so a v2 entry that reached `cmd_report` used to
     fail on `has_thesis(text)`. Now: verify the lock is intact, generate the
     report, THEN stamp `reported`. A tampered BEFORE block refuses to report
-    (the entry no longer represents the preregistered claim)."""
+    (the entry no longer represents the preregistered claim).
+
+    All of it under the entry's report lock (Hermes audit of 424b0b4,
+    finding 3b): the entry is read and checked only once the lock is held,
+    so a second command waits for the first, finds its stamp and refuses
+    before it builds; ``--defer-mark`` releases the lock once the report is
+    published, and ``mark-reported`` takes it again for the stamp."""
+    with store.report_lock(path):
+        return _report_v2_locked(path, args)
+
+
+def _report_v2_locked(path, args: argparse.Namespace) -> int:
     entry = store.load_v2(path)
     if not verify_lock(entry):
         print(
@@ -165,6 +176,13 @@ def cmd_report(args: argparse.Namespace) -> int:
         return _cmd_replay(path, args)
     if store.is_v2(path):
         return _cmd_report_v2(path, args)
+    # The v1 entry is read and checked under its report lock too (finding 3b):
+    # two commands at once each built and published, and both "locked" it.
+    with store.report_lock(path):
+        return _report_v1_locked(path, args)
+
+
+def _report_v1_locked(path: Path, args: argparse.Namespace) -> int:
     text = path.read_text(encoding="utf-8")
     if not store.has_thesis(text):
         print("BEFORE block looks empty — write your thesis first. Refusing to generate the "
@@ -707,6 +725,14 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
         print(f"No entry for {args.ticker.upper()}"
               f"{' on ' + args.date if args.date else ''}.", file=sys.stderr)
         return 1
+    # Under the report lock (finding 3b): a stamp made while a `report`
+    # command is still building made that command's own stamp fail, with its
+    # report live. It waits for the report instead, and then finds its stamp.
+    with store.report_lock(path):
+        return _mark_reported_locked(path)
+
+
+def _mark_reported_locked(path: Path) -> int:
     if store.is_v2(path):
         entry = store.load_v2(path)
         if not verify_lock(entry):

@@ -13,7 +13,10 @@ truncated "reported: 20" a plain ``write_text`` left. Read-modify-write
 updates hold a per-entry lock across the read, the change and the write (v1:
 ``mark_reported`` / ``set_field``; v2: ``update_v2``), so the sweep, the web
 UI and ``journal.py`` updating one entry at once never lose one another's
-change. Entries are UTF-8 on disk and are read as UTF-8, whatever the locale.
+change. Generating an entry's report holds a second, longer lock
+(``report_lock``) from the "not reported yet" check to the stamp, so one
+entry's report is built and published once. Entries are UTF-8 on disk and
+are read as UTF-8, whatever the locale.
 """
 
 from __future__ import annotations
@@ -61,18 +64,49 @@ _NO_HARD_LINKS = frozenset(
 
 
 @contextmanager
-def _entry_lock(path: Path) -> Iterator[None]:
-    """Exclusive, cross-process, for one entry's read-modify-write: a sidecar
-    ``.<name>.lock`` beside it, because the entry itself is replaced (a lock
-    on the old inode would not exclude a writer of the new one). `flock` is
-    advisory and not reliable over NFS — the same assumption as the
-    watchlist's `_write_lock` and the reports' `publish_lock`."""
-    fd = os.open(path.with_name(f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+def _flock(lock: Path) -> Iterator[None]:
+    """Hold an exclusive `flock` on the sidecar file ``lock``. Each call opens
+    its own descriptor, so two threads of one process exclude each other as
+    two processes do. `flock` is advisory and not reliable over NFS — the
+    same assumption as the watchlist's `_write_lock` and the reports'
+    `publish_lock`."""
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         os.close(fd)  # closing releases the lock
+
+
+@contextmanager
+def _entry_lock(path: Path) -> Iterator[None]:
+    """Exclusive, cross-process, for one entry's read-modify-write: a sidecar
+    ``.<name>.lock`` beside it, because the entry itself is replaced (a lock
+    on the old inode would not exclude a writer of the new one)."""
+    with _flock(path.with_name(f".{path.name}.lock")):
+        yield
+
+
+@contextmanager
+def report_lock(path: Path) -> Iterator[None]:
+    """Exclusive, cross-process, for generating one entry's report. A report
+    command holds it from its "not reported yet" check (made after taking
+    it) through the build and publish to the ``reported`` stamp; with
+    ``--defer-mark``, through the publish, and ``mark-reported`` takes it for
+    the stamp. So of two report commands on one entry (the CLI, the web UI,
+    the sweep) the second waits, then finds the entry stamped and refuses
+    before it builds or publishes anything.
+
+    Hermes audit of 424b0b4, finding 3b: two commands at once each checked,
+    built and published; the second's stamp was then refused ("already
+    reported", exit 1) with its report the live one.
+
+    A sidecar of its own (``.<name>.report.lock``), not the entry lock: a
+    report takes minutes, and the entry lock held that long would stop every
+    other update of the entry; the stamp takes the entry lock itself, inside
+    this one (always in that order, never the other)."""
+    with _flock(path.with_name(f".{path.name}.report.lock")):
+        yield
 
 
 def _durable_write(path: Path, text: str, *, create: bool = False) -> None:
@@ -382,7 +416,17 @@ def update_v2(path: Path, change):
     fix: a `resolve --commit` beside the sweep's `mark-reported` lost the
     `reported` stamp). ``change`` therefore sees the entry as it is on disk
     now, and must re-check anything it depends on against that entry; the
-    BEFORE lock is re-verified here. Returns the saved entry."""
+    BEFORE lock is re-verified here.
+
+    The entry ``change`` returns is verified too (Hermes audit of 424b0b4,
+    finding 4): the save compared only the two `before_sha256` fields, so a
+    ``change`` that edited the BEFORE block and kept the stored hash wrote an
+    entry whose lock no longer verified. What the lock seals (the BEFORE
+    block, its hash, when it was locked, when the case was opened) and what
+    the file is named for (ticker, day) must come back exactly as read, and
+    the lock must verify; otherwise nothing is written. They are compared
+    with a copy taken before ``change`` runs, which may have edited the
+    entry it was given in place. Returns the saved entry."""
     from app.services.journal.schema_v2 import render_entry, verify_lock
 
     with _entry_lock(path):
@@ -391,9 +435,19 @@ def update_v2(path: Path, change):
             raise UpdateRefused(
                 f"LOCK BROKEN — the BEFORE block of {path.name} no longer matches its "
                 "hash; refusing to update a tampered entry.")
+        read = current.model_copy(deep=True)
         updated = change(current)
+        moved = [name for name in _SEALED if getattr(updated, name) != getattr(read, name)]
+        if moved or not verify_lock(updated):
+            raise UpdateRefused(
+                f"{path.name}: the update changed {', '.join(moved) or 'the BEFORE block'}, "
+                "which the lock seals or the file is named for; refusing to save it.")
         _save_v2_locked(updated, path, True, render_entry)
         return updated
+
+
+# What an update of a v2 entry must leave exactly as it read it (`update_v2`).
+_SEALED = ("before", "before_sha256", "locked_at", "opened", "ticker", "day")
 
 
 def load_v2(path: Path):

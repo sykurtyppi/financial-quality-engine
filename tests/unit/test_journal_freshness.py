@@ -40,7 +40,8 @@ def test_freshness_defaults(monkeypatch, argv, expected):
 def test_only_the_report_command_takes_freshness_flags(monkeypatch, capsys):
     # `open` locks a thesis; it does not fetch anything, so a freshness flag
     # there would be decoration. Every build_report call site lives under
-    # `report` (the v1 path, _cmd_report_v2 and the --replay path).
+    # `report` (the v1 and v2 paths, each run under the entry's report lock,
+    # and the --replay path).
     import ast
 
     monkeypatch.setattr(sys, "argv", ["journal.py", "open", "NVDA", "--no-fresh"])
@@ -56,4 +57,4 @@ def test_only_the_report_command_takes_freshness_flags(monkeypatch, capsys):
         if isinstance(fn, ast.FunctionDef)
         and any(fn.lineno <= c <= (fn.end_lineno or fn.lineno) for c in calls)
     }
-    assert owners == {"cmd_report", "_cmd_report_v2", "_cmd_replay"}
+    assert owners == {"_report_v1_locked", "_report_v2_locked", "_cmd_replay"}

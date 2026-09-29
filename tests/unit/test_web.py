@@ -186,6 +186,28 @@ def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):
     assert not store.parse_entry(store.find_entry("CRM"))["is_reported"]
 
 
+def test_report_waits_for_the_entrys_report_lock_then_rechecks(client, monkeypatch):
+    """Hermes audit of 424b0b4, finding 3b: the route serialized on a lock of
+    its own process, so it and `journal.py report` each built and published
+    one entry's report. It takes the entry's report lock, the CLI's, and
+    re-checks under it: a report generated meanwhile is shown, not rebuilt."""
+    from contextlib import contextmanager
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    built = []
+    monkeypatch.setattr(reporting, "build_report", lambda *a, **k: built.append(a))
+
+    @contextmanager
+    def lock(p):
+        assert p == path
+        store.mark_reported(path)  # the CLI's report, done while this request waited
+        yield
+
+    monkeypatch.setattr(store, "report_lock", lock, raising=False)
+    assert client.get("/report/KO").status_code == 200
+    assert built == [] and store.parse_entry(path)["is_reported"]
+
+
 def test_report_for_dated_entry_reads_same_file_it_generates(client):
     _seed("KO", "steady staple", 3, "hold")
     p = store.find_entry("KO")
