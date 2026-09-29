@@ -469,7 +469,7 @@ def _silent_revisions_section(rep) -> str:
     """Markdown for the Tier-2 (between-snapshot) revision check. Evidence
     framing only — no scoring. Says what was compared before saying what
     moved, and says plainly when nothing could be compared."""
-    from app.services.ingestion.vintages import render_changes
+    from app.services.ingestion.vintages import SWEEP_BASELINE, render_changes
 
     lines = ["## Silent Revisions Between Snapshots (evidence — not scored)", ""]
     if not rep.compared:
@@ -506,8 +506,12 @@ def _silent_revisions_section(rep) -> str:
         lines.append(f"**Since the pinned thesis was locked** ({rep.baseline.captured}{source}):")
         lines.append("")
         if rep.baseline_source:
+            # A state of unrecorded kind is held to the capture rule and named
+            # as what it is (cross-branch review of e0525c4).
+            what = ("a watch-sweep capture" if rep.baseline_source == SWEEP_BASELINE
+                    else "a stored snapshot of unrecorded kind (nothing says a report scored it)")
             lines.append(
-                "_The lock baseline is a watch-sweep capture: the nearest state before the "
+                f"_The lock baseline is {what}: the nearest state before the "
                 "thesis day, and it holds every field and quarter the scored comparison "
                 "reads, built from the same concepts as the scored snapshot; compared as "
                 "the engine scores it._")
