@@ -56,6 +56,16 @@ def poll_env(monkeypatch, tmp_path):
     monkeypatch.setattr(watch_cli, "SWEEP_LOCK", tmp_path / "sweep.lock")  # never the real one
     monkeypatch.setattr(watch_cli, "BRIEF_PENDING", tmp_path / "pending")  # nor the real queue
     monkeypatch.setattr(watch_cli, "BRIEFS", tmp_path / "briefs")  # nor the real briefs
+    # The fake reports live at /tmp/fake_*.md, and the audit retry counter is
+    # written beside the report: it went to the SHARED /tmp and accumulated
+    # across runs until every later run read the audit as abandoned (exit 7).
+    # Each test's counters live in its own tmp_path instead.
+    real_attempts = watch_cli._audit_attempts_path
+    monkeypatch.setattr(
+        watch_cli, "_audit_attempts_path",
+        lambda report: tmp_path / real_attempts(report).name
+        if str(report).startswith("/tmp/fake_") else real_attempts(report),
+    )
     calls.notified = []
     monkeypatch.setattr(watch_cli, "notify", lambda t, m: calls.notified.append((t, m)) or True)
     # Never let a test reach the real companyfacts archive under data/vintages/.
@@ -111,6 +121,12 @@ def _force_decision(monkeypatch, action: str):
         lambda watch, submissions, since=None, force=False:
         Decision(action, f"forced {action}"),
     )
+
+
+def test_the_fake_reports_audit_counters_stay_in_the_tests_tmp_path(poll_env, tmp_path):
+    """A counter left in the shared /tmp by one run made the next runs'
+    audits read as abandoned (exit 7) until the file was deleted by hand."""
+    assert watch_cli._audit_attempts_path(Path("/tmp/fake_auto.md")).parent == tmp_path
 
 
 class TestPollAutoTrack:
