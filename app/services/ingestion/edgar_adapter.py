@@ -139,11 +139,16 @@ def replay_snapshot(
     mapped with fields missing — and a bare one failed the whole replay as
     unmappable though an earlier scored state was stored. A snapshot that
     cannot be read or mapped is passed over; the line says which kind was
-    used and what newer was not.
+    used and what newer was not, and the log says why each was passed over.
+    A snapshot a report scored was built by the mapper already, so only an
+    unreadable or unmappable one is passed over: a TypeError / AttributeError
+    / KeyError there is a mapper defect and raises (review of c131583,
+    finding 3).
     """
     from app.services.ingestion.vintages import (
         RAW,
         SCORED,
+        UNREADABLE,
         UNUSABLE,
         load_vintage,
         observed_vintages,
@@ -161,12 +166,16 @@ def replay_snapshot(
         stored = visible[i]
         if stored.path in failed:
             continue
+        skippable = UNREADABLE if stored.kind == SCORED else UNUSABLE
         try:
             facts = load_vintage(stored.path)
             dataset, diagnostics = build_dataset(
                 facts, ticker=ticker, n_quarters=n_quarters, sector=sector, as_of=as_of
             )
-        except UNUSABLE:
+        except skippable as e:
+            logger.warning("replay %s as of %s: vintage snapshot %s (captured %s, kind %s) "
+                           "passed over: %s: %s", ticker, as_of, stored.path.name,
+                           stored.captured, stored.kind or "unrecorded", type(e).__name__, e)
             failed.add(stored.path)
             continue
         kind = (

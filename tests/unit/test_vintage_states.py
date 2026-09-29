@@ -226,10 +226,11 @@ def test_raw_rows_are_shown_but_never_promoted_or_validated(tmp_path):
     assert silent_revision_tier1_lines(
         rep.changes_since_previous, "a", "b", period_since=date(2000, 1, 1)) == []
     n = len(rep.changes_since_previous)
+    # The window is named with its reason, never "compared X → Y: not
+    # compared" (review of c131583, nit).
     assert rep.status_line() == (
-        f"compared 2024-12-29 → 2024-12-30: not compared as scored (+{n} raw fact row(s), not "
-        "scored changes); scored values not compared as the engine builds them: the "
-        "newer snapshot could not be mapped (raw fact rows only, not scored changes)"
+        f"2024-12-29 → 2024-12-30 not compared as scored: the newer snapshot could not be "
+        f"mapped (+{n} raw fact row(s), not scored changes)"
     )
     md = render_changes(rep.changes_since_previous, "2024-12-29", "2024-12-30")
     assert md.count(
@@ -400,9 +401,22 @@ def test_a_raw_state_before_the_thesis_day_is_not_the_lock_baseline(tmp_path):
     store_snapshot(CIK, s1, now=D3, root=raw_only)
     store_snapshot(CIK, s2, now=D4, root=raw_only)
     rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=date(2024, 12, 30), root=raw_only)
-    assert rep.baseline is None
+    # A bare capture does not map: the lock window is not compared as scored
+    # and says so, not a note under a clean card (review of c131583, finding 1).
+    assert rep.baseline is None and rep.baseline_note is None
+    assert rep.baseline_unavailable == (
+        "no snapshot before the pinned thesis day 2024-12-30 can be mapped (1 stored before "
+        "it, none scored by a report)")
+    assert rep.tier1_gap == ("since the pinned thesis: not compared as scored, no snapshot "
+                             "before the thesis day could be mapped")
+    assert (f"**Since the pinned thesis was locked:** Not compared as scored: "
+            f"{rep.baseline_unavailable}.") in _silent_revisions_section(rep)
+    # Nothing at all stored before the thesis day: a note, not a gap
+    # (nothing can be back-filled).
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=date(2024, 12, 28), root=raw_only)
     assert rep.baseline_note == (
-        "no scored snapshot before the pinned thesis day 2024-12-30; earliest is 2024-12-28")
+        "no snapshot before the pinned thesis day 2024-12-28; earliest is 2024-12-28")
+    assert rep.baseline_unavailable is None and rep.tier1_gap is None
     assert f"_{rep.baseline_note}._" in _silent_revisions_section(rep)
 
 
@@ -580,11 +594,13 @@ def test_an_unmappable_older_state_leaves_the_card_not_checked(tmp_path):
     report, _ = build_report(
         analyze(ds), ds, generated_on=REPORT_DAY.isoformat(), coverage=1.0, fetched_at="x",
         client=_Client(s2), ticker="XYZ", company_facts=s2, field_tags={}, vintage_root=tmp_path)
-    assert ("not checked this run: silent revisions (not compared as scored: a snapshot "
-            "could not be mapped)") in report
-    assert ("- Silent-revision check: compared 2024-12-29 → 2024-12-31: not compared as "
-            "scored (+1 raw fact row(s), not scored changes); scored values not compared as "
-            "the engine builds them: the older snapshot could not be mapped") in report
+    # The card names the window not checked (review of c131583, nit).
+    assert ("not checked this run: silent revisions (since the previous report: not compared "
+            "as scored, a snapshot could not be mapped)") in report
+    assert ("- Silent-revision check: 2024-12-29 → 2024-12-31 not compared as scored: the "
+            "older snapshot could not be mapped (+1 raw fact row(s), not scored changes)\n"
+            ) in report
+    assert "compared 2024-12-29 → 2024-12-31:" not in report
     assert "0 change(s)" not in report
     assert ("1,211 (raw fact of a scored field's tag; not compared as the engine builds it)"
             in report)
@@ -607,10 +623,9 @@ def test_a_raw_lock_window_does_not_suppress_a_promoted_line(tmp_path):
         "snapshots 2024-12-29 and 2024-12-31 (detail in appendix; threshold hand-set, uncalibrated)"]
     assert rep.canonical_unavailable is None and rep.baseline_unavailable
     assert rep.status_line() == (
-        "compared 2024-12-29 → 2024-12-31: 1 change(s); since pinned thesis 2024-12-27: not "
-        "compared as scored (+1 raw fact row(s), not scored changes); since the pinned thesis: "
-        "scored values not compared as the engine builds them: the older snapshot could not be "
-        "mapped (raw fact rows only, not scored changes)")
+        "compared 2024-12-29 → 2024-12-31: 1 change(s); since pinned thesis 2024-12-27 not "
+        "compared as scored: the older snapshot could not be mapped (+1 raw fact row(s), not "
+        "scored changes)")
     assert rep.tier1_gap == (
         "since the pinned thesis: not compared as scored, a snapshot could not be mapped")
     # The ledger's stream state says the same, not a bare "checked".
@@ -733,3 +748,296 @@ def test_the_replay_tries_an_unmappable_content_once(tmp_path, monkeypatch):
     assert snap.company_facts == s1 and "captured 2024-12-28" in source
     assert source.endswith("; 3 newer stored snapshot(s) by then not used (3 not mappable)")
     assert len(built) == 3  # the partial once, the bare capture, S1 — not the partial twice
+
+
+# --- review of c131583 ----------------------------------------------------------
+#
+# 1. The thesis-lock window was silently dropped when only watch-sweep captures
+#    predate the thesis day — the normal journal track, where the first scored
+#    report is made ON that day: the card read clean and the ledger "checked".
+# 2. The section printed the empty-diff sentence for a window not compared as
+#    scored.
+# 3. A mapper defect on a SCORED snapshot was passed over in silence.
+# 4. A fact both windows promote was one card line but two VALIDATED items.
+
+import logging  # noqa: E402
+
+import pytest  # noqa: E402
+
+D24, D25, D26, D27 = (datetime(2024, 12, d, 12, tzinfo=UTC) for d in (24, 25, 26, 27))
+ODD = {"cik": CIK, "entityName": "x", "facts": {"us-gaap": []}}  # the mapper raises AttributeError
+PERIOD = QUARTER_ENDS[-3]
+
+
+def _report(tmp_path: Path, facts: dict, baseline_day: date | None = None) -> tuple[str, dict]:
+    """The full report and its ledger document, over the store at tmp_path/v."""
+    from app.core.pipeline import analyze
+    from app.services.reporting.report_builder import build_report
+    from tests.fixtures.companies import stretch_dataset
+
+    ds = stretch_dataset()
+    out = tmp_path / "ledger.json"
+    report, _ = build_report(
+        analyze(ds), ds, generated_on=REPORT_DAY.isoformat(), coverage=1.0, fetched_at="x",
+        client=_Client(facts), ticker="XYZ", company_facts=facts, field_tags={},
+        vintage_root=tmp_path / "v", baseline_day=baseline_day, ledger_out=out)
+    return report, json.loads(out.read_text())
+
+
+def _silent_items(doc: dict) -> list[tuple[str, str, str | None]]:
+    return [(i["claim"], i["validation_status"], i.get("note"))
+            for i in doc["items"] if i["kind"] == "silent_revision"]
+
+
+def _lock_states() -> tuple[dict, dict, dict]:
+    """S0 (the state the thesis was locked on) -> S1 (+20% total_assets, before
+    the previous report) -> S2 (an unscored addition only)."""
+    s0 = _every_field(composites=False)
+    s1 = _bump(s0, "Assets", PERIOD, factor=1.2)
+    s2 = copy.deepcopy(s1)
+    _add(s2, "SomeUnrelatedConcept", [quarter(QUARTER_ENDS[-1], 1.0)])
+    return s0, s1, s2
+
+
+def test_a_mapped_sweep_capture_is_the_lock_baseline_when_no_report_predates_it(tmp_path):
+    s0, s1, s2 = _lock_states()
+    root = tmp_path / "v"
+    assert capture(_Client(s0), "XYZ", now=D27, root=root).wrote
+    store_snapshot(CIK, s1, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    report, doc = _report(tmp_path, s2, baseline_day=D1.date())
+    # The card: the revision since the lock, as 424b0b4 showed it.
+    assert (f"Silent revision: total_assets for {PERIOD} 1,009 → 1,211 (+20.0%) between "
+            "snapshots 2024-12-27 and 2024-12-31 (detail in appendix; threshold hand-set, "
+            "uncalibrated)") in report
+    assert "not checked this run: silent revisions" not in report
+    assert ("- Silent-revision check: compared 2024-12-29 → 2024-12-31: 0 change(s); since "
+            "pinned thesis 2024-12-27, a sweep capture (mapped): 1 change(s)\n") in report
+    assert ("**Since the pinned thesis was locked** (2024-12-27, a sweep capture (mapped)):"
+            in report)
+    # The ledger: the vintage stream checked, the one promoted fact VALIDATED.
+    assert doc["streams"]["vintage"] == "checked"
+    assert _silent_items(doc) == [
+        (f"total_assets for {PERIOD}: 1,009 → 1,211 between snapshots 2024-12-27 and "
+         "2024-12-31", "validated", None)]
+
+
+def test_no_mappable_capture_before_the_thesis_day_leaves_the_lock_window_not_checked(tmp_path):
+    _s0, s1, s2 = _lock_states()
+    root = tmp_path / "v"
+    assert capture(_Client(_bare()), "XYZ", now=D27, root=root).wrote
+    store_snapshot(CIK, s1, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    report, doc = _report(tmp_path, s2, baseline_day=D1.date())
+    gap = ("since the pinned thesis: not compared as scored, no snapshot before the thesis "
+           "day could be mapped")
+    why = ("no snapshot before the pinned thesis day 2024-12-28 can be mapped (1 stored "
+           "before it, none scored by a report)")
+    assert f"⚠ not checked this run: silent revisions ({gap})" in report
+    assert doc["streams"]["vintage"] == f"checked (incomplete: {gap})"
+    assert (f"- Silent-revision check: compared 2024-12-29 → 2024-12-31: 0 change(s); since the "
+            f"pinned thesis not compared as scored: {why}\n") in report
+    assert f"**Since the pinned thesis was locked:** Not compared as scored: {why}." in report
+    assert "Silent revision:" not in report and _silent_items(doc) == []
+
+
+def test_the_lock_baseline_capture_is_the_newest_that_maps(tmp_path, caplog):
+    s0, s1, s2 = _lock_states()
+    root = tmp_path / "v"
+    capture(_Client(_bump(s0, "Assets", PERIOD, factor=0.5)), "XYZ", now=D24, root=root)
+    capture(_Client(s0), "XYZ", now=D25, root=root)
+    odd = capture(_Client(ODD), "XYZ", now=D26, root=root)
+    capture(_Client(_bare()), "XYZ", now=D27, root=root)
+    store_snapshot(CIK, s1, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=D1.date(), root=root,
+                          scored_sha=v.digest_of(s2))
+    assert rep.baseline.captured == "2024-12-25"
+    assert rep.baseline_source == "a sweep capture (mapped)"
+    assert [(c.field_name, c.scope, round(c.pct_change, 6))
+            for c in rep.changes_since_baseline] == [("total_assets", "scored", 0.2)]
+    assert rep.tier1_gap is None and rep.baseline_unavailable is None
+    # The odd-shaped capture was passed over, and said so.
+    assert odd.path is not None
+    assert any("AttributeError" in r.getMessage() and odd.path.name in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_legacy_state_the_walk_rejected_is_not_mapped_again_for_the_lock(tmp_path, caplog):
+    # The lock fallback reads raw captures only: a legacy state before the
+    # thesis day was already mapped (and rejected) by the walk, and is
+    # passed over once — one load, one warning.
+    _s0, s1, s2 = _lock_states()
+    root = tmp_path / "v"
+    odd = store_snapshot(CIK, ODD, now=D26, root=root)
+    _drop_kinds(root)
+    capture(_Client(_bare()), "XYZ", now=D27, root=root)
+    store_snapshot(CIK, s1, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=D1.date(), root=root,
+                          scored_sha=v.digest_of(s2))
+    assert rep.baseline is None and rep.baseline_unavailable == (
+        "no snapshot before the pinned thesis day 2024-12-28 can be mapped (2 stored before "
+        "it, none scored by a report)")
+    assert odd.path is not None
+    assert sum(odd.path.name in r.getMessage() for r in caplog.records) == 1
+
+
+def test_the_section_says_the_previous_window_was_not_compared_as_scored(tmp_path):
+    s1, _s2 = _scenario_b()
+    new = copy.deepcopy(s1)
+    _add(new, "SomeUnrelatedConcept", [quarter(QUARTER_ENDS[-1], 1.0)])
+    store_snapshot(CIK, _unmappable_older(s1), now=D2, root=tmp_path)
+    store_snapshot(CIK, new, now=D4, root=tmp_path)
+    rep, _tier = _tier1(tmp_path, new)
+    assert rep.changes_since_previous == [] and rep.canonical_unavailable
+    section = _silent_revisions_section(rep)
+    assert ("### Vintage diff — 2024-12-29 → 2024-12-31\n\nNot compared as scored: the older "
+            "snapshot could not be mapped.\n") in section
+    assert "No prior-period figure changed" not in section
+
+
+def test_the_section_says_the_lock_window_was_not_compared_as_scored(tmp_path):
+    s1, _s2 = _scenario_b()
+    new = copy.deepcopy(s1)
+    _add(new, "SomeUnrelatedConcept", [quarter(QUARTER_ENDS[-1], 1.0)])
+    store_snapshot(CIK, _unmappable_older(s1), now=D27, root=tmp_path)
+    store_snapshot(CIK, s1, now=D2, root=tmp_path)
+    store_snapshot(CIK, new, now=D4, root=tmp_path)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=D1.date(), root=tmp_path,
+                      scored_sha=v.digest_of(new))
+    assert rep.changes_since_baseline == [] and rep.baseline_unavailable
+    section = _silent_revisions_section(rep)
+    assert ("**Since the pinned thesis was locked** (2024-12-27):\n\n### Vintage diff — "
+            "2024-12-27 → 2024-12-31\n\nNot compared as scored: the older snapshot could not "
+            "be mapped.\n") in section
+    # The previous -> newest window WAS compared as scored, and found nothing.
+    assert section.count("No prior-period figure changed or disappeared") == 1
+
+
+def test_an_unavailable_window_lists_its_raw_rows_after_saying_so():
+    key = FactKey("us-gaap", "Assets", "USD", None, QUARTER_ENDS[-1])
+    amended = VintageChange("revised", "total_assets", key, 1.0, None, "a", "10-Q", 2.0,
+                            None, "b", "10-Q/A", 1.0, original_retained=True, scope="raw")
+    reason = ("scored values not compared as the engine builds them: the newer snapshot could "
+              "not be mapped (raw fact rows only, not scored changes)")
+    md = render_changes([amended], "a", "b", unavailable=reason)
+    assert md.startswith("### Vintage diff — a → b\n\nNot compared as scored: the newer snapshot "
+                         "could not be mapped.\n")
+    assert "**Moved with a later filing (not silent).**" in md
+    assert "changed silently" not in md  # no "nothing silent" claim over raw rows
+    assert render_changes([], "a", "b") == (
+        "### Vintage diff — a → b\n\nNo prior-period figure changed or disappeared between "
+        "these snapshots.\n")
+
+
+def test_a_mapper_defect_on_a_scored_snapshot_surfaces_in_the_replay(tmp_path, monkeypatch):
+    s1, s2, _s3 = _three_states()
+    store_snapshot(CIK, s1, now=D1, root=tmp_path)
+    store_snapshot(CIK, s2, now=D2, root=tmp_path)
+    real = edgar_adapter.build_dataset
+
+    def defect(facts, **kw):
+        if v.digest_of(facts) == v.digest_of(s2):
+            raise TypeError("unsupported operand")
+        return real(facts, **kw)
+
+    monkeypatch.setattr(edgar_adapter, "build_dataset", defect)
+    with pytest.raises(TypeError, match="unsupported operand"):
+        edgar_adapter.replay_snapshot(_Client(s2), "XYZ", D3.date(), root=tmp_path)
+    # A legacy state (nothing says a report scored it) is still passed over — logged.
+    _drop_kinds(tmp_path)
+    snap, source = edgar_adapter.replay_snapshot(_Client(s2), "XYZ", D3.date(), root=tmp_path)
+    assert snap.company_facts == s1 and source.endswith("(1 not mappable)")
+
+
+def test_every_snapshot_passed_over_is_logged(tmp_path, caplog):
+    s1, _s2, _s3 = _three_states()
+    store_snapshot(CIK, s1, now=D1, root=tmp_path)
+    partial = store_snapshot(CIK, _partial(s1), now=D2, root=tmp_path)  # scored, unmappable
+    bare = capture(_Client(_bare()), "XYZ", now=D3, root=tmp_path)
+    assert partial.path is not None and bare.path is not None
+    with caplog.at_level(logging.WARNING):
+        snap, _source = edgar_adapter.replay_snapshot(_Client(s1), "XYZ", D3.date(), root=tmp_path)
+    assert snap.company_facts == s1
+    [record] = [r for r in caplog.records if partial.path.name in r.getMessage()]
+    assert record.name == edgar_adapter.__name__ and "ValueError" in record.getMessage()
+    assert "kind scored" in record.getMessage()
+    # Tried last (scored states first) and never reached: S1 mapped.
+    assert not any(bare.path.name in r.getMessage() for r in caplog.records)
+    # The report's legacy walk too.
+    caplog.clear()
+    legacy = tmp_path / "legacy"
+    sa, sb = _scenario_b()
+    store_snapshot(CIK, sa, now=D1, root=legacy)
+    odd = store_snapshot(CIK, ODD, now=D2, root=legacy)
+    store_snapshot(CIK, sb, now=D3, root=legacy)
+    _drop_kinds(legacy)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, root=legacy)
+    assert rep.previous.captured == "2024-12-28"
+    assert odd.path is not None
+    assert any("AttributeError" in r.getMessage() and odd.path.name in r.getMessage()
+               for r in caplog.records)
+
+
+def test_card_and_ledger_agree_on_a_fact_both_windows_promote(tmp_path):
+    s0 = _every_field(composites=False)
+    s1 = _bump(s0, "Assets", PERIOD, factor=1.2)
+    s2 = _bump(s1, "Assets", PERIOD, factor=1.2)
+    root = tmp_path / "v"
+    for s, d in ((s0, D27), (s1, D2), (s2, D4)):
+        store_snapshot(CIK, s, now=d, root=root)
+    report, doc = _report(tmp_path, s2, baseline_day=D1.date())
+    assert report.count(f"Silent revision: total_assets for {PERIOD}") == 1
+    assert "1,009 → 1,453 (+44.0%) between snapshots 2024-12-27 and 2024-12-31" in report
+    items = _silent_items(doc)
+    assert [i for i in items if i[1] == "validated"] == [
+        (f"total_assets for {PERIOD}: 1,009 → 1,453 between snapshots 2024-12-27 and "
+         "2024-12-31", "validated", None)]
+    assert (f"total_assets for {PERIOD}: 1,211 → 1,453 between snapshots 2024-12-29 and "
+            "2024-12-31", "directional",
+            "also promoted via snapshots 2024-12-27 → 2024-12-31 (the card lists each fact "
+            "once)") in items
+    assert len(items) == 2
+
+
+def test_the_card_names_the_window_not_checked():
+    from app.services.ingestion.vintages import VintageDiffReport, VintageObservation
+
+    def obs(day: str, sha: str) -> VintageObservation:
+        return VintageObservation(day, sha, Path(f"{day}.json.gz"), "scored")
+
+    why = ("scored values not compared as the engine builds them: the older snapshot could "
+           "not be mapped (raw fact rows only, not scored changes)")
+    base = VintageDiffReport(REPORT_DAY, obs("2024-12-31", "c"), obs("2024-12-29", "b"), [],
+                             obs("2024-12-27", "a"), [])
+    previous_only = replace(base, canonical_unavailable=why)
+    assert previous_only.tier1_gap == (
+        "since the previous report: not compared as scored, a snapshot could not be mapped")
+    assert previous_only.status_line() == (
+        "2024-12-29 → 2024-12-31 not compared as scored: the older snapshot could not be "
+        "mapped; since pinned thesis 2024-12-27: 0 change(s)")
+    both = replace(previous_only, baseline_unavailable=why)
+    assert both.tier1_gap == "not compared as scored in either window: a snapshot could not be mapped"
+    assert both.status_line() == (
+        "2024-12-29 → 2024-12-31 not compared as scored: the older snapshot could not be "
+        "mapped; since pinned thesis 2024-12-27 not compared as scored: the older snapshot "
+        "could not be mapped")
+    assert replace(base, baseline_unavailable=why).tier1_gap == (
+        "since the pinned thesis: not compared as scored, a snapshot could not be mapped")
+    assert base.tier1_gap is None
+
+
+def test_no_vintage_help_says_what_the_check_then_shows(monkeypatch, capsys):
+    from scripts import generate_report
+
+    monkeypatch.setattr(generate_report.sys, "argv", ["generate_report.py", "--help"])
+    with pytest.raises(SystemExit):
+        generate_report.main()
+    text = " ".join(capsys.readouterr().out.split())
+    assert ("--no-vintage do not archive the scored companyfacts payload to data/vintages/ "
+            "(the silent-revision check then reads 'not compared' unless the store already "
+            "holds identical content)") in text
