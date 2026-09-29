@@ -151,7 +151,7 @@ def report_view(request: Request, ticker: str, date: str | None = None,
         # First view: generate the networked report, then lock the thesis. Serialize
         # per entry and re-check under the lock so a double-request generates once.
         with _gen_lock(str(path)):
-            if not store.is_reported(path.read_text()):
+            if not store.is_reported(path.read_text(encoding="utf-8")):
                 try:
                     # fresh=True: the first report LOCKS the thesis against
                     # what was fetched. A <24h EDGAR cache can still hold
@@ -257,7 +257,7 @@ def impact_submit(
         return RedirectResponse("/?error=" + quote_plus(
             f"{store.safe_ticker(ticker)} is a preregistered (v2) case; use "
             "`scripts/journal.py after`."), status_code=303)
-    if not store.is_reported(path.read_text()):
+    if not store.is_reported(path.read_text(encoding="utf-8")):
         # AFTER/outcome fields recorded before the report exists are
         # hindsight, not evidence: the journal's whole point is a verdict
         # formed AFTER a locked thesis met the report. Refuse at the boundary.

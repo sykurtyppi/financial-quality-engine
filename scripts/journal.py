@@ -32,7 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from app.services.journal import store
 from app.services.journal.reporting import build_report
@@ -62,14 +62,20 @@ def cmd_open(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stamp_reported(entry):
+    """Stamp `reported` on the entry as it is on disk — once: a stamp another
+    writer made meanwhile is kept, and the update refused."""
+    if entry.reported is not None:
+        raise store.UpdateRefused("already reported.")
+    return entry.model_copy(update={"reported": datetime.now(UTC)})
+
+
 def _cmd_report_v2(path, args: argparse.Namespace) -> int:
     """v2 report path (round-10 finding 1). The v1 text parser cannot read a
     JSON-front-matter entry, so a v2 entry that reached `cmd_report` used to
     fail on `has_thesis(text)`. Now: verify the lock is intact, generate the
     report, THEN stamp `reported`. A tampered BEFORE block refuses to report
     (the entry no longer represents the preregistered claim)."""
-    from datetime import datetime
-
     entry = store.load_v2(path)
     if not verify_lock(entry):
         print(
@@ -104,10 +110,13 @@ def _cmd_report_v2(path, args: argparse.Namespace) -> int:
               f"`journal.py mark-reported {entry.ticker} --date {entry.day.isoformat()}` "
               "once the audit succeeds.")
         return 0
-    updated = entry.model_copy(update={"reported": datetime.now(UTC)})
-    # allow_update=True: `reported` stamp is a legitimate in-place update.
-    # save_v2 verifies the BEFORE hash is unchanged, so nothing else can slip in.
-    store.save_v2(updated, path, allow_update=True)
+    # update_v2 re-reads the entry under its lock, so a write made while the
+    # report built is kept; save_v2 still verifies the BEFORE hash.
+    try:
+        updated = store.update_v2(path, _stamp_reported)
+    except store.UpdateRefused as e:
+        print(f"{path.name}: {e}", file=sys.stderr)
+        return 1
     print(f"Report stamped at {updated.reported.isoformat()}.")
     print(f"distress: {distress} -> {out}")
     print(f"\nNow fill the AFTER block: `journal.py after {entry.ticker} --impact CODE "
@@ -127,7 +136,7 @@ def _cmd_replay(path: Path, args: argparse.Namespace) -> int:
             return 1
         ticker, day = entry.ticker, entry.day.isoformat()
     else:
-        if not store.has_thesis(path.read_text()):
+        if not store.has_thesis(path.read_text(encoding="utf-8")):
             print("BEFORE block looks empty — write your thesis first.", file=sys.stderr)
             return 1
         ticker, day = args.ticker, store.parse_entry(path)["day"]
@@ -156,7 +165,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         return _cmd_replay(path, args)
     if store.is_v2(path):
         return _cmd_report_v2(path, args)
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if not store.has_thesis(text):
         print("BEFORE block looks empty — write your thesis first. Refusing to generate the "
               "report (that is the whole point).", file=sys.stderr)
@@ -268,13 +277,12 @@ def cmd_after(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        updated = entry.model_copy(update={
-            "after": entry.after.model_copy(update=fields),
-        })
+        store.update_v2(path, lambda e: e.model_copy(update={
+            "after": e.after.model_copy(update=fields),
+        }))
     except Exception as e:  # pydantic ValidationError on impact/conviction bounds
         print(f"AFTER update rejected: {e}", file=sys.stderr)
         return 1
-    store.save_v2(updated, path, allow_update=True)
     changed = ", ".join(sorted(fields))
     print(f"{path.name}: AFTER updated ({changed}).")
     return 0
@@ -348,29 +356,33 @@ def _cmd_outcome_v2(path, entry, args: argparse.Namespace) -> int:
     # Round-13 finding 4: refuse to overwrite already-set factual fields.
     # Idempotent same-value re-set is allowed (harmless). Distinct re-set
     # refused — user must edit the file directly (git captures the change).
-    for name in _OUTCOME_IMMUTABLE_ONCE_SET:
-        if name in fields:
-            existing = getattr(entry.outcome, name)
-            if existing is not None and existing != fields[name]:
-                print(
-                    f"OUTCOME.{name} is already set to {existing!r} and cannot be "
-                    f"changed to {fields[name]!r} through the CLI. Factual outcome "
-                    f"fields are immutable once recorded — this is the same "
-                    f"anti-hindsight guarantee BEFORE gets via the hash lock. "
-                    f"If this is a genuine correction, edit the file directly "
-                    f"so git records the change.",
-                    file=sys.stderr,
-                )
-                return 1
+    # Checked against the entry as it is on disk when saved (update_v2), so a
+    # value another writer recorded meanwhile is refused too.
+    def apply(current):
+        for name in _OUTCOME_IMMUTABLE_ONCE_SET:
+            if name in fields:
+                existing = getattr(current.outcome, name)
+                if existing is not None and existing != fields[name]:
+                    raise store.UpdateRefused(
+                        f"OUTCOME.{name} is already set to {existing!r} and cannot be "
+                        f"changed to {fields[name]!r} through the CLI. Factual outcome "
+                        f"fields are immutable once recorded — this is the same "
+                        f"anti-hindsight guarantee BEFORE gets via the hash lock. "
+                        f"If this is a genuine correction, edit the file directly "
+                        f"so git records the change."
+                    )
+        return current.model_copy(update={
+            "outcome": current.outcome.model_copy(update=fields),
+        })
 
     try:
-        updated = entry.model_copy(update={
-            "outcome": entry.outcome.model_copy(update=fields),
-        })
+        store.update_v2(path, apply)
+    except store.UpdateRefused as e:
+        print(str(e), file=sys.stderr)
+        return 1
     except Exception as e:  # pydantic ValidationError on verdict/y bounds
         print(f"OUTCOME update rejected: {e}", file=sys.stderr)
         return 1
-    store.save_v2(updated, path, allow_update=True)
     changed = ", ".join(sorted(fields))
     print(f"{path.name}: OUTCOME updated ({changed}).")
     return 0
@@ -596,12 +608,18 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     if not terminal:
         print("\nnothing to commit — all proposals are `pending` (retry after the filing arrives).")
         return 0
-    updated = entry
-    for r in terminal:
-        updated = add_resolution(updated, r)
-    # allow_update=True: writing resolutions is a legitimate in-place update
-    # (add_resolution preserves BEFORE, so the hash matches — save_v2 verifies).
-    store.save_v2(updated, path, allow_update=True)
+    def apply(current):
+        for r in terminal:
+            current = add_resolution(current, r)
+        return current
+
+    # A legitimate in-place update (add_resolution preserves BEFORE, so the
+    # hash matches — save_v2 verifies), onto the entry as it is on disk now.
+    try:
+        store.update_v2(path, apply)
+    except store.UpdateRefused as e:
+        print(f"{path.name}: {e}", file=sys.stderr)
+        return 1
     print(f"\ncommitted {len(terminal)} terminal resolution(s) to {path.name}"
           + (f"; left {len(pending)} pending for retry" if pending else ""))
     return 0
@@ -680,8 +698,6 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
     """Stamp `reported` on an entry whose report was generated with
     --defer-mark. Kept separate so the watch flow can order it strictly AFTER
     a successful audit — report-then-mark, never mark-then-hope."""
-    from datetime import datetime
-
     try:
         path = store.find_entry(args.ticker, args.date)
     except ValueError as e:
@@ -700,11 +716,14 @@ def cmd_mark_reported(args: argparse.Namespace) -> int:
         if entry.reported is not None:
             print(f"{path.name}: already reported.", file=sys.stderr)
             return 1
-        updated = entry.model_copy(update={"reported": datetime.now(UTC)})
-        store.save_v2(updated, path, allow_update=True)
+        try:
+            updated = store.update_v2(path, _stamp_reported)
+        except store.UpdateRefused as e:
+            print(f"{path.name}: {e}", file=sys.stderr)
+            return 1
         print(f"Report stamped at {updated.reported.isoformat()}.")
         return 0
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if store.is_reported(text):
         print(f"{path.name}: already reported.", file=sys.stderr)
         return 1
