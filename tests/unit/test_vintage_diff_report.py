@@ -38,10 +38,19 @@ AS_OF = date(2026, 9, 22)
 FLOOR = date(2024, 9, 22)
 
 
+# An earlier balance-sheet quarter every snapshot carries unchanged. The
+# mapper needs two quarter ends to build a snapshot; one it cannot build
+# yields raw fact rows only (`scope="raw"`), which are never promoted — so
+# without this the Tier-1 tests below would test the fallback, not the rule
+# (Hermes audit of 424b0b4, finding 2).
+ANCHOR = ("2025-12-31", "2026-02-01", 900.0, "10-K", "q0")
+
+
 def _facts(rows, tag="Assets"):
-    """rows: (end, filed, val, form, accn)"""
+    """rows: (end, filed, val, form, accn), after the ANCHOR quarter."""
     return {"cik": CIK, "facts": {"us-gaap": {tag: {"units": {"USD": [
-        {"end": r[0], "filed": r[1], "val": r[2], "form": r[3], "accn": r[4]} for r in rows
+        {"end": r[0], "filed": r[1], "val": r[2], "form": r[3], "accn": r[4]}
+        for r in [ANCHOR, *rows]
     ]}}}}}
 
 
@@ -144,13 +153,10 @@ def test_a_baseline_older_than_previous_gets_its_own_block(tmp_path):
     _store(tmp_path, _assets(1100.0, accn="c"), D21)
     rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 20), root=tmp_path)
     assert rep.changes_since_previous == []
-    assert [c.new_value for c in rep.changes_since_baseline] == [1100.0]
-    # (These one-fact snapshots cannot be mapped, so the line says the
-    # scored values were not compared rather than letting silence read as clean.)
+    assert [(c.new_value, c.scope) for c in rep.changes_since_baseline] == [(1100.0, "scored")]
+    # Mappable snapshots: both windows are compared as the engine scores them.
     assert rep.status_line() == (
         "compared 2026-09-20 → 2026-09-21: 0 change(s); since pinned thesis 2026-09-19: 1 change(s)"
-        "; scored values not compared as the engine builds them: the older snapshot "
-        "could not be mapped (raw facts only)"
     )
     from app.services.reporting.report_builder import _silent_revisions_section
 

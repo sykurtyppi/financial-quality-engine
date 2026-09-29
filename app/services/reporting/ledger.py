@@ -475,6 +475,8 @@ def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
                 ),
                 note="; ".join(n for n in (
                     "before the scored window (context)" if c.scope == "context" else "",
+                    "raw fact (a snapshot could not be mapped): not a scored change"
+                    if c.scope == "raw" else "",
                     f"moved with {c.new_form} {c.new_accession}, which the newer snapshot "
                     "carries beside the original: not silent (the restatement scan reports it)"
                     if c.explained_by_filing else "",

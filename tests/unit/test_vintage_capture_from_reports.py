@@ -74,7 +74,13 @@ def test_storing_a_payload_in_hand_matches_fetching_it(tmp_path):
     man_a = read_manifest(CIK, tmp_path / "a")
     man_b = read_manifest(CIK, tmp_path / "b")
     assert man_a["snapshots"][0]["sha256"] == man_b["snapshots"][0]["sha256"]
-    assert man_a["observations"] == man_b["observations"]
+    # One observation each, of the same content; only what wrote it differs
+    # (a fetch is raw, a payload a report scored is scored — finding 2).
+    def unkind(obs):
+        return [{k: val for k, val in o.items() if k != "kind"} for o in obs]
+
+    assert unkind(man_a["observations"]) == unkind(man_b["observations"])
+    assert [o["kind"] for o in man_a["observations"] + man_b["observations"]] == ["raw", "scored"]
 
 
 def test_store_snapshot_dedupes_by_content_and_is_not_day_gated(tmp_path):
