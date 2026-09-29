@@ -212,6 +212,70 @@ class TestFabricationSafety:
         assert r.assumption_index == 3
 
 
+_NON_FINITE = pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+
+
+class TestNonFiniteValues:
+    """Hermes audit of 424b0b4, finding 7: only a MISSING value was checked.
+    NaN compares False against everything, so an OK metric of NaN resolved
+    `violated` with `observed=nan` (and +/-inf gave whichever verdict its
+    sign happened to), and `resolve --commit` wrote that verdict into the
+    journal for good. A number that is not a number is no evidence either
+    way: unresolvable, never met or violated."""
+
+    @_NON_FINITE
+    @pytest.mark.parametrize("comparator", [">", "<", "=="])
+    def test_an_ok_engine_metric_is_no_verdict(self, value, comparator):
+        a = _a(metric="cfo_to_net_income", comparator=comparator, threshold=0.8)
+        r = propose_resolution(a, _ds(_p(cfo=100.0, net_income=100.0)),
+                               bundle=_bundle("cfo_to_net_income", value))
+        assert r.state == "unresolvable"
+        assert r.observed is None
+
+    @_NON_FINITE
+    def test_a_metric_that_skipped_validation_is_refused_here_too(self, value):
+        """`model_copy(update=...)` and `model_construct` do not validate (the
+        registry uses the first), so the resolver cannot rely on the
+        MetricResult contract alone."""
+        ok = _bundle("cfo_to_net_income", 1.0).latest[0]
+        m = ok.model_copy(update={"value": value})
+        bundle = MetricsBundle.model_construct(latest=[m], history={m.name: [m]})
+        assert bundle.history[m.name][0].status is MetricStatus.OK
+        a = _a(metric="cfo_to_net_income", comparator=">", threshold=0.8)
+        r = propose_resolution(a, _ds(_p()), bundle=bundle)
+        assert (r.state, r.observed) == ("unresolvable", None)
+        assert r.note == (f"engine metric 'cfo_to_net_income' (FY2026Q2) is not a "
+                          f"finite number ({value!r})")
+        assert r.at == date(2026, 6, 30)
+        assert r.assumption_index == 0
+
+    @_NON_FINITE
+    @pytest.mark.parametrize("comparator", [">", "<", ">=", "<=", "=="])
+    def test_a_raw_field_is_no_verdict(self, value, comparator):
+        r = propose_resolution(_a(comparator=comparator, threshold=100.0),
+                               _ds(_p(revenue=value)), assumption_index=2)
+        assert (r.state, r.observed) == ("unresolvable", None)
+        assert r.note == f"XBRL field 'revenue' (FY2026Q2) is not a finite number ({value!r})"
+        assert r.assumption_index == 2
+
+    @_NON_FINITE
+    @pytest.mark.parametrize(("comparator", "keyword"), [
+        (">", "positive"), ("<", "negative"), (">=", "non_negative"),
+        ("<=", "non_positive"), ("==", "zero"),
+    ])
+    def test_a_symbolic_threshold_is_no_verdict(self, value, comparator, keyword):
+        a = _a(metric="cfo", comparator=comparator, threshold=keyword)
+        r = propose_resolution(a, _ds(_p(cfo=value)))
+        assert (r.state, r.observed) == ("unresolvable", None)
+
+    def test_a_preregistered_source_does_not_park_it_with_a_nan_observed(self):
+        """The source check returns `pending` carrying the observed value;
+        a non-finite one is refused before it."""
+        r = propose_resolution(_a(source="10-Q"), _ds(_p(revenue=float("nan"))))
+        assert (r.state, r.observed) == ("unresolvable", None)
+
+
 class TestSourceProvenance:
     """Round-11 finding 2: the {10-K, 10-Q} whitelist was NOT provenance — the
     same value resolved met under either form with no accession, so every

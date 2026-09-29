@@ -29,6 +29,8 @@ then fall back to raw XBRL fields on `PeriodFinancials` (`revenue`, `cfo`, …).
 
 from __future__ import annotations
 
+import math
+
 from app.schemas.financials import (
     CompanyDataset,
     FactRef,
@@ -81,8 +83,9 @@ def _lookup_metric_value(
     bundle: MetricsBundle | None,
 ) -> tuple[float | None, str, bool]:
     """Returns (value, note, structural).
-    Value is None with an explanatory note when the metric is missing, non-OK,
-    or non-finite for that period. `structural` is True iff the metric name is
+    Value is None with an explanatory note when the metric is missing or
+    non-OK for that period. A non-finite value is returned as found; the
+    caller refuses it before any comparison. `structural` is True iff the metric name is
     unknown (unresolvable), False iff the metric is known but not yet populated
     (pending)."""
     # 1. Engine spec_id: consult the bundle's latest+history (latest ≡ this period
@@ -299,6 +302,21 @@ def propose_resolution(
             state="unresolvable" if structural else "pending",
             at=period.period_end,
             note=note,
+        )
+    if not math.isfinite(value):
+        # Hermes audit of 424b0b4, finding 7: NaN compares False against
+        # everything, so it resolved `violated` (and +/-inf whichever way
+        # its sign fell), and a committed verdict is final. `MetricResult`
+        # now refuses an OK non-finite value, but a raw field is a plain
+        # float and `model_copy(update=...)` skips validation, so the check
+        # is made here, before any comparator — and before the source check,
+        # whose `pending` would carry the value as `observed`. Terminal: the
+        # value is deterministic for the data as filed.
+        return Resolution(
+            assumption_index=assumption_index,
+            state="unresolvable",
+            at=period.period_end,
+            note=f"{note} is not a finite number ({value!r})",
         )
 
     # Round-11 finding 2, closed: which filings reported this number. A

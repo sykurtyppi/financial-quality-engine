@@ -117,6 +117,10 @@ def fast_pacing(monkeypatch):
     must then FAIL on its assertion, not error in setup."""
     monkeypatch.setattr(sc, "_REQUEST_INTERVAL_S", INTERVAL)
     monkeypatch.setattr(sc, "_last_start", 0.0, raising=False)
+    # Likewise the process-wide hold-off: a virtual-clock Retry-After test
+    # leaves it far ahead of the real clock, and a later test must not wait
+    # it out.
+    monkeypatch.setattr(sc, "_blocked_until", 0.0, raising=False)
     RESERVED.clear()
     if hasattr(sc, "_reserve_slot"):
         monkeypatch.setattr(sc, "_reserve_slot", _recording_reserve(sc._reserve_slot, RESERVED))
@@ -134,11 +138,16 @@ def _run_threads(target, n: int = 12) -> list[str]:
         except BaseException as e:  # noqa: BLE001 - reported below
             errors.append(repr(e))
 
-    threads = [threading.Thread(target=body, args=(i,)) for i in range(n)]
+    # Daemon threads and a bounded join: a request that never goes out (a
+    # pacing loop that never ends) fails the test instead of hanging the run.
+    threads = [threading.Thread(target=body, args=(i,), daemon=True) for i in range(n)]
     for t in threads:
         t.start()
+    deadline = time.monotonic() + 30.0
     for t in threads:
-        t.join()
+        t.join(max(0.0, deadline - time.monotonic()))
+    stuck = sum(t.is_alive() for t in threads)
+    assert stuck == 0, f"{stuck} of {n} requests never finished"
     return errors
 
 
@@ -526,6 +535,13 @@ def _throttling_urlopen(throttled_at: list[float], event, sets_event: bool, othe
     return fake
 
 
+def _stored_schedule(cache_dir: Path) -> float:
+    """The shared schedule's last reserved start: the state file's first
+    field (a second one, the hold-off's end, is present while one is
+    active)."""
+    return float((cache_dir / ".sec_rate").read_text().split()[0])
+
+
 class TestRetryAfterHoldsOffEveryone:
     """Defect: only the call that got the 429 waited. SEC throttles by IP,
     so while it did, a second thread made 20 requests inside the window SEC
@@ -589,7 +605,7 @@ class TestRetryAfterHoldsOffEveryone:
         (tmp_path / ".sec_rate").write_text("not a number")
         before = time.time()
         sc._hold_off(tmp_path, 1.0)
-        stored = float((tmp_path / ".sec_rate").read_text())
+        stored = _stored_schedule(tmp_path)
         assert before + 1.0 - INTERVAL <= stored <= time.time() + 1.0
         # ...and the next reservation lands at or after the hold-off.
         assert sc._reserve_slot(tmp_path) - time.monotonic() >= 1.0 - 0.05
@@ -598,7 +614,7 @@ class TestRetryAfterHoldsOffEveryone:
         far = time.time() + 30
         (tmp_path / ".sec_rate").write_text(repr(far))
         sc._hold_off(tmp_path, 1.0)
-        assert float((tmp_path / ".sec_rate").read_text()) == far
+        assert _stored_schedule(tmp_path) == far
 
     def test_an_unwritable_cache_still_holds_off_this_process(
             self, fast_pacing, monkeypatch, tmp_path):
@@ -683,3 +699,289 @@ class TestStateFilesDoNotFollowSymlinks:
             client._get(f"https://example/{i}")
         assert not (tmp_path / ".sec_rate").exists()
         _assert_paced(starts, 2)
+
+
+# --- a hold-off binds requests that had already reserved their slot -------------
+
+def _reserve_then_wait(real, reserved, held, only_thread: str | None = None):
+    """A `_reserve_slot` that, once it has reserved, signals `reserved` and
+    returns only after `held` (the 429's hold-off) is set: the slot was
+    taken BEFORE SEC asked the machine to back off, and is slept to after.
+    `only_thread` limits that to one thread (the other client's calls pass
+    straight through)."""
+
+    def reserve(cache_dir):
+        start = real(cache_dir)
+        if only_thread is None or threading.current_thread().name == only_thread:
+            reserved.set()
+            held.wait(30)
+        return start
+
+    return reserve
+
+
+def _refuse_once_in_flight(reserved, url_part: str, throttled_at: list[float],
+                           sends: list[tuple[str, float]]):
+    """The first request whose URL contains `url_part` waits until the other
+    request has reserved its slot, then is refused with `429, Retry-After:
+    HOLD`; every other request succeeds. Records (url, start) of each."""
+    lock = threading.Lock()
+
+    def fake(req, timeout=None):
+        url = req.full_url
+        with lock:
+            first = url_part in url and not throttled_at
+        if first:
+            reserved.wait(30)
+            throttled_at.append(time.monotonic())
+            raise _http(429, HOLD)
+        with lock:
+            sends.append((url, time.monotonic()))
+        return _Resp(b"ok")
+
+    return fake
+
+
+class _FrozenTime:
+    """Stands in for `time` inside sec_client: clocks that never move, so a
+    stored value can sit exactly on a boundary. Whole seconds on the wall
+    clock, so `wall + cap - wall == cap` exactly. Nothing under it should
+    wait: a sleep fails the test (and ends a loop that never would)."""
+
+    def __init__(self) -> None:
+        self.mono = float(int(time.monotonic()))
+        self.wall = 1_800_000_000.0
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def time(self) -> float:
+        return self.wall
+
+    def time_ns(self) -> int:
+        return int(self.wall) * 1_000_000_000
+
+    def sleep(self, seconds: float) -> None:
+        raise AssertionError(f"slept {seconds!r} s on a frozen clock")
+
+
+class TestAHoldOffBindsSlotsAlreadyReserved:
+    """Defect (Hermes audit of 424b0b4, finding 6): a 429's Retry-After
+    pushed the schedule for FUTURE reservations only. A request that had
+    already reserved a slot slept to it and sent inside the cooldown — the
+    second client's request went out ~0.3 s after a `Retry-After: 2`."""
+
+    @pytest.mark.parametrize("layout", ["same-cache-dir", "other-cache-dir", "no-shared-file"])
+    def test_another_client_in_this_process_waits_it_out(
+            self, fast_pacing, monkeypatch, tmp_path, layout):
+        if layout == "no-shared-file":
+            # The shared file unusable (NFS without lockd): the process-wide
+            # hold-off alone must stop the reserved request.
+            monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+
+            def no_locks(fd, op):
+                raise OSError(37, "No locks available")
+
+            monkeypatch.setattr(sc.fcntl, "flock", no_locks)
+        reserved, held = threading.Event(), threading.Event()
+        throttled_at: list[float] = []
+        sends: list[tuple[str, float]] = []
+        monkeypatch.setattr(sc, "_RETRY_BACKOFF_S", (0.0, 0.0))
+        monkeypatch.setattr(sc.urllib.request, "urlopen",
+                            _refuse_once_in_flight(reserved, "/a", throttled_at, sends))
+        real_hold = sc._hold_off
+
+        def hold_off(cache_dir, seconds):
+            real_hold(cache_dir, seconds)
+            held.set()
+
+        monkeypatch.setattr(sc, "_hold_off", hold_off)
+        monkeypatch.setattr(sc, "_reserve_slot",
+                            _reserve_then_wait(sc._reserve_slot, reserved, held, "B"))
+        a_dir = tmp_path / "a"
+        b_dir = tmp_path / ("a" if layout == "same-cache-dir" else "b")
+        results: list[bytes] = []
+        a = threading.Thread(target=lambda: results.append(
+            sc.SecClient(cache_dir=a_dir)._get("https://example/a")), name="A", daemon=True)
+        b = threading.Thread(target=lambda: results.append(
+            sc.SecClient(cache_dir=b_dir)._get("https://example/b")), name="B", daemon=True)
+        a.start()
+        b.start()
+        a.join(30)
+        b.join(30)
+        assert results == [b"ok", b"ok"]
+        (b_sent,) = [t for url, t in sends if url.endswith("/b")]
+        after = b_sent - throttled_at[0]
+        assert after >= float(HOLD) - RESERVE_TOL, (
+            f"a request reserved before the 429 went out {after:.3f} s after it; "
+            f"Retry-After asked for {HOLD} s"
+        )
+
+    def test_another_process_waits_it_out(self, tmp_path):
+        ctx = multiprocessing.get_context("spawn")
+        reserved, held = ctx.Event(), ctx.Event()
+        out = ctx.Queue()
+        procs = [
+            ctx.Process(target=_in_flight_throttled_worker,
+                        args=(str(tmp_path), INTERVAL, reserved, held, out)),
+            ctx.Process(target=_reserved_before_worker,
+                        args=(str(tmp_path), INTERVAL, reserved, held, out)),
+        ]
+        for p in procs:
+            p.start()
+        results = dict(out.get(timeout=60) for _ in procs)
+        for p in procs:
+            p.join(timeout=60)
+            assert p.exitcode == 0
+        (sent,) = results["waiting"]
+        after = sent - results["throttled"]
+        assert after >= float(HOLD) - RESERVE_TOL, (
+            f"the other process's reserved request went out {after:.3f} s after "
+            f"a {HOLD} s Retry-After"
+        )
+
+    def test_a_hold_off_in_the_shared_file_holds_a_send(self, fast_pacing, monkeypatch, tmp_path):
+        """Another process's hold-off, read from the file, binds a send here
+        even when the stored schedule itself is long past."""
+        now = time.time()
+        (tmp_path / ".sec_rate").write_text(f"{now - 10.0!r} {now + 1.0!r}")
+        starts: list[float] = []
+        monkeypatch.setattr(sc.urllib.request, "urlopen", _recording_urlopen(starts))
+        t0 = time.monotonic()
+        sc.SecClient(cache_dir=tmp_path)._get("https://example/x")
+        assert starts[0] - t0 >= 1.0 - RESERVE_TOL
+
+    def test_the_hold_off_field_is_written_only_while_it_binds(self, fast_pacing, tmp_path):
+        sc._hold_off(tmp_path, 0.0)  # ends as it starts: nothing to bind
+        assert len((tmp_path / ".sec_rate").read_text().split()) == 1
+        sc._hold_off(tmp_path, 1.0)
+        schedule, until = (float(f) for f in (tmp_path / ".sec_rate").read_text().split())
+        assert until == pytest.approx(time.time() + 1.0, abs=0.1)
+        assert schedule == pytest.approx(until - INTERVAL, abs=0.001)
+        sc._hold_off(tmp_path, 0.0)  # `Retry-After: 0` binds nothing new
+        assert float((tmp_path / ".sec_rate").read_text().split()[1]) == until
+        # Once it has passed it is dropped, and the file is back to the one
+        # field a process running the previous module can read.
+        now = time.time()
+        (tmp_path / ".sec_rate").write_text(f"{now - 10.0!r} {now - 1.0!r}")
+        assert sc._reserve_slot(tmp_path) - time.monotonic() < 1.0
+        assert len((tmp_path / ".sec_rate").read_text().split()) == 1
+
+    def test_a_hold_off_just_inside_the_cap_is_honoured(self, fast_pacing, tmp_path):
+        """The cap discards a stepped clock, never a real (capped) Retry-After."""
+        now = time.time()
+        until = now + sc._RETRY_AFTER_CAP_S - 1.0
+        (tmp_path / ".sec_rate").write_text(f"{now!r} {until!r}")
+        assert sc._reserve_slot(tmp_path) - time.monotonic() >= sc._RETRY_AFTER_CAP_S - 2.0
+
+    def test_a_hold_off_never_pulls_this_processs_schedule_earlier(
+            self, fast_pacing, monkeypatch, tmp_path):
+        """A queue already reserved past the hold-off stays queued (the
+        shared file unusable, so the process-wide schedule alone decides)."""
+        monkeypatch.setattr(sc, "_shared_pacing_warned", set())
+
+        def no_locks(fd, op):
+            raise OSError(37, "No locks available")
+
+        monkeypatch.setattr(sc.fcntl, "flock", no_locks)
+        monkeypatch.setattr(sc, "_last_start", time.monotonic() + 5.0)
+        sc._hold_off(tmp_path, 1.0)
+        assert sc._reserve_slot(tmp_path) - time.monotonic() >= 5.0 + INTERVAL - RESERVE_TOL
+
+    # -- exact boundaries, on clocks that do not move --------------------------------
+
+    @pytest.fixture
+    def frozen(self, fast_pacing, monkeypatch):
+        clock = _FrozenTime()
+        monkeypatch.setattr(sc, "time", clock)
+        return clock
+
+    def test_a_slot_that_is_now_is_sent_at_once(self, frozen, monkeypatch, tmp_path):
+        """No sleep and no second look: a request that is not held off goes
+        straight out (a sleep here raises)."""
+        starts: list[float] = []
+        monkeypatch.setattr(sc.urllib.request, "urlopen", _recording_urlopen(starts))
+        assert sc.SecClient(cache_dir=tmp_path)._get("https://example/x") == b'{"ok": true}'
+        assert len(starts) == 1
+
+    def test_a_hold_off_is_over_at_its_own_instant(self, frozen, monkeypatch, tmp_path):
+        monkeypatch.setattr(sc, "_blocked_until", frozen.mono)
+        (tmp_path / ".sec_rate").write_text(f"{frozen.wall - 10.0!r} {frozen.wall!r}")
+        assert sc._held_off(tmp_path) is False
+        monkeypatch.setattr(sc, "_blocked_until", frozen.mono + 0.5)
+        assert sc._held_off(tmp_path) is True
+
+    def test_the_caps_admit_a_value_exactly_at_them(self, frozen, tmp_path):
+        state = tmp_path / ".sec_rate"
+        state.write_text(f"{frozen.wall!r} {frozen.wall + sc._RETRY_AFTER_CAP_S!r}")
+        assert sc._held_off(tmp_path) is True
+        state.write_text(repr(frozen.wall + sc._SHARED_AHEAD_CAP_S))
+        assert sc._reserve_slot(tmp_path) - frozen.mono == pytest.approx(
+            sc._SHARED_AHEAD_CAP_S + INTERVAL, abs=1e-3)
+
+    # -- compatibility guards: these pass on the unfixed module too ----------------
+
+    def test_guard_an_old_one_field_state_file_is_still_the_schedule(
+            self, fast_pacing, monkeypatch, tmp_path):
+        """A file written before the hold-off field existed holds only the
+        last start; it must still be read as the schedule, not as garbage."""
+        ahead = time.time() + 0.3
+        (tmp_path / ".sec_rate").write_text(repr(ahead))
+        starts: list[float] = []
+        monkeypatch.setattr(sc.urllib.request, "urlopen", _recording_urlopen(starts))
+        t0_m, t0_w = time.monotonic(), time.time()
+        sc.SecClient(cache_dir=tmp_path)._get("https://example/x")
+        assert starts[0] - t0_m >= (ahead - t0_w) + INTERVAL - RESERVE_TOL
+        # With no hold-off active the file keeps the one-field form, which a
+        # process still running the old module reads as before.
+        assert float((tmp_path / ".sec_rate").read_text()) >= ahead + INTERVAL - RESERVE_TOL
+
+    @pytest.mark.parametrize("until", ["far", "nan", "inf"])
+    def test_guard_a_hold_off_far_in_the_future_is_not_trusted(
+            self, fast_pacing, monkeypatch, tmp_path, until):
+        """Wall-clock like the schedule, so a clock stepped backwards (or a
+        corrupted file) must not park every request on the machine behind
+        it: a stored hold-off further out than any Retry-After honoured is
+        discarded, as the schedule is past its own cap."""
+        now = time.time()
+        stored = {"far": repr(now + 3600.0), "nan": "nan", "inf": "inf"}[until]
+        (tmp_path / ".sec_rate").write_text(f"{now!r} {stored}")
+        starts: list[float] = []
+        monkeypatch.setattr(sc.urllib.request, "urlopen", _recording_urlopen(starts))
+        t0 = time.monotonic()
+        sc.SecClient(cache_dir=tmp_path)._get("https://example/x")
+        assert starts[0] - t0 < 1.0
+        assert len((tmp_path / ".sec_rate").read_text().split()) == 1
+
+
+def _in_flight_throttled_worker(cache_dir: str, interval: float, reserved, held, out) -> None:
+    """Its first request is in flight when the other process reserves a
+    slot, and is then refused with a Retry-After."""
+    sc._REQUEST_INTERVAL_S = interval
+    sc._RETRY_BACKOFF_S = (0.0, 0.0)  # type: ignore[assignment]
+    real_hold = sc._hold_off
+
+    def hold_off(cache_dir, seconds):
+        real_hold(cache_dir, seconds)
+        held.set()
+
+    sc._hold_off = hold_off  # type: ignore[assignment]
+    throttled_at: list[float] = []
+    sc.urllib.request.urlopen = _refuse_once_in_flight(  # type: ignore[assignment]
+        reserved, "/throttled", throttled_at, [])
+    sc.SecClient(cache_dir=cache_dir, identity="Test Suite test@example.com")._get(
+        "https://example/throttled")
+    out.put(("throttled", throttled_at[0]))
+
+
+def _reserved_before_worker(cache_dir: str, interval: float, reserved, held, out) -> None:
+    """Reserves its slot before the other process's 429 and sleeps to it
+    after the hold-off."""
+    sc._REQUEST_INTERVAL_S = interval
+    sc._reserve_slot = _reserve_then_wait(  # type: ignore[assignment]
+        sc._reserve_slot, reserved, held)
+    starts: list[float] = []
+    sc.urllib.request.urlopen = _recording_urlopen(starts)  # type: ignore[assignment]
+    sc.SecClient(cache_dir=cache_dir, identity="Test Suite test@example.com")._get(
+        "https://example/waiting")
+    out.put(("waiting", starts))
