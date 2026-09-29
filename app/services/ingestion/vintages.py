@@ -1279,7 +1279,8 @@ class VintageDiffReport:
     # was compared, and "no baseline yet" would be the wrong reason.
     payload_missing: bool = False
     # What the thesis-lock baseline is when it is not a state a report
-    # scored: `SWEEP_BASELINE` (review of c131583, finding 1).
+    # scored: `SWEEP_BASELINE` (review of c131583, finding 1), or
+    # `UNRECORDED_BASELINE` (cross-branch review of e0525c4).
     baseline_source: str | None = None
     # Why no state before the thesis day could stand as the lock baseline,
     # short, for the card and the ledger (with `baseline_unavailable` and
@@ -1413,13 +1414,19 @@ def _passed_over(obs: VintageObservation, e: BaseException) -> None:
 LOCK_CAPTURES_EXAMINED = 8
 # `baseline_source` of a lock baseline that is a watch-sweep capture.
 SWEEP_BASELINE = "a sweep capture (mapped, complete)"
+# ... and of one whose kind the manifest does not record (cross-branch
+# review of e0525c4): held to the same coverage rule as a capture.
+UNRECORDED_BASELINE = "a stored snapshot of unrecorded kind (mapped, complete)"
 
 
-def _passed_over_for_lock(obs: VintageObservation, why: str) -> None:
+def _passed_over_for_lock(obs: VintageObservation, why: str,
+                          baseline: str = "the thesis-lock baseline") -> None:
     """Log a capture the thesis-lock walk passed over: the status line counts
-    them, the log says which and why (review of 626ca1b, finding 5)."""
-    logger.warning("vintage snapshot %s (captured %s, kind %s) passed over for the thesis-lock "
-                   "baseline: %s", obs.path.name, obs.captured, obs.kind or "unrecorded", why)
+    them, the log says which and why (review of 626ca1b, finding 5). A state
+    of unrecorded kind the previous-report walk passes over is logged the
+    same way, naming that baseline."""
+    logger.warning("vintage snapshot %s (captured %s, kind %s) passed over for %s: %s",
+                   obs.path.name, obs.captured, obs.kind or "unrecorded", baseline, why)
 
 
 def report_diff(
@@ -1483,6 +1490,16 @@ def report_diff(
     `LOCK_CAPTURES_EXAMINED` captures are mapped (finding 4). When nothing
     before the day qualifies, `baseline_unavailable` says the lock window
     was not compared as scored.
+
+    A state whose kind the manifest does not record (written before kinds
+    existed, or rebuilt from disk after the manifest was lost) stands in for
+    a scored one as a baseline — the previous report's or the thesis lock's
+    — only if it covers the comparison, like a raw capture: taken whenever
+    it mapped, a partial one hid a real revision ("since pinned thesis ...:
+    0 change(s)"). Only the payload this report scored and a state recorded
+    as scored are a baseline, or the lock's reference, as they are; the
+    status line says how many stored states are of unrecorded kind
+    (cross-branch review of e0525c4).
     """
     visible = [
         s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of
@@ -1534,6 +1551,14 @@ def report_diff(
                 built[key] = e
         return built[key]
 
+    def trusted(obs: VintageObservation) -> bool:
+        # Known to be scored: the payload this report scored, or a state the
+        # manifest records a report scored. Only these stand as a baseline
+        # as they are; a state of unrecorded kind that maps may be a partial
+        # sweep capture, and must cover the comparison like a raw one
+        # (cross-branch review of e0525c4).
+        return (scored_sha is not None and obs.sha256 == scored_sha) or obs.kind == SCORED
+
     def is_scored(obs: VintageObservation) -> bool:
         # A store written before kinds existed (or one whose manifest was
         # rebuilt from disk) does not say what wrote a state, so decide by
@@ -1542,15 +1567,18 @@ def report_diff(
         # without a baseline until two new reports had been scored; the walk
         # stops at the first mappable state, normally the first looked at,
         # so this costs about one extra build per report. A legacy partial
-        # capture that still maps cannot be told apart and is used, as before.
+        # capture that still maps cannot be told apart: as the newest state
+        # it is used, as before; as a baseline it must also cover the
+        # comparison (`coverage_gaps`) — taken as it was, one missing Assets
+        # hid a real +20% revision (cross-branch review of e0525c4).
         # One that cannot be read, or whose odd shape the mapper trips on,
         # is not a usable state: passed over and counted, not a stream
         # failure over a snapshot no comparison needed (review of 224b896,
         # finding 4).
-        if scored_sha is not None and obs.sha256 == scored_sha:
+        if trusted(obs):
             return True
         if obs.kind is not None:
-            return obs.kind == SCORED
+            return False
         got = build(obs)
         if isinstance(got, BaseException):
             # Legacy only: SCORED and RAW returned above. Nothing says a
@@ -1563,13 +1591,58 @@ def report_diff(
         return got is not None
 
     notes: list[str] = []
+    # Stored snapshots of unrecorded kind, by file: every mappable one stood
+    # in for a scored state before, so the reader is told the kinds are
+    # unknown, not only which were passed over.
+    unrecorded = len({s.path for s in visible if s.kind is None})
 
     def raw_note() -> str | None:
         extra = (
             [f"{len(unusable)} snapshot(s) passed over were unreadable or malformed"]
             if unusable else []
         )
+        if unrecorded:
+            extra.append(f"{unrecorded} stored snapshot(s) of unrecorded kind (manifest "
+                         "rebuilt or written before kinds)")
         return "; ".join([*notes, *extra]) or None
+
+    loaded: dict[str, dict] = {}
+
+    def facts_of(obs: VintageObservation) -> dict:
+        if content(obs) not in loaded:
+            loaded[content(obs)] = _load_for_diff(obs)
+        return loaded[content(obs)]
+
+    # A mapped state stands in for a scored one only if it covers the
+    # comparison: checked against a reference state (the scored side it
+    # will be compared with, or the one nearest after the thesis day) as it
+    # stood when the state was fetched — a quarter filed later is not a
+    # gap. The fetch time is known only to the day, and on a filing day it
+    # may precede or follow that day's filing (one after it can also move a
+    # selection), so the state must match the reference as of the day
+    # before or as of the day itself.
+    ref_as_of: dict[tuple[str, date], _Mapped | BaseException | None] = {}
+
+    def gaps_as_of(capture_map: _Mapped, ref_obs: VintageObservation, day: date) -> list[str]:
+        key = (content(ref_obs), day)
+        if key not in ref_as_of:
+            try:
+                ref_as_of[key] = _mapped(facts_of(ref_obs), as_of=day)
+            except UNUSABLE as e:
+                ref_as_of[key] = e
+        ref = ref_as_of[key]
+        if isinstance(ref, _Mapped):
+            return _coverage_gaps(capture_map, ref, since)
+        return ["it cannot be built as of that day"
+                + (f" ({type(ref).__name__}: {ref})" if ref is not None else "")]
+
+    def coverage_gaps(obs: VintageObservation, capture_map: _Mapped,
+                      ref_obs: VintageObservation) -> list[str]:
+        """The gaps as of the day before `obs` was fetched, or none when it
+        covers as of either day."""
+        day = date.fromisoformat(obs.captured)
+        gaps = gaps_as_of(capture_map, ref_obs, day - timedelta(days=1))
+        return gaps if gaps and gaps_as_of(capture_map, ref_obs, day) else []
 
     if top is None:
         top = _newest_scored(visible, is_scored)
@@ -1589,19 +1662,43 @@ def report_diff(
     # changed as scored, and comparing it with itself would say "0 changes"
     # about a comparison never made.
     earlier = [s for s in visible[:top] if not (s.sha256 and s.sha256 == newest.sha256)]
-    at = _newest_scored(earlier, is_scored)
+    # Nearest first: a state known to be scored is the baseline as it is; one
+    # of unrecorded kind that maps only if it covers the newest.
+    at: int | None = None
+    passed = 0  # of unrecorded kind: mapped, but incomplete against the newest
+    for i in range(len(earlier) - 1, -1, -1):
+        if trusted(earlier[i]):
+            at = i
+            break
+        if not is_scored(earlier[i]):
+            continue  # raw, or a legacy state that does not map
+        got = build(earlier[i])
+        assert isinstance(got, _Mapped)  # `is_scored` built it
+        gaps = coverage_gaps(earlier[i], got, newest)
+        if not gaps:
+            at = i
+            break
+        _passed_over_for_lock(earlier[i], f"incomplete against the newest ({newest.captured}): "
+                                          f"{'; '.join(gaps)}", "the previous-report baseline")
+        passed += 1
     if at is None:
         reason = f"no earlier scored snapshot to diff the newest ({newest.captured}) against"
-        if earlier:
-            notes.insert(0, f"{len(earlier)} raw capture(s) not used as the baseline")
+        if len(earlier) > passed:
+            notes.insert(0, f"{len(earlier) - passed} raw capture(s) not used as the baseline")
+        if passed:
+            notes.insert(0, f"{passed} snapshot(s) of unrecorded kind not used as the baseline "
+                            "(incomplete)")
         return VintageDiffReport(as_of, newest, None, [],
                                  no_baseline_reason="; ".join(filter(None, [reason, raw_note()])))
     previous = earlier[at]
-    if at < len(earlier) - 1:
-        notes.insert(0, f"{len(earlier) - 1 - at} raw capture(s) since {previous.captured} "
-                        "not used as the baseline")
-    new_facts = _load_for_diff(newest)
-    scored = diff_scored(_load_for_diff(previous), new_facts, since=since)
+    if at < len(earlier) - 1 - passed:
+        notes.insert(0, f"{len(earlier) - 1 - at - passed} raw capture(s) since "
+                        f"{previous.captured} not used as the baseline")
+    if passed:
+        notes.insert(0, f"{passed} snapshot(s) of unrecorded kind since {previous.captured} "
+                        "not used as the baseline (incomplete)")
+    new_facts = facts_of(newest)
+    scored = diff_scored(facts_of(previous), new_facts, since=since)
     changes, unavailable = scored.changes, scored.canonical_unavailable
     if baseline_day is None:
         return VintageDiffReport(as_of, newest, previous, changes,
@@ -1622,52 +1719,30 @@ def report_diff(
         )
     # A capture is checked against the scored state nearest after the
     # thesis day (the newest when none is nearer): the least time for the
-    # filer to have legitimately changed how a figure is built. Found and
-    # read only once a capture maps.
-    reference: list[tuple[str, dict]] = []
-
-    def ref_state() -> tuple[str, dict]:
-        if not reference:
-            at_ = next((i for i in range(top + 1) if date.fromisoformat(visible[i].captured)
-                        > lock_day and is_scored(visible[i])), top)
-            reference.append((visible[at_].captured,
-                              new_facts if at_ == top else _load_for_diff(visible[at_])))
-        return reference[0]
-
-    # ... as it stood when the capture was fetched: a quarter filed later is
-    # not a gap. The fetch time is known only to the day, and on a filing
-    # day it may precede or follow that day's filing (one after it can also
-    # move a selection), so the capture must match the state as of the day
-    # before or as of the day itself.
-    ref_as_of: dict[date, _Mapped | BaseException | None] = {}
-
-    def gaps_as_of(capture_map: _Mapped, day: date) -> list[str]:
-        if day not in ref_as_of:
-            try:
-                ref_as_of[day] = _mapped(ref_state()[1], as_of=day)
-            except UNUSABLE as e:
-                ref_as_of[day] = e
-        ref = ref_as_of[day]
-        if isinstance(ref, _Mapped):
-            return _coverage_gaps(capture_map, ref, since)
-        return ["it cannot be built as of that day"
-                + (f" ({type(ref).__name__}: {ref})" if ref is not None else "")]
+    # filer to have legitimately changed how a figure is built. A state of
+    # unrecorded kind is not a reference: a partial one would let a capture
+    # missing the same field cover it (cross-branch review of e0525c4).
+    reference = visible[next((i for i in range(top + 1) if date.fromisoformat(visible[i].captured)
+                              > lock_day and trusted(visible[i])), top)]
 
     baseline: VintageObservation | None = None
     source = None
     unmappable = incomplete = mapped_here = untried = 0
-    # Nearest first: a scored state qualifies as it is; a capture only if it
-    # maps and covers the comparison.
+    legacy = raw = 0  # which kinds were passed over, for the wording
+    # Nearest first: a state known to be scored qualifies as it is; a raw
+    # capture, or a state of unrecorded kind, only if it maps and covers the
+    # comparison.
     for obs in reversed(before_lock):
-        if is_scored(obs):
+        if trusted(obs):
             baseline = obs
             break
-        if obs.kind != RAW:
-            continue  # a legacy state that does not map: `is_scored` said so
         day = date.fromisoformat(obs.captured)
         got_before = built.get(content(obs))
+        if obs.kind is None and content(obs) in unusable:
+            continue  # the previous-report walk passed it over: logged and counted
         costly = content(obs) not in built or (
-            isinstance(got_before, _Mapped) and day - timedelta(days=1) not in ref_as_of)
+            isinstance(got_before, _Mapped)
+            and (content(reference), day - timedelta(days=1)) not in ref_as_of)
         if costly and mapped_here >= LOCK_CAPTURES_EXAMINED:
             untried += 1
             continue
@@ -1677,19 +1752,25 @@ def report_diff(
             _passed_over_for_lock(obs, f"{type(got).__name__}: {got}" if got is not None
                                   else "does not map (the mapper cannot build it)")
             unmappable += 1
-            continue
-        gaps = gaps_as_of(got, day - timedelta(days=1))
-        if gaps and gaps_as_of(got, day):
-            _passed_over_for_lock(obs, f"incomplete against the scored state of {ref_state()[0]} "
-                                       f"as of {day - timedelta(days=1)}: {'; '.join(gaps)}")
+        elif gaps := coverage_gaps(obs, got, reference):
+            _passed_over_for_lock(obs, f"incomplete against the scored state of "
+                                       f"{reference.captured} as of {day - timedelta(days=1)}: "
+                                       f"{'; '.join(gaps)}")
             incomplete += 1
-            continue
-        baseline, source = obs, SWEEP_BASELINE
-        break
+        else:
+            baseline, source = obs, SWEEP_BASELINE if obs.kind == RAW else UNRECORDED_BASELINE
+            break
+        legacy += obs.kind is None
+        raw += obs.kind == RAW
+    what = ("sweep capture(s)" if not legacy
+            else "stored snapshot(s) of unrecorded kind" if not raw
+            else "sweep capture(s) or stored snapshot(s) of unrecorded kind")
     if unmappable or incomplete:
         kinds = [f"{unmappable} unmappable" if unmappable else "",
                  f"{incomplete} incomplete" if incomplete else ""]
-        notes.append(f"{unmappable + incomplete} capture(s) before the thesis day not usable as "
+        noun = ("capture(s)" if not legacy else "snapshot(s) of unrecorded kind" if not raw
+                else "capture(s) or snapshot(s) of unrecorded kind")
+        notes.append(f"{unmappable + incomplete} {noun} before the thesis day not usable as "
                      f"the lock baseline ({', '.join(k for k in kinds if k)})")
     if untried:
         notes.append(f"{untried} older capture(s) before the thesis day not examined (at most "
@@ -1702,16 +1783,17 @@ def report_diff(
                    f"the {unmappable + incomplete} examined")
             gap: str | None = "no snapshot examined before the thesis day could be used"
         elif incomplete:
-            gap = ("incomplete sweep capture(s) only" if not unmappable
-                   else "incomplete or unmappable sweep capture(s) only")
+            gap = (f"incomplete {what} only" if not unmappable
+                   else f"incomplete or unmappable {what} only")
             why = f"no snapshot before the pinned thesis day {baseline_day} covers the scored comparison: {gap}"
         else:
             why, gap = f"no snapshot before the pinned thesis day {baseline_day} can be mapped", None
+        scored_by = ("none recorded as scored by a report"
+                     if any(s.kind is None for s in before_lock) else "none scored by a report")
         return VintageDiffReport(
             as_of, newest, previous, changes,
             canonical_unavailable=unavailable, raw_note=raw_note(),
-            baseline_unavailable=(
-                f"{why} ({len(before_lock)} stored before it, none scored by a report)"),
+            baseline_unavailable=f"{why} ({len(before_lock)} stored before it, {scored_by})",
             lock_gap=gap,
         )
     # By content, not identity: a revert (A -> B -> A) is a third observation
@@ -1732,7 +1814,7 @@ def report_diff(
         return VintageDiffReport(as_of, newest, previous, changes, baseline,
                                  baseline_note=note, canonical_unavailable=unavailable,
                                  raw_note=raw_note(), baseline_source=source)
-    lock = diff_scored(_load_for_diff(baseline), new_facts, since=since)
+    lock = diff_scored(facts_of(baseline), new_facts, since=since)
     return VintageDiffReport(as_of, newest, previous, changes, baseline, lock.changes,
                              canonical_unavailable=unavailable,
                              baseline_unavailable=lock.canonical_unavailable,

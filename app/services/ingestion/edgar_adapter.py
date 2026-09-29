@@ -150,7 +150,9 @@ def replay_snapshot(
     mapper applies the same cut (`build_dataset(as_of=)`).
 
     Which stored snapshot (review of 224b896, finding 1): the newest one a
-    report scored (or one stored before kinds were recorded), falling back to
+    report scored (or one of unrecorded kind — stored before kinds were
+    recorded, or under a manifest rebuilt from disk — which the line says
+    nothing marks as scored), falling back to
     the newest raw capture only when none of those maps. Taking the newest
     observation of any kind scored a watch-sweep capture — possibly partial,
     mapped with fields missing — and a bare one failed the whole replay as
@@ -203,7 +205,8 @@ def replay_snapshot(
             "scored by a report" if stored.kind == SCORED
             else "a raw watch-sweep capture: no snapshot a report scored by then maps"
             if stored.kind == RAW
-            else "stored before kinds were recorded"
+            else "of unrecorded kind (manifest rebuilt or written before kinds): nothing "
+            "says a report scored it"
         )
         source = (
             f"the vintage snapshot captured {stored.captured} "

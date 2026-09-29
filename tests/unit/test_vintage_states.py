@@ -673,7 +673,8 @@ def test_the_legacy_walk_passes_over_a_snapshot_it_cannot_read_or_map(tmp_path):
     assert (rep.previous.captured, rep.newest.captured) == ("2024-12-27", "2024-12-30")
     assert rep.status_line() == (
         "compared 2024-12-27 → 2024-12-30: 1 change(s); 2 raw capture(s) since 2024-12-27 "
-        "not used as the baseline; 2 snapshot(s) passed over were unreadable or malformed")
+        "not used as the baseline; 2 snapshot(s) passed over were unreadable or malformed; "
+        "4 stored snapshot(s) of unrecorded kind (manifest rebuilt or written before kinds)")
     assert len(tier1) == 1
 
 
@@ -713,6 +714,7 @@ def test_the_payload_captured_raw_before_the_lock_is_the_lock_baseline(tmp_path)
                       scored_sha=v.digest_of(s3))
     assert (rep.previous.captured, rep.newest.captured) == ("2024-12-27", "2024-12-28")
     assert rep.baseline.captured == "2024-12-28" and rep.changes_since_baseline is None
+    assert rep.baseline_source is None  # the payload itself, not a sweep capture
     assert rep.baseline_note == (
         "the pinned thesis snapshot (2024-12-28) is the newest snapshot; nothing to "
         "compare since the lock")
@@ -729,9 +731,10 @@ def test_the_replay_passes_over_odd_and_unreadable_legacy_snapshots(tmp_path):
     snap, source = edgar_adapter.replay_snapshot(_Client(s1), "XYZ", D3.date(), root=tmp_path)
     assert snap.company_facts == s1
     assert source == (
-        f"the vintage snapshot captured 2024-12-28 (sha {v.digest_of(s1)[:12]}; stored before "
-        "kinds were recorded), cut to facts filed on or before 2024-12-30; 2 newer stored "
-        "snapshot(s) by then not used (2 not mappable)")
+        f"the vintage snapshot captured 2024-12-28 (sha {v.digest_of(s1)[:12]}; of unrecorded "
+        "kind (manifest rebuilt or written before kinds): nothing says a report scored it), "
+        "cut to facts filed on or before 2024-12-30; 2 newer stored snapshot(s) by then not "
+        "used (2 not mappable)")
 
 
 def test_the_replay_tries_an_unmappable_content_once(tmp_path, monkeypatch):
@@ -815,6 +818,7 @@ def test_a_mapped_sweep_capture_is_the_lock_baseline_when_no_report_predates_it(
             "pinned thesis 2024-12-27, a sweep capture (mapped, complete): 1 change(s)\n") in report
     assert ("**Since the pinned thesis was locked** (2024-12-27, a sweep capture (mapped, "
             "complete)):" in report)
+    assert "_The lock baseline is a watch-sweep capture: the nearest state before" in report
     # The ledger: the vintage stream checked, the one promoted fact VALIDATED.
     assert doc["streams"]["vintage"] == "checked"
     assert _silent_items(doc) == [
@@ -881,7 +885,7 @@ def test_a_legacy_state_the_walk_rejected_is_not_mapped_again_for_the_lock(tmp_p
                           scored_sha=v.digest_of(s2))
     assert rep.baseline is None and rep.baseline_unavailable == (
         "no snapshot before the pinned thesis day 2024-12-28 can be mapped (2 stored before "
-        "it, none scored by a report)")
+        "it, none recorded as scored by a report)")
     assert odd.path is not None
     assert sum(odd.path.name in r.getMessage() for r in caplog.records) == 1
 
@@ -1584,3 +1588,217 @@ def test_a_scored_state_past_the_bound_is_still_the_baseline(tmp_path):
         f"{tries} capture(s) before the thesis day not usable as the lock baseline ({tries} "
         f"unmappable); {12 - tries} older capture(s) before the thesis day not examined (at "
         f"most {tries} per report)")
+
+
+# --- states of unrecorded kind stand in for scored ones only if they cover ------
+# Cross-branch review of e0525c4. A store whose kinds are unknown — written
+# before kinds existed, or whose manifest was lost and rebuilt from disk —
+# took any mappable state as a baseline without the coverage check a raw
+# capture gets: a capture missing Assets before the thesis day read "since
+# pinned thesis 2024-12-20: 0 change(s)" over a real +20% revision.
+
+UNRECORDED_GAP = ("since the pinned thesis: not compared as scored, incomplete stored "
+                  "snapshot(s) of unrecorded kind only")
+
+
+def _forget_kinds(root: Path, how: str) -> None:
+    if how == "dropped":
+        _drop_kinds(root)
+    else:  # lost: the next read rebuilds it from the files on disk, kinds unrecorded
+        v._manifest_path(CIK, root).unlink()
+    assert {o.kind for o in observed_vintages(CIK, root)} == {None}
+
+
+@pytest.mark.parametrize("how", ["dropped", "rebuilt"])
+def test_an_incomplete_state_of_unrecorded_kind_is_not_the_lock_baseline(tmp_path, how, caplog):
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)  # the truth: +20% since the lock
+    s2 = _with(bumped, "U")
+    root = tmp_path / "v"
+    capture(_Client(_strip(s0, ["Assets"])), "XYZ", now=D20, root=root)
+    store_snapshot(CIK, bumped, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    _forget_kinds(root, how)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=root,
+                          scored_sha=v.digest_of(s2))
+    assert rep.baseline is None and rep.changes_since_baseline is None
+    assert rep.baseline_unavailable == (
+        "no snapshot before the pinned thesis day 2024-12-28 covers the scored comparison: "
+        "incomplete stored snapshot(s) of unrecorded kind only (1 stored before it, none "
+        "recorded as scored by a report)")
+    assert rep.tier1_gap == UNRECORDED_GAP
+    assert rep.raw_note == (
+        "1 snapshot(s) of unrecorded kind before the thesis day not usable as the lock "
+        "baseline (1 incomplete); 3 stored snapshot(s) of unrecorded kind (manifest rebuilt "
+        "or written before kinds)")
+    assert any("passed over for the thesis-lock baseline: incomplete" in r.getMessage()
+               and "kind unrecorded" in r.getMessage() for r in caplog.records)
+    # The card and the ledger say the lock window was not checked.
+    report, doc = _report(tmp_path, s2, baseline_day=LOCK)
+    assert f"⚠ not checked this run: silent revisions ({UNRECORDED_GAP})" in report
+    assert doc["streams"]["vintage"] == f"checked (incomplete: {UNRECORDED_GAP})"
+    assert "Silent revision:" not in report and _silent_items(doc) == []
+    assert "since the pinned thesis not compared as scored" in report
+
+
+
+def test_a_store_upgraded_mid_way_names_both_kinds_passed_over(tmp_path):
+    # An old observation lost its kind; the sweep has since captured raw.
+    # Neither covers, and the wording names both.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    s2 = _with(bumped, "U")
+    capture(_Client(_strip(s0, ["Assets"])), "XYZ", now=D20, root=tmp_path)
+    _drop_kinds(tmp_path)
+    capture(_Client(_strip(s0, ["Goodwill"])), "XYZ", now=D21, root=tmp_path)
+    capture(_Client(_bare()), "XYZ", now=D22, root=tmp_path)
+    store_snapshot(CIK, bumped, now=D2, root=tmp_path)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    assert [o.kind for o in observed_vintages(CIK, tmp_path)] == [
+        None, "raw", "raw", "scored", "scored"]
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                      scored_sha=v.digest_of(s2))
+    assert rep.baseline is None
+    assert rep.tier1_gap == (
+        "since the pinned thesis: not compared as scored, incomplete or unmappable sweep "
+        "capture(s) or stored snapshot(s) of unrecorded kind only")
+    assert rep.raw_note == (
+        "3 capture(s) or snapshot(s) of unrecorded kind before the thesis day not usable as "
+        "the lock baseline (1 unmappable, 2 incomplete); 1 stored snapshot(s) of unrecorded "
+        "kind (manifest rebuilt or written before kinds)")
+
+@pytest.mark.parametrize("how", ["dropped", "rebuilt"])
+def test_a_covering_state_of_unrecorded_kind_is_the_lock_baseline(tmp_path, how):
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    s2 = _with(bumped, "U")
+    root = tmp_path / "v"
+    capture(_Client(s0), "XYZ", now=D20, root=root)
+    store_snapshot(CIK, bumped, now=D2, root=root)
+    store_snapshot(CIK, s2, now=D4, root=root)
+    _forget_kinds(root, how)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=root,
+                      scored_sha=v.digest_of(s2))
+    assert rep.baseline.captured == "2024-12-20"
+    assert rep.baseline_source == "a stored snapshot of unrecorded kind (mapped, complete)"
+    assert [(c.field_name, c.key.end, round(c.pct_change, 6))
+            for c in rep.changes_since_baseline] == [("total_assets", PERIOD, 0.2)]
+    assert rep.tier1_gap is None
+    report, doc = _report(tmp_path, s2, baseline_day=LOCK)
+    assert "not checked this run: silent revisions" not in report
+    assert (f"Silent revision: total_assets for {PERIOD} 1,009 → 1,211 (+20.0%) between "
+            "snapshots 2024-12-20 and 2024-12-31") in report
+    assert ("since pinned thesis 2024-12-20, a stored snapshot of unrecorded kind (mapped, "
+            "complete): 1 change(s)") in report
+    assert "_The lock baseline is a stored snapshot of unrecorded kind" in report
+    assert doc["streams"]["vintage"] == "checked"
+
+
+def test_the_lock_reference_is_not_a_state_of_unrecorded_kind(tmp_path):
+    # A partial state on the thesis day, of unrecorded kind, is not what the
+    # pre-lock one is checked against: both lack Assets, so it would cover
+    # and hide the +20%. The payload the report scored is the reference.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    s2 = _with(bumped, "U")
+    capture(_Client(_strip(s0, ["Assets"])), "XYZ", now=D20, root=tmp_path)
+    capture(_Client(_with(_strip(bumped, ["Assets"]), "W")), "XYZ", now=D1, root=tmp_path)
+    store_snapshot(CIK, bumped, now=D2, root=tmp_path)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    _forget_kinds(tmp_path, "dropped")
+    assert [o.captured for o in observed_vintages(CIK, tmp_path)][:2] == ["2024-12-20", "2024-12-28"]
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                      scored_sha=v.digest_of(s2))
+    assert rep.baseline is None and rep.tier1_gap == UNRECORDED_GAP
+
+
+def test_an_incomplete_state_of_unrecorded_kind_is_not_the_previous_baseline(tmp_path, caplog):
+    # S1, then a fetch missing Assets, then S2 with Assets +20%: the partial
+    # state maps, and as the previous baseline it hid the revision. A raw
+    # capture since (the store upgraded) is counted apart.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    store_snapshot(CIK, s0, now=D1, root=tmp_path)
+    capture(_Client(_strip(s0, ["Assets"])), "XYZ", now=D2, root=tmp_path)
+    _drop_kinds(tmp_path)
+    capture(_Client(_bare()), "XYZ", now=D3, root=tmp_path)
+    store_snapshot(CIK, bumped, now=D4, root=tmp_path)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, root=tmp_path, scored_sha=v.digest_of(bumped))
+    assert (rep.previous.captured, rep.newest.captured) == ("2024-12-28", "2024-12-31")
+    assert [(c.field_name, c.key.end) for c in rep.changes_since_previous] == [
+        ("total_assets", PERIOD)]
+    assert rep.status_line() == (
+        "compared 2024-12-28 → 2024-12-31: 1 change(s); 1 snapshot(s) of unrecorded kind "
+        "since 2024-12-28 not used as the baseline (incomplete); 1 raw capture(s) since "
+        "2024-12-28 not used as the baseline; 2 stored snapshot(s) of unrecorded kind "
+        "(manifest rebuilt or written before kinds)")
+    assert any("passed over for the previous-report baseline: incomplete" in r.getMessage()
+               for r in caplog.records)
+    # Nothing earlier covers: not compared, and said why.
+    only = tmp_path / "only"
+    capture(_Client(_strip(s0, ["Assets"])), "XYZ", now=D2, root=only)
+    _drop_kinds(only)
+    capture(_Client(_bare()), "XYZ", now=D3, root=only)
+    store_snapshot(CIK, bumped, now=D4, root=only)
+    rep = report_diff(CIK, as_of=REPORT_DAY, root=only, scored_sha=v.digest_of(bumped))
+    assert not rep.compared and rep.no_baseline_reason == (
+        "no earlier scored snapshot to diff the newest (2024-12-31) against; 1 snapshot(s) "
+        "of unrecorded kind not used as the baseline (incomplete); 1 raw capture(s) not used "
+        "as the baseline; 1 stored snapshot(s) of unrecorded kind (manifest rebuilt or "
+        "written before kinds)")
+
+
+def test_the_lock_walk_bound_counts_each_content_once_a_day(tmp_path):
+    # Twenty same-day fetches alternating between two partial contents, of
+    # unrecorded kind: two builds, then each is checked against the
+    # reference already built for that day — none left unexamined. The
+    # note counts snapshot files, not observations.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    s2 = _with(bumped, "U")
+    for _ in range(10):
+        for concept in ("Assets", "Goodwill"):
+            capture(_Client(_strip(s0, [concept])), "XYZ", now=D22, root=tmp_path, force=True)
+    _drop_kinds(tmp_path)
+    store_snapshot(CIK, bumped, now=D2, root=tmp_path)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                      scored_sha=v.digest_of(s2))
+    assert rep.baseline is None and rep.raw_note == (
+        "20 snapshot(s) of unrecorded kind before the thesis day not usable as the lock "
+        "baseline (20 incomplete); 2 stored snapshot(s) of unrecorded kind (manifest rebuilt "
+        "or written before kinds)")
+
+
+def test_each_reference_is_built_apart_as_of_the_same_day(tmp_path, monkeypatch, caplog):
+    # The previous-report walk checks a state of unrecorded kind on the
+    # thesis day against the newest; the lock walk checks a capture from the
+    # day before against the scored state of the thesis day. Both ask for a
+    # state as of the day before the thesis day: two references, two builds.
+    s0 = _every_field(composites=True)
+    bumped = _bump(s0, "Assets", PERIOD, factor=1.2)
+    s2 = _with(bumped, "U")
+    partial = _with(_strip(bumped, ["Assets"]), "P")
+    capture(_Client(partial), "XYZ", now=datetime(2024, 12, 1, 12, tzinfo=UTC), root=tmp_path)
+    _drop_kinds(tmp_path)
+    capture(_Client(_strip(s0, ["Assets"])), "XYZ", now=D27, root=tmp_path)
+    store_snapshot(CIK, bumped, now=D1, root=tmp_path)
+    capture(_Client(partial), "XYZ", now=D1, root=tmp_path, force=True)
+    store_snapshot(CIK, s2, now=D4, root=tmp_path)
+    assert [(o.captured, o.kind) for o in observed_vintages(CIK, tmp_path)] == [
+        ("2024-12-01", None), ("2024-12-27", "raw"), ("2024-12-28", "scored"),
+        ("2024-12-28", None), ("2024-12-31", "scored")]
+    built = _counting(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger=v.__name__):
+        rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
+                          scored_sha=v.digest_of(s2))
+    assert rep.previous.captured == "2024-12-28" and rep.baseline is None
+    # The partial state, the newest as of the 27th and the 28th; the capture
+    # of the 27th, the scored state of the 28th as of the 26th and the 27th;
+    # the partial state again (from its 1 December observation) as of 30 and
+    # 1 December; the one diff.
+    assert len(built) == 1 + 2 + 1 + 2 + 2 + 2
+    assert any("2024-12-27" in r.getMessage() and "against the scored state of 2024-12-28 as "
+               "of 2024-12-26" in r.getMessage() for r in caplog.records)
