@@ -1257,6 +1257,11 @@ def test_the_lock_walk_is_bounded(tmp_path, monkeypatch):
     built = _counting(monkeypatch)
     rep = report_diff(CIK, as_of=REPORT_DAY, baseline_day=LOCK, root=tmp_path,
                       scored_sha=v.digest_of(s2))
+    # The cap is a hand-set policy value, pinned here rather than read back
+    # alone: a test that only follows the constant lets any value through
+    # (complete mutation run of ace7cd8: 8 -> 9 survived). Changing it is a
+    # reviewed decision that updates this line.
+    assert v.LOCK_CAPTURES_EXAMINED == 8
     tries = v.LOCK_CAPTURES_EXAMINED
     assert len(built) == tries + 2  # the previous -> newest diff's two builds
     assert rep.baseline is None and rep.baseline_unavailable == (
