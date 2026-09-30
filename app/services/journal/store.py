@@ -458,7 +458,9 @@ def _durable_write(path: Path, text: str, *, create: bool = False) -> None:
 def safe_ticker(ticker: str) -> str:
     """Uppercased ticker restricted to a safe charset. Raises ValueError on
     anything with path separators, `..`, or that could break `TICKER_DATE.md`."""
-    t = (ticker or "").strip().upper()
+    # Not text (a watchlist's `"ticker": 5`) is a ValueError like any bad
+    # ticker, not an AttributeError out of `.strip` (review of efb8500, L2).
+    t = ticker.strip().upper() if isinstance(ticker, str) else ""
     if not _TICKER_RE.match(t):
         raise ValueError(f"invalid ticker: {ticker!r}")
     return t

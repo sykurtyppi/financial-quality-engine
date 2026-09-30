@@ -190,11 +190,15 @@ The review console is the screen for that. Open it with the journal UI:
 The UI answers only to `localhost`, `127.0.0.1` and `[::1]` (any port): a
 request naming another host is refused (400), so a web page on some other
 name that re-resolves to your machine (DNS rebinding) cannot read a case or
-post a tick. To reach it by another name, list the names, comma-separated:
-`FQE_WEB_ALLOWED_HOSTS=journal.lan .venv/bin/uvicorn app.web:app` (the list
-replaces the default). A tick posted by a page that is not the console's
-own (its `Sec-Fetch-Site` or `Origin` says so) is refused (403); a POST with
-neither header is not from a browser page, and is accepted (`curl`).
+post a tick. To reach it by another name, list the names, comma-separated,
+without ports (a port is ignored): `FQE_WEB_ALLOWED_HOSTS=journal.lan,127.0.0.1
+.venv/bin/uvicorn app.web:app --host 0.0.0.0`. The list REPLACES the default,
+so name `127.0.0.1` too if you still open it locally; uvicorn serves only
+loopback unless given `--host`; an entry that is not a host name makes every
+page say so (500). Anything that changes something (a tick, the impact
+form, a report's first view) is refused (403) to a page that is not this
+UI's own (its `Sec-Fetch-Site` or `Origin` says so); a request with neither
+header is not from a browser page, and is accepted (`curl`).
 
 **The board** (`/review`) lists every watchlist name (the case of its pinned
 entry) and every journal entry with a live or pending report, read-only:
@@ -232,9 +236,12 @@ They are kept in `journal/reviews/<T>_<day>.review.json` (private, beside the
 entries), written whole under a lock, and every tick is bound to the run's
 generation id and the row's id. A rebuild is a new run: its rows start
 unchecked, and the page says how many ticks were recorded for the earlier
-run (restoring that run brings them back). A tick for a run that is no
-longer live, including one rebuilt while the tick was being recorded, is
-refused (409): reload and check the live run. Export the
+run (restoring that run brings them back). A tick is written with the
+case's publish lock held, so it always lands on the run live when it is
+written: a tick for a run rebuilt since the page was loaded is refused
+(409), reload and check the live run; a rebuild that finishes while a tick
+is being written waits the moment the write takes, then goes live.
+Setting an untouched row to *unchecked* writes nothing. Export the
 case for the shadow-run log from its page (CSV or Markdown,
 `/review/<T>/export?date=<day>&format=md`).
 

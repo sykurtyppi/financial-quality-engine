@@ -874,15 +874,20 @@ def test_a_rebuild_between_the_check_and_the_write_is_refused(client, monkeypatc
     doc = _ko_ledger()
     first = _publish("KO", day, doc)
     key = _sourced(doc)[0].id
-    real, made = store._entry_lock, []
+    real, made = report_files.publish_lock, []
 
     @contextlib.contextmanager
-    def racing(path):
-        with real(path):
-            made.append(_publish("KO", day, doc))
+    def racing(report):
+        # The rebuild commits just before the tick takes the publish lock
+        # (a publish inside it would wait for the tick instead). The
+        # rebuild's own publish takes the real lock.
+        if not made:
+            made.append("building")
+            made[0] = _publish("KO", day, doc)
+        with real(report):
             yield
 
-    monkeypatch.setattr(store, "_entry_lock", racing)
+    monkeypatch.setattr(report_files, "publish_lock", racing)
     r = _tick(client, "KO", day, first, key)
     assert r.status_code == 409 and first in r.text and made[0] in r.text
     runs = review._load(_review_file("KO", day), "KO", day)
@@ -924,3 +929,195 @@ def test_an_unchecked_tick_left_by_an_earlier_version_is_not_counted(client):
     page = client.get(f"/review/KO?date={day}").text
     assert f"1 tick recorded for an earlier run {'e' * 32}" in page
     assert "f" * 32 not in page
+
+
+
+# --- review of efb8500 -----------------------------------------------------------------
+
+
+def test_a_publish_during_the_write_waits_for_the_tick(client, monkeypatch):
+    """M1: the in-lock re-check took only the review file's lock, which no
+    publisher takes: a rebuild committing between the re-check and the
+    write left the tick on a run no longer live, said as recorded. The
+    tick now holds the case's publish lock across both, so a publish that
+    comes then waits (only its commit: the build runs before the lock), and
+    the tick lands on the run that was live when it was written."""
+    import threading
+
+    from app.services.journal import review
+
+    _, day = _entry()
+    doc = _ko_ledger()
+    first = _publish("KO", day, doc)
+    key = _sourced(doc)[0].id
+    real, made, during = store._durable_write, [], []
+
+    def racing(path, text, **kw):
+        if path.name.endswith(".review.json") and not during:
+            rebuild = threading.Thread(target=lambda: made.append(_publish("KO", day, doc)))
+            rebuild.start()
+            rebuild.join(timeout=1.0)          # a publish free to commit does so at once
+            during.append((list(made), rebuild))
+        return real(path, text, **kw)
+
+    monkeypatch.setattr(store, "_durable_write", racing)
+    r = _tick(client, "KO", day, first, key)
+    landed_during, rebuild = during[0]
+    rebuild.join(timeout=30)
+    assert landed_during == []                 # the publish waited for the tick
+    assert r.status_code == 303
+    runs = review._load(_review_file("KO", day), "KO", day)
+    assert key in runs[first]                  # on the run live when it was written
+    live = report_files.read_live(reporting.report_path("KO", day)).generation_id
+    assert made and live == made[0] != first   # and the rebuild then went live
+
+
+def test_a_reset_of_a_row_with_no_tick_writes_nothing(client, monkeypatch):
+    """N1: a reset of an untouched row wrote a review file for a no-op, and
+    one whose write failed was said as recorded."""
+    import errno
+
+    _, day = _entry()
+    doc = _ko_ledger()
+    gid = _publish("KO", day, doc)
+    key = _sourced(doc)[0].id
+    assert _tick(client, "KO", day, gid, key, "unchecked").status_code == 303
+    assert not (store.ENTRIES.parent / "reviews").exists()
+
+    def full(path, text, **kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    assert _tick(client, "KO", day, gid, _sourced(doc)[1].id, "disputed").status_code == 303
+    monkeypatch.setattr(store, "_durable_write", full)
+    r = _tick(client, "KO", day, gid, key, "unchecked")
+    assert r.status_code == 303                # still nothing to reset, still no write
+
+
+def test_a_reset_whose_write_fails_is_said_as_not_recorded(client, monkeypatch):
+    import errno
+
+    _, day = _entry()
+    doc = _ko_ledger()
+    gid = _publish("KO", day, doc)
+    key = _sourced(doc)[0].id
+    assert _tick(client, "KO", day, gid, key, "reconciled", "kept").status_code == 303
+
+    def full(path, text, **kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(store, "_durable_write", full)
+    r = _tick(client, "KO", day, gid, key, "unchecked")
+    assert r.status_code == 500 and "could not be recorded" in r.text
+    assert "The tick is recorded" not in r.text
+    assert json.loads(_review_file("KO", day).read_text())["runs"][gid][key]["note"] == "kept"
+
+
+@pytest.mark.parametrize("raw", [
+    "[" * 200000, '{"watchlist": [5]}', '{"watchlist": [{"ticker": 5}]}',
+    '{"watchlist": [{"ticker": "KO", "print_at": []}]}', '{"watchlist": null}',
+    '{"watchlist": [{"ticker": "KO", "print_at": "2026-09-30T20:00:00Z", "forms": 5}]}',
+], ids=["deep", "int-row", "int-ticker", "list-print-at", "null", "int-forms"])
+def test_a_malformed_watchlist_is_said_on_the_board(client, raw, caplog):
+    """L2: a watchlist of the wrong shapes raised out of the loader
+    (AttributeError, TypeError, RecursionError) and 500ed the board."""
+    import logging
+
+    _, day = _entry("KO")
+    _publish("KO", day, _ko_ledger())
+    wl.WATCHLIST.write_text(raw)
+    caplog.set_level(logging.WARNING)
+    r = client.get("/review")
+    assert r.status_code == 200 and "The watchlist cannot be read" in r.text
+    assert "report live" in _board_row(r.text, "KO")
+    assert any(x.name == "app.services.journal.review" and x.exc_info for x in caplog.records)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ({"ticker": 5, "print_at": "2026-09-30T20:00:00Z"}, "invalid ticker"),
+    ({"ticker": "KO", "print_at": "2026-09-30T20:00:00Z", "forms": 5}, "forms must be a list"),
+])
+def test_the_watchlist_parser_refuses_wrong_types_as_a_watchlist_error(raw, expected):
+    with pytest.raises(wl.WatchlistError, match=expected):
+        wl.parse_watch(raw)
+
+
+def test_a_ticker_that_is_not_text_is_a_value_error():
+    for bad in (5, None, ["KO"]):
+        with pytest.raises(ValueError, match="invalid ticker"):
+            store.safe_ticker(bad)
+
+
+def test_a_case_that_fails_on_the_board_is_logged_with_its_traceback(client, monkeypatch, caplog):
+    """L3: the row said the error, and nothing else did."""
+    import logging
+
+    from app.services.journal import review
+
+    _, day = _entry("KO")
+    _publish("KO", day, _ko_ledger())
+
+    def broken(ticker, d):
+        raise AttributeError("a bug")
+
+    monkeypatch.setattr(review, "case", broken)
+    caplog.set_level(logging.WARNING)
+    r = client.get("/review")
+    assert r.status_code == 200 and "AttributeError: a bug" in _board_row(r.text, "KO")
+    [rec] = [x for x in caplog.records if x.name == "app.services.journal.review"]
+    assert rec.exc_info and "KO" in rec.getMessage()
+
+
+def test_served_names_with_a_port_match_the_name(client, monkeypatch):
+    """L4: an entry with a port never matched, so every request was 400."""
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", "journal.lan:8000,[::1]:8000")
+    assert client.get("/review", headers={"host": "journal.lan:8000"}).status_code == 200
+    assert client.get("/review", headers={"host": "journal.lan:9000"}).status_code == 200
+    assert client.get("/review", headers={"host": "[::1]:8000"}).status_code == 200
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", "::1")
+    assert client.get("/review", headers={"host": "[::1]:8000"}).status_code == 200
+
+
+def test_a_served_name_that_is_not_a_host_is_said_loudly(client, monkeypatch):
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", "journal.lan,bad/host")
+    r = client.get("/review", headers={"host": "journal.lan"})
+    assert r.status_code == 500
+    assert "FQE_WEB_ALLOWED_HOSTS" in r.text and "'bad/host'" in r.text
+
+
+def test_a_cross_site_form_cannot_write_an_entry(client):
+    """N2: /impact took a cross-site form (a forged what_happened landed)."""
+    path, day = _entry()
+    store.mark_reported(path)
+    before = path.read_text()
+    for headers in ({"origin": "https://evil.example"}, {"sec-fetch-site": "cross-site"},
+                    {"origin": "http://127.0.0.1", "sec-fetch-site": "same-site"}):
+        r = client.post("/impact/KO", data={"date": day, "what_happened": "FORGED"},
+                        headers=headers)
+        assert r.status_code == 403, headers
+    assert path.read_text() == before
+    # The app's own form, as a browser posts it, still writes.
+    r = client.post("/impact/KO", data={"date": day, "what_happened": "real"},
+                    headers={"origin": "http://127.0.0.1", "sec-fetch-site": "same-origin"})
+    assert r.status_code == 303 and "what_happened: real" in path.read_text()
+
+
+def test_a_cross_site_page_cannot_make_the_report_page_build(client, monkeypatch):
+    """N2: GET /report builds, publishes and stamps on first view; an <img>
+    on another site could trigger it."""
+    built = []
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False):
+        built.append(ticker)
+        p = reporting.report_path(ticker, report_day)
+        p.write_text(f"# {ticker} report\n")
+        return p, "ok"
+
+    monkeypatch.setattr(reporting, "build_report", build)
+    path, _ = _entry()
+    for site in ("cross-site", "same-site"):
+        r = client.get("/report/KO", headers={"sec-fetch-site": site})
+        assert r.status_code == 403
+    assert built == [] and not store.parse_entry(path)["is_reported"]
+    assert client.get("/report/KO", headers={"sec-fetch-site": "same-origin"}).status_code == 200
+    assert built == ["KO"]
+    assert client.get("/report/KO", headers={"sec-fetch-site": "none"}).status_code == 200
