@@ -187,6 +187,15 @@ The review console is the screen for that. Open it with the journal UI:
 .venv/bin/uvicorn app.web:app        # then http://127.0.0.1:8000/review
 ```
 
+The UI answers only to `localhost`, `127.0.0.1` and `[::1]` (any port): a
+request naming another host is refused (400), so a web page on some other
+name that re-resolves to your machine (DNS rebinding) cannot read a case or
+post a tick. To reach it by another name, list the names, comma-separated:
+`FQE_WEB_ALLOWED_HOSTS=journal.lan .venv/bin/uvicorn app.web:app` (the list
+replaces the default). A tick posted by a page that is not the console's
+own (its `Sec-Fetch-Site` or `Origin` says so) is refused (403); a POST with
+neither header is not from a browser page, and is accepted (`curl`).
+
 **The board** (`/review`) lists every watchlist name (the case of its pinned
 entry) and every journal entry with a live or pending report, read-only:
 
@@ -217,13 +226,15 @@ ledger could not source ("no document to check against"), are listed apart.
 A ledger beside the report that names another run is said, and no table is
 built from it.
 
-**Ticks.** Each row takes *reconciled*, *disputed* or *unchecked* and a note.
+**Ticks.** Each row takes *reconciled* or *disputed* and a note; setting it back to
+*unchecked* removes its tick.
 They are kept in `journal/reviews/<T>_<day>.review.json` (private, beside the
 entries), written whole under a lock, and every tick is bound to the run's
 generation id and the row's id. A rebuild is a new run: its rows start
 unchecked, and the page says how many ticks were recorded for the earlier
 run (restoring that run brings them back). A tick for a run that is no
-longer live is refused (409): reload and check the live run. Export the
+longer live, including one rebuilt while the tick was being recorded, is
+refused (409): reload and check the live run. Export the
 case for the shadow-run log from its page (CSV or Markdown,
 `/review/<T>/export?date=<day>&format=md`).
 
