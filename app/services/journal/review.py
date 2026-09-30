@@ -321,7 +321,7 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
             _write_ticks(path, t, d, runs, generation_id, key, state, tick)
     except Unreadable as e:
         raise Refused(409, f"{e}. Not writing over it.") from None
-    except TimeoutError:  # an OSError: said before those
+    except report_files.PublishBusy:  # an OSError: said before those
         raise Refused(503, f"A publish of {t} {d} is in progress (its lock has been held for "
                       f"over {PUBLISH_WAIT_S:g}s); nothing was recorded. Retry in a moment, "
                       "then reload: the live run may have changed.") from None

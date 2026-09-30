@@ -184,8 +184,13 @@ surfaces is reconciled by hand to its accession before anyone relies on it.
 The review console is the screen for that. Open it with the journal UI:
 
 ```
-.venv/bin/uvicorn app.web:app        # then http://127.0.0.1:8000/review
+.venv/bin/uvicorn app.web:app --forwarded-allow-ips 127.0.0.1   # then http://127.0.0.1:8000/review
 ```
+
+`--forwarded-allow-ips 127.0.0.1` names the only peer whose
+`X-Forwarded-For` uvicorn believes about who the client is; given on the
+command line, it overrides a `FORWARDED_ALLOW_IPS=*` left in the
+environment, which would let any peer claim to be this machine.
 
 The UI has **no authentication**. It serves only this machine: a request
 from any other address is refused (403), and so is one naming a host other
@@ -208,13 +213,18 @@ browsers send no `Sec-Fetch-*` to a plain-http origin that is not loopback,
 and a request from another machine can simply leave the headers out.
 
 Only behind a proxy that authenticates (and serves TLS): set
-`FQE_WEB_ALLOW_REMOTE=1` to serve clients other than this machine (a proxy
-on this machine connects from loopback and needs no such setting), and
+`FQE_WEB_ALLOW_REMOTE=1` to serve clients other than this machine, and
 `FQE_WEB_ALLOWED_HOSTS` to the name(s) the proxy is reached by,
-comma-separated, without ports (a port is ignored). The list REPLACES the
-default, so name `127.0.0.1` too if you still open it locally; an entry
-that is not a host name (`*`, a space, a trailing dot) makes every page say
-so (500) and the server log names it. The proxy must pass the browser's
+comma-separated, without ports (a port is ignored). A proxy on this machine
+that sends `X-Forwarded-For` (nginx, Caddy and Traefik do by default) is
+not "this machine" either: uvicorn reports the forwarded address as the
+client, so it too needs `FQE_WEB_ALLOW_REMOTE=1` (and must authenticate),
+or uvicorn started with `--no-proxy-headers`. The list REPLACES the
+default, so name `127.0.0.1` too if you still open it locally. An entry
+that is not a host name (`*`, a space, a trailing dot, a non-ASCII name not
+in its `xn--` form, a number that is not an IP address) is named once in
+the server log; pages opened by a loopback name then answer 500, any other
+name 400. The proxy must pass the browser's
 `Host` header and scheme through unchanged: one that rewrites `Host`, or
 serves https while the UI sees http, makes every browser POST fail the
 `Origin` check (403: it fails closed).

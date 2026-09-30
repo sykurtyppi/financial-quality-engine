@@ -1199,6 +1199,13 @@ def test_the_runbook_does_not_serve_the_ui_on_the_network():
     assert "0.0.0.0" not in section and "--host" not in section.replace("uvicorn --host", "")
     assert "ssh -L 8000:127.0.0.1:8000" in section
     assert "no authentication" in section and "FQE_WEB_ALLOW_REMOTE" in section
+    # Review of eeb1e51, L-2 and L-4: a proxy that sends X-Forwarded-For is
+    # not "this machine" to the gate, and the launch command pins which
+    # peers may say who the client is.
+    assert "uvicorn app.web:app --forwarded-allow-ips 127.0.0.1" in section
+    assert "X-Forwarded-For" in section and "--no-proxy-headers" in section
+    assert "needs no such setting" not in section
+    assert "makes every page say so" not in section
 
 
 def _counting_build(monkeypatch):
@@ -1323,3 +1330,107 @@ def test_an_unforeseen_watchlist_failure_is_logged_with_its_traceback(client, mo
     assert r.status_code == 200 and "The watchlist cannot be read" in r.text
     [rec] = [x for x in caplog.records if x.name == "app.services.journal.review"]
     assert rec.exc_info
+
+
+
+# --- review of eeb1e51 -----------------------------------------------------------------
+
+
+def test_the_watchlist_round_trips_a_non_ascii_note_under_any_locale(tmp_path):
+    """L-1: the reader reads UTF-8, the writer wrote the locale's encoding:
+    under a non-UTF-8 locale a note like "Nestlé" was written in it (or
+    not at all), and the sweep then refused its own file."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        "import locale, sys\n"
+        f"sys.path.insert(0, {str(root)!r})\n"
+        "from pathlib import Path\n"
+        "from app.services.watch import watchlist as wl\n"
+        "assert locale.getencoding().lower() not in ('utf-8', 'utf8'), locale.getencoding()\n"
+        f"p = Path({str(tmp_path / 'watchlist.json')!r})\n"
+        "wl.add_entry({'ticker': 'KO', 'print_at': '2026-10-21T10:55:00Z',"
+        " 'note': 'Nestl\\u00e9 read-across'}, path=p)\n"
+        "wl.update_entry('KO', {'label': 'FQ3'}, path=p)\n"
+        "[w] = wl.load(p)\n"
+        "print(w.note, w.label)\n")
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C",
+           "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0", "PYTHONIOENCODING": "utf-8"}
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                       text=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "Nestl\u00e9 read-across FQ3"
+    assert "Nestl\u00e9".encode() in (tmp_path / "watchlist.json").read_bytes()
+
+
+def test_a_watchlist_number_too_long_to_parse_is_a_watchlist_error(tmp_path, client):
+    """N-1: json.loads raises a plain ValueError past Python's integer
+    digit limit, which escaped `_read`."""
+    p = tmp_path / "watchlist.json"
+    p.write_text('{"watchlist": [{"ticker": "KO", "print_at": "2026-10-21T10:55:00Z", "n": '
+                 + "1" * 5000 + "}]}", encoding="utf-8")
+    for call in (lambda: wl.load(p), lambda: wl.update_entry("KO", {"label": "x"}, p),
+                 lambda: wl.remove_entry("KO", p)):
+        with pytest.raises(wl.WatchlistError):
+            call()
+
+
+def test_a_timeout_that_is_not_a_busy_publish_is_not_said_as_one(client, monkeypatch):
+    """N-2: `except TimeoutError` spanned the whole write: an OSError
+    ETIMEDOUT (a network mount) read as "a publish is in progress"."""
+    import errno
+
+    _, day = _entry()
+    doc = _ko_ledger()
+    gid = _publish("KO", day, doc)
+
+    def lock(path):
+        raise OSError(errno.ETIMEDOUT, "Connection timed out")
+
+    monkeypatch.setattr(store, "_entry_lock", lock)
+    r = _tick(client, "KO", day, gid, _sourced(doc)[0].id)
+    assert r.status_code == 500 and "Connection timed out" in r.text
+    assert "publish" not in r.text.split("Tick not recorded", 1)[1].lower()
+
+
+_NAME_253 = ".".join(["a" * 63] * 3 + ["b" * 61])           # the longest a DNS name may be
+
+
+@pytest.mark.parametrize("entry", ["0127.0.0.1", "127.1", "0x7f.0.0.1", "999.1.1.1", "1.2.3",
+                                   "1.2.3.4.5", "a" * 64 + ".lan", "bücher.lan",
+                                   _NAME_253 + "b"])
+def test_served_names_are_real_hosts_and_numbers_real_addresses(client, monkeypatch, caplog, entry):
+    """N-3: numeric entries that are no address (a browser would send the
+    canonical form, or refuse them), labels over 63 characters, and a
+    non-ASCII name (sent as punycode) were accepted and matched nothing."""
+    import logging
+
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", entry)
+    caplog.set_level(logging.ERROR)
+    assert client.get("/review").status_code == 500
+    if entry == "bücher.lan":
+        assert any("xn--" in x.getMessage() for x in caplog.records if x.name == "app.web")
+
+
+@pytest.mark.parametrize("entry,host", [
+    ("::ffff:127.0.0.1", "[::ffff:7f00:1]:8000"), ("::ffff:7f00:1", "[::ffff:127.0.0.1]"),
+    ("0:0:0:0:0:0:0:1", "[::1]"), ("my_host.lan", "my_host.lan:8000"),
+    ("xn--bcher-kva.lan", "xn--bcher-kva.lan"), ("a" * 63 + ".lan", "a" * 63 + ".lan"),
+    (_NAME_253, _NAME_253)])
+def test_served_addresses_match_in_any_spelling(client, monkeypatch, entry, host):
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", entry)
+    assert client.get("/review", headers={"host": host}).status_code == 200
+
+
+def test_a_misconfigured_name_list_is_logged_once(client, monkeypatch, caplog):
+    """N-4: logged on every request."""
+    import logging
+
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", "journal.lan,logged-once/x")
+    caplog.set_level(logging.ERROR)
+    for _ in range(3):
+        assert client.get("/review").status_code == 500
+    assert len([x for x in caplog.records
+                if x.name == "app.web" and "logged-once/x" in x.getMessage()]) == 1

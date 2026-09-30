@@ -160,7 +160,7 @@ def _read(p: Path) -> Any:
     N-2: the writers took a deep document as a RecursionError traceback)."""
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except ValueError as e:  # not JSON, not UTF-8, or a number too long to read (N-1)
         raise WatchlistError(f"{p}: invalid JSON ({e})") from e
     except RecursionError as e:
         raise WatchlistError(f"{p}: nested too deeply to be a watchlist") from e
@@ -249,7 +249,9 @@ def _atomic_write(p: Path, data: dict) -> None:
     cron job reads half-written."""
     fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as fh:
+        # UTF-8, as it is read (`_read`), whatever the locale (review of
+        # eeb1e51, L-1: a latin-1 locale wrote a note the sweep then refused).
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         os.replace(tmp, p)
     except BaseException:

@@ -1171,3 +1171,36 @@ def test_a_publish_lock_without_a_timeout_waits_for_its_holder(tmp_path):
     holder.communicate("")
     t.join(10)
     assert got and got[0] >= released
+
+
+
+def test_a_publish_lock_timeout_of_zero_tries_once_and_never_sleeps(tmp_path, monkeypatch):
+    """Review of eeb1e51, L-3: a timeout is a deadline, and a deadline
+    already reached gives up after the one try, however the clock reads."""
+    import fcntl
+
+    report = tmp_path / NAME
+    (tmp_path / STAGING_DIR).mkdir()
+    lock = tmp_path / STAGING_DIR / "AAPL_2026-09-26.lock"
+    held = os.open(lock, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    slept = []
+
+    class Frozen:
+        @staticmethod
+        def monotonic():
+            return 1000.0
+
+        @staticmethod
+        def sleep(seconds):
+            slept.append(seconds)
+            raise AssertionError("slept past a deadline already reached")
+
+    monkeypatch.setattr(report_files, "time", Frozen)
+    try:
+        with pytest.raises(TimeoutError):
+            with report_files.publish_lock(report, timeout=0):
+                pass
+    finally:
+        os.close(held)
+    assert slept == []
