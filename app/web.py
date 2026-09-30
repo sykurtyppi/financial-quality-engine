@@ -14,14 +14,14 @@ from __future__ import annotations
 import html as _html
 import re
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 import markdown as md
-from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Form, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from app.services.journal import reporting, store
+from app.services.journal import reporting, review, store
 from app.services.reporting.report_files import PublishInDoubt, recording
 
 BASE = Path(__file__).resolve().parent
@@ -351,3 +351,86 @@ def impact_submit(
             continue
         store.set_field(path, key, val)
     return RedirectResponse("/", status_code=303)
+
+
+# --- the review console: supervised shadow runs (app.services.journal.review) ---------
+# Read-only over the published runs; its one write is the reviewer's ticks.
+
+
+def _refused(request: Request, e: review.Refused, title: str, back: str | None = None):
+    return templates.TemplateResponse(
+        request, "review_refused.html", {"title": title, "message": e.message, "back": back},
+        status_code=e.status)
+
+
+@app.get("/review", response_class=HTMLResponse)
+def review_board(request: Request):
+    rows, problems = review.board()
+    return templates.TemplateResponse(
+        request, "review_board.html", {"rows": rows, "problems": problems})
+
+
+@app.get("/review/{ticker}", response_class=HTMLResponse)
+def review_case(request: Request, ticker: str, date: str | None = None):
+    try:
+        case = review.case(ticker, date)
+    except review.Refused as e:
+        return _refused(request, e, "Case not shown")
+    audit = case.run.audit_text
+    return templates.TemplateResponse(request, "review_case.html", {
+        "case": case, "states": review.STATES, "note_max": review.NOTE_MAX,
+        # Both untrusted (filer-quoted excerpts, a model-written audit):
+        # `_render_report` escapes them before markdown, as on /report.
+        "report_html": _render_report(case.run.live.text),
+        "audit_html": _render_report(audit) if audit is not None else None,
+    })
+
+
+@app.post("/review/{ticker}/reconcile")
+def review_reconcile(
+    request: Request,
+    ticker: str,
+    date: str = Form(""),
+    generation: str = Form(""),
+    key: str = Form(""),
+    state: str = Form(""),
+    note: str = Form(""),
+):
+    origin = request.headers.get("origin")
+    if origin is not None and urlsplit(origin).netloc != request.headers.get("host"):
+        # A page on another site can post this form to a console on
+        # loopback: a forged "reconciled" is the one tick that must never
+        # land. A browser names the page's origin on every cross-site POST.
+        return _refused(request, review.Refused(
+            403, f"A tick posted from another site ({origin}) is not recorded."),
+            "Tick not recorded")
+    try:
+        t, d = review.record_tick(ticker, date, generation, key, state, note)
+    except review.Refused as e:
+        back = None
+        try:
+            t, d = review.case_names(ticker, date)
+            back = f"/review/{t}?date={d}"
+        except review.Refused:
+            pass
+        return _refused(request, e, "Tick not recorded", back)
+    return RedirectResponse(f"/review/{t}?date={d}#{key}", status_code=303)
+
+
+_EXPORTS = {"csv": ("text/csv; charset=utf-8", "csv"),
+            "md": ("text/markdown; charset=utf-8", "md")}
+
+
+@app.get("/review/{ticker}/export")
+def review_export(request: Request, ticker: str, date: str | None = None,
+                  fmt: str = Query("csv", alias="format")):
+    try:
+        t, d = review.case_day(ticker, date)
+        if fmt not in _EXPORTS:
+            raise review.Refused(400, f"format {fmt!r}: csv or md")
+        text = review.export(review.case(t, d), fmt)
+    except review.Refused as e:
+        return _refused(request, e, "Nothing exported")
+    media, ext = _EXPORTS[fmt]
+    return Response(text, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{t}_{d}_review.{ext}"'})
