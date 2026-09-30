@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import date
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -135,13 +135,14 @@ class LedgerDocument(BaseModel):
     ticker: str
     # The company's CIK, which a filing's folder on EDGAR is filed under
     # (`/Archives/edgar/data/<cik>/<accession without dashes>/`), so a
-    # reviewer can open each accession (`reporting.ledger.ledger_cik`: the
-    # payload's, the filing index's and the resolved one, when they agree).
-    # None when the run held no source for it (the API, tests), or when its
-    # sources disagreed or one was not a CIK: then `cik_note` says which
-    # said what, and nothing is linked on a guess. A ledger written before
-    # the field existed loads with None and no note.
-    cik: int | None = None
+    # reviewer can open each accession. Recorded from the run's resolved
+    # CIK as its payloads carry it (`reporting.ledger.ledger_cik`); withheld
+    # when any payload names a different one or something that is not a
+    # CIK, and `cik_note` then says what each gave. None with no note when
+    # the run held no source (the API, tests), or in a ledger written before
+    # the field existed. Strict: only an int in (0, 10**10) loads — the
+    # console links it (review of e37827a, finding N1).
+    cik: Annotated[int, Field(strict=True, gt=0, lt=10**10)] | None = None
     cik_note: str | None = None
     generated_on: date
     fetched_at: str | None = None

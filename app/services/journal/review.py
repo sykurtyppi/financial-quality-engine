@@ -70,7 +70,7 @@ _ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 # A document link of an offering row (`reporting.ledger._edgar_url`): the one
 # place a ledger written before `LedgerDocument.cik` carried the company's
 # CIK, and one more a ledger's own CIK must agree with.
-_CIK_URL_RE = re.compile(r"^https://www\.sec\.gov/Archives/edgar/data/(\d{1,10})/")
+_CIK_URL_RE = re.compile(r"^https://www\.sec\.gov/Archives/edgar/data/([0-9]{1,10})/")
 # `<stamp>_<seq>_<id>`: a generation directory's name (`report_files._name_next`).
 _BUILT_RE = re.compile(r"^(\d{8}T\d{6}Z)_\d+_")
 
@@ -488,18 +488,20 @@ def fmt_value(v: float | None) -> str:
 
 
 def _cik(ledger: LedgerDocument) -> tuple[int | None, str | None]:
-    """The company's CIK, or None and why: the ledger's own (`cik`, recorded
-    from the run's sources when they agree), else — a ledger written before
-    it — an offering's document link. Never guessed from an accession, whose
-    prefix is whoever filed it (often a filing agent), and never taken from
-    a link when the ledger says its sources disagreed."""
+    """The company's CIK, or None and why: the ledger's own (`cik`, the run's
+    resolved CIK, withheld when any payload named a different one), else — a
+    ledger written before it — an offering's document link. Never guessed
+    from an accession, whose prefix is whoever filed it (often a filing
+    agent), and never taken from a link when the ledger withheld it; a link
+    naming another CIK than the ledger's links nothing."""
     found = {int(m.group(1)) for i in ledger.items for p in i.provenance
              if p.url and (m := _CIK_URL_RE.match(p.url))}
     if ledger.cik is not None:
         found.add(ledger.cik)
     elif ledger.cik_note:
-        return None, (f"This run's ledger records no CIK ({ledger.cik_note}), so accessions "
-                      "are shown as text: look each one up on EDGAR by accession number.")
+        return None, (f"This run's ledger withholds the company's CIK: {ledger.cik_note}. "
+                      "Accessions are shown as text: look each one up on EDGAR by accession "
+                      "number.")
     if len(found) == 1:
         return found.pop(), None
     if not found:

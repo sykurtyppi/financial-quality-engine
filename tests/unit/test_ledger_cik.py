@@ -200,7 +200,10 @@ def _ko():
     return ds, analyze(ds)
 
 
-def test_the_offering_row_link_uses_the_ledgers_cik():
+KO_DOC = "https://www.sec.gov/Archives/edgar/data/21344/000002134426000010/p.htm"
+
+
+def test_agreeing_sources_record_the_cik_and_the_offering_link_names_it():
     ds, result = _ko()
     doc = build_ledger(result=result, dataset=ds, ticker="KO", report_date=DAY,
                        streams={"ran": True, "offerings": _offering(21344)}, errors={},
@@ -208,20 +211,70 @@ def test_the_offering_row_link_uses_the_ledgers_cik():
                                     "the filing index": "21344"})
     assert doc.cik == 21344
     (row,) = [i for i in doc.items if i.kind == "offering"]
-    assert row.provenance[0].url == \
-        "https://www.sec.gov/Archives/edgar/data/21344/000002134426000010/p.htm"
+    assert row.provenance[0].url == KO_DOC
 
 
-def test_when_the_resolved_cik_disagrees_the_offering_row_is_not_linked_either():
-    """The offering URL was built from the resolved CIK alone: against a
-    payload naming another, it must not link where the ledger will not."""
+def test_a_payload_naming_another_cik_withholds_the_ledgers_but_not_the_offering_link():
+    """Review of e37827a, finding L3: the offering row's accession came from
+    the filing index, which `fetch_offerings` asserted against the CIK its
+    link is built with. A companyfacts payload naming another CIK withholds
+    the ledger's CIK (the console's link for every other row), not that."""
     ds, result = _ko()
     doc = build_ledger(result=result, dataset=ds, ticker="KO", report_date=DAY,
                        streams={"ran": True, "offerings": _offering(21344)}, errors={},
-                       cik_sources={"the companyfacts payload": 77})
+                       cik_sources={"the companyfacts payload": 77,
+                                    "the filing index": "21344"})
     assert doc.cik is None and "77" in (doc.cik_note or "")
     (row,) = [i for i in doc.items if i.kind == "offering"]
-    assert row.provenance[0].url is None
+    assert row.provenance[0].url == KO_DOC
+
+
+def test_the_resolved_cik_of_the_offering_list_is_a_source():
+    """The offerings stream's CIK is the ticker's resolution itself: alone it
+    records the CIK, and against a payload naming another it withholds it."""
+    ds, result = _ko()
+    alone = build_ledger(result=result, dataset=ds, ticker="KO", report_date=DAY,
+                         streams={"ran": True, "offerings": _offering(21344)}, errors={})
+    assert (alone.cik, alone.cik_note) == (21344, None)
+    against = build_ledger(result=result, dataset=ds, ticker="KO", report_date=DAY,
+                           streams={"ran": True, "offerings": _offering(99)}, errors={},
+                           cik_sources={"the companyfacts payload": 21344})
+    assert against.cik is None
+    assert "the CIK the ticker resolved to says 99" in (against.cik_note or "")
+
+
+def test_one_source_suffices():
+    """Review of e37827a, finding L1: the sources are one resolution carried
+    by several payloads, so agreement is a consistency check, not
+    corroboration, and a run holding one of them records it."""
+    assert ledger_mod.ledger_cik({"only": "0000320193"}) == (320193, None)
+
+
+@pytest.mark.parametrize("value", [
+    "320193\n", "320193 ", " 320193", "\uff13\uff12\uff10\uff11\uff19\uff13",
+    "\u0663\u0662\u0660\u0661\u0669\u0663", "32019\u0663",
+])
+def test_only_exact_ascii_digits_are_a_cik(value):
+    """Review of e37827a, finding L2: `\\d` and `$` let a trailing newline
+    and fullwidth or Arabic-Indic digits through as the same CIK."""
+    assert ledger_mod._as_cik(value) is None
+    cik, note = ledger_mod.ledger_cik({"the companyfacts payload": 320193,
+                                       "the filing index": value})
+    assert cik is None and note is not None
+
+
+def test_a_huge_source_value_is_cut_in_the_note():
+    """Review of e37827a, finding N3: the note quotes each value, bounded."""
+    cik, note = ledger_mod.ledger_cik({"the companyfacts payload": 21344,
+                                       "the filing index": "9" * 100_000})
+    assert cik is None and note is not None
+    assert len(note) < 300 and "the companyfacts payload says 21344" in note
+    assert "…" in note
+    # Exactly the bound is quoted whole; one more character is cut to it.
+    whole = "x" * (ledger_mod._CIK_QUOTED - 2)          # its repr: 40 characters
+    assert ledger_mod._quoted(whole) == repr(whole)
+    cut = ledger_mod._quoted(whole + "y")
+    assert len(cut) == ledger_mod._CIK_QUOTED and cut.endswith("…")
 
 
 def test_a_ledger_built_without_sec_data_names_no_cik():
@@ -247,3 +300,18 @@ def test_an_older_ledger_without_the_field_still_loads():
     assert loaded.items == new.items
     # A written ledger round-trips whole, the CIK included.
     assert LedgerDocument.model_validate_json(new.model_dump_json()) == new
+
+
+@pytest.mark.parametrize("value", [True, -5, 0, 10**10, 10**12, "0000021344", "21344", 21344.0])
+def test_a_ledger_whose_cik_is_not_one_does_not_load(value):
+    """Review of e37827a, finding N1: the console links whatever `cik`
+    loads, so only a CIK loads — an int, 0 < cik < 10**10, never coerced."""
+    from pydantic import ValidationError
+
+    base = {"ticker": "KO", "generated_on": "2026-09-29", "config_version": "0.3.0"}
+    with pytest.raises(ValidationError):
+        LedgerDocument.model_validate_json(json.dumps({**base, "cik": value}))
+    with pytest.raises(ValidationError):
+        LedgerDocument(**base, cik=value)
+    assert LedgerDocument.model_validate_json(
+        json.dumps({**base, "cik": 9_999_999_999})).cik == 9_999_999_999

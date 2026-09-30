@@ -253,11 +253,15 @@ generation (`report_files.read_live`). Each row is a ledger item with its
 filings: accession, form, filed date, concept, period and value as filed,
 and its change state and note (e.g. "reads revised input(s)"). An accession
 links to its folder on EDGAR only when the ledger carries the company's CIK
-(its `cik`, recorded when the companyfacts payload, the filing index and the
-ticker's resolved CIK agree; a ledger written before the field, only an
-offering's document link); otherwise it is text, never a guessed link. When
-those sources disagree the ledger records no CIK, its `cik_note` says which
-said what, and the case page shows that note. Items resting on other items, and claims the
+(its `cik`, recorded from the run's resolved CIK; withheld when any payload
+— the companyfacts payload, the filing index — names a different one; in a
+ledger written before the field, only an offering's document link carries
+one); otherwise it is text, never a guessed link. Those payloads were all
+fetched by that one resolution, so their agreement is a consistency check,
+not independent corroboration. When the CIK is withheld, the ledger's
+`cik_note` says what each source gave and the case page shows it; offering
+rows keep their document links, built with the CIK their filing index was
+checked against. Items resting on other items, and claims the
 ledger could not source ("no document to check against"), are listed apart.
 A ledger beside the report that names another run is said, and no table is
 built from it.
