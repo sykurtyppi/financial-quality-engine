@@ -270,6 +270,38 @@ def test_sources_that_disagreed_link_nothing_even_beside_an_offering_link(client
     assert r.status_code == 200
     assert "sec.gov/Archives/edgar/data/21344/0000" not in r.text  # no accession linked
     assert "the companyfacts payload says 999" in r.text
+    # Said once (review of e37827a, finding N2: the page wrapped a note that
+    # already said "no CIK recorded" in "records no CIK").
+    (line,) = [ln for ln in r.text.splitlines() if "companyfacts payload says 999" in ln]
+    assert "no CIK recorded" not in line and "records no CIK" not in line
+    assert line.count("withholds the company&#39;s CIK") == 1
+
+
+def test_a_cik_note_is_escaped_never_markup(client):
+    from app.services.reporting.ledger import ledger_cik
+
+    _, day = _entry()
+    cik, note = ledger_cik({"the companyfacts payload": KO_CIK, "the filing index": XSS})
+    _publish("KO", day, _ko_ledger().model_copy(update=dict(cik=cik, cik_note=note)))
+    r = client.get(f"/review/KO?date={day}")
+    assert r.status_code == 200
+    assert XSS not in r.text and "&lt;script&gt;" in r.text
+
+
+@pytest.mark.parametrize("value", [True, -5, 0, 10**12, "0000021344", 21344.0])
+def test_a_ledger_whose_cik_is_not_one_is_unreadable_never_linked(client, value):
+    """Review of e37827a, finding N1: such a ledger loaded, and its `cik`
+    (1 for true, -5, a string) was linked. It is now refused on load, and
+    the case says its ledger cannot be read, as for any malformed ledger."""
+    _, day = _entry()
+    _publish("KO", day, _ko_ledger(cik_url=False))
+    ledger = current_generation(reporting.report_path("KO", day)) / f"KO_{day}.ledger.json"
+    raw = json.loads(ledger.read_text())
+    ledger.write_text(json.dumps({**raw, "cik": value}))
+    r = client.get(f"/review/KO?date={day}")
+    assert r.status_code == 200
+    assert "evidence ledger of this run cannot be read" in r.text
+    assert "sec.gov/Archives" not in r.text and '<tr id="EV-' not in r.text
 
 
 def test_a_ledger_cik_and_an_offering_link_naming_another_link_nothing(client):

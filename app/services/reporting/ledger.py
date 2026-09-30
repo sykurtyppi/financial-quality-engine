@@ -94,42 +94,54 @@ def _edgar_url(cik: int | None, accession: str, document: str = "") -> str | Non
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{document}"
 
 
-# SEC's CIK: at most ten digits. The filing index writes it as a string (at
-# times zero-padded), companyfacts as an int.
-_CIK_TEXT = re.compile(r"^\d{1,10}$")
+# SEC's CIK: at most ten ASCII digits. The filing index writes it as a
+# string (at times zero-padded), companyfacts as an int. Matched whole
+# (`fullmatch`) and over [0-9] only: `\d` takes fullwidth and Arabic-Indic
+# digits and `$` a trailing newline (review of e37827a, finding L2).
+_CIK_TEXT = re.compile(r"[0-9]{1,10}")
+_CIK_QUOTED = 40  # characters of a source's value quoted in the note
 
 
 def _as_cik(value: object) -> int | None:
     """`value` as a CIK, or None when it is not one (a bool, a float, a
-    string of anything but digits, zero). Never coerced into one."""
+    string of anything but ASCII digits, zero). Never coerced into one."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         n = value
-    elif isinstance(value, str) and _CIK_TEXT.match(value):
+    elif isinstance(value, str) and _CIK_TEXT.fullmatch(value):
         n = int(value)
     else:
         return None
     return n if 0 < n < 10**10 else None
 
 
-def ledger_cik(sources: dict[str, object]) -> tuple[int | None, str | None]:
-    """The company's CIK from every source the run holds (name -> the value
-    it gives; None = that source says nothing), or None and why.
+def _quoted(value: object) -> str:
+    r = repr(value)
+    return r if len(r) <= _CIK_QUOTED else r[: _CIK_QUOTED - 1] + "…"
 
-    The one CIK all sources agree on. None with no note when none says
-    anything (the API, tests). None WITH a note naming each source's value
-    when they disagree or one is not a CIK: a folder link under the wrong
-    CIK sends the reviewer to another company's filings, so no source is
-    preferred and nothing is linked on a guess."""
+
+def ledger_cik(sources: dict[str, object]) -> tuple[int | None, str | None]:
+    """The run's resolved CIK, as the payloads it read carry it (name -> the
+    value a source gives; None = that source says nothing), or None and why.
+
+    The sources are not independent: the companyfacts payload and the filing
+    index were fetched by the CIK the ticker resolved to, and the offering
+    list holds that CIK. Their agreement is a consistency check, not
+    corroboration, so one source suffices. The CIK is withheld when any
+    source names a different one or gives something that is not a CIK — a
+    folder link under the wrong CIK sends the reviewer to another company's
+    filings — and the note then says what each source gave (each value cut
+    to `_CIK_QUOTED` characters). None with no note when no source says
+    anything (the API, tests)."""
     given = {name: v for name, v in sources.items() if v is not None}
     ciks = {_as_cik(v) for v in given.values()}
     if len(ciks) == 1 and None not in ciks:
         return ciks.pop(), None
     if not given:
         return None, None
-    said = ", ".join(f"{name} says {v!r}" for name, v in given.items())
-    return None, f"no CIK recorded: its sources disagree or are not a CIK ({said})"
+    said = ", ".join(f"{name} says {_quoted(v)}" for name, v in given.items())
+    return None, f"its sources disagree or one is not a CIK ({said})"
 
 
 class _Builder:
@@ -341,9 +353,13 @@ def _mismatch_items(
 # --- evidence streams ---------------------------------------------------------
 
 
-def _offering_items(b: _Builder, timeline: Any, cik: int | None) -> None:
-    """`cik` is the ledger's, not the timeline's own: a document link must
-    not name a CIK the ledger declined to record (its sources disagreed)."""
+def _offering_items(b: _Builder, timeline: Any) -> None:
+    """Document links under the timeline's own CIK: the one its filing index
+    was asserted against (`fetch_offerings`), so a companyfacts payload
+    naming another CIK withholds the ledger's `cik`, not these links (review
+    of e37827a, finding L3). The console refuses every link when a link and
+    the ledger's `cik` name different CIKs."""
+    cik = getattr(timeline, "cik", None)
     for f in timeline.filings:
         detail = f.kind + (f", {f.security_type}" if f.kind == "takedown" else "")
         p = _filing(
@@ -577,7 +593,7 @@ def build_ledger(
     them; `errors` the per-stream failures, as the report renders them.
     `cik_sources` names the CIK each payload the run read gives (source ->
     value, `ledger_cik`); the CIK the offerings stream resolved the ticker
-    to is added here, being the one its document links were built with."""
+    to is added here: all are the run's one resolution of the ticker."""
     b = _Builder()
     streams = streams or {}
     errors = errors or {}
@@ -595,7 +611,7 @@ def build_ledger(
 
     ran = bool(streams.get("ran"))
     if (timeline := streams.get("offerings")) is not None and errors.get("offerings") is None:
-        _offering_items(b, timeline, cik)
+        _offering_items(b, timeline)
     if (scan := streams.get("restatements")) is not None:
         _footprint_items(b, scan.footprints)
         _derived_items(b, scan.derived)
