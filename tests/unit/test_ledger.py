@@ -454,3 +454,47 @@ def test_a_derived_quarter_that_moved_is_an_item_cited_by_the_filings_that_moved
     assert "2026-08-01" in a.claim and "2026-09-01" in a.claim
     # A derived move whose filing is not fully identified is listed, not dropped.
     assert [u.kind for u in doc.unsourced if u.kind == "derived_revision"] == ["derived_revision"]
+
+
+# --- what build_ledger passes through (survivors of the mutation run over it) ---------
+
+
+def test_an_offering_claim_names_the_security_type_of_a_takedown_only():
+    def filing(form, accession, kind):
+        return SimpleNamespace(form=form, filing_date=date(2026, 8, 1), accession=accession,
+                               primary_doc="p.htm", kind=kind, security_type="equity", excerpt="")
+
+    ds = stretch_dataset()
+    timeline = SimpleNamespace(cik=1, filings=[filing("424B5", "acc-1", "takedown"),
+                                               filing("S-3", "acc-2", "shelf")])
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="X", report_date=DAY,
+                       streams={"ran": True, "offerings": timeline}, errors={})
+    claims = sorted(i.claim for i in doc.items if i.kind == "offering")
+    assert claims == ["424B5 filed 2026-08-01 (takedown, equity)",
+                      "S-3 filed 2026-08-01 (shelf)"]
+
+
+def test_the_4_02_window_opens_on_the_report_day_two_years_back():
+    """The floor keeps the report's own day of the month (capped at 28, so a
+    29th/30th/31st has a date in every month): a 4.02 filed mid-month two
+    years back is inside a window that opened on the 1st."""
+    ds = stretch_dataset()
+    events = SimpleNamespace(non_reliance_8k_filings=[
+        (date(2024, 9, 15), "0000000001-24-000001", "8-K"),   # inside
+        (date(2024, 8, 31), "0000000001-24-000002", "8-K"),   # before the floor
+    ])
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="X", report_date=date(2026, 9, 1),
+                       streams={"ran": True, "events": events}, errors={})
+    assert [i.accessions() for i in doc.items if i.kind == "non_reliance_8k_402"] == [
+        ["0000000001-24-000001"]]
+
+
+def test_selections_name_each_field_with_a_concept_and_skip_one_without():
+    ds = stretch_dataset()
+    tags = {"revenue": SimpleNamespace(label="us-gaap:Revenues|2026-03-31:us-gaap:Sales"),
+            "capex": SimpleNamespace(label="", tag_used="us-gaap:PaymentsToAcquire"),
+            "cfo": SimpleNamespace(label="", tag_used="")}
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="X", report_date=DAY,
+                       field_tags=tags)
+    assert doc.selections == {"revenue": "us-gaap:Revenues|2026-03-31:us-gaap:Sales",
+                              "capex": "us-gaap:PaymentsToAcquire"}

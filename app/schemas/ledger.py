@@ -133,6 +133,16 @@ class LedgerDocument(BaseModel):
     # stamped at the same time; the report states it on the line above.
     engine_commit: str | None = None
     ticker: str
+    # The company's CIK, which a filing's folder on EDGAR is filed under
+    # (`/Archives/edgar/data/<cik>/<accession without dashes>/`), so a
+    # reviewer can open each accession (`reporting.ledger.ledger_cik`: the
+    # payload's, the filing index's and the resolved one, when they agree).
+    # None when the run held no source for it (the API, tests), or when its
+    # sources disagreed or one was not a CIK: then `cik_note` says which
+    # said what, and nothing is linked on a guess. A ledger written before
+    # the field existed loads with None and no note.
+    cik: int | None = None
+    cik_note: str | None = None
     generated_on: date
     fetched_at: str | None = None
     fresh: bool = False

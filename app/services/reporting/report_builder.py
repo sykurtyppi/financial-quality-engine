@@ -765,6 +765,13 @@ def build_report(
             ticker=ticker or dataset.profile.ticker, report_date=report_date,
             fetched_at=fetched_at, fresh=fresh, coverage=coverage, field_tags=field_tags,
             streams=stream_objects, errors=errors,
+            # The CIK each payload this run read names (a replay's
+            # fundamentals are its stored snapshot's): read from what the
+            # build holds, never fetched for the ledger.
+            cik_sources={
+                "the companyfacts payload": (company_facts or {}).get("cik"),
+                "the filing index": (submissions or {}).get("cik"),
+            },
         )
     return report, thermometer
 
