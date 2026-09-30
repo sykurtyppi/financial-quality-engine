@@ -41,6 +41,7 @@ import csv
 import errno
 import io
 import json
+import logging
 import os
 import re
 import stat
@@ -67,6 +68,8 @@ _ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 _CIK_URL_RE = re.compile(r"^https://www\.sec\.gov/Archives/edgar/data/(\d{1,10})/")
 # `<stamp>_<seq>_<id>`: a generation directory's name (`report_files._name_next`).
 _BUILT_RE = re.compile(r"^(\d{8}T\d{6}Z)_\d+_")
+
+log = logging.getLogger(__name__)
 
 
 class Refused(Exception):
@@ -207,6 +210,30 @@ def _check_note(note: str) -> str:
     return note
 
 
+def _write_ticks(path: Path, ticker: str, day: str, runs: Runs, generation_id: str, key: str,
+                 state: str, tick: Tick) -> None:
+    """Write the ticks; the caller holds the locks. A write that raised is
+    read back (still under the locks, so no other tick is read for this
+    one), as a stamp is (`store.reported_on_disk`): the write renames the
+    file into place, then fsyncs its folder, and a failed fsync raises with
+    the change made. A reset (only ever written for a row that had a tick)
+    landed when the row is gone."""
+    try:
+        store._durable_write(path, _dump(ticker, day, runs))
+    except OSError as e:
+        try:
+            now = _load(path, ticker, day).get(generation_id, {})
+        except Unreadable:
+            landed = False
+        else:
+            landed = key not in now if state == "unchecked" else now.get(key) == tick
+        if landed:
+            raise Refused(500, f"The tick is recorded, but its write raised after it was in "
+                          f"place ({e}): it could not be confirmed durable. Check the "
+                          "disk.") from None
+        raise Refused(500, f"The tick could not be recorded: {e}") from None
+
+
 def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
                 note: str) -> tuple[str, str]:
     """Record the reviewer's ``state`` and ``note`` for row ``key`` of the run
@@ -214,9 +241,24 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
 
     Refused (`Refused`, nothing written) unless every input is well formed,
     the run is the case's live one, its ledger is its own, and ``key`` is a
-    row of that ledger with a filing to check. The run is read before the
-    lock: a rebuild published meanwhile leaves the tick on the run the
-    reviewer saw, which is the one it is bound to."""
+    row of that ledger with a filing to check. A reset to "unchecked" of a
+    row with no tick is no change, and writes nothing.
+
+    The run is checked twice: first, before anything is written; then, with
+    the case's `report_files.publish_lock` held, and inside it the review
+    file's lock, across the re-check and the write (reviews of 2f26846,
+    finding 3, and efb8500, M1: the review file's lock alone is one no
+    publisher takes, so a rebuild could commit between the re-check and the
+    write and the tick land on a run no longer live, said as recorded). A
+    rebuild that committed since the page was loaded is refused (409); one
+    that comes to commit while the tick is written waits the moment it
+    takes, and publishes after it, so the tick is always on the run that was
+    live when it was written. The publish lock covers only a publish's
+    commit (`report_files.replacing` builds before taking it), so a tick
+    never waits for a build. Lock order: publish lock, then review lock.
+    Nothing that holds the review lock takes the publish lock, and a
+    publisher (`replacing`, `restore`, `set_aside`) takes only journal
+    locks of its own that are never the review file's."""
     t, d = case_names(ticker, day)
     if not _GID_RE.match(generation_id):
         raise Refused(400, f"{generation_id!r} is not a generation id")
@@ -239,14 +281,16 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
                       f"{generation_id}")
     path = reviews_dir() / f"{t}_{d}.review.json"
     tick = Tick(state, note, store.now_iso())
+    report = reporting.report_path(t, d)
     try:
+        if state == "unchecked" and key not in _load(path, t, d).get(generation_id, {}):
+            return t, d  # nothing to reset: no write, no review file for a no-op
         report_files.own_dir(path.parent).mkdir(parents=True, exist_ok=True)
-        # The entries' own lock (an O_NOFOLLOW sidecar) and durable write.
-        with store._entry_lock(path):
-            # Read again under the lock (review of 2f26846, finding 3): a
-            # rebuild published since the check above would otherwise take
-            # this tick for a run no longer live, said as recorded.
-            now_live = report_files.read_live(reporting.report_path(t, d))
+        # The case's publish lock, then the entries' own lock (an O_NOFOLLOW
+        # sidecar) on the review file, held across the re-check and the
+        # write: see the docstring.
+        with report_files.publish_lock(report), store._entry_lock(path):
+            now_live = report_files.read_live(report)
             if now_live is None or now_live.generation_id != generation_id:
                 raise Refused(409, f"This tick is for run {generation_id}, but the live run of "
                               f"{t} {d} is now "
@@ -256,33 +300,22 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
             runs = _load(path, t, d)
             rows = runs.setdefault(generation_id, {})
             if state == "unchecked":
-                # A reset is no tick (finding 4): kept, it read as review
-                # work on this run once the run was rebuilt.
-                rows.pop(key, None)
+                # A reset is no tick (review of 2f26846, finding 4): kept, it
+                # read as review work on this run once the run was rebuilt.
+                if key not in rows:
+                    return t, d  # reset meanwhile: nothing left to write
+                rows.pop(key)
                 if not rows:
                     del runs[generation_id]
             else:
                 rows[key] = tick
-            store._durable_write(path, _dump(t, d, runs))
+            _write_ticks(path, t, d, runs, generation_id, key, state, tick)
     except Unreadable as e:
         raise Refused(409, f"{e}. Not writing over it.") from None
     except (OSError, ValueError) as e:
         if isinstance(e, OSError) and e.errno == errno.ELOOP:
             raise Refused(409, f"Not recorded: {e.strerror or e} (a symlink is never "
                           "followed; check it, then remove it by hand)") from None
-        # Read back, as a stamp is (`store.reported_on_disk`): the write
-        # renames the file into place, then fsyncs its folder, and a failed
-        # fsync raises with the tick recorded.
-        try:
-            now = _load(path, t, d).get(generation_id, {})
-        except Unreadable:
-            landed = False
-        else:
-            landed = key not in now if state == "unchecked" else now.get(key) == tick
-        if landed:
-            raise Refused(500, f"The tick is recorded, but its write raised after it was in "
-                          f"place ({e}): it could not be confirmed durable. Check the "
-                          "disk.") from None
         raise Refused(500, f"The tick could not be recorded: {e}") from None
     return t, d
 
@@ -629,6 +662,9 @@ def _isolated_row(ticker: str, day: str | None, watch: wl.Watch | None) -> Board
     try:
         return _board_row(ticker, day, watch)
     except Exception as e:  # noqa: BLE001 - said on its row, never a board 500
+        # Logged with its traceback: an error nobody foresaw is a bug, and
+        # the row's one line is no place to find it (review of efb8500, L3).
+        log.exception("review board: case %s %s cannot be read", ticker, day)
         return BoardRow(ticker, day, watch, report="unreadable",
                         problem=f"This case cannot be read: {type(e).__name__}: {e}")
 
@@ -642,9 +678,13 @@ def board() -> tuple[list[BoardRow], list[str]]:
     seen: set[tuple[str, str | None]] = set()
     try:
         watches = wl.load()
-    except (wl.WatchlistError, OSError, ValueError) as e:  # ValueError: not UTF-8
+    except Exception as e:  # noqa: BLE001 - said on the board, never a board 500
+        # Any shape a hand edit can leave (review of efb8500, L2): the
+        # loader refuses what it knows as a WatchlistError; anything else
+        # is said here too, and logged.
+        log.exception("review board: the watchlist cannot be read")
         watches = []
-        problems.append(f"The watchlist cannot be read: {e}")
+        problems.append(f"The watchlist cannot be read: {type(e).__name__}: {e}")
     for w in watches:
         seen.add((w.ticker, w.thesis_entry))
         rows.append(_isolated_row(w.ticker, w.thesis_entry, w))

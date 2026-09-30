@@ -43,9 +43,28 @@ ALLOWED_HOSTS_ENV = "FQE_WEB_ALLOWED_HOSTS"
 DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
+class BadAllowedHosts(ValueError):
+    """An entry of ``FQE_WEB_ALLOWED_HOSTS`` that names no host."""
+
+
 def _allowed_hosts() -> set[str]:
-    named = {h.strip().strip("[]").lower() for h in os.environ.get(ALLOWED_HOSTS_ENV, "").split(",")}
-    return (named - {""}) or set(DEFAULT_ALLOWED_HOSTS)
+    """The served names: ``FQE_WEB_ALLOWED_HOSTS`` (comma-separated, read
+    through the same parser as a Host header, so a port on an entry is
+    ignored; review of efb8500, L4), else the loopback names. An entry that
+    names no host raises `BadAllowedHosts`: said on every request, never a
+    list that silently matches nothing."""
+    named = set()
+    for entry in os.environ.get(ALLOWED_HOSTS_ENV, "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry.count(":") > 1 and not entry.startswith("["):
+            entry = f"[{entry}]"  # a bare IPv6 address
+        host = _host_name(entry)
+        if not host:
+            raise BadAllowedHosts(f"{ALLOWED_HOSTS_ENV} entry {entry!r} is not a host name")
+        named.add(host)
+    return named or set(DEFAULT_ALLOWED_HOSTS)
 
 
 def _host_name(header: str) -> str | None:
@@ -61,13 +80,51 @@ def _host_name(header: str) -> str | None:
     return parts.hostname
 
 
+def _foreign(request: Request) -> str | None:
+    """Who sent ``request``, when it is not a page of this UI: a page on
+    another site can post a form to a UI on loopback, or load one of its
+    pages as an image. A browser says so on every request it makes for a
+    page (``Sec-Fetch-Site``) and on every form POST (``Origin``). A
+    request with neither is not from a browser page (curl, a script the
+    operator runs), which no other site can make on their behalf, and is
+    accepted. The Host itself is one of the served names (`_guard`)."""
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in ("same-origin", "none"):
+        return f"a page on another site (Sec-Fetch-Site: {site})"
+    origin = request.headers.get("origin")
+    own = f"{request.url.scheme}://{request.headers.get('host', '')}"
+    if origin is not None and origin.lower() != own.lower():
+        return f"another site ({origin})"
+    return None
+
+
+# A GET with a side effect: the first view of a v1 case builds, publishes and
+# stamps its report, so it is refused to another site's page like a POST.
+_ACTING_GETS = re.compile(r"^/report/[^/]+$")
+
+
 @app.middleware("http")
-async def _loopback_only(request: Request, call_next):
-    if _host_name(request.headers.get("host", "")) not in _allowed_hosts():
+async def _guard(request: Request, call_next):
+    """Every request: a served Host (DNS rebinding); and every request that
+    changes something (a POST, or a report's first view) from this UI's own
+    pages only (reviews of 2f26846, finding 1, and efb8500, N2: the review
+    console's POST was guarded, `/impact` and `/report` were not)."""
+    try:
+        allowed = _allowed_hosts()
+    except BadAllowedHosts as e:
+        return PlainTextResponse(f"Misconfigured: {e}. Names take no path; a port is ignored.",
+                                 status_code=500)
+    if _host_name(request.headers.get("host", "")) not in allowed:
         return PlainTextResponse(
-            f"Invalid host header: this UI answers only to {', '.join(sorted(_allowed_hosts()))} "
+            f"Invalid host header: this UI answers only to {', '.join(sorted(allowed))} "
             f"(set {ALLOWED_HOSTS_ENV} to serve another name)", status_code=400)
+    acts = request.method not in ("GET", "HEAD", "OPTIONS") or bool(
+        _ACTING_GETS.match(request.url.path))
+    if acts and (foreign := _foreign(request)) is not None:
+        return PlainTextResponse(f"Refused: a request from {foreign}. Use this UI's own pages.",
+                                 status_code=403)
     return await call_next(request)
+
 
 OPENV2_HINT = 'scripts/journal.py openv2 <TICKER> --thesis "..." --conviction 3'
 
@@ -426,24 +483,6 @@ def review_case(request: Request, ticker: str, date: str | None = None):
     })
 
 
-def _foreign_post(request: Request) -> str | None:
-    """Who posted, when it is not this console's own page: a page on another
-    site can post the form to a console on loopback, and a forged
-    "reconciled" is the one tick that must never land. A browser says so on
-    every form POST (``Sec-Fetch-Site``, ``Origin``). A POST with neither is
-    not from a browser page (curl, a script the operator runs), which no
-    other site can make on their behalf, and is accepted. The Host itself is
-    one of the served names (`_loopback_only`)."""
-    site = request.headers.get("sec-fetch-site")
-    if site is not None and site not in ("same-origin", "none"):
-        return f"a page on another site (Sec-Fetch-Site: {site})"
-    origin = request.headers.get("origin")
-    own = f"{request.url.scheme}://{request.headers.get('host', '')}"
-    if origin is not None and origin.lower() != own.lower():
-        return f"another site ({origin})"
-    return None
-
-
 @app.post("/review/{ticker}/reconcile")
 def review_reconcile(
     request: Request,
@@ -454,10 +493,7 @@ def review_reconcile(
     state: str = Form(""),
     note: str = Form(""),
 ):
-    foreign = _foreign_post(request)
-    if foreign is not None:
-        return _refused(request, review.Refused(
-            403, f"A tick posted from {foreign} is not recorded."), "Tick not recorded")
+    # A tick from another site's page never reaches here (`_guard`).
     try:
         t, d = review.record_tick(ticker, date, generation, key, state, note)
     except review.Refused as e:

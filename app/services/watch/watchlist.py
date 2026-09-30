@@ -106,7 +106,7 @@ def parse_watch(raw: dict) -> Watch:
         raise WatchlistError(f"invalid ticker in watchlist: {e}") from e
 
     forms_raw = raw.get("forms", DEFAULT_FORMS)
-    if isinstance(forms_raw, str) or not all(isinstance(f, str) for f in forms_raw):
+    if not isinstance(forms_raw, (list, tuple)) or not all(isinstance(f, str) for f in forms_raw):
         raise WatchlistError(f"{ticker}: forms must be a list of strings, got {forms_raw!r}")
     forms = tuple(f.strip().upper() for f in forms_raw if f.strip())
     if not forms:
@@ -162,6 +162,8 @@ def load(path: Path | None = None) -> list[Watch]:
         data = json.loads(p.read_text())
     except json.JSONDecodeError as e:
         raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+    except RecursionError as e:
+        raise WatchlistError(f"{p}: nested too deeply to be a watchlist") from e
 
     items = data.get("watchlist") if isinstance(data, dict) else data
     if not isinstance(items, list):
