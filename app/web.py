@@ -12,13 +12,19 @@ only to reduce the friction of running the journal so it actually gets run.
 from __future__ import annotations
 
 import html as _html
+import os
 import re
 from pathlib import Path
 from urllib.parse import quote_plus, urlsplit
 
 import markdown as md
 from fastapi import FastAPI, Form, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.templating import Jinja2Templates
 
 from app.services.journal import reporting, review, store
@@ -28,6 +34,40 @@ BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 app = FastAPI(title="Decision-Impact Journal", docs_url=None, redoc_url=None)
+
+# The names this UI answers to. It is a loopback tool; a page on any other
+# name that resolves here is a DNS-rebinding page, same-origin with itself,
+# which could read a case and post a forged tick (review of 2f26846,
+# finding 1). A deployment reached by another name lists it here.
+ALLOWED_HOSTS_ENV = "FQE_WEB_ALLOWED_HOSTS"
+DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def _allowed_hosts() -> set[str]:
+    named = {h.strip().strip("[]").lower() for h in os.environ.get(ALLOWED_HOSTS_ENV, "").split(",")}
+    return (named - {""}) or set(DEFAULT_ALLOWED_HOSTS)
+
+
+def _host_name(header: str) -> str | None:
+    """The host a ``Host`` header names, or None when it is not a bare
+    ``host[:port]`` (no user, path, or malformed IPv6 literal or port)."""
+    try:
+        parts = urlsplit("//" + header)
+        _ = parts.port  # a port that is not a number in 0-65535 raises ValueError
+    except ValueError:
+        return None
+    if parts.username is not None or parts.path or parts.query or parts.fragment:
+        return None
+    return parts.hostname
+
+
+@app.middleware("http")
+async def _loopback_only(request: Request, call_next):
+    if _host_name(request.headers.get("host", "")) not in _allowed_hosts():
+        return PlainTextResponse(
+            f"Invalid host header: this UI answers only to {', '.join(sorted(_allowed_hosts()))} "
+            f"(set {ALLOWED_HOSTS_ENV} to serve another name)", status_code=400)
+    return await call_next(request)
 
 OPENV2_HINT = 'scripts/journal.py openv2 <TICKER> --thesis "..." --conviction 3'
 
@@ -386,6 +426,24 @@ def review_case(request: Request, ticker: str, date: str | None = None):
     })
 
 
+def _foreign_post(request: Request) -> str | None:
+    """Who posted, when it is not this console's own page: a page on another
+    site can post the form to a console on loopback, and a forged
+    "reconciled" is the one tick that must never land. A browser says so on
+    every form POST (``Sec-Fetch-Site``, ``Origin``). A POST with neither is
+    not from a browser page (curl, a script the operator runs), which no
+    other site can make on their behalf, and is accepted. The Host itself is
+    one of the served names (`_loopback_only`)."""
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in ("same-origin", "none"):
+        return f"a page on another site (Sec-Fetch-Site: {site})"
+    origin = request.headers.get("origin")
+    own = f"{request.url.scheme}://{request.headers.get('host', '')}"
+    if origin is not None and origin.lower() != own.lower():
+        return f"another site ({origin})"
+    return None
+
+
 @app.post("/review/{ticker}/reconcile")
 def review_reconcile(
     request: Request,
@@ -396,14 +454,10 @@ def review_reconcile(
     state: str = Form(""),
     note: str = Form(""),
 ):
-    origin = request.headers.get("origin")
-    if origin is not None and urlsplit(origin).netloc != request.headers.get("host"):
-        # A page on another site can post this form to a console on
-        # loopback: a forged "reconciled" is the one tick that must never
-        # land. A browser names the page's origin on every cross-site POST.
+    foreign = _foreign_post(request)
+    if foreign is not None:
         return _refused(request, review.Refused(
-            403, f"A tick posted from another site ({origin}) is not recorded."),
-            "Tick not recorded")
+            403, f"A tick posted from {foreign} is not recorded."), "Tick not recorded")
     try:
         t, d = review.record_tick(ticker, date, generation, key, state, note)
     except review.Refused as e:

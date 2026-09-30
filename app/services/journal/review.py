@@ -243,22 +243,42 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
         report_files.own_dir(path.parent).mkdir(parents=True, exist_ok=True)
         # The entries' own lock (an O_NOFOLLOW sidecar) and durable write.
         with store._entry_lock(path):
+            # Read again under the lock (review of 2f26846, finding 3): a
+            # rebuild published since the check above would otherwise take
+            # this tick for a run no longer live, said as recorded.
+            now_live = report_files.read_live(reporting.report_path(t, d))
+            if now_live is None or now_live.generation_id != generation_id:
+                raise Refused(409, f"This tick is for run {generation_id}, but the live run of "
+                              f"{t} {d} is now "
+                              f"{now_live.generation_id if now_live else 'none'}: the report was "
+                              "rebuilt while the tick was recorded. Reload the page and check "
+                              "the live run.")
             runs = _load(path, t, d)
-            runs.setdefault(generation_id, {})[key] = tick
+            rows = runs.setdefault(generation_id, {})
+            if state == "unchecked":
+                # A reset is no tick (finding 4): kept, it read as review
+                # work on this run once the run was rebuilt.
+                rows.pop(key, None)
+                if not rows:
+                    del runs[generation_id]
+            else:
+                rows[key] = tick
             store._durable_write(path, _dump(t, d, runs))
     except Unreadable as e:
         raise Refused(409, f"{e}. Not writing over it.") from None
-    except OSError as e:
-        if e.errno == errno.ELOOP:
+    except (OSError, ValueError) as e:
+        if isinstance(e, OSError) and e.errno == errno.ELOOP:
             raise Refused(409, f"Not recorded: {e.strerror or e} (a symlink is never "
                           "followed; check it, then remove it by hand)") from None
         # Read back, as a stamp is (`store.reported_on_disk`): the write
         # renames the file into place, then fsyncs its folder, and a failed
         # fsync raises with the tick recorded.
         try:
-            landed = _load(path, t, d).get(generation_id, {}).get(key) == tick
+            now = _load(path, t, d).get(generation_id, {})
         except Unreadable:
             landed = False
+        else:
+            landed = key not in now if state == "unchecked" else now.get(key) == tick
         if landed:
             raise Refused(500, f"The tick is recorded, but its write raised after it was in "
                           f"place ({e}): it could not be confirmed durable. Check the "
@@ -301,8 +321,11 @@ def read_run(ticker: str, day: str) -> Run:
     names one by one: they can move between two reads."""
     try:
         live = report_files.read_live(reporting.report_path(ticker, day))
-    except OSError as e:
-        raise Refused(500, f"The live run of {ticker} {day} cannot be read: {e}") from None
+    except (OSError, ValueError) as e:
+        # ValueError: a report or audit that is not UTF-8 (review of 2f26846,
+        # finding 2), said here rather than raised through the page.
+        raise Refused(500, f"The live run of {ticker} {day} cannot be read: "
+                      f"{type(e).__name__}: {e}") from None
     if live is None:
         raise Refused(404, f"{ticker} {day} has no live report: nothing to review yet.")
     problems: list[str] = []
@@ -334,7 +357,7 @@ def read_run(ticker: str, day: str) -> Run:
         try:
             audit_text = live.audit.read_text()
             audit = "matches"
-        except OSError as e:
+        except (OSError, ValueError) as e:
             problems.append(f"The audit of this run cannot be read: {e}")
     else:
         audits = [g for n, g in stale.items() if n.endswith("_audit.md")]
@@ -462,7 +485,9 @@ def case(ticker: str, day: str | None) -> Case:
         runs, c.ticks_error = {}, f"{e}. No tick is shown, and none is recorded until it is fixed."
     gid = run.live.generation_id
     mine = runs.get(gid, {}) if gid is not None else {}
-    c.earlier = [(g, len(rows)) for g, rows in runs.items() if g != gid and rows]
+    # Resets are not ticks; a file from before they were dropped may hold some.
+    counted = {g: sum(1 for x in rows.values() if x.state != "unchecked") for g, rows in runs.items()}
+    c.earlier = [(g, n) for g, n in counted.items() if g != gid and n]
     if run.ledger is None:
         return c
     c.cik, c.cik_note = _cik(run.ledger)
@@ -597,6 +622,17 @@ def _board_row(ticker: str, day: str | None, watch: wl.Watch | None) -> BoardRow
     return row
 
 
+def _isolated_row(ticker: str, day: str | None, watch: wl.Watch | None) -> BoardRow:
+    """`_board_row`, where anything one case raises is that row's problem:
+    one unreadable case never takes the board down (review of 2f26846,
+    finding 2)."""
+    try:
+        return _board_row(ticker, day, watch)
+    except Exception as e:  # noqa: BLE001 - said on its row, never a board 500
+        return BoardRow(ticker, day, watch, report="unreadable",
+                        problem=f"This case cannot be read: {type(e).__name__}: {e}")
+
+
 def board() -> tuple[list[BoardRow], list[str]]:
     """The night's cases: every watchlist name (its pinned entry's case, if
     any), then every journal entry with a live report or a pending one.
@@ -606,18 +642,18 @@ def board() -> tuple[list[BoardRow], list[str]]:
     seen: set[tuple[str, str | None]] = set()
     try:
         watches = wl.load()
-    except (wl.WatchlistError, OSError) as e:
+    except (wl.WatchlistError, OSError, ValueError) as e:  # ValueError: not UTF-8
         watches = []
         problems.append(f"The watchlist cannot be read: {e}")
     for w in watches:
         seen.add((w.ticker, w.thesis_entry))
-        rows.append(_board_row(w.ticker, w.thesis_entry, w))
+        rows.append(_isolated_row(w.ticker, w.thesis_entry, w))
     journal: list[BoardRow] = []
     for p in store.list_entries():
         ticker, _, day = p.stem.partition("_")
         if (ticker, day) in seen:
             continue
-        row = _board_row(ticker, day, None)
+        row = _isolated_row(ticker, day, None)
         if row.report != "none" or row.pending is not None:
             journal.append(row)
     journal.sort(key=lambda r: (r.day or "", r.ticker), reverse=True)

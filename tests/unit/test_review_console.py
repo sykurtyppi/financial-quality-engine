@@ -78,7 +78,9 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client(home):
-    return TestClient(app, follow_redirects=False)
+    # A loopback host, as a browser on the operator's machine sends it
+    # (TestClient's default, "testserver", is refused like any other name).
+    return TestClient(app, base_url="http://127.0.0.1", follow_redirects=False)
 
 
 @functools.cache
@@ -312,7 +314,7 @@ def test_a_tick_round_trips(client):
     assert _tick(client, "KO", day, gid, other, "disputed", "value differs").status_code == 303
     assert _tick(client, "KO", day, gid, key, "unchecked").status_code == 303
     runs = json.loads(_review_file("KO", day).read_text())["runs"][gid]
-    assert runs[key]["state"] == "unchecked" and runs[other]["state"] == "disputed"
+    assert key not in runs and runs[other]["state"] == "disputed"   # a reset is no tick
     assert f"0 of {len(_sourced(doc))} rows reconciled" in client.get(f"/review/KO?date={day}").text
 
 
@@ -397,7 +399,7 @@ def test_a_tick_posted_from_another_site_is_refused(client):
         r = client.post("/review/KO/reconcile", data=data, headers={"Origin": origin})
         assert r.status_code == 403 and "another site" in r.text
     assert not _review_file("KO", day).exists()
-    same = client.post("/review/KO/reconcile", data=data, headers={"Origin": "http://testserver"})
+    same = client.post("/review/KO/reconcile", data=data, headers={"Origin": "http://127.0.0.1"})
     assert same.status_code == 303 and _review_file("KO", day).exists()
 
 
@@ -733,3 +735,192 @@ def test_a_tick_whose_write_fails_is_said_as_not_recorded(client, monkeypatch):
     assert r.status_code == 500 and "could not be recorded" in r.text
     assert "No space left on device" in r.text
     assert json.loads(_review_file("KO", day).read_text())["runs"][gid][key]["note"] == "first"
+
+
+
+# --- review of 2f26846 -----------------------------------------------------------------
+
+
+def _rebinding_setup():
+    _, day = _entry()
+    doc = _ko_ledger()
+    gid = _publish("KO", day, doc)
+    return day, {"date": day, "generation": gid, "key": _sourced(doc)[0].id,
+                 "state": "reconciled", "note": ""}
+
+
+def test_a_rebound_host_is_refused_on_every_route(client, monkeypatch):
+    """Finding 1: DNS rebinding. A page on rebind.evil.example, re-resolved
+    to 127.0.0.1, is same-origin with itself: its Host and Origin agree, so
+    comparing the two let its forged tick land (after it read the run and
+    the row ids with a GET). Only a loopback name is served."""
+    monkeypatch.delenv("FQE_WEB_ALLOWED_HOSTS", raising=False)
+    day, data = _rebinding_setup()
+    evil = {"host": "rebind.evil.example:8000"}
+    for url in ("/", "/review", f"/review/KO?date={day}", f"/review/KO/export?date={day}"):
+        assert client.get(url, headers=evil).status_code == 400, url
+    r = client.post("/review/KO/reconcile", data=data,
+                    headers={**evil, "origin": "http://rebind.evil.example:8000"})
+    assert r.status_code == 400 and not _review_file("KO", day).exists()
+    for host in ("127.0.0.1:8000", "localhost:8000", "[::1]:8000", "127.0.0.1", "LOCALHOST"):
+        assert client.get("/review", headers={"host": host}).status_code == 200, host
+    for host in ("", "[::1", "127.0.0.1.evil.example", "evil.example#@127.0.0.1",
+                 "127.0.0.1:99999", "127.0.0.1:x", "user@127.0.0.1", "127.0.0.1/x"):
+        assert client.get("/review", headers={"host": host}).status_code == 400, host
+
+
+def test_the_served_names_can_be_set_for_a_deployment(client, monkeypatch):
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", " journal.lan , Review.Box ")
+    assert client.get("/review", headers={"host": "journal.lan:8000"}).status_code == 200
+    assert client.get("/review", headers={"host": "review.box"}).status_code == 200
+    assert client.get("/review", headers={"host": "127.0.0.1:8000"}).status_code == 400
+
+
+@pytest.mark.parametrize("site,status", [
+    ("cross-site", 403), ("same-site", 403), ("same-origin", 303), ("none", 303)])
+def test_a_tick_from_a_page_that_is_not_the_consoles_is_refused(client, site, status):
+    day, data = _rebinding_setup()
+    r = client.post("/review/KO/reconcile", data=data, headers={"sec-fetch-site": site})
+    assert r.status_code == status
+    assert _review_file("KO", day).exists() == (status == 303)
+
+
+def test_origin_must_be_the_consoles_own_and_a_missing_one_is_a_non_browser(client):
+    """A browser sends Origin on every form POST; a POST without one comes
+    from a script (curl), which is no forgery vector, and is accepted."""
+    day, data = _rebinding_setup()
+    for origin in ("http://127.0.0.1:9000", "https://127.0.0.1", "http://localhost"):
+        r = client.post("/review/KO/reconcile", data=data, headers={"origin": origin})
+        assert r.status_code == 403, origin
+    assert not _review_file("KO", day).exists()
+    assert client.post("/review/KO/reconcile", data=data).status_code == 303
+
+
+def _latin1_audit(day, gid):
+    gen = current_generation(reporting.report_path("KO", day))
+    (gen / f"KO_{day}_audit.md").write_bytes(
+        f"<!-- generation: {gid} -->\n# audit \xe9\n".encode("latin-1"))
+
+
+def test_one_case_that_cannot_be_decoded_does_not_take_the_board_down(client):
+    """Finding 2: a non-UTF-8 audit raised UnicodeDecodeError (a ValueError,
+    not an OSError) out of read_live and 500ed the whole board."""
+    _, day = _entry("KO")
+    gid = _publish("KO", day, _ko_ledger())
+    _entry("PEP")
+    _publish("PEP", day, _ko_ledger())
+    _latin1_audit(day, gid)
+    r = client.get("/review")
+    assert r.status_code == 200
+    row = _board_row(r.text, "KO")
+    assert "report unreadable" in row and "cannot be read" in row
+    assert "report live" in _board_row(r.text, "PEP")
+    page = client.get(f"/review/KO?date={day}")
+    assert page.status_code == 500 and "cannot be read" in page.text and "Case not shown" in page.text
+    assert client.get(f"/review/PEP?date={day}").status_code == 200
+    tick = _tick(client, "KO", day, gid, _sourced(_ko_ledger())[0].id)
+    assert tick.status_code == 500 and not _review_file("KO", day).exists()
+
+
+def test_a_report_that_cannot_be_decoded_is_a_clean_error(client):
+    _, day = _entry("KO")
+    report = reporting.report_path("KO", day)
+    report.write_bytes(b"# KO \xff report\n")
+    report.with_name(f"KO_{day}.ledger.json").write_text(_ko_ledger().model_dump_json())
+    assert client.get("/review").status_code == 200
+    r = client.get(f"/review/KO?date={day}")
+    assert r.status_code == 500 and "cannot be read" in r.text
+
+
+def test_a_watchlist_that_cannot_be_decoded_is_said_on_the_board(client):
+    _, day = _entry("KO")
+    _publish("KO", day, _ko_ledger())
+    wl.WATCHLIST.write_bytes(b'{"watchlist": [], "x": "\xff"}')
+    r = client.get("/review")
+    assert r.status_code == 200 and "The watchlist cannot be read" in r.text
+    assert "report live" in _board_row(r.text, "KO")
+
+
+def test_any_failure_of_one_case_is_that_rows_problem(client, monkeypatch):
+    from app.services.journal import review
+
+    _, day = _entry("KO")
+    _publish("KO", day, _ko_ledger())
+    _entry("PEP")
+    _publish("PEP", day, _ko_ledger())
+    real = review.case
+
+    def case(ticker, d):
+        if ticker == "KO":
+            raise RuntimeError("something nobody foresaw")
+        return real(ticker, d)
+
+    monkeypatch.setattr(review, "case", case)
+    r = client.get("/review")
+    assert r.status_code == 200
+    row = _board_row(r.text, "KO")
+    assert "RuntimeError: something nobody foresaw" in row and "report unreadable" in row
+    assert "report live" in _board_row(r.text, "PEP")
+
+
+def test_a_rebuild_between_the_check_and_the_write_is_refused(client, monkeypatch):
+    """Finding 3: the run was checked before the lock; a rebuild landing
+    in between stored the tick under the run no longer live, answered 303."""
+    import contextlib
+
+    from app.services.journal import review
+
+    _, day = _entry()
+    doc = _ko_ledger()
+    first = _publish("KO", day, doc)
+    key = _sourced(doc)[0].id
+    real, made = store._entry_lock, []
+
+    @contextlib.contextmanager
+    def racing(path):
+        with real(path):
+            made.append(_publish("KO", day, doc))
+            yield
+
+    monkeypatch.setattr(store, "_entry_lock", racing)
+    r = _tick(client, "KO", day, first, key)
+    assert r.status_code == 409 and first in r.text and made[0] in r.text
+    runs = review._load(_review_file("KO", day), "KO", day)
+    assert first not in runs
+
+
+def test_a_reset_to_unchecked_leaves_no_tick(client):
+    """Finding 4: a reset was stored as a tick, and after a rebuild read as
+    "1 tick recorded for an earlier run" of a run nobody reconciled."""
+    _, day = _entry()
+    doc = _ko_ledger()
+    first = _publish("KO", day, doc)
+    key = _sourced(doc)[0].id
+    other = _sourced(doc)[1].id
+    assert _tick(client, "KO", day, first, key, "reconciled").status_code == 303
+    assert _tick(client, "KO", day, first, other, "disputed").status_code == 303
+    assert _tick(client, "KO", day, first, key, "unchecked", "looked again").status_code == 303
+    runs = json.loads(_review_file("KO", day).read_text())["runs"]
+    assert list(runs[first]) == [other]
+    assert _tick(client, "KO", day, first, other, "unchecked").status_code == 303
+    assert json.loads(_review_file("KO", day).read_text())["runs"] == {}
+    _publish("KO", day, doc)
+    assert "earlier run" not in client.get(f"/review/KO?date={day}").text
+    assert "earlier run" not in client.get(f"/review/KO/export?date={day}&format=md").text
+    assert "earlier runs" not in _board_row(client.get("/review").text, "KO")
+
+
+def test_an_unchecked_tick_left_by_an_earlier_version_is_not_counted(client):
+    _, day = _entry()
+    doc = _ko_ledger()
+    _publish("KO", day, doc)
+    path = _review_file("KO", day)
+    path.parent.mkdir()
+    keys = [i.id for i in _sourced(doc)[:2]]
+    path.write_text(json.dumps({"format": "fqe-review/1", "ticker": "KO", "day": day, "runs": {
+        "e" * 32: {keys[0]: {"state": "unchecked", "note": "", "at": "2026-09-30T00:00:00Z"},
+                   keys[1]: {"state": "reconciled", "note": "", "at": "2026-09-30T00:00:00Z"}},
+        "f" * 32: {keys[0]: {"state": "unchecked", "note": "", "at": "2026-09-30T00:00:00Z"}}}}))
+    page = client.get(f"/review/KO?date={day}").text
+    assert f"1 tick recorded for an earlier run {'e' * 32}" in page
+    assert "f" * 32 not in page
