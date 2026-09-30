@@ -297,6 +297,7 @@ def test_a_ledger_whose_cik_is_not_one_is_unreadable_never_linked(client, value)
     _publish("KO", day, _ko_ledger(cik_url=False))
     ledger = current_generation(reporting.report_path("KO", day)) / f"KO_{day}.ledger.json"
     raw = json.loads(ledger.read_text())
+    ledger.unlink()                  # a hand edit: the published copy is read-only
     ledger.write_text(json.dumps({**raw, "cik": value}))
     r = client.get(f"/review/KO?date={day}")
     assert r.status_code == 200
