@@ -94,6 +94,44 @@ def _edgar_url(cik: int | None, accession: str, document: str = "") -> str | Non
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{document}"
 
 
+# SEC's CIK: at most ten digits. The filing index writes it as a string (at
+# times zero-padded), companyfacts as an int.
+_CIK_TEXT = re.compile(r"^\d{1,10}$")
+
+
+def _as_cik(value: object) -> int | None:
+    """`value` as a CIK, or None when it is not one (a bool, a float, a
+    string of anything but digits, zero). Never coerced into one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        n = value
+    elif isinstance(value, str) and _CIK_TEXT.match(value):
+        n = int(value)
+    else:
+        return None
+    return n if 0 < n < 10**10 else None
+
+
+def ledger_cik(sources: dict[str, object]) -> tuple[int | None, str | None]:
+    """The company's CIK from every source the run holds (name -> the value
+    it gives; None = that source says nothing), or None and why.
+
+    The one CIK all sources agree on. None with no note when none says
+    anything (the API, tests). None WITH a note naming each source's value
+    when they disagree or one is not a CIK: a folder link under the wrong
+    CIK sends the reviewer to another company's filings, so no source is
+    preferred and nothing is linked on a guess."""
+    given = {name: v for name, v in sources.items() if v is not None}
+    ciks = {_as_cik(v) for v in given.values()}
+    if len(ciks) == 1 and None not in ciks:
+        return ciks.pop(), None
+    if not given:
+        return None, None
+    said = ", ".join(f"{name} says {v!r}" for name, v in given.items())
+    return None, f"no CIK recorded: its sources disagree or are not a CIK ({said})"
+
+
 class _Builder:
     def __init__(self) -> None:
         self.items: list[EvidenceItem] = []
@@ -303,8 +341,9 @@ def _mismatch_items(
 # --- evidence streams ---------------------------------------------------------
 
 
-def _offering_items(b: _Builder, timeline: Any) -> None:
-    cik = getattr(timeline, "cik", None)
+def _offering_items(b: _Builder, timeline: Any, cik: int | None) -> None:
+    """`cik` is the ledger's, not the timeline's own: a document link must
+    not name a CIK the ledger declined to record (its sources disagreed)."""
     for f in timeline.filings:
         detail = f.kind + (f", {f.security_type}" if f.kind == "takedown" else "")
         p = _filing(
@@ -531,13 +570,21 @@ def build_ledger(
     field_tags: Any = None,
     streams: dict[str, Any] | None = None,
     errors: dict[str, Any] | None = None,
+    cik_sources: dict[str, object] | None = None,
 ) -> LedgerDocument:
     """The ledger of one run. `streams` holds the raw stream objects
     (`offerings`, `restatements`, `events`, `filing_events`, `vintage`) when a client ran
-    them; `errors` the per-stream failures, as the report renders them."""
+    them; `errors` the per-stream failures, as the report renders them.
+    `cik_sources` names the CIK each payload the run read gives (source ->
+    value, `ledger_cik`); the CIK the offerings stream resolved the ticker
+    to is added here, being the one its document links were built with."""
     b = _Builder()
     streams = streams or {}
     errors = errors or {}
+    sources = dict(cik_sources or {})
+    if (timeline := streams.get("offerings")) is not None:
+        sources["the CIK the ticker resolved to"] = getattr(timeline, "cik", None)
+    cik, cik_note = ledger_cik(sources)
     revised = revision_index(
         streams.get("restatements") if errors.get("restatements") is None else None,
         streams.get("vintage") if errors.get("vintage") is None else None,
@@ -548,7 +595,7 @@ def build_ledger(
 
     ran = bool(streams.get("ran"))
     if (timeline := streams.get("offerings")) is not None and errors.get("offerings") is None:
-        _offering_items(b, timeline)
+        _offering_items(b, timeline, cik)
     if (scan := streams.get("restatements")) is not None:
         _footprint_items(b, scan.footprints)
         _derived_items(b, scan.derived)
@@ -572,6 +619,8 @@ def build_ledger(
 
     return LedgerDocument(
         ticker=ticker.upper(),
+        cik=cik,
+        cik_note=cik_note,
         generated_on=report_date,
         fetched_at=fetched_at,
         fresh=fresh,

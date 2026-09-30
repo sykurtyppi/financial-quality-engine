@@ -209,6 +209,86 @@ def test_without_a_cik_in_the_ledger_accessions_are_text_not_guessed_links(clien
     assert "CIK" in r.text                                        # and says why
 
 
+@functools.cache
+def _ko_ledger_with_cik_json() -> str:
+    """The real KO ledger as a report run now writes it: its CIK recorded
+    from the run's sources (`reporting.ledger.ledger_cik`), no offering row."""
+    from app.core.pipeline import analyze
+    from app.services.ingestion.companyfacts_mapper import build_dataset
+    from app.services.reporting.ledger import build_ledger
+
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    return build_ledger(result=analyze(ds), dataset=ds, ticker="KO", report_date=date(2026, 9, 29),
+                        cik_sources={"the companyfacts payload": KO_CIK,
+                                     "the filing index": str(KO_CIK)}).model_dump_json()
+
+
+def test_the_ledgers_cik_links_every_sourced_row_and_an_older_ledger_falls_back_to_text(client):
+    """No offering row carries a document link here: the CIK is the ledger's
+    own. The same ledger without the field (as written before it existed)
+    shows its accessions as text, and says why."""
+    _, day = _entry()
+    doc = LedgerDocument.model_validate_json(_ko_ledger_with_cik_json())
+    assert doc.cik == KO_CIK
+    assert not any(p.url for i in doc.items for p in i.provenance)
+    _publish("KO", day, doc)
+    r = client.get(f"/review/KO?date={day}")
+    assert r.status_code == 200
+    sourced = _sourced(doc)
+    assert len(sourced) > 20
+    for item in sourced:
+        row = _row(r.text, item.id)
+        for p in item.provenance:
+            # The CIK without leading zeros, the accession without dashes.
+            href = (f'href="https://www.sec.gov/Archives/edgar/data/21344/'
+                    f'{p.accession.replace("-", "")}/"')
+            assert href in row and f">{p.accession}</a>" in row
+    assert "names no CIK" not in r.text
+
+    old = {k: v for k, v in json.loads(doc.model_dump_json()).items()
+           if k not in ("cik", "cik_note")}
+    _publish("KO", day, LedgerDocument.model_validate(old))
+    r = client.get(f"/review/KO?date={day}")
+    assert r.status_code == 200
+    assert "sec.gov/Archives" not in r.text
+    first = sourced[0]
+    assert first.provenance[0].accession in _row(r.text, first.id)
+    assert "names no CIK" in r.text                                # and says why
+
+
+def test_sources_that_disagreed_link_nothing_even_beside_an_offering_link(client):
+    """The ledger recorded no CIK because its sources disagreed: an offering
+    row's document link (one of those sources) must not be used instead."""
+    _, day = _entry()
+    from app.services.reporting.ledger import ledger_cik
+
+    cik, note = ledger_cik({"the companyfacts payload": 999, "the filing index": "21344"})
+    doc = _ko_ledger().model_copy(update=dict(cik=cik, cik_note=note))
+    _publish("KO", day, doc)
+    r = client.get(f"/review/KO?date={day}")
+    assert r.status_code == 200
+    assert "sec.gov/Archives/edgar/data/21344/0000" not in r.text  # no accession linked
+    assert "the companyfacts payload says 999" in r.text
+
+
+def test_a_ledger_cik_and_an_offering_link_naming_another_link_nothing(client):
+    _, day = _entry()
+    other = EvidenceItem(
+        id="EV-0ff0000003", plane=Plane.CAPITAL_MARKETS, kind="offering", subject="S-3",
+        claim="S-3 filed 2026-05-02 (shelf)",
+        provenance=(Provenance(accession="0000021344-26-000011", form="S-3",
+                               filed=date(2026, 5, 2), role="shelf",
+                               url="https://www.sec.gov/Archives/edgar/data/99/x/s3.htm"),),
+        validation_status="directional")
+    doc = LedgerDocument.model_validate_json(_ko_ledger_with_cik_json())
+    _publish("KO", day, doc.model_copy(update=dict(items=[*doc.items, other])))
+    r = client.get(f"/review/KO?date={day}")
+    assert "more than one CIK (99, 21344)" in r.text
+    assert "sec.gov/Archives/edgar/data/99/0000" not in r.text
+    assert "sec.gov/Archives/edgar/data/21344/0000" not in r.text
+
+
 def test_ledger_text_is_escaped_never_markup(client):
     _, day = _entry()
     evil = _sourced(_ko_ledger())[0].model_copy(update=dict(

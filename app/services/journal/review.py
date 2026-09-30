@@ -67,8 +67,9 @@ NOTE_MAX = 2000
 _GID_RE = re.compile(r"^[0-9a-f]{32}$")
 _KEY_RE = re.compile(r"^EV-[0-9a-f]{10}$")  # `reporting.ledger._id`
 _ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
-# The one place a ledger carries the company's CIK: a document link of an
-# offering row (`reporting.ledger._edgar_url`).
+# A document link of an offering row (`reporting.ledger._edgar_url`): the one
+# place a ledger written before `LedgerDocument.cik` carried the company's
+# CIK, and one more a ledger's own CIK must agree with.
 _CIK_URL_RE = re.compile(r"^https://www\.sec\.gov/Archives/edgar/data/(\d{1,10})/")
 # `<stamp>_<seq>_<id>`: a generation directory's name (`report_files._name_next`).
 _BUILT_RE = re.compile(r"^(\d{8}T\d{6}Z)_\d+_")
@@ -487,17 +488,23 @@ def fmt_value(v: float | None) -> str:
 
 
 def _cik(ledger: LedgerDocument) -> tuple[int | None, str | None]:
-    """The company's CIK, from the one place the ledger carries it (an
-    offering's document link), or None and why. Never guessed from an
-    accession, whose prefix is whoever filed it (often a filing agent)."""
+    """The company's CIK, or None and why: the ledger's own (`cik`, recorded
+    from the run's sources when they agree), else — a ledger written before
+    it — an offering's document link. Never guessed from an accession, whose
+    prefix is whoever filed it (often a filing agent), and never taken from
+    a link when the ledger says its sources disagreed."""
     found = {int(m.group(1)) for i in ledger.items for p in i.provenance
              if p.url and (m := _CIK_URL_RE.match(p.url))}
+    if ledger.cik is not None:
+        found.add(ledger.cik)
+    elif ledger.cik_note:
+        return None, (f"This run's ledger records no CIK ({ledger.cik_note}), so accessions "
+                      "are shown as text: look each one up on EDGAR by accession number.")
     if len(found) == 1:
         return found.pop(), None
     if not found:
-        return None, ("This run's ledger names no CIK (only an offering's document link "
-                      "carries one), so accessions are shown as text: look each one up on "
-                      "EDGAR by accession number.")
+        return None, ("This run's ledger names no CIK, so accessions are shown as text: look "
+                      "each one up on EDGAR by accession number.")
     return None, (f"This run's ledger names more than one CIK ({', '.join(map(str, sorted(found)))}), "
                   "so accessions are shown as text.")
 
