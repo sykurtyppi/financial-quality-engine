@@ -187,18 +187,37 @@ The review console is the screen for that. Open it with the journal UI:
 .venv/bin/uvicorn app.web:app        # then http://127.0.0.1:8000/review
 ```
 
-The UI answers only to `localhost`, `127.0.0.1` and `[::1]` (any port): a
-request naming another host is refused (400), so a web page on some other
+The UI has **no authentication**. It serves only this machine: a request
+from any other address is refused (403), and so is one naming a host other
+than `localhost`, `127.0.0.1` or `[::1]` (400), so a web page on some other
 name that re-resolves to your machine (DNS rebinding) cannot read a case or
-post a tick. To reach it by another name, list the names, comma-separated,
-without ports (a port is ignored): `FQE_WEB_ALLOWED_HOSTS=journal.lan,127.0.0.1
-.venv/bin/uvicorn app.web:app --host 0.0.0.0`. The list REPLACES the default,
-so name `127.0.0.1` too if you still open it locally; uvicorn serves only
-loopback unless given `--host`; an entry that is not a host name makes every
-page say so (500). Anything that changes something (a tick, the impact
-form, a report's first view) is refused (403) to a page that is not this
-UI's own (its `Sec-Fetch-Site` or `Origin` says so); a request with neither
-header is not from a browser page, and is accepted (`curl`).
+post a tick. Leave uvicorn on its default loopback address. To use the
+console from another machine, forward the port over SSH and open
+`http://127.0.0.1:8000/review` there:
+
+```
+ssh -L 8000:127.0.0.1:8000 <this machine>
+```
+
+Anything that changes something (a tick, the impact form, a report's first
+view, which builds and stamps it) is refused (403) to a page that is not
+this UI's own, as its `Sec-Fetch-Site` or `Origin` header says; a request
+with neither is not from a browser page (`curl` on this machine) and is
+accepted. That guard protects only a UI no other machine can reach:
+browsers send no `Sec-Fetch-*` to a plain-http origin that is not loopback,
+and a request from another machine can simply leave the headers out.
+
+Only behind a proxy that authenticates (and serves TLS): set
+`FQE_WEB_ALLOW_REMOTE=1` to serve clients other than this machine (a proxy
+on this machine connects from loopback and needs no such setting), and
+`FQE_WEB_ALLOWED_HOSTS` to the name(s) the proxy is reached by,
+comma-separated, without ports (a port is ignored). The list REPLACES the
+default, so name `127.0.0.1` too if you still open it locally; an entry
+that is not a host name (`*`, a space, a trailing dot) makes every page say
+so (500) and the server log names it. The proxy must pass the browser's
+`Host` header and scheme through unchanged: one that rewrites `Host`, or
+serves https while the UI sees http, makes every browser POST fail the
+`Origin` check (403: it fails closed).
 
 **The board** (`/review`) lists every watchlist name (the case of its pinned
 entry) and every journal entry with a live or pending report, read-only:

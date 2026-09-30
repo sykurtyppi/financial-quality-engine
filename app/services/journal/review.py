@@ -57,6 +57,10 @@ from app.services.reporting import report_files
 from app.services.watch import watchlist as wl
 
 FORMAT = "fqe-review/1"
+# How long a tick waits for a publish of its case to commit (a commit takes
+# a moment; a build is never under the lock): a stalled holder must not hold
+# the web worker the tick runs on (review of 68dbc24, L-2).
+PUBLISH_WAIT_S = 5.0
 STATES = ("unchecked", "reconciled", "disputed")
 NOTE_MAX = 2000
 
@@ -172,6 +176,9 @@ def _parse(raw: bytes, ticker: str, day: str, name: str) -> Runs:
         doc = json.loads(raw.decode("utf-8"))
     except ValueError as e:  # UnicodeDecodeError is one
         raise Unreadable(f"{name} cannot be read: it is not JSON ({e})") from None
+    except RecursionError:  # review of 68dbc24, N-1
+        raise Unreadable(f"{name} cannot be read: it is nested too deeply to be "
+                         "a review file") from None
     if not isinstance(doc, dict) or doc.get("format") != FORMAT:
         raise Unreadable(f"{name} cannot be read: it is not a review file of this console "
                          f"(format {FORMAT})")
@@ -255,7 +262,8 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
     takes, and publishes after it, so the tick is always on the run that was
     live when it was written. The publish lock covers only a publish's
     commit (`report_files.replacing` builds before taking it), so a tick
-    never waits for a build. Lock order: publish lock, then review lock.
+    never waits for a build; it waits for a commit at most
+    ``PUBLISH_WAIT_S``, then is refused (503) with nothing written. Lock order: publish lock, then review lock.
     Nothing that holds the review lock takes the publish lock, and a
     publisher (`replacing`, `restore`, `set_aside`) takes only journal
     locks of its own that are never the review file's."""
@@ -289,7 +297,8 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
         # The case's publish lock, then the entries' own lock (an O_NOFOLLOW
         # sidecar) on the review file, held across the re-check and the
         # write: see the docstring.
-        with report_files.publish_lock(report), store._entry_lock(path):
+        with report_files.publish_lock(report, timeout=PUBLISH_WAIT_S), \
+                store._entry_lock(path):
             now_live = report_files.read_live(report)
             if now_live is None or now_live.generation_id != generation_id:
                 raise Refused(409, f"This tick is for run {generation_id}, but the live run of "
@@ -312,6 +321,10 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
             _write_ticks(path, t, d, runs, generation_id, key, state, tick)
     except Unreadable as e:
         raise Refused(409, f"{e}. Not writing over it.") from None
+    except TimeoutError:  # an OSError: said before those
+        raise Refused(503, f"A publish of {t} {d} is in progress (its lock has been held for "
+                      f"over {PUBLISH_WAIT_S:g}s); nothing was recorded. Retry in a moment, "
+                      "then reload: the live run may have changed.") from None
     except (OSError, ValueError) as e:
         if isinstance(e, OSError) and e.errno == errno.ELOOP:
             raise Refused(409, f"Not recorded: {e.strerror or e} (a symlink is never "
@@ -678,10 +691,16 @@ def board() -> tuple[list[BoardRow], list[str]]:
     seen: set[tuple[str, str | None]] = set()
     try:
         watches = wl.load()
+    except (wl.WatchlistError, OSError) as e:
+        # What the loader refuses, or the disk: said, and logged in one line
+        # (a traceback on every refresh of the board is noise; review of
+        # 68dbc24, N-3).
+        log.warning("review board: the watchlist cannot be read: %s", e)
+        watches = []
+        problems.append(f"The watchlist cannot be read: {type(e).__name__}: {e}")
     except Exception as e:  # noqa: BLE001 - said on the board, never a board 500
-        # Any shape a hand edit can leave (review of efb8500, L2): the
-        # loader refuses what it knows as a WatchlistError; anything else
-        # is said here too, and logged.
+        # Anything else is a bug (review of efb8500, L2): said, and logged
+        # with its traceback.
         log.exception("review board: the watchlist cannot be read")
         watches = []
         problems.append(f"The watchlist cannot be read: {type(e).__name__}: {e}")

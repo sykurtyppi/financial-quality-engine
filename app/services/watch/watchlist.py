@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 from app.services.journal import store
 
@@ -152,18 +153,26 @@ def parse_watch(raw: dict) -> Watch:
     )
 
 
+def _read(p: Path) -> Any:
+    """The watchlist file's JSON, or `WatchlistError` for anything that is
+    not (text that is not UTF-8 or not JSON, or nesting too deep to parse):
+    every reader and writer refuses it the same way (review of 68dbc24,
+    N-2: the writers took a deep document as a RecursionError traceback)."""
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+    except RecursionError as e:
+        raise WatchlistError(f"{p}: nested too deeply to be a watchlist") from e
+
+
 def load(path: Path | None = None) -> list[Watch]:
     """Read the watchlist. A missing file is an empty watchlist, not an error —
     the poller is opt-in and should not crash a cron job before setup."""
     p = path or WATCHLIST
     if not p.exists():
         return []
-    try:
-        data = json.loads(p.read_text())
-    except json.JSONDecodeError as e:
-        raise WatchlistError(f"{p}: invalid JSON ({e})") from e
-    except RecursionError as e:
-        raise WatchlistError(f"{p}: nested too deeply to be a watchlist") from e
+    data = _read(p)
 
     items = data.get("watchlist") if isinstance(data, dict) else data
     if not isinstance(items, list):
@@ -219,10 +228,7 @@ def add_entry(raw: dict, path: Path | None = None) -> Watch:
     p = path or WATCHLIST
     with _write_lock(p):
         if p.exists():
-            try:
-                data = json.loads(p.read_text())
-            except json.JSONDecodeError as e:
-                raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+            data = _read(p)
             if isinstance(data, list):
                 data = {"watchlist": data}
         else:
@@ -262,10 +268,7 @@ def update_entry(ticker: str, updates: dict, path: Path | None = None) -> Watch:
     if not p.exists():
         raise WatchlistError(f"{p}: no watchlist to update")
     with _write_lock(p):
-        try:
-            data = json.loads(p.read_text())
-        except json.JSONDecodeError as e:
-            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+        data = _read(p)
         if isinstance(data, list):
             data = {"watchlist": data}
         items = data.setdefault("watchlist", [])
@@ -294,10 +297,7 @@ def remove_entry(ticker: str, path: Path | None = None) -> None:
     if not p.exists():
         raise WatchlistError(f"{p}: no watchlist to update")
     with _write_lock(p):
-        try:
-            data = json.loads(p.read_text())
-        except json.JSONDecodeError as e:
-            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+        data = _read(p)
         if isinstance(data, list):
             data = {"watchlist": data}
         items = data.setdefault("watchlist", [])
