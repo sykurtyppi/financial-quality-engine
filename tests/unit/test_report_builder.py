@@ -193,6 +193,7 @@ class TestCapitalIntegrityOfferingsCaveat:
         assert caveat is not None
         assert "blind" in caveat
         assert "1 selling-stockholder takedown(s)" in caveat
+        assert "/100" not in caveat and "10" not in caveat.split("blind")[0]  # no 0-100 number
 
     def test_mixed_offering_fires(self):
         # FPS's actual July deal: sponsor shares AND issuer shares in one 424B4.

@@ -199,7 +199,7 @@ def test_an_unmappable_snapshot_says_composed_fields_were_not_compared():
     result = diff_scored(older, _every_field(composites=False))
     assert result.canonical_unavailable == (
         "scored values not compared as the engine builds them: the older snapshot "
-        "could not be mapped (raw facts only)"
+        "could not be mapped (raw fact rows only, not scored changes)"
     )
 
 

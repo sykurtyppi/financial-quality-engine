@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import date
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -125,15 +125,38 @@ class LedgerDocument(BaseModel):
     """The ledger of one report run."""
 
     schema_version: str = LEDGER_SCHEMA_VERSION
+    # The run this ledger belongs to, stamped when it is published
+    # (`report_files.replacing`): the report beside it names the same id on
+    # its last line. None for a ledger never published (the API, tests).
+    generation_id: str | None = None
+    # The engine commit that built the run (`report_files.engine_commit`),
+    # stamped at the same time; the report states it on the line above.
+    engine_commit: str | None = None
     ticker: str
+    # The company's CIK, which a filing's folder on EDGAR is filed under
+    # (`/Archives/edgar/data/<cik>/<accession without dashes>/`), so a
+    # reviewer can open each accession. Recorded from the run's resolved
+    # CIK as its payloads carry it (`reporting.ledger.ledger_cik`); withheld
+    # when any payload names a different one or something that is not a
+    # CIK, and `cik_note` then says what each gave. None with no note when
+    # the run held no source (the API, tests), or in a ledger written before
+    # the field existed. Strict: only an int in (0, 10**10) loads — the
+    # console links it (review of e37827a, finding N1).
+    cik: Annotated[int, Field(strict=True, gt=0, lt=10**10)] | None = None
+    cik_note: str | None = None
     generated_on: date
     fetched_at: str | None = None
     fresh: bool = False
     config_version: str
     coverage: float | None = None
-    # field -> the concept(s) its values were read from (the mapper's selection)
+    # field -> the concept(s) its values were read from (the mapper's
+    # selection, `SeriesSelection.label`): `tag_used`, then
+    # "|<period end>:<concept>" for each quarter filled from another concept
+    # after a tag switch. A field without such quarters is just `tag_used`.
     selections: dict[str, str] = Field(default_factory=dict)
-    # stream -> "checked" | "not run" | "data failure: …" | "internal error: …"
+    # stream -> "checked" | "checked (incomplete: <the scan's coverage>)" (the
+    # restatement scan) | "not compared: …" (vintage) | "not run" |
+    # "data failure: …" | "internal error: …"
     streams: dict[str, str] = Field(default_factory=dict)
     items: list[EvidenceItem] = Field(default_factory=list)
     unsourced: list[Unsourced] = Field(default_factory=list)

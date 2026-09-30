@@ -54,7 +54,11 @@ def client(tmp_path, monkeypatch):
         return p, 31.2
 
     monkeypatch.setattr(reporting, "build_report", fake_build)
-    return TestClient(app, follow_redirects=False)
+    # A loopback host and client, as a browser on the operator's machine:
+    # the app refuses any other (the review console's guards), and
+    # TestClient's defaults are "testserver" and "testclient".
+    return TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000),
+                      follow_redirects=False)
 
 
 def test_dashboard_empty(client):
@@ -184,6 +188,90 @@ def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):
     assert r.status_code == 200
     assert "Report generation failed" in r.text
     assert not store.parse_entry(store.find_entry("CRM"))["is_reported"]
+
+
+def test_report_waits_for_the_entrys_report_lock_then_rechecks(client, monkeypatch):
+    """Hermes audit of 424b0b4, finding 3b: the route serialized on a lock of
+    its own process, so it and `journal.py report` each built and published
+    one entry's report. It takes the entry's report lock, the CLI's, and
+    re-checks under it: a report generated meanwhile is shown, not rebuilt."""
+    from contextlib import contextmanager
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    built = []
+    monkeypatch.setattr(reporting, "build_report", lambda *a, **k: built.append(a))
+
+    @contextmanager
+    def lock(p):
+        assert p == path
+        store.mark_reported(path)  # the CLI's report, done while this request waited
+        yield
+
+    monkeypatch.setattr(store, "report_lock", lock, raising=False)
+    assert client.get("/report/KO").status_code == 200
+    assert built == [] and store.parse_entry(path)["is_reported"]
+
+
+def test_a_publish_in_doubt_is_said_plainly_and_nothing_is_stamped(client, monkeypatch):
+    """`PublishInDoubt` (the new run may be live) was shown as an ordinary
+    "Report generation failed", with a 200. It is said as what it is, with
+    a 500, and the thesis is not locked."""
+    from app.services.reporting.report_files import PublishInDoubt
+
+    def in_doubt(*a, **k):
+        raise PublishInDoubt("KO_x.md: publishing g failed, and switching back failed: "
+                             "the NEW generation g may be live.")
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    monkeypatch.setattr(reporting, "build_report", in_doubt)
+    r = client.get("/report/KO")
+    assert r.status_code == 500
+    assert "the NEW generation g may be live" in r.text and "generation failed" not in r.text
+    assert not store.parse_entry(path)["is_reported"]
+
+
+def test_the_report_page_refuses_while_the_sweep_audits_that_report(client, monkeypatch):
+    """Review of the 3b fix: the sweep's `journal.py report --defer-mark`
+    releases the report lock once it publishes, and audits the report with
+    the entry unstamped. The page found "not reported", built, published over
+    the run being audited and stamped. It refuses while the report is
+    pending, says why and what to run, and builds nothing."""
+    path = _seed("KO", "steady staple", 3, "hold")
+    built = []
+    monkeypatch.setattr(reporting, "build_report", lambda *a, **k: built.append(a))
+    import json
+    import os
+
+    monkeypatch.setenv("FQE_REPORT_OWNER", json.dumps({  # as the sweep's child records it
+        "name": "watch.py", "pid": 4242, "host": os.uname().nodename,
+        "token": "0123456789abcdef", "lock": "/j/sweep.lock"}))
+    store.set_report_pending(path, "journal.py report --defer-mark")
+    r = client.get("/report/KO")
+    assert r.status_code == 409
+    assert "pending (being audited by the sweep, or left by an interrupted run" in r.text
+    assert "pid 4242" in r.text and "/j/sweep.lock" in r.text  # its owner, shown
+    assert "mark-reported KO" in r.text and "--retry" in r.text
+    assert built == [] and not store.parse_entry(path)["is_reported"]
+    assert store.report_pending(path) is not None
+
+
+def test_a_stamp_that_fails_says_the_report_is_live_but_not_stamped(client, monkeypatch):
+    """The stamp shared the build's `try`: a stamp that failed was shown as
+    "Report generation failed" (with a 200) though the report was live. It
+    is said as it is: live, not stamped, and how to stamp it."""
+    path = _seed("KO", "steady staple", 3, "hold")
+
+    def refuse(p):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store, "mark_reported", refuse)
+    r = client.get("/report/KO")
+    assert r.status_code == 500
+    assert "generation failed" not in r.text
+    assert "is live" in r.text and "NOT stamped" in r.text and "No space left" in r.text
+    assert "mark-reported KO" in r.text
+    assert "KO report" in r.text  # the live report is shown
+    assert not store.parse_entry(path)["is_reported"]
 
 
 def test_report_for_dated_entry_reads_same_file_it_generates(client):
@@ -388,6 +476,9 @@ class TestV2ReadOnly:
         loc = client.get("/report/MXL").headers["location"]
         r = client.get(loc)
         assert r.status_code == 200 and "preregistered (v2) case" in r.text
+        # The command named is the entry's: without --date, the newest entry's.
+        day = store.find_entry("MXL").stem.split("_", 1)[1]
+        assert f"scripts/journal.py report MXL --date {day}" in r.text
 
 
 def test_one_unreadable_entry_does_not_lose_every_other_case(client, monkeypatch):
@@ -400,3 +491,151 @@ def test_one_unreadable_entry_does_not_lose_every_other_case(client, monkeypatch
     r = client.get("/")
     assert r.status_code == 200 and "KO" in r.text
     assert store.tally()["unreadable"] == ["ZZZ_2026-07-29.md"]
+
+
+# --- review of 6563168 (rev31c_web_parity): the page's stamp failure left nothing ---------
+# pending, so the next load built and published again over the live report,
+# where `journal.py report` leaves the entry pending and names the run to stamp.
+
+
+def _publishing_build(monkeypatch, builds):
+    from app.services.reporting.report_files import replacing
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False):
+        out = reporting.report_path(ticker, report_day)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with replacing(out) as staged:
+            staged.report.write_text(f"# {ticker} report\n")
+            staged.ledger.write_text("{}")
+        builds.append(out)
+        return out, "no acute signals"
+
+    monkeypatch.setattr(reporting, "build_report", build)
+
+
+def test_a_stamp_failure_on_the_page_leaves_the_report_pending(client, monkeypatch):
+    from app.services.reporting.report_files import read_live
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    builds: list = []
+    _publishing_build(monkeypatch, builds)
+    real_mark, fired = store.mark_reported, []
+
+    def once(p):
+        if not fired:
+            fired.append(1)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_mark(p)
+
+    monkeypatch.setattr(store, "mark_reported", once)
+    r = client.get("/report/KO")
+    gid = read_live(builds[0]).generation_id
+    assert r.status_code == 500
+    assert "NOT stamped" in r.text and "No space left on device" in r.text
+    assert f"mark-reported KO --date {path.stem.split('_', 1)[1]} --generation {gid}" in r.text
+    pending = store.pending_marker(path)
+    assert pending is not None and pending.generation_id == gid
+    assert client.get("/report/KO").status_code == 409  # not built again
+    assert len(builds) == 1 and not store.parse_entry(path)["is_reported"]
+
+
+def test_a_stamp_that_landed_on_the_page_is_a_stamp(client, monkeypatch):
+    """The stamp renamed into place, then its directory fsync failed: the
+    thesis IS locked. Said, with a warning, and nothing left pending."""
+    import stat
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    _publishing_build(monkeypatch, [])
+    real_mark, real_fsync, armed = store.mark_reported, os.fsync, []
+
+    def fsync(fd):
+        if armed and stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "directory fsync failed")
+        return real_fsync(fd)
+
+    def mark(p):
+        armed.append(1)
+        try:
+            return real_mark(p)
+        finally:
+            armed.clear()
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(store, "mark_reported", mark)
+    r = client.get("/report/KO")
+    assert r.status_code == 200
+    assert "could not be confirmed durable" in r.text
+    assert store.parse_entry(path)["is_reported"] and store.report_pending(path) is None
+
+
+# --- review of 40c2d36 (rev31d_web_owner): the page's own marker, said as what it is ------
+
+
+def _page_stamp_fails(monkeypatch, then=None):
+    real_mark, fired = store.mark_reported, []
+
+    def once(p):
+        if not fired:
+            fired.append(1)
+            if then is not None:
+                then()
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_mark(p)
+
+    monkeypatch.setattr(store, "mark_reported", once)
+
+
+def test_the_pages_unstamped_run_is_refused_in_its_own_words_and_retryable(
+        client, monkeypatch):
+    import argparse
+    import importlib.util
+
+    from app.services.reporting.report_files import read_live
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    day = path.stem.split("_", 1)[1]
+    builds: list = []
+    _publishing_build(monkeypatch, builds)
+    _page_stamp_fails(monkeypatch)
+    assert client.get("/report/KO").status_code == 500
+    gid = read_live(builds[0]).generation_id
+    r = client.get("/report/KO")
+    assert r.status_code == 409 and len(builds) == 1
+    assert "was published but its thesis was NOT stamped" in r.text
+    assert f"mark-reported KO --date {day} --generation {gid}" in r.text
+    assert f"report KO --date {day} --retry" in r.text
+    assert "being audited" not in r.text and "once the audit passes" not in r.text
+    assert "owner is gone" not in r.text
+    # The server that wrote it runs on; `--retry` is not held for it.
+    spec = importlib.util.spec_from_file_location(
+        "journal_cli_web", Path(__file__).resolve().parents[2] / "scripts" / "journal.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    monkeypatch.delenv("FQE_REPORT_OWNER", raising=False)
+    assert cli.cmd_report(argparse.Namespace(ticker="KO", date=day, no_docs=True,
+                                             defer_mark=False, retry=True, force=False)) == 0
+    assert len(builds) == 2 and store.parse_entry(path)["is_reported"]
+
+
+def test_the_pages_marker_in_place_is_said_in_place(client, monkeypatch):
+    """rev31d_marker_landed, on the page: the marker's directory fsync fails
+    after it is linked into place; it is there, and the page says so."""
+    import stat
+
+    path = _seed("KO", "steady staple", 3, "hold")
+    _publishing_build(monkeypatch, [])
+    real_fsync = os.fsync
+
+    def dir_fsyncs_fail():
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "directory fsync failed")
+            return real_fsync(fd)
+        monkeypatch.setattr(os, "fsync", fsync)
+
+    _page_stamp_fails(monkeypatch, then=dir_fsyncs_fail)
+    r = client.get("/report/KO")
+    assert r.status_code == 500
+    assert "builds its report again" not in r.text
+    assert "Its pending marker is in place, but its write could not be confirmed durable" in r.text
+    assert store.pending_marker(path).not_stamped

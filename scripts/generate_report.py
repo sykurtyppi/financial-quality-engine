@@ -8,6 +8,14 @@ documents -> markdown report under reports/.
 
 Report assembly lives in app/services/reporting/report_builder.build_report, the
 single builder shared by the CLI, journal, and API (review finding 1).
+
+Exit codes: 0 report published · 2 no report written (SEC could not supply
+the fundamentals, or they could not be mapped) · 3 no report published (the
+run was not whole, or the publish was refused; the previous run stays live) ·
+4 (--as-of only) the mapper trips on a stored snapshot a report scored — the
+message names it; move it aside to replay from an older state · 8 the publish
+is IN DOUBT: it failed and could not be undone, so the new run may be live —
+the message says how to check and how to put the previous run back.
 """
 
 from __future__ import annotations
@@ -15,6 +23,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -23,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.core.pipeline import analyze
 from app.services.ingestion.edgar_adapter import (
+    ScoredSnapshotUnmappable,
     fetch_dataset_snapshot,
     fetch_submissions_snapshot,
     store_vintage_snapshot,
@@ -30,8 +41,49 @@ from app.services.ingestion.edgar_adapter import (
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.reporting.report_builder import build_report, ledger_path
+from app.services.reporting.report_files import (
+    PUBLISH_IN_DOUBT_RC,
+    NotPublished,
+    PublishInDoubt,
+    Staged,
+    replacing,
+)
 
 logging.basicConfig(level=logging.WARNING)
+
+# A replay's stored scored snapshot trips the mapper (review of 626ca1b,
+# finding 2): not 2, which says the fundamentals themselves are unusable.
+EXIT_SCORED_SNAPSHOT = 4
+
+
+def _unmappable(ticker: str, e: ValueError) -> int:
+    """The payload arrived but cannot be mapped into a scored dataset (too
+    little history, an unrecognised structure). Same contract as an
+    acquisition failure: one line, no report, exit 2 — not a traceback."""
+    print(f"error: {ticker}: {e}", file=sys.stderr)
+    print("no report written: the fundamentals were fetched but could not be "
+          "mapped into quarters to score.", file=sys.stderr)
+    return 2
+
+
+@contextmanager
+def _publishing(out: Path) -> Iterator[Staged]:
+    """`replacing`, with an OSError of the publish itself (a foreign pointer,
+    a linked ``.staging`` or ``.generations``: refused before anything live
+    changes) raised as `NotPublished`, so it is the one-line "no report
+    published" and exit 3, not a traceback and exit 1 (cross-branch review
+    of the finding 5 fix, finding 3). One raised by the build inside the
+    block is the build's, and passes through as it is."""
+    building = False
+    try:
+        with replacing(out) as staged:
+            building = True
+            yield staged
+            building = False
+    except OSError as e:
+        if building:
+            raise
+        raise NotPublished(f"{out.name}: {e}") from e
 
 
 def main() -> int:
@@ -45,12 +97,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--no-vintage", action="store_true",
-        help="do not archive the scored companyfacts payload to data/vintages/",
+        help="do not archive the scored companyfacts payload to data/vintages/ (the "
+             "silent-revision check then reads 'not compared' unless the store already "
+             "holds identical content)",
     )
     parser.add_argument(
         "--as-of", metavar="YYYY-MM-DD", type=date.fromisoformat,
         help="historical replay: rebuild the report as of this day (newest stored "
-             "snapshot by then, else today's facts cut there) -> reports/T_D.replay.md",
+             "snapshot a report scored by then, else today's facts cut there) "
+             "-> reports/T_D.replay.md",
     )
     args = parser.parse_args()
     ticker = args.ticker.upper()
@@ -58,18 +113,31 @@ def main() -> int:
     if args.as_of is not None:
         from app.services.journal import reporting as journal_reporting
 
-        out, distress = journal_reporting.build_report(
-            ticker, with_docs=not args.no_docs, quarters=args.quarters,
-            report_day=args.as_of.isoformat(), fresh=args.fresh,
-            out_dir=ROOT / "reports", replay=True,
-        )
+        try:
+            out, distress = journal_reporting.build_report(
+                ticker, with_docs=not args.no_docs, quarters=args.quarters,
+                report_day=args.as_of.isoformat(), fresh=args.fresh,
+                out_dir=ROOT / "reports", replay=True,
+            )
+        except journal_reporting.UnmappablePayload as e:
+            # Only the snapshot stage's own failure; any other ValueError is a
+            # defect in the build and surfaces as one (round-9 audit F3).
+            return _unmappable(ticker, e)
+        except ScoredSnapshotUnmappable as e:
+            # A defect, but one the operator can route around: one line naming
+            # the snapshot, not a traceback that names neither it nor the way out.
+            print(f"error: {ticker}: {e}", file=sys.stderr)
+            return EXIT_SCORED_SNAPSHOT
         print(f"historical replay as of {args.as_of}: distress signals: {distress} -> {out}")
         return 0
 
     client = SecClient(fresh=args.fresh)
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
-    snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
+    try:
+        snapshot = fetch_dataset_snapshot(ticker, n_quarters=args.quarters, client=client)
+    except ValueError as e:
+        return _unmappable(ticker, e)
     dataset, diag = snapshot.dataset, snapshot.diagnostics
     # Archive exactly the payload that is about to be scored: the baseline a
     # later silent revision would otherwise erase. Failure is a report line.
@@ -97,32 +165,41 @@ def main() -> int:
     generated_on = date.today().isoformat()
     out_dir = ROOT / "reports"
     out = out_dir / f"{ticker}_{generated_on}.md"
-    report, thermometer = build_report(
-        result, dataset,
-        generated_on=generated_on,
-        coverage=diag.coverage(),
-        # The evidence must name the same series the score came from.
-        field_tags=diag.selected_series(),
-        client=client,
-        ticker=ticker,
-        fetched_at=fetched_at,
-        fresh=args.fresh,
-        warnings=diag.warnings,
-        field_notes=diag.field_notes(),
-        doc_diagnostics=doc_diagnostics,
-        company_facts=snapshot.company_facts,
-        submissions=submissions,
-        index_degraded=submissions is None,
-        vintage_note=vintage_note,
-        # No baseline_day: the CLI has no pinned thesis; the silent-revision
-        # section compares the newest snapshot with the previous one only.
-        ledger_out=ledger_path(out),
-    )
-
-    out_dir.mkdir(exist_ok=True)
-    out.write_text(report)
-    ledger = ledger_path(out)
-    print(f"evidence ledger: {ledger if ledger.exists() else 'NOT written (see log)'}")
+    # Built off to the side, then published in one step: a same-day rerun
+    # (filing night: the /A lands after the first run) goes live only once
+    # its report and ledger exist, the earlier run is kept whole as the
+    # previous generation, and a build that fails leaves the live report as
+    # it was.
+    with _publishing(out) as staged:
+        report, thermometer = build_report(
+            result, dataset,
+            generated_on=generated_on,
+            coverage=diag.coverage(),
+            # The evidence must name the same series the score came from.
+            field_tags=diag.selected_series(),
+            # ...and read the same facts: the dataset was mapped from the
+            # whole payload, so the restatement scan must not stop at today
+            # (an evening 10-Q is dated tomorrow by EDGAR).
+            uncut_fundamentals=True,
+            client=client,
+            ticker=ticker,
+            fetched_at=fetched_at,
+            fresh=args.fresh,
+            warnings=diag.warnings,
+            field_notes=diag.field_notes(),
+            doc_diagnostics=doc_diagnostics,
+            company_facts=snapshot.company_facts,
+            submissions=submissions,
+            index_degraded=submissions is None,
+            vintage_note=vintage_note,
+            # No baseline_day: the CLI has no pinned thesis; the silent-revision
+            # section compares the newest snapshot with the previous one only.
+            ledger_out=staged.ledger,
+        )
+        staged.report.write_text(report)
+    for moved in staged.archived:
+        print(f"previous run archived: {moved}")
+    print(f"evidence ledger: {ledger_path(out)}")
 
     # Review finding 8: no 0-100 number on any surface, stdout included.
     from app.services.scoring.thermometer import describe
@@ -138,6 +215,17 @@ def _main() -> int:
     build, and a traceback told the operator less than the one line below."""
     try:
         return main()
+    except NotPublished as e:
+        # A run that is not whole (no evidence ledger) is not published: the
+        # earlier report, ledger and audit are still live, untouched.
+        print(f"error: {e}", file=sys.stderr)
+        print("no report published; the previous run (if any) stays live.", file=sys.stderr)
+        return 3
+    except PublishInDoubt as e:
+        # Not a NotPublished: the new run MAY be live. Said as it is, never
+        # as a traceback, and with its own code.
+        print(f"error: {e}", file=sys.stderr)
+        return PUBLISH_IN_DOUBT_RC
     except SecClientError as e:
         print(f"error: {e}", file=sys.stderr)
         print("no report written: the fundamentals could not be acquired. Retry, or "

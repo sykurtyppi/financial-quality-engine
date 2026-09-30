@@ -3,6 +3,13 @@
 Operating procedure for `scripts/watch.py`. Written for NVDA FQ2-27 on
 **Wed 2026-08-26**, but the sequence is the same for any watched name.
 
+Rehearse it first: [earnings_night_drill.md](earnings_night_drill.md)
+(`scripts/drill.py`) runs a filing night offline, including an amendment
+landing, a stale cache, SEC down, a rerun and a rollback, and leaves a log to
+sign. A same-day rerun no longer overwrites a report: the earlier run, with
+its ledger and audit, is kept whole in `reports/.generations/`, and
+`report_files.restore` makes it live again in one step.
+
 ## What is and isn't automated
 
 Automated: the reminder before the print, watching EDGAR for the filing,
@@ -125,7 +132,36 @@ no thesis (`--no-auto` only; act now) · `3` nothing yet (`--once` only) ·
 `7` the audit failed three times and was ABANDONED — the brief was built
 without it and the row re-armed ·
 `1` gave up, EDGAR failed, the watch has no event identity (re-`add` it), or
-the row could not be re-armed after a completed case.
+the row could not be re-armed after a completed case ·
+`8` the report's publish is IN DOUBT: it failed and could not be undone, so
+the new report may be live. Nothing was audited or marked; the log says how
+to check (`readlink` the generation pointer) and how to put the previous run
+back (`report_files.restore`). `generate_report.py` and `journal.py report`
+exit 8 on it too, and it outranks every other code in a `sweep` ·
+`9` a report WAS published but its journal entry is NOT stamped
+(`journal.py report`'s own code). From a `poll` or `sweep`: the child could
+not write which run it published, so the report is NOT audited — do not
+stamp it by hand (that would skip its audit); the entry stays pending and
+the next pass rebuilds and audits it. From a plain `journal.py report`: the
+stamp failed after the publish (a full disk, a denied write, the journal
+folder gone) or was refused (the BEFORE block edited while it built); the
+message names the run and the command that stamps it, `journal.py
+mark-reported <T> --date <day> --generation <id>` (for a refused stamp,
+once `journal.py verify` passes again), and the entry is left pending so a
+plain `report` refuses instead of building again. Ranked just below `8` in a
+`sweep`. A stamp whose write raised only after it was in place (the
+directory's fsync) is a stamp: said, with its durability unconfirmed, exit
+`0`.
+
+The sweep audits and stamps exactly the report its own `journal.py report
+--defer-mark` published: the child writes that run (its generation's own
+report path and id) to a `--result-file`, and `mark-reported --generation`
+stamps the entry only if that run is the entry's (its live report carries
+it, or its pending marker records it). A child that exits 0 without saying
+which run it published is exit `4`: no other report is audited or marked in
+its place. Before this (Hermes re-audit of 84e65b0, finding 3) the sweep
+audited the ticker's newest report, another run's if one went live meanwhile,
+and stamped the entry for it.
 
 **4. After it generates — read, then fill AFTER**
 
@@ -140,6 +176,110 @@ scripts/journal.py after NVDA --impact changed_confidence --conviction-after 3 \
 scripts/journal.py outcome NVDA
 scripts/journal.py tally
 ```
+
+## Shadow-run review
+
+The engine is cleared for supervised shadow runs only: every fact a report
+surfaces is reconciled by hand to its accession before anyone relies on it.
+The review console is the screen for that. Open it with the journal UI:
+
+```
+.venv/bin/uvicorn app.web:app --forwarded-allow-ips 127.0.0.1   # then http://127.0.0.1:8000/review
+```
+
+`--forwarded-allow-ips 127.0.0.1` names the only peer whose
+`X-Forwarded-For` uvicorn believes about who the client is; given on the
+command line, it overrides a `FORWARDED_ALLOW_IPS=*` left in the
+environment, which would let any peer claim to be this machine.
+
+The UI has **no authentication**. It serves only this machine: a request
+from any other address is refused (403), and so is one naming a host other
+than `localhost`, `127.0.0.1` or `[::1]` (400), so a web page on some other
+name that re-resolves to your machine (DNS rebinding) cannot read a case or
+post a tick. Leave uvicorn on its default loopback address. To use the
+console from another machine, forward the port over SSH and open
+`http://127.0.0.1:8000/review` there:
+
+```
+ssh -L 8000:127.0.0.1:8000 <this machine>
+```
+
+Anything that changes something (a tick, the impact form, a report's first
+view, which builds and stamps it) is refused (403) to a page that is not
+this UI's own, as its `Sec-Fetch-Site` or `Origin` header says; a request
+with neither is not from a browser page (`curl` on this machine) and is
+accepted. That guard protects only a UI no other machine can reach:
+browsers send no `Sec-Fetch-*` to a plain-http origin that is not loopback,
+and a request from another machine can simply leave the headers out.
+
+Only behind a proxy that authenticates (and serves TLS): set
+`FQE_WEB_ALLOW_REMOTE=1` to serve clients other than this machine, and
+`FQE_WEB_ALLOWED_HOSTS` to the name(s) the proxy is reached by,
+comma-separated, without ports (a port is ignored). A proxy on this machine
+that sends `X-Forwarded-For` (nginx, Caddy and Traefik do by default) is
+not "this machine" either: uvicorn reports the forwarded address as the
+client, so it too needs `FQE_WEB_ALLOW_REMOTE=1` (and must authenticate),
+or uvicorn started with `--no-proxy-headers`. The list REPLACES the
+default, so name `127.0.0.1` too if you still open it locally. An entry
+that is not a host name (`*`, a space, a trailing dot, a non-ASCII name not
+in its `xn--` form, a number that is not an IP address) is named once in
+the server log; pages opened by a loopback name then answer 500, any other
+name 400. The proxy must pass the browser's
+`Host` header and scheme through unchanged: one that rewrites `Host`, or
+serves https while the UI sees http, makes every browser POST fail the
+`Origin` check (403: it fails closed).
+
+**The board** (`/review`) lists every watchlist name (the case of its pinned
+entry) and every journal entry with a live or pending report, read-only:
+
+- *no report yet* — nothing published for the case; *no journal entry
+  pinned* — a watch without a thesis, whose print takes the auto track
+  (`reports/auto/`), which the console does not review;
+- *report live* — the live run's generation id and when it was built;
+- *pending its audit* — `journal.py report --defer-mark` published it and the
+  sweep owns its audit and stamp; *published, not stamped* — the stamp
+  failed after the publish (the refusal and the `mark-reported --generation`
+  command are the report page's, above);
+- *stamped reported* — the entry's `reported` stamp; *entry not stamped* —
+  none yet;
+- *audit matches* / *stale audit* — an audit of this run, or one beside it
+  that names another run (never shown as this run's);
+- *N / M rows reconciled* — ticks recorded for the live run, out of its
+  ledger rows that name a filing.
+
+**A case** (`/review/<T>?date=<day>`) shows the live run's report, its
+evidence ledger as a reconciliation table and its audit, all read from ONE
+generation (`report_files.read_live`). Each row is a ledger item with its
+filings: accession, form, filed date, concept, period and value as filed,
+and its change state and note (e.g. "reads revised input(s)"). An accession
+links to its folder on EDGAR only when the ledger carries the company's CIK
+(its `cik`, recorded from the run's resolved CIK; withheld when any payload
+— the companyfacts payload, the filing index — names a different one; in a
+ledger written before the field, only an offering's document link carries
+one); otherwise it is text, never a guessed link. Those payloads were all
+fetched by that one resolution, so their agreement is a consistency check,
+not independent corroboration. When the CIK is withheld, the ledger's
+`cik_note` says what each source gave and the case page shows it; offering
+rows keep their document links, built with the CIK their filing index was
+checked against. Items resting on other items, and claims the
+ledger could not source ("no document to check against"), are listed apart.
+A ledger beside the report that names another run is said, and no table is
+built from it.
+
+**Ticks.** Each row takes *reconciled* or *disputed* and a note; setting it back to
+*unchecked* removes its tick.
+They are kept in `journal/reviews/<T>_<day>.review.json` (private, beside the
+entries), written whole under a lock, and every tick is bound to the run's
+generation id and the row's id. A rebuild is a new run: its rows start
+unchecked, and the page says how many ticks were recorded for the earlier
+run (restoring that run brings them back). A tick is written with the
+case's publish lock held, so it always lands on the run live when it is
+written: a tick for a run rebuilt since the page was loaded is refused
+(409), reload and check the live run; a rebuild that finishes while a tick
+is being written waits the moment the write takes, then goes live.
+Setting an untouched row to *unchecked* writes nothing. Export the
+case for the shadow-run log from its page (CSV or Markdown,
+`/review/<T>/export?date=<day>&format=md`).
 
 ## Rehearsing
 
@@ -195,6 +335,40 @@ brief need that cron does not provide:
   On a Mac that sleeps, prefer a launchd LaunchAgent over cron: it runs in
   your login session and catches up after a missed hour; cron skips it.
 
+**Preflight.** `scripts/preflight.py` checks all of the above from the
+checkout the season runs from, and says what to fix:
+
+```
+.venv/bin/python scripts/preflight.py --expect <pinned sha>   # offline
+.venv/bin/python scripts/preflight.py --expect <pinned sha> --live --claude-login
+```
+
+It checks the Python version, the engine commit (`--expect` fails unless the
+checkout is exactly that commit with no changes to the engine code),
+`EDGAR_IDENTITY`, the CLI a scheduler would find (under `/usr/bin:/bin`, not
+your shell's PATH), the portfolio and watchlist (rows that can never fire,
+past hints, names with no linked thesis), whether `journal/watchlist.json`
+now differs from the commit (after `sync` it names your holdings: do not
+commit it), and whether an hourly sweep is installed. `--live` makes one
+EDGAR request and `--claude-login` makes one headless run (paid); neither
+happens without the flag. Exit 1 means something would fail on print night.
+
+`scripts/preflight.py launchd` prints a LaunchAgent that runs the hourly
+sweep from this checkout with a scheduler-shaped environment. It is printed,
+never installed:
+
+```
+.venv/bin/python scripts/preflight.py launchd \
+  > ~/Library/LaunchAgents/com.financial-quality-engine.watch-sweep.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.financial-quality-engine.watch-sweep.plist
+```
+
+**Which code built a report.** Every published report states the engine
+commit on the line above its `- Generation:` line, and its ledger carries
+the same string as `engine_commit`: `<sha> (clean checkout)`, or `<sha> +
+uncommitted changes to the engine code` when the checkout was edited. A copy
+without `.git` states `FQE_ENGINE_COMMIT` if set, and says so.
+
 Per pass, in order:
 
 1. **Sync** (`--portfolio`): any holding not yet watched is armed exactly as
@@ -215,6 +389,30 @@ Per pass, in order:
    under `reports/briefs/.pending/`, and every later pass retries it first —
    so a season-long fault (no CLI on the scheduler's PATH, an expired login)
    shows up as a run of 5s, never as a quiet season without briefs.
+
+   The queue holds one small text file per **event**, not per ticker:
+   `<TICKER>__print-night` for a print-night brief, `<TICKER>__<report
+   stem>` (e.g. `NVDA__NVDA_2026-11-19`) for a full one. Each is a target
+   line (`-` or the report's path), `attempts=N`, and `alerted=<day>` once
+   an exhausted entry has notified. A print-night entry that has given up
+   also carries `gave_up=<day>` and `accession=<8-K>` (see below). A brief that succeeds clears only its
+   own event's file — plus the print-night file when it is the full brief
+   (the 10-Q rebuild is the print-night brief's second chance). A failure
+   writes only its own event's file. So a full brief that has failed six
+   times and is kept (see below) keeps saying so every day through the next
+   quarter: the next quarter's briefs neither delete it nor wait behind it.
+   A full brief that keeps failing is retried six times, then kept, not
+   retried, and notified once a day until you act (run the `earnings_brief.py
+   build` line the log gives you, or delete the file to silence it).
+
+   Each file is written whole (temporary file, then rename). A file that
+   still does not parse — an empty one, a truncated path, a hand edit — is
+   named on stderr, deleted, and makes that pass exit 5: whatever it held is
+   no longer queued, so check the print's brief. It never holds back a
+   print-night brief. A queue from before this change has bare `<TICKER>`
+   files; they are still read and honoured, and each moves to its per-event
+   name the next time its entry is written, or goes when its brief
+   succeeds. Nothing needs doing by hand.
 4. **Re-arm** — once an event completes (exit 0 on either track, or a skip),
    the row is rewritten for the NEXT quarter from the issuer's history: new
    baseline accession (the filing just consumed), next expected period, next
@@ -262,6 +460,64 @@ never a second generate+audit of the same print. A sweep holds the lock for
 its whole pass, so during a multi-name earnings night a manual `poll` may
 wait for several audits.
 
+No second report is built over one entry's report while it is in use:
+`journal.py report`, the web UI's report page and `journal.py mark-reported`
+hold the entry's report lock (`journal/entries/.<T>_<day>.md.report.lock`)
+from the "not reported yet" check to the `reported` stamp (`--defer-mark`:
+to the publish). A second `journal.py report` of the same entry waits for
+the first and, once that one has stamped, refuses ("already generated",
+exit 1) before building or publishing anything. Before this (Hermes audit
+of 424b0b4, finding 3b) both built and published, and the second's report
+was live though its command failed.
+
+A deferred report (the sweep's `report --defer-mark`) stamps nothing, so
+the case stays retryable, but between its publish and the sweep's
+`mark-reported` the report is being audited: the command leaves the entry
+PENDING (`journal/entries/.<T>_<day>.md.report.pending`, which says when,
+and which run OWNS it: the sweep or poll that will audit and stamp it — its
+pid and host, and the sweep lock it holds — not the short-lived
+`journal.py` child, which exits as soon as it has published). While it is
+there a plain `journal.py report` and the web report page refuse (exit 1 /
+HTTP 409, saying the report is "pending (being audited by the sweep, or
+left by an interrupted run)", naming its owner and both ways out);
+`mark-reported` removes it once it has stamped. Every way a sweep pass ends
+either stamps (audit passed, or ABANDONED: exit 7 still completes the case)
+or leaves the case retryable and pending (exit 4, the audit failed, or the
+child did not say which report it published; exit 8, a publish in doubt,
+whose new run may be live and was never audited; exit 9, published but the
+child could not write which run, so it was never audited; or a sweep killed
+part way). The sweep's next pass retries it (`--defer-mark`
+again, which takes the marker over: its owner, the earlier pass, is gone).
+
+If you give up on a pending case by hand, first check the owner the refusal
+names. While it may still be at work — its pid running on this host, or
+the sweep lock (`journal/sweep.lock`) held by any sweep or poll — a
+`--retry` (and a `--defer-mark` run by hand) is refused: rebuilding would
+publish over the report being audited. Once it is gone, either stamp the
+report that was audited, `journal.py mark-reported <T> --date <day>
+--generation <id>` (the refusal names the id when the marker records it), or
+rebuild it on purpose, `journal.py report <T> --date <day> --retry` (built
+and stamped as a plain report). Only if you are sure the owner is not
+auditing this report (a pid reused by another process, an owner on another
+host, a marker that does not say who owns it — a symlink or anything but a
+plain file there counts as pending), `--retry --force`. A deferred report
+whose build fails (nothing published) makes nothing pending that was not
+pending before. Before this, the marker named the `journal.py` child, dead
+throughout the audit, so it looked stale and `--retry` published over the
+run being audited (review of the pending marker).
+
+A plain `journal.py report` or the web report page whose stamp fails after
+the publish (exit `9`, or the page's 500) leaves the entry pending too, with
+a marker of its own kind ("published, not stamped", recording the run).
+Nobody audits that run and nobody is at work on it, whoever wrote the marker
+(the web page's writer is the server, running for good): a plain `report`
+and the page refuse, naming `journal.py mark-reported <T> --date <day>
+--generation <id>`, which stamps the published run; `journal.py report <T>
+--date <day> --retry` rebuilds it without `--force`, the new run replacing it
+as the live one (it stays, an earlier generation). If another writer stamped
+a v2 entry while its report was built (a hand edit), `report` keeps that
+stamp, says so, leaves nothing pending and exits `0`.
+
 Check `journal/watch.log` afterwards. Exit 2 in that log means `--no-auto`
 was set and a filing landed with no thesis on file.
 
@@ -279,7 +535,17 @@ date within 14 days of the 8-K means build one. A failed print-night brief
 is queued and retried like any other (exit 5) — but never in the pass that
 is about to rebuild it with the engine report anyway, and at most six times
 (the 10-Q rebuild is its second chance; an hourly paid run for weeks is
-not). Amended 8-Ks (8-K/A) never count as the print, so a corrected exhibit
+not). After the sixth failure it **gives up**: the entry stays in the
+queue, marked `gave_up=<day>` with the 8-K's `accession=`. It is not
+retried or rebuilt for that 8-K, and it is reported once (exit 5). It goes
+when that print's full brief succeeds. A newer earnings 8-K is a new print:
+the given-up entry is cleared and the new print's brief starts a fresh
+count. The 8-K pass stays quiet only while a brief of **this** print is
+queued: the print-night entry, or a full brief whose report was generated
+on or after the 8-K and which is still being retried. An older quarter's
+kept entry does not hold it back. Nor does this print's own full brief
+once it has failed six times: then the print-night brief is the fallback,
+under its own cap. Amended 8-Ks (8-K/A) never count as the print, so a corrected exhibit
 days later cannot move the brief to a second file; the prior-quarter guide
 must be at least 45 days older than the print, so a preliminary-results
 8-K is never mistaken for last quarter's release. Two earnings 8-Ks within
@@ -287,9 +553,21 @@ the window (Boeing's preliminary-then-final pattern) each get a brief; if
 they share a day, the print-night brief is rebuilt from the newer one.
 
 Each brief records how it was built in `reports/briefs/<T>/<date>/built.json`
-(`kind`: `print-night` or `full`, the 8-K accession, the report path). A
-print-night build never downgrades a brief that already carries the engine
-findings — a queued retry or a stray `--no-report` by hand is a no-op then.
+(`kind`: `print-night` or `full`, the 8-K accession, the report path, and
+`brief_sha256`, the hash of the brief file it describes). A print-night
+build never downgrades a brief that already carries the engine findings — a
+queued retry or a stray `--no-report` by hand is a no-op then. The brief,
+its `assessment.json` and `built.json` are each written whole, in that
+order, with the record last. A build killed part way can therefore leave a
+new brief beside an old record, and that record's hash no longer matches.
+A record that does not match its brief, or names no hash (one written
+before this change), counts as **no record**, and a brief with no record
+is treated as full: it is never rebuilt without the engine findings (the
+8-K pass leaves it alone, `--no-report` refuses). The next full build
+writes a matching record. Editing a brief by hand, flipping `useful:`
+included, changes its hash in the same way. A print-night brief you have
+edited is therefore not rebuilt from a same-day second 8-K. The 10-Q
+rebuild still replaces it and keeps your `useful:` value.
 
 Two deliberate limits: `poll` is the 10-Q track only (on print night, run
 `earnings_brief.py build TICKER --no-report` by hand if you are at the

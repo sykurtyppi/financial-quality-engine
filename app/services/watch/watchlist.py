@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 from app.services.journal import store
 
@@ -106,7 +107,7 @@ def parse_watch(raw: dict) -> Watch:
         raise WatchlistError(f"invalid ticker in watchlist: {e}") from e
 
     forms_raw = raw.get("forms", DEFAULT_FORMS)
-    if isinstance(forms_raw, str) or not all(isinstance(f, str) for f in forms_raw):
+    if not isinstance(forms_raw, (list, tuple)) or not all(isinstance(f, str) for f in forms_raw):
         raise WatchlistError(f"{ticker}: forms must be a list of strings, got {forms_raw!r}")
     forms = tuple(f.strip().upper() for f in forms_raw if f.strip())
     if not forms:
@@ -152,16 +153,26 @@ def parse_watch(raw: dict) -> Watch:
     )
 
 
+def _read(p: Path) -> Any:
+    """The watchlist file's JSON, or `WatchlistError` for anything that is
+    not (text that is not UTF-8 or not JSON, or nesting too deep to parse):
+    every reader and writer refuses it the same way (review of 68dbc24,
+    N-2: the writers took a deep document as a RecursionError traceback)."""
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except ValueError as e:  # not JSON, not UTF-8, or a number too long to read (N-1)
+        raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+    except RecursionError as e:
+        raise WatchlistError(f"{p}: nested too deeply to be a watchlist") from e
+
+
 def load(path: Path | None = None) -> list[Watch]:
     """Read the watchlist. A missing file is an empty watchlist, not an error —
     the poller is opt-in and should not crash a cron job before setup."""
     p = path or WATCHLIST
     if not p.exists():
         return []
-    try:
-        data = json.loads(p.read_text())
-    except json.JSONDecodeError as e:
-        raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+    data = _read(p)
 
     items = data.get("watchlist") if isinstance(data, dict) else data
     if not isinstance(items, list):
@@ -191,12 +202,18 @@ def _write_lock(p: Path):
     NFS mounts, so do not host ``journal/`` on one and expect this guarantee.
     """
     lock_path = p.with_name(p.name + ".lock")
-    with open(lock_path, "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    # Neither truncated nor followed: `open(lock_path, "w")` emptied the file
+    # a symlink planted at this name pointed to; a link now fails (ELOOP)
+    # before anything is written (Hermes audit of 424b0b4, finding 5).
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def add_entry(raw: dict, path: Path | None = None) -> Watch:
@@ -211,10 +228,7 @@ def add_entry(raw: dict, path: Path | None = None) -> Watch:
     p = path or WATCHLIST
     with _write_lock(p):
         if p.exists():
-            try:
-                data = json.loads(p.read_text())
-            except json.JSONDecodeError as e:
-                raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+            data = _read(p)
             if isinstance(data, list):
                 data = {"watchlist": data}
         else:
@@ -235,7 +249,9 @@ def _atomic_write(p: Path, data: dict) -> None:
     cron job reads half-written."""
     fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as fh:
+        # UTF-8, as it is read (`_read`), whatever the locale (review of
+        # eeb1e51, L-1: a latin-1 locale wrote a note the sweep then refused).
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         os.replace(tmp, p)
     except BaseException:
@@ -254,10 +270,7 @@ def update_entry(ticker: str, updates: dict, path: Path | None = None) -> Watch:
     if not p.exists():
         raise WatchlistError(f"{p}: no watchlist to update")
     with _write_lock(p):
-        try:
-            data = json.loads(p.read_text())
-        except json.JSONDecodeError as e:
-            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+        data = _read(p)
         if isinstance(data, list):
             data = {"watchlist": data}
         items = data.setdefault("watchlist", [])
@@ -286,10 +299,7 @@ def remove_entry(ticker: str, path: Path | None = None) -> None:
     if not p.exists():
         raise WatchlistError(f"{p}: no watchlist to update")
     with _write_lock(p):
-        try:
-            data = json.loads(p.read_text())
-        except json.JSONDecodeError as e:
-            raise WatchlistError(f"{p}: invalid JSON ({e})") from e
+        data = _read(p)
         if isinstance(data, list):
             data = {"watchlist": data}
         items = data.setdefault("watchlist", [])

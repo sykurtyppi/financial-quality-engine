@@ -7,11 +7,47 @@ period type (91 for quarters, 365 for fiscal years).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import date
+
 from app.schemas.financials import PeriodFinancials, PeriodType
 from app.schemas.metrics import MetricResult, MetricStatus
 from app.services.formulas.base import (
     build_metric, contributor_note, growth, non_finite, stale_current,
 )
+
+# "The same quarter a year earlier" is checked by date, never by position:
+# four periods back is a year back only when no period is missing between
+# (Hermes finding 5). Accepts 52/53-week fiscal years; rejects a mislabeled
+# or skipped year. Defined here and imported by `registry` (its year-ago
+# rule), which imports this module — so the series formulas share the rule
+# without a circular import.
+MIN_YEAR_GAP_DAYS = 330
+MAX_YEAR_GAP_DAYS = 400
+
+
+def a_year_apart(earlier: date, later: date) -> bool:
+    return MIN_YEAR_GAP_DAYS <= (later - earlier).days <= MAX_YEAR_GAP_DAYS
+
+
+def quarterly(periods: Sequence[PeriodFinancials]) -> bool:
+    """Whether "four periods back" should mean "a year back": only for
+    quarters. Four fiscal years back is four years back, and the day rule
+    would refuse every annual comparison."""
+    return bool(periods) and all(p.period_type is PeriodType.QUARTER for p in periods)
+
+
+def same_quarter_priors(ends: Sequence[date]) -> list[int]:
+    """Indices of the same fiscal quarter in prior years, newest first: every
+    4th entry back from the last, while each step spans a year. The walk
+    stops at the first step that does not — past a missing year the stride
+    lands on a different quarter, or a year too far back."""
+    out: list[int] = []
+    k = len(ends) - 1
+    while k >= 4 and a_year_apart(ends[k - 4], ends[k]):
+        k -= 4
+        out.append(k)
+    return out
 
 
 def _days(p: PeriodFinancials) -> float:
@@ -137,14 +173,23 @@ def working_capital_swing_to_income(cur: PeriodFinancials, prev: PeriodFinancial
     )
 
 
-def seasonal_trend_change(name: str, series: list[MetricResult]) -> MetricResult:
+def seasonal_trend_change(
+    name: str, series: list[MetricResult], ends: Sequence[date] | None = None
+) -> MetricResult:
     """Latest OK value minus the mean of SAME-FISCAL-QUARTER prior observations
-    (positional stride of 4 through the per-period series).
+    (stride of 4 back through the per-period series).
 
     Day-count levels (DSO/DIO) are strongly seasonal; comparing the latest
     value to an unconditional trailing mean fabricates deterioration at every
     seasonal peak (roadmap P0-B, the MSFT June-quarter receivables class).
+
+    `ends` — each entry's period end — confines the priors to those a year
+    apart all the way back (`same_quarter_priors`): without it, a history
+    missing a year compared FY2026Q1 with FY2023Q1 as a "prior year". The
+    registry always passes it; without it the stride is positional.
     """
+    if ends is not None and len(ends) != len(series):
+        raise ValueError(f"{name}: {len(series)} entries but {len(ends)} period ends")
     label = series[-1].fiscal_label if series else "n/a"
     formula = "latest - mean(same fiscal quarter, prior years)"
     if (
@@ -160,7 +205,8 @@ def seasonal_trend_change(name: str, series: list[MetricResult]) -> MetricResult
             missing_fields=["latest value"],
         )
     latest = series[-1]
-    priors = [series[i] for i in range(len(series) - 5, -1, -4)]
+    back = range(len(series) - 5, -1, -4) if ends is None else same_quarter_priors(ends)
+    priors = [series[i] for i in back]
     priors_ok = [m for m in priors if m.status is MetricStatus.OK and m.value is not None]
     if not priors_ok:
         return MetricResult(

@@ -35,6 +35,23 @@ class DatasetSnapshot:
     company_facts: dict
 
 
+class ScoredSnapshotUnmappable(RuntimeError):
+    """The mapper tripped (TypeError / AttributeError / KeyError) on a stored
+    snapshot a report scored, during a historical replay. The mapper built
+    that payload when the report scored it, so this is a defect, not a data
+    gap, and it is not passed over — but a bare traceback named neither the
+    snapshot nor the way out (review of 626ca1b, finding 2). Not a
+    ValueError, so no caller reads it as an unmappable payload."""
+
+    def __init__(self, path: Path, captured: str, kind: str, cause: BaseException):
+        self.path, self.captured, self.kind, self.cause = path, captured, kind, cause
+        super().__init__(
+            f"mapper defect on a snapshot a report scored: {path} (captured {captured}, kind "
+            f"{kind}): {type(cause).__name__}: {cause}; move it aside to replay from an "
+            "older state"
+        )
+
+
 def fetch_submissions_snapshot(ticker: str, client: SecClient) -> dict | None:
     """Read the filing index once for a whole report, or return None.
 
@@ -125,34 +142,93 @@ def replay_snapshot(
     """The fundamentals a reader on `as_of` could have had, and a line saying
     where they came from.
 
-    Preferred: the newest companyfacts snapshot the vintage store captured on
-    or before that day — what was actually knowable then, including values the
+    Preferred: a companyfacts snapshot the vintage store captured on or
+    before that day (which one: below) — what was actually knowable then, including values the
     filer has since revised in place. Otherwise today's payload, cut to facts
     filed on or before the day: that undoes later filings but not a value
     revised without a new filing date, and the line says so. Either way the
     mapper applies the same cut (`build_dataset(as_of=)`).
+
+    Which stored snapshot (review of 224b896, finding 1): the newest one a
+    report scored (or one of unrecorded kind — stored before kinds were
+    recorded, or under a manifest rebuilt from disk — which the line says
+    nothing marks as scored), falling back to
+    the newest raw capture only when none of those maps. Taking the newest
+    observation of any kind scored a watch-sweep capture — possibly partial,
+    mapped with fields missing — and a bare one failed the whole replay as
+    unmappable though an earlier scored state was stored. A snapshot that
+    cannot be read or mapped is passed over; the line says which kind was
+    used and what newer was not, and the log says why each was passed over.
+    A snapshot a report scored was built by the mapper already, so only an
+    unreadable or unmappable one is passed over: a TypeError / AttributeError
+    / KeyError there is a mapper defect and raises (review of c131583,
+    finding 3), as `ScoredSnapshotUnmappable`, naming the snapshot.
     """
     from app.services.ingestion.vintages import (
+        RAW,
+        SCORED,
+        UNREADABLE,
+        UNUSABLE,
         load_vintage,
-        observation_at_or_before,
         observed_vintages,
     )
 
     cik = client.resolve_cik(ticker)
-    stored = observation_at_or_before(observed_vintages(cik, root), as_of)
-    if stored is not None:
-        facts = load_vintage(stored.path)
+    visible = [s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of]
+    # Indices, not states: one content observed twice on one day is two
+    # equal observations, and "newer" is by position.
+    newest_first = range(len(visible) - 1, -1, -1)
+    failed: set[Path] = set()
+    for i in [i for i in newest_first if visible[i].kind != RAW] + [
+        i for i in newest_first if visible[i].kind == RAW
+    ]:
+        stored = visible[i]
+        if stored.path in failed:
+            continue
+        skippable = UNREADABLE if stored.kind == SCORED else UNUSABLE
+        try:
+            facts = load_vintage(stored.path)
+            dataset, diagnostics = build_dataset(
+                facts, ticker=ticker, n_quarters=n_quarters, sector=sector, as_of=as_of
+            )
+        except skippable as e:
+            logger.warning("replay %s as of %s: vintage snapshot %s (captured %s, kind %s) "
+                           "passed over: %s: %s", ticker, as_of, stored.path.name,
+                           stored.captured, stored.kind or "unrecorded", type(e).__name__, e)
+            failed.add(stored.path)
+            continue
+        except UNUSABLE as e:
+            # Only a SCORED state reaches here (every other kind skips
+            # UNUSABLE): a mapper defect on a payload a report scored.
+            raise ScoredSnapshotUnmappable(stored.path, stored.captured, SCORED, e) from e
+        kind = (
+            "scored by a report" if stored.kind == SCORED
+            else "a raw watch-sweep capture: no snapshot a report scored by then maps"
+            if stored.kind == RAW
+            else "of unrecorded kind (manifest rebuilt or written before kinds): nothing "
+            "says a report scored it"
+        )
         source = (
             f"the vintage snapshot captured {stored.captured} "
-            f"(sha {stored.sha256[:12]}), cut to facts filed on or before {as_of}"
+            f"(sha {stored.sha256[:12]}; {kind}), cut to facts filed on or before {as_of}"
         )
-    else:
-        facts = client.company_facts(ticker)
-        source = (
-            f"today's companyfacts cut to facts filed on or before {as_of} — no "
-            "snapshot that old is stored, so a value the filer revised in place "
-            "since then shows as revised"
-        )
+        newer = visible[i + 1:]
+        if newer:
+            bad = sum(s.path in failed for s in newer)
+            raw = sum(s.kind == RAW and s.path not in failed for s in newer)
+            parts = [f"{raw} raw capture(s)" if raw else "", f"{bad} not mappable" if bad else ""]
+            source += (f"; {len(newer)} newer stored snapshot(s) by then not used "
+                       f"({', '.join(p for p in parts if p)})")
+        return DatasetSnapshot(dataset, diagnostics, facts), source
+    facts = client.company_facts(ticker)
+    stored_note = (
+        f"no snapshot stored by then can be mapped ({len(visible)} stored)" if visible
+        else "no snapshot that old is stored"
+    )
+    source = (
+        f"today's companyfacts cut to facts filed on or before {as_of} — {stored_note}, "
+        "so a value the filer revised in place since then shows as revised"
+    )
     dataset, diagnostics = build_dataset(
         facts, ticker=ticker, n_quarters=n_quarters, sector=sector, as_of=as_of
     )

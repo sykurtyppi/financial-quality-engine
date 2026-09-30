@@ -64,17 +64,22 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_restatement_scan.py", "tests/unit/test_properties_restatements.py",
         "tests/unit/test_debt_composition.py", "tests/unit/test_series_selection.py",
         "tests/unit/test_restatement_scan_truth.py", "tests/unit/test_same_day_precedence.py",
-        "tests/unit/test_payload_fuzz.py",
+        "tests/unit/test_payload_fuzz.py", "tests/unit/test_tag_switch_fallback.py",
+        "tests/unit/test_restatement_scan_reads_what_was_scored.py",
     )),
     Target("app/services/ingestion/companyfacts_mapper.py", (
         "tests/unit/test_companyfacts_mapper.py", "tests/unit/test_coherent_derivation.py",
         "tests/unit/test_same_day_precedence.py", "tests/unit/test_provenance.py",
         "tests/integration/test_selection_snapshot.py", "tests/unit/test_build_dataset_as_of.py",
+        "tests/unit/test_tag_switch_fallback.py",
     )),
     Target("app/services/ingestion/vintages.py", (
         "tests/unit/test_vintages.py", "tests/unit/test_vintage_composed.py",
         "tests/unit/test_vintage_diff_report.py", "tests/unit/test_replay.py",
         "tests/unit/test_pit_agreement.py", "tests/unit/test_vintage_capture_from_reports.py",
+        "tests/unit/test_vintage_amendment.py", "tests/unit/test_tag_switch_fallback.py",
+        "tests/unit/test_vintage_cli.py", "tests/unit/test_vintage_states.py",
+        "tests/unit/test_symlink_containment.py",
     )),
     Target("app/services/backtesting/pit.py", (
         "tests/unit/test_pit_agreement.py", "tests/unit/test_build_dataset_as_of.py",
@@ -90,12 +95,24 @@ TARGETS: tuple[Target, ...] = (
     )),
     Target("app/services/ingestion/selection.py", (
         "tests/unit/test_series_selection.py", "tests/unit/test_debt_composition.py",
+        "tests/unit/test_tag_switch_fallback.py",
     )),
     Target("app/core/pipeline.py", (
         "tests/unit/test_distress_flags.py", "tests/integration/test_pipeline.py",
         "tests/integration/test_golden_report.py",
         "tests/unit/test_properties_engine.py",
     ), function="_generate_flags"),
+    Target("app/services/provenance.py", (
+        "tests/unit/test_provenance.py", "tests/unit/test_series_provenance.py",
+        "tests/unit/test_ledger.py", "tests/unit/test_journal_resolver.py",
+    )),
+    Target("app/services/reporting/revised_inputs.py", (
+        "tests/unit/test_revised_inputs.py",
+    )),
+    Target("app/services/reporting/report_files.py", (
+        "tests/unit/test_report_files.py", "tests/unit/test_earnings_brief.py",
+        "tests/unit/test_watch_cli.py", "tests/unit/test_symlink_containment.py",
+    )),
     Target("app/services/journal/resolver.py", (
         "tests/unit/test_journal_resolver.py", "tests/unit/test_assumption_vocabulary.py",
         "tests/unit/test_properties_engine.py",
@@ -359,6 +376,14 @@ def run_tests(workspace: Path, tests: tuple[str, ...], timeout: float) -> str:
     return "pass" if proc.returncode == 0 else "fail"
 
 
+def shown_rate(rate: float) -> str:
+    """A kill rate as printed: one decimal, never rounded up to 100% while a
+    mutant survived (the complete run of ace7cd8 printed 761/763 as "100%"
+    beside its two survivors)."""
+    text = f"{rate:.1%}"
+    return ">99.9%" if rate < 1 and text == "100.0%" else text
+
+
 @dataclass
 class Report:
     killed: list[Mutant] = field(default_factory=list)
@@ -383,7 +408,7 @@ class Report:
 
     def markdown(self, seed: int) -> str:
         rate = self.kill_rate
-        shown = f"**{rate:.0%}**" if rate is not None else "**n/a — no mutant ran**"
+        shown = f"**{shown_rate(rate)}**" if rate is not None else "**n/a — no mutant ran**"
         lines = [
             "## Mutation run",
             "",
@@ -569,7 +594,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no mutant ran; the floor {args.floor:.0%} cannot be met")
             return 1
         if rate < args.floor:
-            print(f"kill rate {rate:.0%} below the floor {args.floor:.0%}")
+            print(f"kill rate {shown_rate(rate)} below the floor {args.floor:.0%}")
             return 1
     return 0
 

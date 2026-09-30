@@ -90,7 +90,7 @@ def test_distress_scored_components_now_reach_the_card():
     for name in DISTRESS_METRICS:
         detail = flags[name].detail
         assert detail.startswith(f"{name} undefined — ")
-        assert "scored at this metric's maximum because the denominator itself signals distress" in detail
+        assert "scored at this metric's maximum concern because the denominator itself signals distress" in detail
         assert "None" not in detail and "nan" not in detail.lower()
         assert flags[name].severity == "red"
         assert flags[name].fiscal_label == distress[name].fiscal_label

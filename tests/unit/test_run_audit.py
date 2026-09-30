@@ -58,7 +58,7 @@ def test_invokes_the_resolved_cli_path_not_a_bare_name(tmp_path, monkeypatch):
     assert seen["argv"][:2] == ["/opt/claude/bin/claude", "-p"]
 
 
-def test_nonzero_exit_fails_without_writing(tmp_path, monkeypatch):
+def test_nonzero_exit_fails_without_writing(tmp_path, monkeypatch, capsys):
     report = tmp_path / "KTOS_2026-07-31.md"
     report.write_text("# report")
     monkeypatch.setattr(
@@ -67,6 +67,7 @@ def test_nonzero_exit_fails_without_writing(tmp_path, monkeypatch):
     )
     assert run_audit.run_audit(report) == 1
     assert not (tmp_path / "KTOS_2026-07-31_audit.md").exists()
+    assert "boom" in capsys.readouterr().err  # the CLI's own error, passed on
 
 
 def test_timeout_fails_cleanly(tmp_path, monkeypatch):
@@ -93,3 +94,144 @@ def test_missing_claude_cli_fails_cleanly(tmp_path, monkeypatch):
 
 def test_missing_report_refuses(tmp_path):
     assert run_audit.run_audit(tmp_path / "nope.md") == 1
+
+
+# --- Hermes deep audit, finding 1: an audit belongs to one report generation ------
+
+
+def _published(tmp_path, tag):
+    from app.services.reporting.report_files import replacing
+
+    report = tmp_path / "KTOS_2026-07-31.md"
+    with replacing(report) as staged:
+        staged.ledger.write_text("{}")
+        staged.report.write_text(f"# {tag} report")
+    return report, staged.generation_id
+
+
+def test_the_audit_goes_into_the_generation_it_read(tmp_path, monkeypatch):
+    from app.services.reporting.report_files import current_generation, read_live
+
+    report, gid = _published(tmp_path, "first")
+    seen = {}
+
+    def audit(argv, **k):
+        seen["prompt"] = argv[-1]
+        return SimpleNamespace(returncode=0, stdout="AUDIT TEXT", stderr="")
+
+    monkeypatch.setattr(run_audit.subprocess, "run", audit)
+    assert run_audit.run_audit(report) == 0
+    gen = current_generation(report)
+    # The auditor reads the pinned file, not the live name a rebuild can move.
+    assert str(gen / "KTOS_2026-07-31.md") in seen["prompt"]
+    kept = gen / "KTOS_2026-07-31_audit.md"
+    assert kept.read_text() == f"<!-- generation: {gid} -->\n\nAUDIT TEXT"
+    assert read_live(report).audit == kept
+    assert (tmp_path / "KTOS_2026-07-31_audit.md").read_text() == kept.read_text()
+
+
+def test_a_report_rebuilt_during_the_audit_does_not_get_it(tmp_path, monkeypatch, capsys):
+    """The audit (up to 30 minutes) read one run; a rebuild published another
+    meanwhile. The audit stays with the run it read and exits 1, so the live
+    run is audited too; it never sits beside the new report."""
+    from app.services.reporting.report_files import current_generation
+
+    report, gid = _published(tmp_path, "first")
+    first = current_generation(report)
+
+    def audit_while_rebuilt(*a, **k):
+        _published(tmp_path, "second")
+        return SimpleNamespace(returncode=0, stdout="AUDIT OF THE FIRST RUN", stderr="")
+
+    monkeypatch.setattr(run_audit.subprocess, "run", audit_while_rebuilt)
+    assert run_audit.run_audit(report) == 1
+    assert not (tmp_path / "KTOS_2026-07-31_audit.md").exists()
+    assert (first / "KTOS_2026-07-31_audit.md").read_text().endswith("AUDIT OF THE FIRST RUN")
+    assert "rebuilt, set aside or restored while the audit ran" in capsys.readouterr().err
+    staging = tmp_path / ".staging"
+    assert [p for p in staging.iterdir() if p.suffix != ".lock"] == []
+
+
+def test_a_failed_audit_write_leaves_no_temporary_file(tmp_path, monkeypatch):
+    import app.services.reporting.report_files as rf
+
+    report, _gid = _published(tmp_path, "first")
+    live = rf.read_live(report)
+
+    def full(src, dst):
+        raise OSError("ENOSPC")
+
+    monkeypatch.setattr(rf.os, "replace", full)
+    try:
+        run_audit.publish_audit(report, live, "AUDIT")
+    except OSError:
+        pass
+    monkeypatch.undo()
+    assert [p for p in tmp_path.rglob("*") if ".tmp" in p.name or "_audit" in p.name] == []
+
+
+def test_an_audit_of_a_report_set_aside_is_not_published(tmp_path, capsys):
+    """A report from before generations names none; set aside while its
+    audit ran, `None == None` published the audit beside no report."""
+    from app.services.reporting.report_files import read_live, set_aside
+
+    report = tmp_path / "KTOS_2026-07-31.md"
+    report.write_text("# report from before generations")
+    live = read_live(report)
+    set_aside(report)
+    assert run_audit.publish_audit(report, live, "AUDIT") == 1
+    assert not (tmp_path / "KTOS_2026-07-31_audit.md").exists()
+    assert "no longer the run it read" in capsys.readouterr().err
+
+
+def test_an_audit_of_files_from_before_generations_goes_beside_them(tmp_path, monkeypatch):
+    from app.services.reporting.report_files import read_live
+
+    report = tmp_path / "KTOS_2026-07-31.md"
+    report.write_text("# report from before generations")
+    monkeypatch.setattr(
+        run_audit.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="AUDIT", stderr=""),
+    )
+    assert run_audit.run_audit(report) == 0
+    assert (tmp_path / "KTOS_2026-07-31_audit.md").read_text() == "AUDIT"
+    assert read_live(report).audit == tmp_path / "KTOS_2026-07-31_audit.md"
+
+
+def test_an_audit_of_a_generation_path_creates_nothing_inside_it(tmp_path, monkeypatch):
+    """Review of #100: given a generation's own path, the audit took the
+    publish lock there and created `.staging/` inside the generation."""
+    import stat
+
+    from app.services.reporting.report_files import current_generation
+
+    report, gid = _published(tmp_path, "first")
+    gen = current_generation(report)
+    monkeypatch.setattr(
+        run_audit.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="AUDIT", stderr=""),
+    )
+    assert run_audit.run_audit(gen / "KTOS_2026-07-31.md") == 0
+    assert sorted(p.name for p in gen.iterdir()) == [
+        "KTOS_2026-07-31.ledger.json", "KTOS_2026-07-31.md", "KTOS_2026-07-31_audit.md"]
+    assert stat.S_IMODE((gen / "KTOS_2026-07-31_audit.md").stat().st_mode) == 0o444
+    assert (tmp_path / "KTOS_2026-07-31_audit.md").read_text().endswith("AUDIT")
+
+
+def test_an_audit_of_a_generation_no_longer_live_is_not_run(tmp_path, monkeypatch, capsys):
+    """Hermes re-audit of 84e65b0, finding 3: the sweep audits the generation
+    its own report command published, by that generation's path. Rebuilt
+    before the audit started, it is not the live run: the paid audit is not
+    run for it (review of 6563168) — exit 1, as the check after the audit
+    exits, so the live run is audited instead."""
+    from app.services.reporting.report_files import current_generation
+
+    report, _gid = _published(tmp_path, "first")
+    first = current_generation(report)
+    _published(tmp_path, "second")
+    ran = []
+    monkeypatch.setattr(run_audit.subprocess, "run", lambda *a, **k: ran.append(a))
+    assert run_audit.run_audit(first / "KTOS_2026-07-31.md") == 1
+    assert ran == []
+    assert not (first / "KTOS_2026-07-31_audit.md").exists()
+    assert "no audit run" in capsys.readouterr().err

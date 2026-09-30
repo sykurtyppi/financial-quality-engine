@@ -4,6 +4,7 @@ dropped; the report's entry points write the ledger beside the report."""
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -18,10 +19,20 @@ from app.schemas.ledger import (
     Provenance,
     ValidationStatus,
 )
+from app.schemas.report import MetricNarrativeMismatch, NarrativeEvidence
 from app.services.backtesting.events import fetch_entity_events
-from app.services.metrics_registry import BASIS, FINANCIAL_METRICS, SERIES_OF, Basis
-from app.services.narrative.evidence import NOT_LOCATED
+from app.services.ingestion.fields import FIELDS
+from app.services.metrics_registry import (
+    BASIS,
+    FIELD_WINDOWS,
+    FINANCIAL_METRICS,
+    SERIES_OF,
+    USABLE_CAPEX_INTENSITY,
+    Basis,
+)
+from app.services.narrative.evidence import NO_SOURCE_RECORDED, NOT_LOCATED
 from app.services.reporting.ledger import _cited, _id, build_ledger
+from app.services.reporting.report_files import generation_of
 from tests.fixtures.companies import stretch_dataset
 
 DAY = date(2026, 9, 22)
@@ -143,17 +154,153 @@ def test_validation_follows_the_cards_tiers():
     assert status[("narrative_evidence", "adjustment_recurrence")] is ValidationStatus.DIRECTIONAL
 
 
-def test_a_row_not_located_cites_its_periods_documents_and_says_so():
+def _two_documents_in_one_period():
+    """The golden run with a second document (B) in the FY2025Q4 period
+    beside its own (A): a row that names neither must not inherit either."""
     ds = _stretch_with_sources()
+    [a] = [d for d in ds.documents if d.fiscal_label == "FY2025Q4"]
+    a = a.model_copy(update=dict(source="8-K ACC-A EX-99.1", accession="ACC-A"))
+    b = a.model_copy(update=dict(source="10-Q ACC-B", accession="ACC-B", form="10-Q"))
+    ds.documents = [d for d in ds.documents if d.fiscal_label != "FY2025Q4"] + [a, b]
+    return ds
+
+
+def _with_row_source(ds, source: str, evidence_id: str = "NE-010"):
+    """The run's `evidence_id` row, alone and with `source`, and no mismatch."""
     result = analyze(ds)
-    row = result.narrative_evidence[0].model_copy(update=dict(source=NOT_LOCATED))
-    result = result.model_copy(update=dict(narrative_evidence=[row], mismatches=[]))
+    [row] = [r for r in result.narrative_evidence if r.evidence_id == evidence_id]
+    row = row.model_copy(update=dict(source=source))
+    return row, result.model_copy(update=dict(narrative_evidence=[row], mismatches=[]))
+
+
+@pytest.mark.parametrize("source", [
+    "missing source",
+    NOT_LOCATED,
+    NO_SOURCE_RECORDED,
+    "derived from FY2025Q4 documents (no source recorded)",
+])
+def test_a_row_naming_no_document_is_unsourced_not_given_its_periods_documents(source):
+    """Hermes deep audit: a row whose source names no document used to cite
+    every document of its period as ordinary filing provenance. It is now
+    listed as unsourced; the period's accessions appear only in the reason."""
+    ds = _two_documents_in_one_period()
+    row, result = _with_row_source(ds, source)
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    assert [i for i in doc.items if i.kind == "narrative_evidence"] == []
+    [u] = [u for u in doc.unsourced if u.kind == "narrative_evidence"]
+    assert (u.plane, u.subject, u.claim) == (Plane.NARRATIVE, row.detector, row.detail)
+    assert u.reason == (f"source recorded as {source!r}; no single document identified "
+                        "(period documents: ACC-A, ACC-B)")
+    # The narrative metrics of the period still list its documents (they are
+    # computed from all of them); nothing else may.
+    cited = {p.accession for i in doc.items if i.kind != "metric" for p in i.provenance}
+    assert not cited & {"ACC-A", "ACC-B"}
+
+
+def test_a_row_naming_no_document_in_a_period_without_documents_says_none():
+    ds = _stretch_with_sources()
+    _row, result = _with_row_source(ds, NOT_LOCATED)
+    ds.documents = [d for d in ds.documents if d.fiscal_label != "FY2025Q4"]
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    [u] = [u for u in doc.unsourced if u.kind == "narrative_evidence"]
+    assert u.reason == (f"source recorded as {NOT_LOCATED!r}; no single document identified "
+                        "(period documents: none)")
+
+
+@pytest.mark.parametrize("own_named", [False, True])
+def test_a_derived_row_with_a_period_it_names_no_document_for_is_unsourced(own_named):
+    """Audit of this PR: a derived row whose own period recorded no source
+    cited its comparison period's filings alone, as if they were its source
+    (and the reverse). Part of a claim sourced is not the claim sourced."""
+    ds = _stretch_with_sources()
+    [row] = _with_row_source(ds, "x")[1].narrative_evidence
+    other = next(d for d in ds.documents if d.fiscal_label != row.fiscal_label and d.source)
+    own = next(d for d in ds.documents if d.fiscal_label == row.fiscal_label and d.source)
+    named = f"{row.fiscal_label} documents: {own.source}"
+    unnamed = f"{other.fiscal_label} documents (no source recorded)"
+    source = (f"derived from {named}; compared with {unnamed}" if own_named else
+              f"derived from {row.fiscal_label} documents (no source recorded); "
+              f"compared with {other.fiscal_label} documents: {other.source}")
+    _row, result = _with_row_source(ds, source)
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    assert [i for i in doc.items if i.kind == "narrative_evidence"] == []
+    [u] = [u for u in doc.unsourced if u.kind == "narrative_evidence"]
+    gap = unnamed if own_named else f"{row.fiscal_label} documents (no source recorded)"
+    assert u.reason == (f"source recorded as {source!r}; {gap!r} names no document, "
+                        "so the documents it does name are part of its source, not all")
+
+
+def test_a_row_that_names_one_of_its_periods_documents_cites_only_that_one():
+    ds = _two_documents_in_one_period()
+    row, result = _with_row_source(ds, "10-Q ACC-B")
     doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
     [item] = [i for i in doc.items if i.kind == "narrative_evidence"]
-    period = {d.accession for d in ds.documents if d.fiscal_label == row.fiscal_label}
-    assert set(item.accessions()) == period
-    assert "provenance lists the period's documents" in item.note
-    assert all(p.excerpt is None for p in item.provenance)  # not claimed as the quote's home
+    assert item.accessions() == ["ACC-B"] and item.note is None
+    assert [p.excerpt for p in item.provenance] == [row.excerpt]
+    assert [u for u in doc.unsourced if u.kind == "narrative_evidence"] == []
+
+
+def test_a_mismatch_whose_narrative_row_is_unsourced_is_unsourced_too():
+    """The golden mismatch rests on its narrative row alone (its metrics
+    carry no per-value provenance). With the row unsourced it has nothing to
+    derive from: it is listed with the reason, never pointing at an id the
+    ledger does not hold."""
+    ds = _two_documents_in_one_period()
+    result = analyze(ds)
+    [mismatch] = result.mismatches
+    rows = [r.model_copy(update=dict(source=NOT_LOCATED))
+            if r.evidence_id == mismatch.narrative_evidence_id else r
+            for r in result.narrative_evidence]
+    result = result.model_copy(update=dict(narrative_evidence=rows))
+    doc = build_ledger(result=result, dataset=ds, ticker="stretch", report_date=DAY)
+    assert [i for i in doc.items if i.kind == "mismatch"] == []
+    [u] = [u for u in doc.unsourced if u.kind == "mismatch"]
+    assert (u.plane, u.subject, u.claim) == (Plane.CONSISTENCY, mismatch.kind, mismatch.detail)
+    assert u.reason == (
+        f"its narrative row {mismatch.narrative_evidence_id} is not in the ledger, "
+        f"nor are its metrics ({', '.join(mismatch.metric_names)})"
+    )
+    LedgerDocument.model_validate_json(doc.model_dump_json())  # no dangling derivation
+    # A mismatch naming no metric says so rather than listing nothing.
+    bare = result.model_copy(update=dict(
+        mismatches=[mismatch.model_copy(update=dict(metric_names=[]))]))
+    doc = build_ledger(result=bare, dataset=ds, ticker="stretch", report_date=DAY)
+    [u] = [u for u in doc.unsourced if u.kind == "mismatch"]
+    assert u.reason.endswith("nor are its metrics (none named)")
+
+
+def test_a_mismatch_whose_narrative_row_is_unsourced_derives_from_its_metrics_and_says_so():
+    import json
+    from pathlib import Path
+
+    from app.services.ingestion.companyfacts_mapper import build_dataset
+
+    facts = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "real"
+                        / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    result = analyze(ds)
+    metric_ids = {i.subject: i.id for i in build_ledger(
+        result=result, dataset=ds, ticker="KO", report_date=DAY).items if i.kind == "metric"}
+    names = [n for n in metric_ids if n in FINANCIAL_METRICS][:2]
+    assert len(names) == 2
+    rows = [NarrativeEvidence(
+        evidence_id="NE-900", detector="demand_narrative",
+        fiscal_label=result.evidence[0].fiscal_label, comparison="point", source=NOT_LOCATED,
+        excerpt="demand remains robust", confidence="medium", detail="narrative says demand up",
+    )]
+    mismatch = MetricNarrativeMismatch(
+        kind="demand_narrative_vs_working_capital", detail="narrative up, metrics down",
+        fiscal_label=result.evidence[0].fiscal_label, narrative_evidence_id="NE-900",
+        metric_names=[*names, "not_in_this_run"], confidence="medium",
+    )
+    result = result.model_copy(update=dict(narrative_evidence=rows, mismatches=[mismatch]))
+    doc = build_ledger(result=result, dataset=ds, ticker="KO", report_date=DAY)
+    [item] = [i for i in doc.items if i.kind == "mismatch"]
+    assert item.derived_from == tuple(metric_ids[n] for n in names)
+    assert item.note == ("its narrative row NE-900 is not in the ledger: "
+                         "it derives from its metrics only")
+    assert [u.kind for u in doc.unsourced if u.kind in ("mismatch", "narrative_evidence")] == [
+        "narrative_evidence"]
 
 
 # --- inputs the ledger needs ----------------------------------------------------
@@ -161,7 +308,11 @@ def test_a_row_not_located_cites_its_periods_documents_and_says_so():
 
 def test_every_series_metric_names_its_base_metric():
     assert set(SERIES_OF) == {n for n, b in BASIS.items() if b is Basis.SERIES}
-    assert set(SERIES_OF.values()) <= FINANCIAL_METRICS
+    assert {base for base, _select in SERIES_OF.values()} <= FINANCIAL_METRICS
+    # and every metric read from period fields names the fields it reads
+    assert set(FIELD_WINDOWS) == {n for n, b in BASIS.items() if b is Basis.FIELDS}
+    for spec in FIELD_WINDOWS.values():
+        assert spec == USABLE_CAPEX_INTENSITY or set(spec) <= {f.name for f in FIELDS}
 
 
 def test_an_8k_402_keeps_its_accession():
@@ -186,6 +337,7 @@ def test_both_entry_points_write_the_ledger_beside_the_report(monkeypatch, tmp_p
 
     def fake_build(*args, **kwargs):
         observed.append(kwargs["ledger_out"])
+        kwargs["ledger_out"].write_text('{"ledger": true}')
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
 
     diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_tags=lambda: {},
@@ -212,10 +364,19 @@ def test_both_entry_points_write_the_ledger_beside_the_report(monkeypatch, tmp_p
     out, _ = journal_reporting.build_report("aapl", with_docs=False, out_dir=tmp_path / "j",
                                             report_day="2026-09-01")
 
+    # Each builder writes into staging (Hermes round 8: a rebuild is built off
+    # to the side), and the ledger is published beside the report it belongs to.
     cli, journal = observed
-    assert cli.parent == tmp_path / "reports" and cli.name.endswith(".ledger.json")
-    assert cli.name.startswith("AAPL_")
-    assert journal == out.with_suffix(".ledger.json")
+    assert cli.parent.parent == tmp_path / "reports" / ".staging"
+    assert cli.name.endswith(".ledger.json")
+    assert journal.parent.parent == tmp_path / "j" / ".staging"
+    (cli_report,) = (tmp_path / "reports").glob("AAPL_*.md")
+    for report in (cli_report, out):
+        # One generation: the ledger published beside the report is its own.
+        ledger = json.loads(report.with_suffix(".ledger.json").read_text())
+        assert ledger["ledger"] is True
+        assert ledger["generation_id"] == generation_of(report) is not None
+    assert not cli.exists() and not journal.exists()
 
 
 def test_ids_do_not_depend_on_what_else_is_in_the_ledger():
@@ -293,3 +454,47 @@ def test_a_derived_quarter_that_moved_is_an_item_cited_by_the_filings_that_moved
     assert "2026-08-01" in a.claim and "2026-09-01" in a.claim
     # A derived move whose filing is not fully identified is listed, not dropped.
     assert [u.kind for u in doc.unsourced if u.kind == "derived_revision"] == ["derived_revision"]
+
+
+# --- what build_ledger passes through (survivors of the mutation run over it) ---------
+
+
+def test_an_offering_claim_names_the_security_type_of_a_takedown_only():
+    def filing(form, accession, kind):
+        return SimpleNamespace(form=form, filing_date=date(2026, 8, 1), accession=accession,
+                               primary_doc="p.htm", kind=kind, security_type="equity", excerpt="")
+
+    ds = stretch_dataset()
+    timeline = SimpleNamespace(cik=1, filings=[filing("424B5", "acc-1", "takedown"),
+                                               filing("S-3", "acc-2", "shelf")])
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="X", report_date=DAY,
+                       streams={"ran": True, "offerings": timeline}, errors={})
+    claims = sorted(i.claim for i in doc.items if i.kind == "offering")
+    assert claims == ["424B5 filed 2026-08-01 (takedown, equity)",
+                      "S-3 filed 2026-08-01 (shelf)"]
+
+
+def test_the_4_02_window_opens_on_the_report_day_two_years_back():
+    """The floor keeps the report's own day of the month (capped at 28, so a
+    29th/30th/31st has a date in every month): a 4.02 filed mid-month two
+    years back is inside a window that opened on the 1st."""
+    ds = stretch_dataset()
+    events = SimpleNamespace(non_reliance_8k_filings=[
+        (date(2024, 9, 15), "0000000001-24-000001", "8-K"),   # inside
+        (date(2024, 8, 31), "0000000001-24-000002", "8-K"),   # before the floor
+    ])
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="X", report_date=date(2026, 9, 1),
+                       streams={"ran": True, "events": events}, errors={})
+    assert [i.accessions() for i in doc.items if i.kind == "non_reliance_8k_402"] == [
+        ["0000000001-24-000001"]]
+
+
+def test_selections_name_each_field_with_a_concept_and_skip_one_without():
+    ds = stretch_dataset()
+    tags = {"revenue": SimpleNamespace(label="us-gaap:Revenues|2026-03-31:us-gaap:Sales"),
+            "capex": SimpleNamespace(label="", tag_used="us-gaap:PaymentsToAcquire"),
+            "cfo": SimpleNamespace(label="", tag_used="")}
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="X", report_date=DAY,
+                       field_tags=tags)
+    assert doc.selections == {"revenue": "us-gaap:Revenues|2026-03-31:us-gaap:Sales",
+                              "capex": "us-gaap:PaymentsToAcquire"}

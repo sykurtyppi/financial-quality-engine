@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.services.ingestion.fields import Composition, field
 
@@ -52,10 +52,39 @@ class SeriesSelection(BaseModel):
     field: str
     composer: Composer
     components: tuple[str, ...]
+    # Reported quarters (ISO period end, qualified concept) a single-concept
+    # field took from ANOTHER of its candidates, because the selected concept
+    # has no value there and that candidate is proven equal to it on every
+    # quarter both report (the mapper's checked fallback for a filer's tag
+    # switch). Not components: the figure is never composed from them, and
+    # `tag_used` / `concepts` stay the selected concept's, so nothing that
+    # reads them starts summing two concepts that report one number.
+    fallbacks: tuple[tuple[str, str], ...] = ()
+
+    @model_validator(mode="after")
+    def _fallbacks_are_other_concepts_of_a_single_field(self) -> SeriesSelection:
+        if not self.fallbacks:
+            return self
+        if self.composer is not Composer.SINGLE:
+            raise ValueError(f"{self.field}: fallbacks are for single-concept fields only")
+        for period_end, concept in self.fallbacks:
+            if concept in self.components:
+                raise ValueError(
+                    f"{self.field}: fallback at {period_end} names the selected concept {concept}"
+                )
+        return self
 
     @classmethod
-    def of(cls, field_name: str, components: tuple[str, ...]) -> SeriesSelection:
-        return cls(field=field_name, composer=composer_for(field_name), components=components)
+    def of(
+        cls,
+        field_name: str,
+        components: tuple[str, ...],
+        fallbacks: tuple[tuple[str, str], ...] = (),
+    ) -> SeriesSelection:
+        return cls(
+            field=field_name, composer=composer_for(field_name), components=components,
+            fallbacks=fallbacks,
+        )
 
     @property
     def tag_used(self) -> str:
@@ -68,6 +97,16 @@ class SeriesSelection(BaseModel):
         ):
             return self.components[0]
         return "+".join(_bare(c) for c in self.components)
+
+    @property
+    def label(self) -> str:
+        """`tag_used`, then `|<period end>:<concept>` for each quarter filled
+        from another concept (`fallbacks`). The one spelling of a selection
+        for records that keep a string — the ledger, the corpus, the
+        selections digest: a field without fallbacks reads exactly as
+        `tag_used`, and one with them no longer claims the selected concept
+        supplied every quarter."""
+        return self.tag_used + "".join(f"|{q}:{c}" for q, c in self.fallbacks)
 
     @property
     def concepts(self) -> list[tuple[str, str]]:

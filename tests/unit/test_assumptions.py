@@ -46,6 +46,13 @@ class TestAddAndLoad:
         with pytest.raises(ValueError, match="retire"):
             asm.add_assumption("NVDA", "one more", root=tmp_path)
 
+    def test_the_length_limit_is_inclusive(self, tmp_path):
+        at_limit = "y" * asm.MAX_ASSUMPTION_CHARS
+        asm.add_assumption("NVDA", at_limit, root=tmp_path)
+        assert asm.load_assumptions("NVDA", root=tmp_path) == [at_limit]
+        with pytest.raises(ValueError, match="thesis"):
+            asm.add_assumption("NVDA", at_limit + "y", root=tmp_path)
+
     def test_missing_file_is_empty_and_ticker_is_validated(self, tmp_path):
         assert asm.load_assumptions("NVDA", root=tmp_path) == []
         with pytest.raises(ValueError):

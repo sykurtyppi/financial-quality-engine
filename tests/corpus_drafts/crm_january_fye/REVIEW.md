@@ -9,7 +9,7 @@ This draft was built offline from the committed trimmed fixture `tests/fixtures/
 ## What to check, and against which filing
 
 1. Fiscal calendar: FY2027Q1 ends 2026-04-30, FY2026Q4 ends 2026-01-31. Confirm against the 10-Q `0001108524-26-000127` (filed 2026-05-28) and the 10-K `0001108524-26-000060` (filed 2026-03-02) cover pages.
-2. FY2026Q4 `interest_expense` is 122m, derived as the 10-K year minus the nine months in `0001108524-25-000238`; every other quarter is 67–68m. Check that the fourth quarter really carried ~122m (new debt in the quarter?) and that the 10-K's annual `InterestExpenseDebt` is the same concept as the 10-Q year-to-date figure. FY2027Q1 `interest_expense` is not mapped: check whether the Q1 FY2027 10-Q reports it under another tag.
+2. FY2026Q4 `interest_expense` is 122m, derived as the 10-K year minus the nine months in `0001108524-25-000238`; every other quarter is 67–68m. Check that the fourth quarter really carried ~122m (new debt in the quarter?) and that the 10-K's annual `InterestExpenseDebt` is the same concept as the 10-Q year-to-date figure. FY2027Q1 `interest_expense` is 317m, taken from `InterestExpenseNonoperating` in `0001108524-26-000127`: the payload holds no `InterestExpenseDebt` fact for the quarter, and the mapper fills a quarter the selected concept misses from another candidate only when the two agree on every quarter both report (here FY2026Q1, 68m each). Check that the 317m is interest on debt — total debt rose from 14.4bn to 39.3bn in the quarter — and not a broader nonoperating line; one shared quarter is thin proof that the two concepts measure the same thing.
 3. FY2027Q1 `shares_outstanding` is 819m (cover dated 2026-05-21) against 923m a quarter earlier. Confirm the cover-page count; an 11% fall in one quarter is either a real event (a large accelerated repurchase) or a data error the engine should not score silently.
 4. `sga_expense` is composed from separate sales-and-marketing and general-and-administrative tags; confirm CRM reports no combined SG&A line.
 5. `accounts_payable`, `inventory` and `share_issuance_proceeds` are named not inspectable: the payload holds none of their candidate tags (for payables: `AccountsPayableCurrent`, `AccountsPayableAndAccruedLiabilitiesCurrent`, `AccountsPayableTradeCurrent`). Check the balance sheet for the tag CRM does use for payables; if it is a standard us-gaap payables concept, the engine's candidate list has a gap.
@@ -26,6 +26,7 @@ Mapper notes:
 
 - `shares_outstanding`: Share counts matched from cover-page dates within 60 days after quarter end.
 - `sga_expense`: SG&A composed from separate S&M and G&A tags.
+- `interest_expense`: FY2027Q1 from us-gaap:InterestExpenseNonoperating: the filer switched concepts; it agrees with us-gaap:InterestExpenseDebt on FY2026Q1.
 - `shares_diluted`: Weighted-average share counts are not additive; quarters without a directly reported value stay missing (no Q4 derivation).
 - `total_debt`: Short-term borrowings unavailable or zero; not included.
 
@@ -62,7 +63,7 @@ Sample of mapped values and the facts behind them:
 | FY2026Q4 | 2026-01-31 | `shares_outstanding` | 923,000,000 | nearest | + `EntityCommonStockSharesOutstanding` →2026-02-25 (10-K `0001108524-26-000060`) |
 | FY2026Q4 | 2026-01-31 | `total_debt` | 14,439,000,000 | composite | + `LongTermDebtNoncurrent` →2026-01-31 (10-Q `0001108524-26-000127`)<br>+ `LongTermDebtCurrent` →2026-01-31 (10-Q `0001108524-26-000127`) |
 | FY2027Q1 | 2026-04-30 | `revenue` | 11,133,000,000 | direct | + `RevenueFromContractWithCustomerExcludingAssessedTax` 2026-02-01→2026-04-30 (10-Q `0001108524-26-000127`) |
-| FY2027Q1 | 2026-04-30 | `interest_expense` | — | not mapped | |
+| FY2027Q1 | 2026-04-30 | `interest_expense` | 317,000,000 | direct | + `InterestExpenseNonoperating` 2026-02-01→2026-04-30 (10-Q `0001108524-26-000127`) |
 | FY2027Q1 | 2026-04-30 | `shares_outstanding` | 819,000,000 | nearest | + `EntityCommonStockSharesOutstanding` →2026-05-21 (10-Q `0001108524-26-000127`) |
 | FY2027Q1 | 2026-04-30 | `total_debt` | 39,280,000,000 | composite | + `LongTermDebtNoncurrent` →2026-04-30 (10-Q `0001108524-26-000127`)<br>+ `LongTermDebtCurrent` →2026-04-30 (10-Q `0001108524-26-000127`) |
 

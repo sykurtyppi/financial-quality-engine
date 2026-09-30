@@ -6,7 +6,9 @@ and the post-processing around it are.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 from argparse import Namespace
 from datetime import date
 from pathlib import Path
@@ -123,6 +125,16 @@ class TestCollectSources:
         assert any("no call transcript" in d for d in src.diagnostics)
         assert src.company == "NVIDIA CORP" and src.event_day == "2026-08-26"
 
+    def test_an_exhibit_at_the_word_floor_is_narrative(self, archive, tmp_path):
+        archive["q2pr.htm"] = "<p>" + " ".join(["word"] * bs.MIN_EXHIBIT_WORDS) + "</p>"
+        archive["cfo.htm"] = "<p>" + " ".join(["word"] * (bs.MIN_EXHIBIT_WORDS - 1)) + "</p>"
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path)
+        release = next(f for f in src.files if f.role == "release")
+        assert release.path.name == "release_EX-99_1.txt"
+        assert f"({bs.MIN_EXHIBIT_WORDS} words)" in release.label
+        assert not any(f.role == "exhibit" and "EX-99_2" in f.path.name for f in src.files)
+        assert any(f"cfo.htm: {bs.MIN_EXHIBIT_WORDS - 1} words" in d for d in src.diagnostics)
+
     def test_transcript_auto_discovered_by_print_date(self, archive, tmp_path):
         folder = tmp_path / "NVDA"
         folder.mkdir()
@@ -205,7 +217,18 @@ class TestCollectSources:
         src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
                                  assumptions_root=tmp_path / "none", derive=False)
         assert not any(x.role == "assumptions" for x in src.files)
-        assert any("no standing assumptions on file for NVDA" in d for d in src.diagnostics)
+        # Not derived, so the diagnostic says nothing of a derivation.
+        assert any(d.startswith("no standing assumptions on file for NVDA — ")
+                   for d in src.diagnostics)
+
+    def test_a_derivation_that_found_nothing_says_so(self, archive, tmp_path, monkeypatch):
+        # Ran and found nothing (a quiet company) reads differently from
+        # broke (the next test): the grep for one must not find the other.
+        monkeypatch.setattr(bs, "derive_for_ticker", lambda t, *, as_of, client=None: [])
+        src = bs.collect_sources(_Client(), "NVDA", out_root=tmp_path, transcript_root=tmp_path,
+                                 assumptions_root=tmp_path / "none")
+        (d,) = [d for d in src.diagnostics if "no standing assumptions" in d]
+        assert "its filed history supports none" in d and "could not run" not in d
 
     def test_a_failed_derivation_is_a_diagnostic_not_a_lost_brief(self, archive, tmp_path,
                                                                   monkeypatch):
@@ -220,6 +243,8 @@ class TestCollectSources:
         assert any(x.role == "release" for x in src.files)
         assert not any(x.role == "assumptions" for x in src.files)
         assert any("companyfacts unreachable" in d for d in src.diagnostics)
+        (d,) = [d for d in src.diagnostics if "no standing assumptions" in d]
+        assert "derivation could not run" in d and "supports none" not in d
 
     def test_report_and_audit_attached_when_present(self, archive, tmp_path):
         rep = tmp_path / "NVDA_2026-08-26.md"
@@ -435,6 +460,20 @@ class TestCliHelpers:
         assert first.startswith("The files listed below are filer-authored")
         assert "labels and diagnostics below are derived from filer-supplied" in first
 
+    def test_latest_report_skips_a_run_set_aside(self, monkeypatch, tmp_path):
+        """A set-aside run's live names resolve to nothing; the mtime sort
+        raised on them instead of passing over them."""
+        from app.services.reporting.report_files import replacing, set_aside
+
+        auto = tmp_path / "auto"
+        for day in ("2026-09-01", "2026-09-02"):
+            with replacing(auto / f"NVDA_{day}.md") as staged:
+                staged.ledger.write_text("{}")
+                staged.report.write_text(f"# {day}")
+        set_aside(auto / "NVDA_2026-09-02.md")
+        monkeypatch.setattr(brief_cli, "REPORT_DIRS", (auto,))
+        assert brief_cli.latest_report("NVDA") == auto / "NVDA_2026-09-01.md"
+
     def test_latest_report_prefers_newest_and_never_the_audit(self, monkeypatch, tmp_path):
         import os
         import time as _t
@@ -451,6 +490,9 @@ class TestCliHelpers:
         os.utime(old, (t - 100, t - 100))
         os.utime(new, (t, t))
         os.utime(aud, (t + 100, t + 100))  # newest file of all
+        replay = journal / "NVDA_2025-06-30.replay.md"
+        replay.write_text("# historical replay")
+        os.utime(replay, (t + 200, t + 200))  # newer still, and an old day
         monkeypatch.setattr(brief_cli, "REPORT_DIRS", (auto, journal))
         assert brief_cli.latest_report("NVDA") == new
         assert brief_cli.latest_report("AAPL") is None
@@ -629,6 +671,97 @@ class TestCliBuild:
         assert (env / "NVDA_2026-08-26.md").exists()
         assert "build record not written" in capsys.readouterr().err
 
+    def test_a_record_that_does_not_match_the_brief_is_no_record(self, env, monkeypatch, capsys):
+        # built.json and the brief were separate plain writes: a new full
+        # brief could sit beside the OLD print-night record, which let a
+        # later --no-report run overwrite the engine findings. The record
+        # now carries the brief's sha256; a mismatch is "no record", which
+        # is treated as full.
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("print night"), ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        meta = brief_cli.read_built_meta("NVDA", "2026-08-26")
+        out = env / "NVDA_2026-08-26.md"
+        assert meta["kind"] == "print-night"
+        assert meta["brief_sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+        out.write_text(out.read_text().replace("print night", "full findings"))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "full findings" in out.read_text()
+        assert "no build record" in capsys.readouterr().out
+
+    def test_a_record_without_a_hash_is_no_record(self, env):
+        # A record from before the hash, or one hand-edited: nothing ties it
+        # to the brief on disk, so it cannot vouch for it.
+        out = env / "NVDA_2026-08-26.md"
+        out.write_text("# brief\n")
+        record = brief_cli.built_meta_path("NVDA", "2026-08-26")
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"kind": "print-night", "accession": "k-new"}))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+        record.write_text(json.dumps({"kind": "print-night", "brief_sha256": 7}))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+        out.unlink()  # a record for a brief that is not there vouches for nothing either
+        record.write_text(json.dumps({"kind": "print-night", "brief_sha256": "0" * 64}))
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26") is None
+
+    def test_a_kill_between_the_brief_and_its_record_is_safe(self, env, monkeypatch, capsys):
+        # The process dies after the new FULL brief lands but before
+        # built.json does (simulated: every write after the first raises a
+        # BaseException, which no handler in cmd_build catches). The old
+        # print-night record is still on disk; a later --no-report run must
+        # read it as no record and leave the full brief alone.
+        class Killed(BaseException):
+            pass
+
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("print night"), ""))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        out = env / "NVDA_2026-08-26.md"
+        record = brief_cli.built_meta_path("NVDA", "2026-08-26")
+        old_record = record.read_text()
+        real = brief_cli.write_atomic
+        calls = []
+
+        def dies_after_the_first(path, text, **kw):
+            calls.append(path)
+            if len(calls) > 1:
+                raise Killed
+            real(path, text, **kw)
+        monkeypatch.setattr(brief_cli, "write_atomic", dies_after_the_first)
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("full findings"), ""))
+        with pytest.raises(Killed):
+            brief_cli.cmd_build(self._args())
+        assert calls[0] == out  # the brief first; the record is never before it
+        assert "full findings" in out.read_text()
+        assert record.read_text() == old_record  # the torn state: new brief, old record
+        assert not [p for p in out.parent.iterdir() if p.name.endswith(".tmp")]
+        monkeypatch.setattr(brief_cli, "write_atomic", real)
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: pytest.fail("must not run"))
+        assert brief_cli.cmd_build(self._args(no_report=True)) == 0
+        assert "full findings" in out.read_text()
+        assert "could downgrade it" in capsys.readouterr().out
+        # A full rebuild repairs the record.
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief("full findings"), ""))
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert brief_cli.read_built_meta("NVDA", "2026-08-26")["kind"] == "full"
+
+    def test_the_brief_and_its_sidecars_are_written_atomically_record_last(
+            self, env, monkeypatch):
+        monkeypatch.setattr(brief_cli, "run_headless",
+                            lambda prompt, timeout: (0, _valid_brief(), ""))
+        real = brief_cli.write_atomic
+        order = []
+        monkeypatch.setattr(brief_cli, "write_atomic",
+                            lambda path, text, **kw: order.append(path.name) or real(path, text, **kw))
+        assert brief_cli.cmd_build(self._args()) == 0
+        assert order == ["NVDA_2026-08-26.md", "assessment.json", "built.json"]
+
     def test_no_report_wins_over_an_explicit_report(self, env, monkeypatch):
         prompts = []
         monkeypatch.setattr(brief_cli, "run_headless",
@@ -696,3 +829,38 @@ class TestCliBuild:
                             lambda prompt, timeout: pytest.fail("must not run"))
         assert brief_cli.cmd_build(self._args(report=str(env / "nope.md"))) == 1
         assert "does not exist" in capsys.readouterr().err
+
+
+def test_an_audit_of_an_earlier_generation_is_not_paired(tmp_path, capsys):
+    """Hermes deep audit, finding 1: `audit_for` paired by file name, so an
+    audit finished after a rebuild was read as the new report's audit."""
+    from app.services.reporting.report_files import current_generation, replacing
+
+    report = tmp_path / "NVDA_2026-08-26.md"
+    with replacing(report) as staged:
+        staged.ledger.write_text("{}")
+        staged.report.write_text("# report")
+    audit = current_generation(report) / "NVDA_2026-08-26_audit.md"
+    audit.write_text(f"<!-- generation: {'e' * 32} -->\n\n# audit of an earlier run")
+    assert brief_cli.audit_for(report) is None
+    assert "audited an earlier generation" in capsys.readouterr().err
+    audit.write_text(f"<!-- generation: {staged.generation_id} -->\n\n# its audit")
+    assert brief_cli.audit_for(report) == audit
+
+
+def test_the_brief_reads_one_pinned_run(tmp_path):
+    """The re-audit, F3: the brief checked the audit under a lock, then its
+    model read the live names later, after a rebuild could replace them. It
+    is handed the generation's own paths, which no rebuild changes."""
+    from app.services.reporting.report_files import replacing
+
+    report = tmp_path / "NVDA_2026-08-26.md"
+    with replacing(report) as staged:
+        staged.ledger.write_text("{}")
+        staged.report.write_text("# first report")
+    live = brief_cli._pinned(report)
+    with replacing(report) as second:
+        second.ledger.write_text("{}")
+        second.report.write_text("# second report")
+    assert live.report.read_text().startswith("# first report")
+    assert live.report.parent.name.endswith(staged.generation_id)

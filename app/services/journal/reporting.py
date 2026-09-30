@@ -25,7 +25,7 @@ from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
-from app.services.reporting.report_builder import ledger_path
+from app.services.reporting.report_files import replacing
 from app.services.scoring.thermometer import describe
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -41,6 +41,14 @@ def replay_banner(as_of: date, source: str, rebuilt_on: date) -> str:
         "documents, offerings and 8-K events can only see filings that today's "
         "filing index (SEC's recent-filings block) still lists."
     )
+
+
+class UnmappablePayload(ValueError):
+    """The fundamentals were acquired but cannot be mapped into quarters to
+    score (too little history, an unrecognised structure). Raised only from
+    the snapshot stage, so a caller can name that condition without also
+    catching a ValueError from a defect elsewhere in the build (round-9
+    audit F3)."""
 
 
 def report_path(ticker: str, day: str | None = None) -> Path:
@@ -78,11 +86,13 @@ def build_report(
     at or before the lock. It still never sets ``generated_on`` (below).
 
     ``replay`` rebuilds the report AS OF ``report_day`` instead (historical
-    replay): fundamentals from the newest vintage snapshot captured by then,
+    replay): fundamentals from the newest vintage snapshot a report scored by
+    then (a mappable raw capture only when none maps — `replay_snapshot`),
     else today's payload cut there; documents filed by then; every evidence
     stream cut there (they all anchor on ``generated_on``, which a replay sets
-    to that day). Nothing is archived, the report opens with a replay banner
-    and is written to ``<TICKER>_<day>.replay.md``, never over a real report.
+    to that day). The report opens with a replay banner and is written to
+    ``<TICKER>_<day>.replay.md``, never over a real report; a replay rerun
+    keeps the earlier replay as any rebuild does.
     """
     ticker = ticker.upper()
     as_of: date | None = None
@@ -92,11 +102,18 @@ def build_report(
             raise ValueError("a historical replay needs the day to replay (report_day)")
         as_of = date.fromisoformat(report_day)
     client = SecClient(fresh=fresh)
+    try:
+        if as_of is not None:
+            snapshot, replay_source = replay_snapshot(client, ticker, as_of, n_quarters=quarters)
+        else:
+            snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
+    except UnmappablePayload:
+        raise
+    except ValueError as e:
+        raise UnmappablePayload(str(e)) from e
     if as_of is not None:
-        snapshot, replay_source = replay_snapshot(client, ticker, as_of, n_quarters=quarters)
         vintage_note: str | None = "not captured (historical replay)"
     else:
-        snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
         vintage_note = store_vintage_snapshot(
             client, ticker, snapshot.company_facts, enabled=vintage
         )
@@ -125,31 +142,40 @@ def build_report(
     warnings = list(diag.warnings)
     if as_of is not None:
         warnings.append(f"HISTORICAL REPLAY as of {as_of}: fundamentals from {replay_source}.")
-    report, thermometer = build_full_report(
-        result, dataset,
-        generated_on=generated_on,
-        coverage=diag.coverage(),
-        # The evidence must name the same series the score came from.
-        field_tags=diag.selected_series(),
-        client=client,
-        ticker=ticker,
-        fetched_at=fetched_at,
-        warnings=warnings,
-        field_notes=diag.field_notes(),
-        doc_diagnostics=doc_diagnostics,
-        company_facts=snapshot.company_facts,
-        submissions=submissions,
-        index_degraded=submissions is None,
-        fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
-        vintage_note=vintage_note,
-        baseline_day=date.fromisoformat(report_day) if report_day else None,
-        # The same claims as data, each with the filings behind it.
-        ledger_out=ledger_path(out),
-    )
-    if as_of is not None:
-        report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"
-    if banner:
-        report = f"{banner}\n\n{report}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    out.write_text(report)
+    # Built off to the side, then published in one step: a rerun on the same
+    # day goes live only once its report and ledger exist, the earlier run is
+    # kept whole as the previous generation, and a build that fails leaves the
+    # live report as it was.
+    with replacing(out) as staged:
+        report, thermometer = build_full_report(
+            result, dataset,
+            generated_on=generated_on,
+            coverage=diag.coverage(),
+            # The evidence must name the same series the score came from.
+            field_tags=diag.selected_series(),
+            # ...and read the same facts. A report of today mapped the whole
+            # payload, so its scan runs through the newest filing (an evening
+            # 10-Q is dated tomorrow by EDGAR); a replay mapped as of its
+            # day, and its scan stops there.
+            uncut_fundamentals=as_of is None,
+            client=client,
+            ticker=ticker,
+            fetched_at=fetched_at,
+            warnings=warnings,
+            field_notes=diag.field_notes(),
+            doc_diagnostics=doc_diagnostics,
+            company_facts=snapshot.company_facts,
+            submissions=submissions,
+            index_degraded=submissions is None,
+            fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
+            vintage_note=vintage_note,
+            baseline_day=date.fromisoformat(report_day) if report_day else None,
+            # The same claims as data, each with the filings behind it.
+            ledger_out=staged.ledger,
+        )
+        if as_of is not None:
+            report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"
+        if banner:
+            report = f"{banner}\n\n{report}"
+        staged.report.write_text(report)
     return out, describe(thermometer)

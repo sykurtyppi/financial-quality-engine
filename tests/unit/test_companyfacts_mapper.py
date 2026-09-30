@@ -140,8 +140,15 @@ class TestAmendmentsAndTagSelection:
         assert all(p.receivables == 2.0 for p in ds.periods)
         assert diag.field_by_name("receivables").tag_used == "us-gaap:ReceivablesNetCurrent"
 
-    def test_tags_never_mixed_within_series(self):
-        """Even when mixing would fill more quarters, one tag is chosen."""
+    def test_tags_are_mixed_only_into_gaps_and_only_when_proven_equal(self):
+        """The no-mixing rule, refined. Two tags that never report the same
+        quarter cannot be shown to measure one thing, so even though mixing
+        would fill all eight quarters, one tag is chosen and the other is
+        named in a note, not used (a 1 -> 2 step at the seam would be a
+        fabricated jump). A tag that does share quarters but disagrees on
+        one is never used either. Only a tag equal on every shared quarter
+        fills the selected tag's GAPS — never a quarter it reports
+        (tests/unit/test_tag_switch_fallback.py covers the fill)."""
         first_half = [fact(None, e, 1.0) for e in Q_ENDS[:4]]
         second_half = [fact(None, e, 2.0) for e in Q_ENDS[4:]]
         fj = facts_json({
@@ -152,8 +159,23 @@ class TestAmendmentsAndTagSelection:
         })
         ds, diag = build_dataset(fj, "SYN", n_quarters=8)
         vals = {p.receivables for p in ds.periods if p.receivables is not None}
-        assert len(vals) == 1  # one tag's values only
-        assert diag.field_by_name("receivables").periods_filled == 4
+        assert vals == {1.0}  # one tag's values only
+        fd = diag.field_by_name("receivables")
+        assert fd.periods_filled == 4 and fd.fallbacks == {}
+        assert len(fd.notes) == 4
+        assert all("us-gaap:ReceivablesNetCurrent reports 2 but was not used: it shares no "
+                   "quarter with us-gaap:AccountsReceivableNetCurrent" in n for n in fd.notes)
+
+        # Overlapping on one quarter with a different value: the newer tag now
+        # covers more and wins, and the older one is still not mixed in.
+        overlapping = [fact(None, e, 2.0) for e in Q_ENDS[3:]]
+        fj["facts"]["us-gaap"]["ReceivablesNetCurrent"]["units"]["USD"] = overlapping
+        ds, diag = build_dataset(fj, "SYN", n_quarters=8)
+        assert {p.receivables for p in ds.periods if p.receivables is not None} == {2.0}
+        fd = diag.field_by_name("receivables")
+        assert fd.periods_filled == 5 and fd.fallbacks == {}
+        assert len(fd.notes) == 3
+        assert all("it disagrees with us-gaap:ReceivablesNetCurrent" in n for n in fd.notes)
 
 
 class TestDebtComposition:
@@ -489,3 +511,122 @@ class TestMutationBacklog:
         p.add("Assets", rows)
         ds, _diag = build_dataset(p.data, "MIX", n_quarters=8)
         assert {x.total_assets for x in ds.periods} == {1000.0}
+
+    @pytest.mark.parametrize("gap_days", [0, 1])
+    def test_a_prior_quarter_ending_on_the_annual_start_is_inside_the_year(self, gap_days):
+        # fy_minus_3q: `annual.start <= p` -> `<` (formerly an `accepted`
+        # survivor, Hermes audit item 8). With 2024-03-31 missing from the
+        # balance sheet, the three quarter ends before 2024-12-31 are
+        # 2023-12-31, 2024-06-30 and 2024-09-30, and the annual figure starts
+        # ON the first of them (gap_days=0) or the day before it (gap_days=1,
+        # the control). Either way the quarter end is on or after the start,
+        # so today Q4 is derived: 5000 - (300 + 200 + 100). This pins that
+        # current behaviour; it does not claim a quarter ending the day a
+        # fiscal year starts is well-formed.
+        from tests.fixtures.selection_cases import (
+            QUARTER_ENDS,
+            Payload,
+            duration,
+            instant,
+            quarter,
+        )
+
+        q4_23, q1_24, q2_24, q3_24, q4_24 = QUARTER_ENDS[7:12]
+        assert (q4_23, q1_24, q4_24) == (date(2023, 12, 31), date(2024, 3, 31), date(2024, 12, 31))
+        ends = [e for e in QUARTER_ENDS if e != q1_24]
+        p = Payload("Year Start Co")
+        p.add("Assets", [instant(e, 1.0) for e in ends])
+        rows = [quarter(e, 10.0) for e in ends if e not in (q4_23, q2_24, q3_24, q4_24)]
+        rows += [quarter(q4_23, 300.0), quarter(q2_24, 200.0), quarter(q3_24, 100.0)]
+        rows.append(duration(q4_23 - timedelta(days=gap_days), q4_24, 5000.0, form="10-K"))
+        p.add("Revenues", rows)
+        ds, diag = build_dataset(p.data, "YS", n_quarters=8)
+        (q4,) = [x for x in ds.periods if x.period_end == q4_24]
+        assert q4.revenue == pytest.approx(4400.0)
+        src = diag.field_by_name("revenue").period_sources[q4_24.isoformat()]
+        assert src.method == "fy_minus_3q"
+
+
+# The spellings a companyfacts payload can carry a non-number in: `json.loads`
+# accepts the bare NaN / Infinity literals, and `float()` accepts the strings.
+_NON_FINITE_VALS = pytest.mark.parametrize(
+    "bad", [float("nan"), "NaN", float("inf"), "-Infinity"], ids=["nan", "NaN-str", "inf", "-Infinity-str"],
+)
+
+
+class TestNonFiniteFactValues:
+    """Review of deb6364, finding 1: `float(e["val"])` took NaN / inf as a
+    reported number. A NaN revenue then made DSO NOT_MEANINGFUL, which the
+    journal resolver commits as a terminal `unresolvable` — while the same
+    field, looked up raw, waits `pending`. A value that is not a number is
+    not a report of one: the fact is dropped where it is read, so the field
+    is missing like any unreported one — MISSING_DATA downstream, `pending`
+    in the resolver — and a warning names the fact."""
+
+    def _payload(self, bad, filed_bad: str = "2026-01-01") -> dict:
+        last = Q_ENDS[-1]
+        revenue = quarterly_flows([100.0] * 8)[:-1] + [
+            {**fact(q_start(last), last, bad, filed=filed_bad), "accn": "0000000000-26-000099"},
+        ]
+        receivables = [fact(None, end, 50.0) for end in Q_ENDS]
+        return facts_json({
+            "Assets": assets_instants(),
+            "Revenues": revenue,
+            "AccountsReceivableNetCurrent": receivables,
+        })
+
+    @_NON_FINITE_VALS
+    def test_the_fact_is_dropped_and_named(self, bad, caplog):
+        with caplog.at_level("WARNING", logger="app.services.ingestion.companyfacts_mapper"):
+            ds, _diag = build_dataset(self._payload(bad), "SYN", n_quarters=4)
+        assert [p.revenue for p in ds.periods] == [100.0, 100.0, 100.0, None]
+        # Finite facts are read as they always were.
+        assert [p.receivables for p in ds.periods] == [50.0] * 4
+        named = [r.getMessage() for r in caplog.records
+                 if "0000000000-26-000099" in r.getMessage()]
+        assert named, "no warning names the dropped fact"
+        assert all("us-gaap:Revenues" in m and "2025-12-31" in m for m in named)
+
+    @_NON_FINITE_VALS
+    def test_the_metric_is_missing_data_and_the_resolver_waits(self, bad):
+        from app.schemas.metrics import MetricStatus
+        from app.services.formulas.registry import compute_metrics
+        from app.services.journal.resolver import propose_resolution
+        from app.services.journal.schema_v2 import Assumption
+
+        ds, _diag = build_dataset(self._payload(bad), "SYN", n_quarters=4)
+        bundle = compute_metrics(ds)
+        label = ds.periods[-1].fiscal_label
+        (dso,) = [m for m in bundle.history["dso"] if m.fiscal_label == label]
+        assert dso.status is MetricStatus.MISSING_DATA
+        for metric in ("dso", "revenue"):
+            a = Assumption(metric=metric, comparator=">", threshold=1.0, window=label,
+                           source=None, resolve_by=date(2030, 1, 1))
+            r = propose_resolution(a, ds, bundle=bundle)
+            assert (r.state, r.observed) == ("pending", None), (metric, r.note)
+
+    @pytest.mark.parametrize("malformed", [
+        {"end": "not-a-date", "val": 1.0, "filed": "2026-01-01", "form": "10-Q"},
+        {"end": "2025-12-31", "filed": "2026-01-01", "form": "10-Q"},  # no val
+        {"end": "2025-12-31", "val": "a lot", "filed": "2026-01-01", "form": "10-Q"},
+    ], ids=["bad-date", "no-val", "not-a-number"])
+    def test_an_unreadable_fact_is_skipped_before_the_check(self, malformed):
+        """The finiteness check follows the parse, so an unreadable fact must
+        leave the loop before it (the check would otherwise meet no fact, or
+        the previous one). It is the FIRST row here."""
+        fj = facts_json({"Assets": assets_instants(),
+                         "Revenues": [malformed] + quarterly_flows([100.0] * 8)})
+        ds, _diag = build_dataset(fj, "SYN", n_quarters=4)
+        assert [p.revenue for p in ds.periods] == [100.0] * 4
+
+    @_NON_FINITE_VALS
+    def test_a_later_non_finite_filing_does_not_supersede_a_number(self, bad):
+        """Not reported means not reported: a later filing carrying no
+        number leaves the period's reported value current."""
+        fj = self._payload(100.0, filed_bad="2026-01-01")
+        last = Q_ENDS[-1]
+        fj["facts"]["us-gaap"]["Revenues"]["units"]["USD"].append(
+            {**fact(q_start(last), last, bad, filed="2026-03-01", form="10-Q/A"),
+             "accn": "0000000000-26-000100"})
+        ds, _diag = build_dataset(fj, "SYN", n_quarters=4)
+        assert ds.periods[-1].revenue == 100.0
