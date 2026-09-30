@@ -446,6 +446,12 @@ def test_newest_filed_is_the_latest_dated_row_and_skips_what_it_cannot_read():
     assert newest_filed({"facts": {"us-gaap": {"Assets": {"units": {"USD": [
         {"end": "2024-03-31", "val": 1}]}}}}}) is None
     assert newest_filed(_real("CRM")) == _last_filed(_real("CRM"))
+    # A unit whose rows are not a list at all (null, a number) is skipped
+    # too, not iterated: "never raised on" (complete mutation run of ace7cd8,
+    # restatements.py `continue` -> `pass` survived on the string alone).
+    assert newest_filed({"facts": {"us-gaap": {"Assets": {"units": {
+        "USD": None, "EUR": 7,
+        "GBP": [{"end": "2024-06-30", "val": 1, "filed": "2024-07-01"}]}}}}}) == date(2024, 7, 1)
 
 
 def test_a_quarter_filled_from_another_concept_is_part_of_the_selection_compared():

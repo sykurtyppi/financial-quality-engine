@@ -376,6 +376,14 @@ def run_tests(workspace: Path, tests: tuple[str, ...], timeout: float) -> str:
     return "pass" if proc.returncode == 0 else "fail"
 
 
+def shown_rate(rate: float) -> str:
+    """A kill rate as printed: one decimal, never rounded up to 100% while a
+    mutant survived (the complete run of ace7cd8 printed 761/763 as "100%"
+    beside its two survivors)."""
+    text = f"{rate:.1%}"
+    return ">99.9%" if rate < 1 and text == "100.0%" else text
+
+
 @dataclass
 class Report:
     killed: list[Mutant] = field(default_factory=list)
@@ -400,7 +408,7 @@ class Report:
 
     def markdown(self, seed: int) -> str:
         rate = self.kill_rate
-        shown = f"**{rate:.0%}**" if rate is not None else "**n/a — no mutant ran**"
+        shown = f"**{shown_rate(rate)}**" if rate is not None else "**n/a — no mutant ran**"
         lines = [
             "## Mutation run",
             "",
@@ -586,7 +594,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no mutant ran; the floor {args.floor:.0%} cannot be met")
             return 1
         if rate < args.floor:
-            print(f"kill rate {rate:.0%} below the floor {args.floor:.0%}")
+            print(f"kill rate {shown_rate(rate)} below the floor {args.floor:.0%}")
             return 1
     return 0
 
