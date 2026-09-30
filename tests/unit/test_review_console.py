@@ -1263,6 +1263,7 @@ def test_a_tick_waits_for_a_publish_only_so_long(client, monkeypatch):
 
     from app.services.journal import review
 
+    assert review.PUBLISH_WAIT_S == 5.0        # the runbook's "a moment": a few seconds
     monkeypatch.setattr(review, "PUBLISH_WAIT_S", 0.5)
     _, day = _entry()
     doc = _ko_ledger()
