@@ -177,6 +177,56 @@ scripts/journal.py outcome NVDA
 scripts/journal.py tally
 ```
 
+## Shadow-run review
+
+The engine is cleared for supervised shadow runs only: every fact a report
+surfaces is reconciled by hand to its accession before anyone relies on it.
+The review console is the screen for that. Open it with the journal UI:
+
+```
+.venv/bin/uvicorn app.web:app        # then http://127.0.0.1:8000/review
+```
+
+**The board** (`/review`) lists every watchlist name (the case of its pinned
+entry) and every journal entry with a live or pending report, read-only:
+
+- *no report yet* — nothing published for the case; *no journal entry
+  pinned* — a watch without a thesis, whose print takes the auto track
+  (`reports/auto/`), which the console does not review;
+- *report live* — the live run's generation id and when it was built;
+- *pending its audit* — `journal.py report --defer-mark` published it and the
+  sweep owns its audit and stamp; *published, not stamped* — the stamp
+  failed after the publish (the refusal and the `mark-reported --generation`
+  command are the report page's, above);
+- *stamped reported* — the entry's `reported` stamp; *entry not stamped* —
+  none yet;
+- *audit matches* / *stale audit* — an audit of this run, or one beside it
+  that names another run (never shown as this run's);
+- *N / M rows reconciled* — ticks recorded for the live run, out of its
+  ledger rows that name a filing.
+
+**A case** (`/review/<T>?date=<day>`) shows the live run's report, its
+evidence ledger as a reconciliation table and its audit, all read from ONE
+generation (`report_files.read_live`). Each row is a ledger item with its
+filings: accession, form, filed date, concept, period and value as filed,
+and its change state and note (e.g. "reads revised input(s)"). An accession
+links to its folder on EDGAR only when the ledger carries the company's CIK
+(an offering's document link is the one place it does); otherwise it is
+text, never a guessed link. Items resting on other items, and claims the
+ledger could not source ("no document to check against"), are listed apart.
+A ledger beside the report that names another run is said, and no table is
+built from it.
+
+**Ticks.** Each row takes *reconciled*, *disputed* or *unchecked* and a note.
+They are kept in `journal/reviews/<T>_<day>.review.json` (private, beside the
+entries), written whole under a lock, and every tick is bound to the run's
+generation id and the row's id. A rebuild is a new run: its rows start
+unchecked, and the page says how many ticks were recorded for the earlier
+run (restoring that run brings them back). A tick for a run that is no
+longer live is refused (409): reload and check the live run. Export the
+case for the shadow-run log from its page (CSV or Markdown,
+`/review/<T>/export?date=<day>&format=md`).
+
 ## Rehearsing
 
 Every time-dependent path takes an override so the schedule can be tested
