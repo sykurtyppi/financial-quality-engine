@@ -162,11 +162,3 @@ operator = "cmp"
 source = "twins = {cell: tuple(g) for g in groups.values() if len(g) > 1 for cell in g}"
 change = "> -> >="
 reason = "Every group has at least one member, so the mutant only adds a one-member group mapping a cell to itself. `revised_inputs` looks the cell up first and then its twins, so looking itself up a second time returns the same entry: the result is the same."
-
-[[exclusion]]
-kind = "equivalent"
-path = "app/services/reporting/report_files.py"
-operator = "cmp"
-function = "publish_lock"
-source = "if time.monotonic() >= deadline:"
-reason = "The deadline is a float on a continuous monotonic clock, read after a failed non-blocking try and a 50 ms sleep: the reading equal to the deadline, where >= and > differ, is not an input anything can arrange. Past it, both give up; before it, both retry (review of 68dbc24, L-2)."

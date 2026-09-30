@@ -53,9 +53,15 @@ DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1")
 # machine's clients are served, unless the operator sets this to "1"; only
 # behind a proxy that authenticates.
 ALLOW_REMOTE_ENV = "FQE_WEB_ALLOW_REMOTE"
-# A DNS name (labels of letters, digits and inner hyphens, no trailing dot)
-# or an IPv4 address; IPv6 literals are checked apart.
-_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+# A DNS name: labels of 1-63 letters, digits, inner hyphens, no trailing dot.
+# Underscores too: browsers send a name that has one (`my_host.lan`) as it
+# is, and refusing it would only make the operator's own name fail. A name
+# whose last label is numeric is an IPv4 address or nothing (review of
+# eeb1e51, N-3); IPv6 literals are checked apart.
+_NAME_RE = re.compile(
+    r"^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)*$")
+# The FQE_WEB_ALLOWED_HOSTS values already said to be wrong in the log.
+_LOGGED_BAD: set[str] = set()
 
 
 class BadAllowedHosts(ValueError):
@@ -77,11 +83,34 @@ def _allowed_hosts() -> set[str]:
         if entry.count(":") > 1 and not entry.startswith("["):
             entry = f"[{entry}]"  # a bare IPv6 address
         host = _host_name(entry)
-        if not (host and (_NAME_RE.match(host) or _ipv6(host))):
+        if not (host and (_ipv6(host) or _ipv4(host) or (
+                _NAME_RE.match(host) and len(host) <= 253
+                and not host.rsplit(".", 1)[-1].isdigit()))):
             raise BadAllowedHosts(f"{ALLOWED_HOSTS_ENV} entry {raw.strip()!r} is not a host "
-                                  "name (a DNS name or an IP address; a port is ignored)")
-        named.add(host)
+                                  "name (a DNS name, a non-ASCII one in its xn-- punycode "
+                                  "form, or an IP address; a port is ignored)")
+        named.add(_canonical(host))
     return named or set(DEFAULT_ALLOWED_HOSTS)
+
+
+def _ipv4(host: str) -> bool:
+    """A dotted-quad IPv4 address, as `ipaddress` reads one: `127.1`,
+    `0127.0.0.1` and `0x7f.0.0.1` are not (a browser rewrites or refuses
+    them, so as served names they would match nothing)."""
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _canonical(host: str) -> str:
+    """An IP address in its one spelling (`::ffff:127.0.0.1` and
+    `::ffff:7f00:1` are one address); a name as it is."""
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return host
 
 
 def _ipv6(host: str) -> bool:
@@ -158,13 +187,17 @@ async def _guard(request: Request, call_next):
             "elsewhere through `ssh -L 8000:127.0.0.1:8000`, or set "
             f"{ALLOW_REMOTE_ENV}=1 behind a proxy that authenticates.", status_code=403)
     host = _host_name(request.headers.get("host", ""))
+    host = _canonical(host) if host else host
     try:
         allowed = _allowed_hosts()
     except BadAllowedHosts as e:
-        # Said to the operator in the log; to a request only that the
-        # configuration is wrong, and only on a loopback name (anything
-        # else is refused as always).
-        log.error("%s", e)
+        # Said to the operator in the log, once per value (review of
+        # eeb1e51, N-4); to a request only that the configuration is wrong,
+        # and only on a loopback name (anything else is refused as always).
+        value = os.environ.get(ALLOWED_HOSTS_ENV, "")
+        if value not in _LOGGED_BAD:
+            _LOGGED_BAD.add(value)
+            log.error("%s", e)
         if host not in DEFAULT_ALLOWED_HOSTS:
             return PlainTextResponse("Invalid host header.", status_code=400)
         return PlainTextResponse(f"Misconfigured: {ALLOWED_HOSTS_ENV} holds an entry that is "

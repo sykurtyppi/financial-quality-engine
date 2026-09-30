@@ -292,6 +292,12 @@ def _symlink(link: Path, target: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
+class PublishBusy(TimeoutError):
+    """`publish_lock` with a timeout found the lock held past it: its own
+    type, so a caller can tell it from any other timeout (an OSError
+    ETIMEDOUT is a TimeoutError too; review of eeb1e51, N-2)."""
+
+
 @contextmanager
 def publish_lock(report: Path, *, timeout: float | None = None) -> Iterator[None]:
     """The lock every change to ``report``'s live names holds, across
@@ -301,7 +307,7 @@ def publish_lock(report: Path, *, timeout: float | None = None) -> Iterator[None
     advisory and unreliable over NFS, so the reports directory must be
     local, as the watchlist's lock already assumes.
 
-    ``timeout`` (seconds): give up with `TimeoutError` if it is not free by
+    ``timeout`` (seconds): give up with `PublishBusy` if it is not free by
     then, for a caller that must not wait on a stalled holder (the review
     console's tick, holding a web worker; review of 68dbc24, L-2). None,
     the default and what every publisher uses: wait for it."""
@@ -322,7 +328,7 @@ def publish_lock(report: Path, *, timeout: float | None = None) -> Iterator[None
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(
+                        raise PublishBusy(
                             f"{report.name}: a publish has held its lock for over "
                             f"{timeout:g}s") from None
                     time.sleep(0.05)
