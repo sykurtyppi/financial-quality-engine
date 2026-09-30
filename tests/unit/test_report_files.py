@@ -1112,3 +1112,62 @@ def test_generate_report_says_a_publish_in_doubt_with_its_own_exit_code(monkeypa
     err = capsys.readouterr().err
     assert "the NEW generation g may be live" in err
     assert "no report published" not in err  # that is NotPublished's line, not this one's
+
+
+
+# --- review of 68dbc24, L-2: a publish lock that a reader waits for only so long ------
+
+
+def _holder(lock: Path):
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, os, sys\n"
+         f"fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT)\n"
+         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+         "print('held', flush=True)\n"
+         "sys.stdin.read()\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "held"
+    return holder
+
+
+def test_a_publish_lock_with_a_timeout_gives_up_on_a_holder(tmp_path):
+    import time
+
+    report = tmp_path / NAME
+    (tmp_path / STAGING_DIR).mkdir()
+    holder = _holder(tmp_path / STAGING_DIR / "AAPL_2026-09-26.lock")
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError, match="publish"):
+            with report_files.publish_lock(report, timeout=0.3):
+                pass
+        waited = time.monotonic() - t0
+    finally:
+        holder.communicate("")
+    assert 0.25 < waited < 5
+    with report_files.publish_lock(report, timeout=0.3):  # free: taken at once
+        pass
+
+
+def test_a_publish_lock_without_a_timeout_waits_for_its_holder(tmp_path):
+    import threading
+    import time
+
+    report = tmp_path / NAME
+    (tmp_path / STAGING_DIR).mkdir()
+    holder = _holder(tmp_path / STAGING_DIR / "AAPL_2026-09-26.lock")
+    got = []
+
+    def take():
+        with report_files.publish_lock(report):
+            got.append(time.monotonic())
+
+    t = threading.Thread(target=take)
+    t.start()
+    t.join(0.6)
+    assert got == []                        # still waiting: publishers keep blocking
+    released = time.monotonic()
+    holder.communicate("")
+    t.join(10)
+    assert got and got[0] >= released

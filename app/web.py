@@ -12,6 +12,8 @@ only to reduce the friction of running the journal so it actually gets run.
 from __future__ import annotations
 
 import html as _html
+import ipaddress
+import logging
 import os
 import re
 from pathlib import Path
@@ -35,12 +37,25 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 app = FastAPI(title="Decision-Impact Journal", docs_url=None, redoc_url=None)
 
+log = logging.getLogger(__name__)
+
 # The names this UI answers to. It is a loopback tool; a page on any other
 # name that resolves here is a DNS-rebinding page, same-origin with itself,
 # which could read a case and post a forged tick (review of 2f26846,
-# finding 1). A deployment reached by another name lists it here.
+# finding 1). A deployment reached by another name (through a proxy on this
+# machine) lists it here.
 ALLOWED_HOSTS_ENV = "FQE_WEB_ALLOWED_HOSTS"
 DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1")
+# The UI has no authentication, and its cross-site guard (`_foreign`) only
+# protects a UI no other machine can reach: a header-less request from
+# another machine passes it, and browsers send no Sec-Fetch-* to a plain
+# http origin that is not loopback (review of 68dbc24, M-1). So only this
+# machine's clients are served, unless the operator sets this to "1"; only
+# behind a proxy that authenticates.
+ALLOW_REMOTE_ENV = "FQE_WEB_ALLOW_REMOTE"
+# A DNS name (labels of letters, digits and inner hyphens, no trailing dot)
+# or an IPv4 address; IPv6 literals are checked apart.
+_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 
 
 class BadAllowedHosts(ValueError):
@@ -51,20 +66,32 @@ def _allowed_hosts() -> set[str]:
     """The served names: ``FQE_WEB_ALLOWED_HOSTS`` (comma-separated, read
     through the same parser as a Host header, so a port on an entry is
     ignored; review of efb8500, L4), else the loopback names. An entry that
-    names no host raises `BadAllowedHosts`: said on every request, never a
-    list that silently matches nothing."""
+    is not a host name (`*`, a space, markup, a trailing dot, an IPv6 zone;
+    review of 68dbc24, N-4) raises `BadAllowedHosts`: never a list that
+    silently matches nothing."""
     named = set()
-    for entry in os.environ.get(ALLOWED_HOSTS_ENV, "").split(","):
-        entry = entry.strip()
+    for raw in os.environ.get(ALLOWED_HOSTS_ENV, "").split(","):
+        entry = raw.strip()
         if not entry:
             continue
         if entry.count(":") > 1 and not entry.startswith("["):
             entry = f"[{entry}]"  # a bare IPv6 address
         host = _host_name(entry)
-        if not host:
-            raise BadAllowedHosts(f"{ALLOWED_HOSTS_ENV} entry {entry!r} is not a host name")
+        if not (host and (_NAME_RE.match(host) or _ipv6(host))):
+            raise BadAllowedHosts(f"{ALLOWED_HOSTS_ENV} entry {raw.strip()!r} is not a host "
+                                  "name (a DNS name or an IP address; a port is ignored)")
         named.add(host)
     return named or set(DEFAULT_ALLOWED_HOSTS)
+
+
+def _ipv6(host: str) -> bool:
+    if "%" in host:
+        return False  # a zone names an interface, not a host a browser sends
+    try:
+        ipaddress.IPv6Address(host)
+    except ValueError:
+        return False
+    return True
 
 
 def _host_name(header: str) -> str | None:
@@ -80,14 +107,29 @@ def _host_name(header: str) -> str | None:
     return parts.hostname
 
 
+def _local_client(request: Request) -> bool:
+    """The request comes from this machine (a loopback address), or the
+    operator has said to serve others (``FQE_WEB_ALLOW_REMOTE=1``)."""
+    if os.environ.get(ALLOW_REMOTE_ENV) == "1":
+        return True
+    try:
+        ip = ipaddress.ip_address(request.client.host if request.client else "")
+    except ValueError:
+        return False  # not an address (a unix socket, a test client): not known local
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
+
+
 def _foreign(request: Request) -> str | None:
     """Who sent ``request``, when it is not a page of this UI: a page on
     another site can post a form to a UI on loopback, or load one of its
     pages as an image. A browser says so on every request it makes for a
     page (``Sec-Fetch-Site``) and on every form POST (``Origin``). A
     request with neither is not from a browser page (curl, a script the
-    operator runs), which no other site can make on their behalf, and is
-    accepted. The Host itself is one of the served names (`_guard`)."""
+    operator runs on this machine), which no other site can make on their
+    behalf, and is accepted: sound only because no other machine is served
+    (`_local_client`). The Host itself is one of the served names."""
     site = request.headers.get("sec-fetch-site")
     if site is not None and site not in ("same-origin", "none"):
         return f"a page on another site (Sec-Fetch-Site: {site})"
@@ -98,31 +140,43 @@ def _foreign(request: Request) -> str | None:
     return None
 
 
-# A GET with a side effect: the first view of a v1 case builds, publishes and
-# stamps its report, so it is refused to another site's page like a POST.
-_ACTING_GETS = re.compile(r"^/report/[^/]+$")
+def _refuse_foreign(foreign: str) -> PlainTextResponse:
+    return PlainTextResponse(f"Refused: a request from {foreign}. Use this UI's own pages.",
+                             status_code=403)
 
 
 @app.middleware("http")
 async def _guard(request: Request, call_next):
-    """Every request: a served Host (DNS rebinding); and every request that
-    changes something (a POST, or a report's first view) from this UI's own
-    pages only (reviews of 2f26846, finding 1, and efb8500, N2: the review
-    console's POST was guarded, `/impact` and `/report` were not)."""
+    """Every request: from this machine (review of 68dbc24, M-1), to a
+    served Host (DNS rebinding); and every request that changes something
+    (anything but GET/HEAD/OPTIONS) from this UI's own pages only (reviews
+    of 2f26846, finding 1, and efb8500, N2). A report's first view, a GET
+    that builds and stamps, is checked by its page (`report_view`)."""
+    if not _local_client(request):
+        return PlainTextResponse(
+            "This UI serves only this machine: it has no authentication. Reach it from "
+            "elsewhere through `ssh -L 8000:127.0.0.1:8000`, or set "
+            f"{ALLOW_REMOTE_ENV}=1 behind a proxy that authenticates.", status_code=403)
+    host = _host_name(request.headers.get("host", ""))
     try:
         allowed = _allowed_hosts()
     except BadAllowedHosts as e:
-        return PlainTextResponse(f"Misconfigured: {e}. Names take no path; a port is ignored.",
-                                 status_code=500)
-    if _host_name(request.headers.get("host", "")) not in allowed:
+        # Said to the operator in the log; to a request only that the
+        # configuration is wrong, and only on a loopback name (anything
+        # else is refused as always).
+        log.error("%s", e)
+        if host not in DEFAULT_ALLOWED_HOSTS:
+            return PlainTextResponse("Invalid host header.", status_code=400)
+        return PlainTextResponse(f"Misconfigured: {ALLOWED_HOSTS_ENV} holds an entry that is "
+                                 "not a host name; the server log names it.", status_code=500)
+    if host not in allowed:
         return PlainTextResponse(
-            f"Invalid host header: this UI answers only to {', '.join(sorted(allowed))} "
-            f"(set {ALLOWED_HOSTS_ENV} to serve another name)", status_code=400)
-    acts = request.method not in ("GET", "HEAD", "OPTIONS") or bool(
-        _ACTING_GETS.match(request.url.path))
-    if acts and (foreign := _foreign(request)) is not None:
-        return PlainTextResponse(f"Refused: a request from {foreign}. Use this UI's own pages.",
-                                 status_code=403)
+            "Invalid host header: this UI answers only to the names it serves "
+            f"(loopback, or those {ALLOWED_HOSTS_ENV} names).", status_code=400)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        foreign = _foreign(request)
+        if foreign is not None:
+            return _refuse_foreign(foreign)
     return await call_next(request)
 
 
@@ -236,6 +290,13 @@ def report_view(request: Request, ticker: str, date: str | None = None,
     report_file = reporting.report_path(ticker, entry["day"])
     status = 200
     if not entry["is_reported"]:
+        # A GET that builds, publishes and stamps: refused to another site's
+        # page like a POST (an <img> could make it). Only here, where it
+        # acts: a stamped report's view is a view (review of 68dbc24, L-1;
+        # a path match in the middleware also missed a --root-path prefix).
+        foreign = _foreign(request)
+        if foreign is not None:
+            return _refuse_foreign(foreign)
         # First view: generate the networked report, then lock the thesis. Serialize
         # per entry and re-check under the lock so a double-request generates once.
         # The entry's report lock, the one `journal.py report` holds (Hermes

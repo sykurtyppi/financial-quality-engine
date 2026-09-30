@@ -54,9 +54,11 @@ def client(tmp_path, monkeypatch):
         return p, 31.2
 
     monkeypatch.setattr(reporting, "build_report", fake_build)
-    # A loopback host: the app refuses any other (the review console's
-    # DNS-rebinding guard), and TestClient's default is "testserver".
-    return TestClient(app, base_url="http://127.0.0.1", follow_redirects=False)
+    # A loopback host and client, as a browser on the operator's machine:
+    # the app refuses any other (the review console's guards), and
+    # TestClient's defaults are "testserver" and "testclient".
+    return TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000),
+                      follow_redirects=False)
 
 
 def test_dashboard_empty(client):

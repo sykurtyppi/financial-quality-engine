@@ -80,7 +80,8 @@ def home(tmp_path, monkeypatch):
 def client(home):
     # A loopback host, as a browser on the operator's machine sends it
     # (TestClient's default, "testserver", is refused like any other name).
-    return TestClient(app, base_url="http://127.0.0.1", follow_redirects=False)
+    return TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000),
+                      follow_redirects=False)
 
 
 @functools.cache
@@ -877,14 +878,14 @@ def test_a_rebuild_between_the_check_and_the_write_is_refused(client, monkeypatc
     real, made = report_files.publish_lock, []
 
     @contextlib.contextmanager
-    def racing(report):
+    def racing(report, **kw):
         # The rebuild commits just before the tick takes the publish lock
         # (a publish inside it would wait for the tick instead). The
         # rebuild's own publish takes the real lock.
         if not made:
             made.append("building")
             made[0] = _publish("KO", day, doc)
-        with real(report):
+        with real(report, **kw):
             yield
 
     monkeypatch.setattr(report_files, "publish_lock", racing)
@@ -1029,7 +1030,10 @@ def test_a_malformed_watchlist_is_said_on_the_board(client, raw, caplog):
     r = client.get("/review")
     assert r.status_code == 200 and "The watchlist cannot be read" in r.text
     assert "report live" in _board_row(r.text, "KO")
-    assert any(x.name == "app.services.journal.review" and x.exc_info for x in caplog.records)
+    # A refusal the loader knows is one line, not a traceback on every
+    # refresh (review of 68dbc24, N-3).
+    [rec] = [x for x in caplog.records if x.name == "app.services.journal.review"]
+    assert rec.levelname == "WARNING" and not rec.exc_info
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -1077,11 +1081,37 @@ def test_served_names_with_a_port_match_the_name(client, monkeypatch):
     assert client.get("/review", headers={"host": "[::1]:8000"}).status_code == 200
 
 
-def test_a_served_name_that_is_not_a_host_is_said_loudly(client, monkeypatch):
-    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", "journal.lan,bad/host")
-    r = client.get("/review", headers={"host": "journal.lan"})
-    assert r.status_code == 500
-    assert "FQE_WEB_ALLOWED_HOSTS" in r.text and "'bad/host'" in r.text
+@pytest.mark.parametrize("entry", ["bad/host", "*", "a b", "<script>", "journal.lan.",
+                                   "fe80::1%eth0", "http://journal.lan", "user@x", ":8000"])
+def test_a_served_name_that_is_not_a_host_is_said_loudly(client, monkeypatch, caplog, entry):
+    """N-4 (review of 68dbc24): `*`, a space, markup and a trailing dot were
+    taken as names that match nothing; the 500 was not logged, came before
+    the Host check and echoed the entry."""
+    import logging
+
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", f"journal.lan,{entry}")
+    caplog.set_level(logging.ERROR)
+    r = client.get("/review")                                      # a loopback Host
+    assert r.status_code == 500 and "FQE_WEB_ALLOWED_HOSTS" in r.text
+    assert entry not in r.text and "journal.lan" not in r.text     # the log says, not the page
+    assert any("FQE_WEB_ALLOWED_HOSTS" in x.getMessage() and repr(entry) in x.getMessage()
+               for x in caplog.records if x.name == "app.web")
+    r = client.get("/review", headers={"host": "evil.example"})
+    assert r.status_code == 400 and entry not in r.text
+
+
+@pytest.mark.parametrize("entry,host", [
+    ("journal.lan", "journal.lan"), ("10.0.0.5", "10.0.0.5:8000"), ("fe80::1", "[fe80::1]:80"),
+    ("[::1]", "[::1]"), ("my-box.local", "MY-BOX.local:8000")])
+def test_well_formed_served_names_are_served(client, monkeypatch, entry, host):
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", entry)
+    assert client.get("/review", headers={"host": host}).status_code == 200
+
+
+def test_a_refused_host_is_not_told_the_served_names(client, monkeypatch):
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", "secret-box.lan")
+    r = client.get("/review", headers={"host": "evil.example"})
+    assert r.status_code == 400 and "secret-box" not in r.text
 
 
 def test_a_cross_site_form_cannot_write_an_entry(client):
@@ -1121,3 +1151,174 @@ def test_a_cross_site_page_cannot_make_the_report_page_build(client, monkeypatch
     assert client.get("/report/KO", headers={"sec-fetch-site": "same-origin"}).status_code == 200
     assert built == ["KO"]
     assert client.get("/report/KO", headers={"sec-fetch-site": "none"}).status_code == 200
+
+
+
+# --- review of 68dbc24 -----------------------------------------------------------------
+
+
+def _remote(client_host: str) -> TestClient:
+    return TestClient(app, base_url="http://127.0.0.1", client=(client_host, 50000),
+                      follow_redirects=False)
+
+
+def test_a_client_that_is_not_this_machine_is_refused(home, monkeypatch):
+    """M-1: with the UI served on the LAN, a header-less request (curl on
+    another machine) passed the Origin/Sec-Fetch guard, which protects
+    only a UI that no other machine can reach: it read theses and posted
+    a forged tick. Only loopback clients are served, unless the operator
+    opts in (behind an authenticating proxy)."""
+    monkeypatch.delenv("FQE_WEB_ALLOW_REMOTE", raising=False)
+    _, day = _entry()
+    doc = _ko_ledger()
+    gid = _publish("KO", day, doc)
+    key = _sourced(doc)[0].id
+    for host in ("192.168.1.20", "10.0.0.7", "fe80::1", "testclient", "8.8.8.8"):
+        c = _remote(host)
+        for url in ("/", "/review", f"/review/KO?date={day}"):
+            r = c.get(url)
+            assert r.status_code == 403 and "this machine" in r.text, (host, url)
+        assert _tick(c, "KO", day, gid, key).status_code == 403
+    assert not _review_file("KO", day).exists()
+    for host in ("127.0.0.1", "127.0.0.9", "::1", "::ffff:127.0.0.1"):
+        assert _remote(host).get("/review").status_code == 200, host
+
+
+def test_remote_clients_are_served_only_when_the_operator_says_so(home, monkeypatch):
+    c = _remote("192.168.1.20")
+    for value in ("0", "", "yes", "true"):
+        monkeypatch.setenv("FQE_WEB_ALLOW_REMOTE", value)
+        assert c.get("/review").status_code == 403, value
+    monkeypatch.setenv("FQE_WEB_ALLOW_REMOTE", "1")
+    assert c.get("/review").status_code == 200
+
+
+def test_the_runbook_does_not_serve_the_ui_on_the_network():
+    text = (Path(__file__).resolve().parents[2] / "docs" / "earnings_night_runbook.md").read_text()
+    section = text.split("## Shadow-run review", 1)[1].split("\n## ", 1)[0]
+    assert "0.0.0.0" not in section and "--host" not in section.replace("uvicorn --host", "")
+    assert "ssh -L 8000:127.0.0.1:8000" in section
+    assert "no authentication" in section and "FQE_WEB_ALLOW_REMOTE" in section
+
+
+def _counting_build(monkeypatch):
+    built: list = []
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False):
+        built.append(ticker)
+        p = reporting.report_path(ticker, report_day)
+        p.write_text(f"# {ticker} report\n")
+        return p, "ok"
+
+    monkeypatch.setattr(reporting, "build_report", build)
+    return built
+
+
+def test_a_cross_site_first_view_is_refused_behind_a_root_path(home, monkeypatch):
+    """L-1: the path match read request.url.path, which carries the
+    root_path: behind `--root-path /journal` a cross-site first view built
+    and stamped. The check is the report page's own now."""
+    built = _counting_build(monkeypatch)
+    path, _ = _entry()
+    c = TestClient(app, base_url="http://127.0.0.1", root_path="/journal",
+                   client=("127.0.0.1", 50000), follow_redirects=False)
+    r = c.get("/journal/report/KO", headers={"sec-fetch-site": "cross-site"})
+    assert r.status_code == 403
+    assert built == [] and not store.parse_entry(path)["is_reported"]
+
+
+def test_a_cross_site_view_of_a_stamped_report_is_only_a_view(client, monkeypatch):
+    """L-1: only the first view (which builds and stamps) is refused to
+    another site's page; a stamped report is read-only, like any page."""
+    built = _counting_build(monkeypatch)
+    path, day = _entry()
+    reporting.report_path("KO", day).write_text("# KO stamped report\n")
+    store.mark_reported(path)
+    r = client.get("/report/KO", headers={"sec-fetch-site": "cross-site"})
+    assert r.status_code == 200 and "KO stamped report" in r.text and built == []
+
+
+def _hold_publish_lock(day: str):
+    import subprocess
+    import sys
+
+    lock = reporting.REPORTS / ".staging" / f"KO_{day}.lock"
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, os, sys, time\n"
+         f"fd = os.open({str(lock)!r}, os.O_RDWR)\n"
+         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+         "print('held', flush=True)\n"
+         "sys.stdin.read()\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "held"
+    return holder
+
+
+def test_a_tick_waits_for_a_publish_only_so_long(client, monkeypatch):
+    """L-2: a tick waited on the publish lock without limit, holding a
+    worker thread; a stalled holder could take every one. It gives up
+    after `review.PUBLISH_WAIT_S` and says so (503); nothing is written."""
+    import time
+
+    from app.services.journal import review
+
+    monkeypatch.setattr(review, "PUBLISH_WAIT_S", 0.5)
+    _, day = _entry()
+    doc = _ko_ledger()
+    gid = _publish("KO", day, doc)
+    holder = _hold_publish_lock(day)
+    try:
+        t0 = time.monotonic()
+        r = _tick(client, "KO", day, gid, _sourced(doc)[0].id)
+        waited = time.monotonic() - t0
+    finally:
+        holder.communicate("")
+    assert r.status_code == 503 and "publish" in r.text and "retry" in r.text.lower()
+    assert 0.4 < waited < 10 and not _review_file("KO", day).exists()
+    assert _tick(client, "KO", day, gid, _sourced(doc)[0].id).status_code == 303
+
+
+def test_a_review_file_nested_too_deeply_is_unreadable_not_a_crash(client):
+    """N-1: json.loads raised RecursionError, a 500 on the tick and the page."""
+    _, day = _entry()
+    doc = _ko_ledger()
+    gid = _publish("KO", day, doc)
+    path = _review_file("KO", day)
+    path.parent.mkdir()
+    path.write_text("[" * 100000 + "]" * 100000)
+    r = _tick(client, "KO", day, gid, _sourced(doc)[0].id)
+    assert r.status_code == 409 and "cannot be read" in r.text
+    page = client.get(f"/review/KO?date={day}")
+    assert page.status_code == 200 and "cannot be read" in page.text
+    assert client.get("/review").status_code == 200
+
+
+@pytest.mark.parametrize("raw", [b"[" * 100000, b'{"watchlist": [], "x": "\xff"}'],
+                         ids=["deep", "not-utf8"])
+def test_every_watchlist_writer_refuses_a_file_it_cannot_parse(tmp_path, raw):
+    """N-2: add/update/remove caught only JSONDecodeError: a deep document
+    was a RecursionError traceback out of `watch.py`."""
+    p = tmp_path / "watchlist.json"
+    p.write_bytes(raw)
+    row = {"ticker": "KO", "print_at": "2026-10-21T11:00:00Z"}
+    for call in (lambda: wl.load(p), lambda: wl.add_entry(row, p),
+                 lambda: wl.update_entry("KO", {"label": "x"}, p),
+                 lambda: wl.remove_entry("KO", p)):
+        with pytest.raises(wl.WatchlistError):
+            call()
+    assert p.read_bytes() == raw
+
+
+def test_an_unforeseen_watchlist_failure_is_logged_with_its_traceback(client, monkeypatch, caplog):
+    import logging
+
+    def broken(path=None):
+        raise KeyError("a bug")
+
+    monkeypatch.setattr(wl, "load", broken)
+    caplog.set_level(logging.WARNING)
+    r = client.get("/review")
+    assert r.status_code == 200 and "The watchlist cannot be read" in r.text
+    [rec] = [x for x in caplog.records if x.name == "app.services.journal.review"]
+    assert rec.exc_info

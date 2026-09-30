@@ -51,6 +51,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -292,13 +293,18 @@ def _symlink(link: Path, target: str) -> None:
 
 
 @contextmanager
-def publish_lock(report: Path) -> Iterator[None]:
+def publish_lock(report: Path, *, timeout: float | None = None) -> Iterator[None]:
     """The lock every change to ``report``'s live names holds, across
     processes: publishes, ``set_aside`` and ``restore`` happen one after the
     other. Readers take no lock: a generation, once published, never
     changes. It is a sidecar in the staging directory; ``flock`` is
     advisory and unreliable over NFS, so the reports directory must be
-    local, as the watchlist's lock already assumes."""
+    local, as the watchlist's lock already assumes.
+
+    ``timeout`` (seconds): give up with `TimeoutError` if it is not free by
+    then, for a caller that must not wait on a stalled holder (the review
+    console's tick, holding a web worker; review of 68dbc24, L-2). None,
+    the default and what every publisher uses: wait for it."""
     lock = own_dir(report.parent / STAGING_DIR) / f"{_base(report)}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     # O_NOFOLLOW: a link planted at the lock's name fails (ELOOP) rather than
@@ -306,7 +312,20 @@ def publish_lock(report: Path) -> Iterator[None]:
     # finding 5).
     fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"{report.name}: a publish has held its lock for over "
+                            f"{timeout:g}s") from None
+                    time.sleep(0.05)
         yield
     finally:
         os.close(fd)  # closing releases the lock
