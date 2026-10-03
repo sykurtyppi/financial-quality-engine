@@ -2,7 +2,7 @@
 
 A rehearsal of a filing night, run before a season and after any change to
 report generation. `scripts/drill.py` runs the operator's own commands
-(`generate_report.py`, `journal.py`) against a scratch copy of the code and an
+(`generate_report.py`, `journal.py`, `market.py`) against a scratch copy of the code and an
 SEC cache seeded from its inputs, then breaks the inputs the way a filing
 night does, and writes a log to sign. It answers Hermes audit round 7,
 finding 3: "prove it on an earnings night: acquisition failure, stale EDGAR
@@ -10,7 +10,8 @@ data, amendment arrival, conflicting tags, partial statements, rerun
 determinism, report generation, analyst override, rollback".
 
 A PASS means **the commands behave** on these inputs: right exit codes, no
-tracebacks, the right lines present or absent, nothing overwritten. It does
+tracebacks, the right lines present or absent, nothing overwritten, and
+(step 13) nothing the valuation shadow card adds moves the card or a score. It does
 not mean the reports are right. Reading them is the operator's part of the
 drill (below).
 
@@ -58,6 +59,7 @@ others each start from a clean copy of the inputs.
 | 10 | Rollback | Step 1's generation is made live again in one step (`restore`): report and ledger byte-identical to step 1, and step 3's run still kept whole. The vintage store is append-only (step 1's snapshots are unchanged, and the /A's snapshot is kept). |
 | 11 | A rebuild that fails | After a good report, a rerun whose report build raises once the data is in hand (injected by the drill's shim, `FQE_DRILL_FAIL_BUILD=1`, in the workspace's copy only). It exits nonzero, and the live report and ledger are **byte-identical** to before. No generation is added, and no staged file is left. The next rerun succeeds and keeps the first run as the earlier generation. |
 | 12 | A ledger that cannot be built | After a good report, a rerun whose evidence ledger build raises (`FQE_DRILL_FAIL_LEDGER=1`, in the workspace's copy only). It exits nonzero and says no report was published. The live report and ledger are **byte-identical** to before, no generation is added, and no staged file is left. Before the fix, the report went live without its ledger and the earlier complete run was archived. |
+| 13 | A market observation | After a good report (whose appendix says the valuation shadow card was not produced), `market.py record` writes an observation into the workspace's `journal/market/`, and a rerun appends `## Valuation shadow card (non-scoring)` to the appendix with a bridge row resting on filings and the observation row in the ledger's `valuation` plane. The **decision card is byte-identical** with and without it, and so are the ledger items of every other plane. After `market.py remove`, a rerun drops the section and the report and ledger are again identical to the first (volatile lines masked). The plane never touches a score ([valuation_spec.md](valuation_spec.md)). |
 
 ### Known issues
 

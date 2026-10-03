@@ -281,6 +281,30 @@ Setting an untouched row to *unchecked* writes nothing. Export the
 case for the shadow-run log from its page (CSV or Markdown,
 `/review/<T>/export?date=<day>&format=md`).
 
+## Recording a market observation
+
+The report's appendix can carry a **valuation shadow card** — a lens on the
+price, never a score ([valuation_spec.md](valuation_spec.md)). Its one input
+is a price you looked at, recorded once per name with its exact timestamp
+(offset required) and what you looked at:
+
+```
+scripts/market.py record NVDA --price 182.40 --at 2026-11-18T21:00:00+00:00 \
+  --source "NYSE official close (broker statement)"
+scripts/market.py show NVDA
+scripts/market.py remove NVDA
+```
+
+The next report of the name (`generate_report.py`, `journal.py report`, the
+watch) appends the card; `--no-market` on `generate_report.py` leaves it out.
+Nothing is fetched, and a file under `journal/market/` that cannot be read as
+an observation fails the build closed (exit 3, nothing published) like a
+ledger that cannot be built. The card marks an observation older than seven
+days STALE, so record one on the night. Optional model assumptions
+(`--required-return`, `--terminal-growth`, `--horizon-years`) and scenarios
+(`--scenario name:fcf_growth:years[:terminal[:r]]`) are labelled as yours;
+without them the card uses, and names, its documented defaults.
+
 ## Rehearsing
 
 Every time-dependent path takes an override so the schedule can be tested

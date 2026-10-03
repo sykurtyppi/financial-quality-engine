@@ -10,11 +10,17 @@ under `LedgerDocument.unsourced` with the reason instead of being dropped.
 `kind="snapshot"` provenance is a stored companyfacts snapshot (sha256 +
 capture date): the source of a between-snapshot revision, which by
 definition has no filing announcing it.
+
+`kind="observation"` provenance is the operator's market observation (the
+valuation shadow card's price: its timestamp, its source as the operator
+wrote it, when it was recorded, and the sha256 of the file it was read
+from). It names no filing and is not reconcilable to one; the console says
+so instead of offering a tick (Hermes review of 02c2aac, valuation plane).
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -31,6 +37,8 @@ class Plane(StrEnum):
     FILING_BEHAVIOR = "filing_behavior"
     NARRATIVE = "narrative"
     CONSISTENCY = "consistency"
+    # The valuation shadow card: unscored, so every item is UNVALIDATED.
+    VALUATION = "valuation"
 
 
 class ValidationStatus(StrEnum):
@@ -46,7 +54,7 @@ class Provenance(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["filing", "snapshot"] = "filing"
+    kind: Literal["filing", "snapshot", "observation"] = "filing"
     accession: str | None = None
     form: str | None = None
     filed: date | None = None
@@ -63,6 +71,12 @@ class Provenance(BaseModel):
     excerpt: str | None = None
     snapshot_sha256: str | None = None
     captured: date | None = None
+    # An observation: when the price was seen, what the operator looked at,
+    # when it was recorded, and the digest of the observation file's bytes.
+    observed_at: datetime | None = None
+    source: str | None = None
+    recorded_at: datetime | None = None
+    observation_sha256: str | None = None
 
     @model_validator(mode="after")
     def _complete(self) -> Provenance:
@@ -72,8 +86,14 @@ class Provenance(BaseModel):
                     "filing provenance needs accession, form and filed "
                     f"(got {self.accession!r}, {self.form!r}, {self.filed!r})"
                 )
-        elif not (self.snapshot_sha256 and self.captured):
-            raise ValueError("snapshot provenance needs snapshot_sha256 and captured")
+        elif self.kind == "snapshot":
+            if not (self.snapshot_sha256 and self.captured):
+                raise ValueError("snapshot provenance needs snapshot_sha256 and captured")
+        else:
+            missing = [name for name in ("observed_at", "source", "recorded_at",
+                                         "observation_sha256") if not getattr(self, name)]
+            if missing:
+                raise ValueError(f"observation provenance needs {', '.join(missing)}")
         return self
 
 
@@ -121,6 +141,21 @@ class Unsourced(BaseModel):
     reason: str
 
 
+class ValuationSummary(BaseModel):
+    """What the valuation shadow card did this run: `state` is "produced",
+    "not produced: no market observation" or "not produced: <error>"; the
+    rest is set only when produced — the observation's provenance, and the
+    EV or the reason none was asserted, for the period it rests on."""
+
+    model_config = ConfigDict(frozen=True)
+
+    state: str
+    observation: Provenance | None = None
+    fiscal_label: str | None = None
+    ev: float | None = None
+    ev_reason: str | None = None
+
+
 class LedgerDocument(BaseModel):
     """The ledger of one report run."""
 
@@ -160,6 +195,10 @@ class LedgerDocument(BaseModel):
     streams: dict[str, str] = Field(default_factory=dict)
     items: list[EvidenceItem] = Field(default_factory=list)
     unsourced: list[Unsourced] = Field(default_factory=list)
+    # The valuation shadow card's state this run; None when the caller did
+    # not ask for the plane (the API, a replay) and in every ledger written
+    # before it existed. Its rows are `items` on `Plane.VALUATION`.
+    valuation: ValuationSummary | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> LedgerDocument:

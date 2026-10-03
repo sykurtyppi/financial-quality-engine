@@ -102,7 +102,9 @@ def _first_component(facts: dict, field_name: str) -> str:
     return selected.split("+")[0].split(":")[-1]
 
 
-SCORED = [f.name for f in FIELDS if f.name not in SPLIT_ADJUSTED_FIELDS]
+# The scored fields: the valuation plane's inputs (`scored=False`) are
+# mapped but never diffed as scored (tests/unit/test_valuation_fields.py).
+SCORED = [f.name for f in FIELDS if f.scored and f.name not in SPLIT_ADJUSTED_FIELDS]
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,12 @@ documents -> markdown report under reports/.
     EDGAR_IDENTITY="Name email" .venv/bin/python scripts/generate_report.py NVDA
     ... generate_report.py NVDA --no-docs     # fundamentals only (faster)
     ... generate_report.py NVDA --fresh       # bypass caches (filing day)
+    ... generate_report.py NVDA --no-market   # no valuation shadow card
+
+A market observation recorded with `scripts/market.py record NVDA ...`
+(journal/market/NVDA.json) adds the valuation shadow card to the appendix;
+one that is there but cannot be read fails the build (exit 3, nothing
+published), as a ledger that cannot be built does.
 
 Report assembly lives in app/services/reporting/report_builder.build_report, the
 single builder shared by the CLI, journal, and API (review finding 1).
@@ -48,6 +54,7 @@ from app.services.reporting.report_files import (
     Staged,
     replacing,
 )
+from app.services.valuation.observation import find_observation
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -102,6 +109,10 @@ def main() -> int:
              "holds identical content)",
     )
     parser.add_argument(
+        "--no-market", action="store_true",
+        help="do not read journal/market/<TICKER>.json: no valuation shadow card",
+    )
+    parser.add_argument(
         "--as-of", metavar="YYYY-MM-DD", type=date.fromisoformat,
         help="historical replay: rebuild the report as of this day (newest stored "
              "snapshot a report scored by then, else today's facts cut there) "
@@ -130,6 +141,16 @@ def main() -> int:
             return EXIT_SCORED_SNAPSHOT
         print(f"historical replay as of {args.as_of}: distress signals: {distress} -> {out}")
         return 0
+
+    # The market observation is read before anything is fetched: a file that
+    # cannot be read fails the run closed (exit 3, like a ledger that cannot
+    # be built), and should cost no SEC request.
+    observation = None
+    if not args.no_market:
+        try:
+            observation = find_observation(ROOT / "journal", ticker)
+        except (ValueError, OSError) as e:  # ObservationError is a ValueError; so is a bad ticker
+            raise NotPublished(f"market observation for {ticker}: {e}; nothing published") from e
 
     client = SecClient(fresh=args.fresh)
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
@@ -195,11 +216,19 @@ def main() -> int:
             # No baseline_day: the CLI has no pinned thesis; the silent-revision
             # section compares the newest snapshot with the previous one only.
             ledger_out=staged.ledger,
+            market_observation=observation,
+            valuation_requested=not args.no_market,
         )
         staged.report.write_text(report)
     for moved in staged.archived:
         print(f"previous run archived: {moved}")
     print(f"evidence ledger: {ledger_path(out)}")
+    if observation is not None:
+        print(f"valuation shadow card: produced from {observation.path} (observed "
+              f"{observation.observation.observed_at.isoformat()})")
+    elif not args.no_market:
+        print(f"valuation shadow card: not produced (no market observation recorded for "
+              f"{ticker})")
 
     # Review finding 8: no 0-100 number on any surface, stdout included.
     from app.services.scoring.thermometer import describe

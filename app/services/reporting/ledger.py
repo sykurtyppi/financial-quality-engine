@@ -29,6 +29,7 @@ from app.schemas.ledger import (
     Provenance,
     Unsourced,
     ValidationStatus,
+    ValuationSummary,
 )
 from app.schemas.metrics import MetricResult
 from app.schemas.report import AnalysisResult, EvidenceEntry, NarrativeEvidence
@@ -549,6 +550,153 @@ def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
             )
 
 
+# --- the valuation shadow card ------------------------------------------------------
+
+_NO_VALUE_PROVENANCE = ("its value carries no per-value provenance (dataset not mapped from "
+                        "companyfacts in this run)")
+# TTM figure -> the period fields summed over the window, as `ttm.annualize`
+# and `PeriodFinancials` build them.
+_TTM_FIELDS: dict[str, tuple[str, ...]] = {
+    "revenue": ("revenue",), "net_income": ("net_income",), "ebit": ("ebit",),
+    "ebitda": ("ebit", "depreciation_amortization"), "fcf": ("cfo", "capex"),
+}
+
+
+def _valuation_items(b: _Builder, plane: Any, dataset: CompanyDataset) -> ValuationSummary:
+    """The shadow card's rows (Hermes review of 02c2aac, valuation plane).
+    Every one is UNVALIDATED: the plane is unscored, so no tier of the card
+    ranks it and nothing here was ever measured against an outcome — the
+    tier mapping's third tier is exactly that. The price rests on the
+    observation; each bridge line on the filings behind the period's value;
+    market cap, EV, the multiples, the implied growth and the scenarios on
+    those rows. A line the dataset cannot source (no per-value provenance)
+    is listed as unsourced, as a metric would be."""
+    obs = plane.observation
+    bridge = plane.bridge
+    sha = plane.loaded.sha256
+    status = ValidationStatus.UNVALIDATED
+    observed = Provenance(kind="observation", observed_at=obs.observed_at, source=obs.source,
+                          recorded_at=obs.recorded_at, observation_sha256=sha)
+    price_id = b.add(
+        _id("market_observation", obs.ticker, obs.observed_at.isoformat(), obs.price, sha),
+        plane=Plane.VALUATION, kind="market_observation", subject="price",
+        claim=f"price {obs.price:,.2f} {obs.currency} observed {obs.observed_at.isoformat()} "
+              f"({obs.source})",
+        value=obs.price, provenance=(observed.model_copy(update={"role": "price"}),),
+        validation_status=status,
+    )
+    label = bridge.fiscal_label
+    components: dict[str, str] = {}
+    for c in bridge.filing_components():
+        prov = [
+            p for sv in c.sources for ref in sv.inputs
+            if (p := _filing(ref.accession, ref.form, ref.filed, concept=ref.concept,
+                             period_start=ref.start, period_end=ref.end, value=ref.value,
+                             sign=ref.sign, method=sv.method, role=c.name)) is not None
+        ]
+        added = b.add(
+            _id("bridge_component", c.name, bridge.period_end),
+            plane=Plane.VALUATION, kind="bridge_component", subject=c.name,
+            claim=f"{c.label}: {c.value:,.0f} for {label}", fiscal_label=label, value=c.value,
+            provenance=tuple(prov), validation_status=status, why_unsourced=_NO_VALUE_PROVENANCE,
+        )
+        if added is not None:
+            components[c.name] = added
+
+    def derived(key: str, kind: str, subject: str, claim: str, value: float | None,
+                rests_on: list[str | None], **kw: Any) -> str | None:
+        on = tuple(dict.fromkeys(r for r in rests_on if r))
+        return b.add(
+            _id(kind, key, sha, bridge.period_end), plane=Plane.VALUATION, kind=kind,
+            subject=subject, claim=claim, fiscal_label=label, value=value, derived_from=on,
+            validation_status=status, why_unsourced="the rows it rests on are not in the ledger",
+            **kw,
+        )
+
+    mcap = bridge.market_cap
+    mcap_id = derived(
+        "market_cap", "market_cap", "market_cap",
+        f"{mcap.label}: {mcap.value:,.0f}" if mcap.value is not None else f"{mcap.label}: {mcap.note}",
+        mcap.value, [price_id, components.get(bridge.shares.name)],
+        formula="price × share count",
+    )
+    assumed = [c.name for c in (bridge.short_term_investments, bridge.minority_interest,
+                                bridge.preferred_stock) if c.basis == "assumption"]
+    ev_id = derived(
+        "enterprise_value", "enterprise_value", "enterprise_value",
+        f"EV {bridge.ev:,.0f} for {label}" if bridge.ev is not None else str(bridge.ev_reason),
+        bridge.ev,
+        [mcap_id, *(components.get(n) for n in ("total_debt", "cash_and_equivalents",
+                                                 "short_term_investments", "minority_interest",
+                                                 "preferred_stock"))],
+        formula="market cap + total debt − cash − short-term investments + minority interest "
+                "+ preferred stock",
+        note=(f"{', '.join(assumed)} not reported (assumed 0): model assumption" if assumed
+              else None),
+    )
+
+    # The TTM figures the multiples read: each summed over the window's four
+    # quarters from the same filed facts the engine's ratios read.
+    ttm_ids: dict[str, str] = {}
+    if plane.ttm.label is not None:
+        periods = dataset.sorted_periods()
+        idx = next(i for i, x in enumerate(periods) if x.fiscal_label == label)
+        window = periods[idx - 3: idx + 1]
+        for name, fields in _TTM_FIELDS.items():
+            value = getattr(plane.ttm, name)
+            if value is None:
+                continue
+            prov = [
+                p for x in window for f in fields if (sv := x.sources.get(f)) is not None
+                for ref in sv.inputs
+                if (p := _filing(ref.accession, ref.form, ref.filed, concept=ref.concept,
+                                 period_start=ref.start, period_end=ref.end, value=ref.value,
+                                 sign=ref.sign, method=sv.method, role=f)) is not None
+            ]
+            added = b.add(
+                _id("ttm_figure", name, bridge.period_end), plane=Plane.VALUATION,
+                kind="ttm_figure", subject=name, claim=f"{plane.ttm.label} {name}: {value:,.0f}",
+                fiscal_label=plane.ttm.label, value=value, provenance=tuple(prov),
+                validation_status=status, why_unsourced=_NO_VALUE_PROVENANCE,
+            )
+            if added is not None:
+                ttm_ids[name] = added
+    by_figure = {"net income": "net_income", "EBIT": "ebit", "EBITDA": "ebitda",
+                 "revenue": "revenue", "FCF": "fcf"}
+    for m in plane.multiples:
+        base = ev_id if "EV" in (m.numerator_name, m.denominator_name) else mcap_id
+        figure = by_figure.get(m.numerator_name) or by_figure.get(m.denominator_name)
+        claim = (f"{m.name} {m.value:.4g} = {m.numerator_name} / {m.denominator_name} "
+                 f"({m.ttm_window})" if m.value is not None else f"{m.name}: {m.reason}")
+        derived(m.name, "multiple", m.name, claim, m.value, [base, ttm_ids.get(figure or "")],
+                formula=f"{m.numerator_name} / {m.denominator_name}",
+                inputs={m.numerator_name: m.numerator, m.denominator_name: m.denominator})
+
+    e = plane.expectations
+    tag = "default assumptions (not operator-supplied)" if e.defaulted else "operator-supplied"
+    for key, what, g in (("gordon", "Gordon implied perpetual FCF growth", e.gordon),
+                         ("reverse_dcf", "reverse two-stage DCF implied FCF growth", e.reverse)):
+        note = f"{tag}: r={e.assumptions.required_return:.1%}"
+        if key == "reverse_dcf":
+            note += (f", terminal {e.assumptions.terminal_growth:.1%}, "
+                     f"{e.assumptions.horizon_years} years")
+            if e.main_assumption is not None:
+                note += f"; main assumption: {e.main_assumption}"
+        derived(key, "implied_growth", key,
+                f"{what}: {g.value:+.2%}/yr" if g.value is not None else f"{what}: {g.reason}",
+                g.value, [ev_id, ttm_ids.get("fcf")], formula=g.formula, note=note)
+    for sc in e.scenarios:
+        derived(sc.name, "scenario", sc.name,
+                (f"{sc.label}: value per share {sc.value_per_share:,.2f} vs price "
+                 f"{obs.price:,.2f} ({sc.upside:+.1%})") if sc.value_per_share is not None
+                else f"{sc.label}: {sc.reason}",
+                sc.value_per_share, [price_id, ev_id, ttm_ids.get("fcf"),
+                                     components.get(bridge.shares.name)])
+
+    return ValuationSummary(state="produced", observation=observed, fiscal_label=label,
+                            ev=bridge.ev, ev_reason=bridge.ev_reason)
+
+
 # --- the document -------------------------------------------------------------
 
 
@@ -587,13 +735,19 @@ def build_ledger(
     streams: dict[str, Any] | None = None,
     errors: dict[str, Any] | None = None,
     cik_sources: dict[str, object] | None = None,
+    valuation: Any = None,
+    valuation_requested: bool = False,
 ) -> LedgerDocument:
     """The ledger of one run. `streams` holds the raw stream objects
     (`offerings`, `restatements`, `events`, `filing_events`, `vintage`) when a client ran
     them; `errors` the per-stream failures, as the report renders them.
     `cik_sources` names the CIK each payload the run read gives (source ->
     value, `ledger_cik`); the CIK the offerings stream resolved the ticker
-    to is added here: all are the run's one resolution of the ticker."""
+    to is added here: all are the run's one resolution of the ticker.
+    `valuation` is the computed shadow card (`valuation.plane.ValuationPlane`)
+    when the run had a market observation; `valuation_requested` says the
+    caller asked for the plane, so a run without one records that it was
+    not produced rather than nothing."""
     b = _Builder()
     streams = streams or {}
     errors = errors or {}
@@ -623,6 +777,11 @@ def build_ledger(
     rep = streams.get("vintage")
     if rep is not None:
         _vintage_items(b, rep, floor)
+    summary: ValuationSummary | None = None
+    if valuation is not None:
+        summary = _valuation_items(b, valuation, dataset)
+    elif valuation_requested:
+        summary = ValuationSummary(state="not produced: no market observation")
 
     selections: dict[str, str] = {}
     for name, sel in (field_tags or {}).items():
@@ -649,4 +808,5 @@ def build_ledger(
         },
         items=b.items,
         unsourced=b.unsourced,
+        valuation=summary,
     )

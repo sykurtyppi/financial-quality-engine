@@ -6,7 +6,8 @@ leave a log an operator can sign (Hermes audit round 7, finding 3).
     .venv/bin/python scripts/drill.py --ticker NVDA --cache data/cache
     .venv/bin/python scripts/drill.py --only 1,2,3        # a subset of steps
 
-Every step runs the operator's own commands (generate_report.py, journal.py)
+Every step runs the operator's own commands (generate_report.py, journal.py,
+market.py)
 in a subprocess, against a COPY of `app/` and `scripts/` in a scratch
 workspace whose SEC cache is seeded from the inputs, with the network pointed
 at a closed port. Nothing reaches SEC and nothing under the real `reports/`,
@@ -721,6 +722,70 @@ class Drill:
         step.check("no staged file is left behind", not _staged_left(ws))
 
 
+    # 13 --------------------------------------------------------------------------
+    def s13_valuation(self, step: Step) -> None:
+        """The valuation shadow card never touches the score (Hermes review of
+        02c2aac): a market observation recorded with `market.py` adds the
+        card to the appendix and its plane to the ledger, while the decision
+        card and every other plane's ledger items stay byte-identical; once
+        removed, the section goes and the run is again identical to the
+        first."""
+        ws = self.workspace("valuation")
+        t = self.inputs.ticker
+        first = self.generate(step, ws, "--no-docs")
+        report0 = self.wrote_report(step, ws, first)
+        ledger0 = ws.live(".ledger.json").read_text() if report0 else ""
+        step.check("without an observation the appendix says the card was not produced",
+                   "Valuation shadow card: not produced" in report0)
+        at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        cmd = ws.run(step, "market.py", "record", t, "--price", "123.45", "--at", at,
+                     "--source", "drill: synthetic observation", "--scenario", "drill:0.05:5")
+        step.check("`market.py record` exits 0", cmd.returncode == 0, cmd.stderr[-400:])
+        self.no_traceback(step, cmd)
+        step.check("the observation is in the workspace's journal",
+                   (ws.path / "journal" / "market" / f"{t}.json").is_file())
+        cmd = self.generate(step, ws, "--no-docs")
+        report1 = self.wrote_report(step, ws, cmd)
+        step.check("stdout says the card was produced", "valuation shadow card: produced" in cmd.stdout)
+        step.check("the appendix carries the shadow card",
+                   "## Valuation shadow card (non-scoring)" in report1)
+        ledger1 = ws.live(".ledger.json").read_text() if report1 else ""
+        l0 = json.loads(ledger0 or "null") or {}
+        l1 = json.loads(ledger1 or "null") or {}
+        rows = [i for i in l1.get("items", []) if i["plane"] == "valuation"]
+        step.check("the ledger has a bridge row resting on filings",
+                   any(i["kind"] == "bridge_component" and i["provenance"]
+                       and all(p["kind"] == "filing" for p in i["provenance"]) for i in rows),
+                   f"{len(rows)} valuation row(s)")
+        step.check("...and the observation row",
+                   any(i["kind"] == "market_observation"
+                       and any(p["kind"] == "observation" for p in i["provenance"]) for i in rows))
+        step.check("the ledger says the card was produced",
+                   (l1.get("valuation") or {}).get("state") == "produced")
+        card0, card1 = (normalise_report(r.split("# Full report (appendix)")[0])
+                        for r in (report0, report1))
+        step.check("the decision card is byte-identical with and without the observation",
+                   bool(report1) and card0 == card1,
+                   "" if card0 == card1 else first_difference(card0, card1))
+        others = [i for i in l1.get("items", []) if i["plane"] != "valuation"]
+        step.check("the ledger items of every other plane are byte-identical",
+                   bool(l0) and l0.get("items") == others
+                   and l0.get("unsourced") == l1.get("unsourced"))
+        cmd = ws.run(step, "market.py", "remove", t)
+        step.check("`market.py remove` exits 0", cmd.returncode == 0, cmd.stderr[-400:])
+        cmd = self.generate(step, ws, "--no-docs")
+        report2 = self.wrote_report(step, ws, cmd)
+        step.check("the section is gone once the observation is removed",
+                   "## Valuation shadow card" not in report2
+                   and "Valuation shadow card: not produced" in report2)
+        a, b = normalise_report(report0), normalise_report(report2)
+        step.check("the report is again identical to the first (volatile lines masked)",
+                   bool(report2) and a == b, "" if a == b else first_difference(a, b))
+        l2 = json.loads(ws.live(".ledger.json").read_text()) if report2 else None
+        step.check("the ledger is again identical to the first (fetched_at and generation masked)",
+                   l2 is not None and normalise_ledger(l0) == normalise_ledger(l2))
+
+
 STEPS: tuple[tuple[str, str, Callable[[Drill, Step], None]], ...] = (
     ("baseline", "Baseline report", Drill.s1_baseline),
     ("rerun", "Rerun on the same inputs: deterministic, first run archived", Drill.s2_rerun),
@@ -735,6 +800,8 @@ STEPS: tuple[tuple[str, str, Callable[[Drill, Step], None]], ...] = (
     ("failed_rebuild", "A rebuild that fails keeps the live report", Drill.s11_failed_rebuild),
     ("ledger_failure", "A ledger that cannot be built publishes nothing",
      Drill.s12_ledger_failure),
+    ("valuation", "A market observation adds the shadow card and moves no score",
+     Drill.s13_valuation),
 )
 
 

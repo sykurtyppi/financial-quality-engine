@@ -45,7 +45,7 @@ from app.services.ingestion.companyfacts_mapper import (
     _unit_for,
 )
 from app.services.ingestion.composition import compose_total_debt, resolve_by_strategy
-from app.services.ingestion.fields import FIELDS
+from app.services.ingestion.fields import FIELDS, is_scored
 from app.services.ingestion.payloads import concept_rows
 from app.services.ingestion.precedence import Rank, conflicts, earliest, latest, rank
 from app.services.ingestion.selection import Composer, SeriesSelection, parse_components
@@ -525,7 +525,9 @@ def _fields_to_inspect(
     """
     fields: dict[str, tuple[tuple[str, str], ...]] = {**INSTANT_FIELDS, **FLOW_FIELDS}
     for name in selected_tags or {}:
-        if name not in fields:
+        # The valuation plane's unscored inputs are in the mapper's selection
+        # too; the scan reads the facts the SCORE read, and they are not.
+        if name not in fields and is_scored(name):
             fields[name] = ()
     return fields
 
