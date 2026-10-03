@@ -267,6 +267,26 @@ def test_journal_build_fails_closed_on_an_invalid_observation_file(sec, tmp_path
     assert not list((tmp_path / "reports").rglob("*.ledger.json")) if (tmp_path / "reports").exists() else True
 
 
+def test_journal_build_fails_closed_on_a_future_dated_observation(sec, tmp_path):
+    """Review of 48b1f04, F2: observed_at ≤ recorded_at held, both in 2999,
+    and the build published a card with a negative age. The reader now
+    refuses the future; the live report stays what it was, byte for byte."""
+    sec("KO")
+    out, _ = journal_reporting.build_report("KO", with_docs=False, vintage=False)
+    before = out.read_bytes()
+    ledger_before = ledger_path(out).read_bytes()
+    path = observation_path(tmp_path / "journal", "KO")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"ticker": "KO", "price": 1, "observed_at": "2999-01-01T00:00:00+00:00",
+                                "source": "s", "recorded_at": "2999-01-02T00:00:00+00:00"}))
+    with pytest.raises(NotPublished) as e:
+        journal_reporting.build_report("KO", with_docs=False, vintage=False)
+    assert str(path) in str(e.value) and "future" in str(e.value)
+    assert _live_reports(tmp_path) == [out]
+    assert out.read_bytes() == before and ledger_path(out).read_bytes() == ledger_before
+    assert not list((tmp_path / "reports" / ".staging").glob("*.md"))
+
+
 def test_a_replay_never_carries_a_present_day_observation(sec, tmp_path):
     from app.services.ingestion import vintages
 
@@ -387,12 +407,71 @@ def test_market_show_marks_a_stale_observation(market, capsys):
      "--terminal-growth", "0.5"],
     ["record", "../KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00", "--source", "s"],
     ["show", "../KO"],
+    # Control characters in the operator's text (F4) and a scenario growth
+    # past the bracket (F3).
+    ["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00", "--source", "x\n## y"],
+    ["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00", "--source", "s",
+     "--note", "a\tb"],
+    ["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00", "--source", "s",
+     "--scenario", "a\nb:0.05:5"],
+    ["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00", "--source", "s",
+     "--scenario", "big:1e300:50"],
+    ["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00", "--source", "s",
+     "--scenario", "big:1.01:5"],
 ])
 def test_market_invalid_input_exits_2_and_writes_nothing(market, tmp_path, argv, capsys):
     assert market.main(argv) == 2
-    assert capsys.readouterr().err.strip()
+    err = capsys.readouterr().err
+    assert err.strip() and "Traceback" not in err
     assert not (tmp_path / "journal" / "market").exists() or not list(
         (tmp_path / "journal" / "market").iterdir())
+
+
+def test_market_record_names_the_control_character(market, capsys):
+    assert market.main(["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00",
+                        "--source", "x\n## y"]) == 2
+    assert "control character" in capsys.readouterr().err
+
+
+def test_market_show_refuses_a_future_dated_file(market, tmp_path, capsys):
+    path = observation_path(tmp_path / "journal", "KO")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"ticker": "KO", "price": 1, "observed_at": "2999-01-01T00:00:00+00:00",
+                                "source": "s", "recorded_at": "2999-01-02T00:00:00+00:00"}))
+    assert market.main(["show", "KO"]) == 2
+    err = capsys.readouterr().err
+    assert str(path) in err and "future" in err and "Traceback" not in err
+
+
+def test_market_show_prints_the_bytes_it_read_and_exits_1_on_an_io_error(market, tmp_path, capsys,
+                                                                          monkeypatch):
+    # F10: `show` prints what it read (not a second read of the file) and
+    # an I/O failure is exit 1 with the reason, not a traceback.
+    from app.services.valuation.observation import EASTERN
+
+    seen = datetime.now(UTC) - timedelta(hours=3)
+    assert market.main(["record", "KO", "--price", "66.25", "--at", seen.isoformat(),
+                        "--source", "s"]) == 0
+    path = observation_path(tmp_path / "journal", "KO")
+    raw = path.read_bytes()
+    expected_age = (datetime.now(EASTERN).date() - seen.astimezone(EASTERN).date()).days
+    real_read = Path.read_text
+
+    def no_second_read(self, *a, **k):
+        if self == path:
+            raise AssertionError("show re-read the observation file")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", no_second_read)
+    assert market.main(["show", "KO"]) == 0
+    out = capsys.readouterr().out
+    assert raw.decode().rstrip() in out
+    assert f"age: {expected_age} day" in out and "(US/Eastern;" in out
+    monkeypatch.setattr(market, "find_observation",
+                        lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied")))
+    assert market.main(["show", "KO"]) == 1
+    err = capsys.readouterr().err
+    assert "denied" in err and "Traceback" not in err
 
 
 def test_market_io_failure_exits_1(market, tmp_path, capsys):

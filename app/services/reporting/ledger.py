@@ -562,15 +562,18 @@ _TTM_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _valuation_items(b: _Builder, plane: Any, dataset: CompanyDataset) -> ValuationSummary:
+def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
     """The shadow card's rows (Hermes review of 02c2aac, valuation plane).
     Every one is UNVALIDATED: the plane is unscored, so no tier of the card
     ranks it and nothing here was ever measured against an outcome — the
     tier mapping's third tier is exactly that. The price rests on the
     observation; each bridge line on the filings behind the period's value;
     market cap, EV, the multiples, the implied growth and the scenarios on
-    those rows. A line the dataset cannot source (no per-value provenance)
-    is listed as unsourced, as a metric would be."""
+    those rows. The filings are those of the dataset the plane read — the
+    one mapped as filed by the observation when the raw facts were in hand
+    (review of 48b1f04, F1) — never the report's. A line that dataset
+    cannot source (no per-value provenance) is listed as unsourced, as a
+    metric would be."""
     obs = plane.observation
     bridge = plane.bridge
     sha = plane.loaded.sha256
@@ -639,7 +642,8 @@ def _valuation_items(b: _Builder, plane: Any, dataset: CompanyDataset) -> Valuat
     # quarters from the same filed facts the engine's ratios read.
     ttm_ids: dict[str, str] = {}
     if plane.ttm.label is not None:
-        periods = dataset.sorted_periods()
+        assert plane.dataset is not None  # a TTM window was built from it
+        periods = plane.dataset.sorted_periods()
         idx = next(i for i, x in enumerate(periods) if x.fiscal_label == label)
         window = periods[idx - 3: idx + 1]
         for name, fields in _TTM_FIELDS.items():
@@ -682,19 +686,22 @@ def _valuation_items(b: _Builder, plane: Any, dataset: CompanyDataset) -> Valuat
                      f"{e.assumptions.horizon_years} years")
             if e.main_assumption is not None:
                 note += f"; main assumption: {e.main_assumption}"
+        # The solves equate PV(FCF to equity) to the market cap (F7): they
+        # rest on it, not on EV.
         derived(key, "implied_growth", key,
                 f"{what}: {g.value:+.2%}/yr" if g.value is not None else f"{what}: {g.reason}",
-                g.value, [ev_id, ttm_ids.get("fcf")], formula=g.formula, note=note)
+                g.value, [mcap_id, ttm_ids.get("fcf")], formula=g.formula, note=note)
     for sc in e.scenarios:
         derived(sc.name, "scenario", sc.name,
                 (f"{sc.label}: value per share {sc.value_per_share:,.2f} vs price "
                  f"{obs.price:,.2f} ({sc.upside:+.1%})") if sc.value_per_share is not None
                 else f"{sc.label}: {sc.reason}",
-                sc.value_per_share, [price_id, ev_id, ttm_ids.get("fcf"),
-                                     components.get(bridge.shares.name)])
+                sc.value_per_share, [price_id, components.get(bridge.shares.name),
+                                     ttm_ids.get("fcf")])
 
     return ValuationSummary(state="produced", observation=observed, fiscal_label=label,
-                            ev=bridge.ev, ev_reason=bridge.ev_reason)
+                            availability=bridge.availability, ev=bridge.ev,
+                            ev_reason=bridge.ev_reason)
 
 
 # --- the document -------------------------------------------------------------
@@ -779,7 +786,7 @@ def build_ledger(
         _vintage_items(b, rep, floor)
     summary: ValuationSummary | None = None
     if valuation is not None:
-        summary = _valuation_items(b, valuation, dataset)
+        summary = _valuation_items(b, valuation)
     elif valuation_requested:
         summary = ValuationSummary(state="not produced: no market observation")
 

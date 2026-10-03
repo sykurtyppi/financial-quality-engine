@@ -1,15 +1,26 @@
 """The enterprise-value bridge: from one observed price to EV, one line per
 component, each line saying which data class it is.
 
-- filing: a balance-sheet figure of the latest period whose facts were all
-  filed by the observation's moment (`select_period`), with the period's
-  `SourcedValue` behind it — the ledger cites those filings;
+- filing: a balance-sheet figure of the latest period that carries the
+  bridge inputs (`select_period`), with the period's `SourcedValue` behind
+  it — the ledger cites those filings;
 - observation: the price;
 - derived: arithmetic over the lines above (market cap, EV);
 - assumption: a component the filer did not report and the bridge reads as
   zero. Said on the line, never folded in silently: short-term investments,
   minority interest and preferred stock are often genuinely absent, but
   "absent" and "zero" are not the same claim.
+
+Which facts a period carries is decided before the bridge sees it (review
+of 48b1f04, F1): the plane maps the raw payload AS FILED by the observation
+through the mapper's point-in-time cut (`plane.as_filed_dataset`), so a
+figure re-filed later — a comparative in the next 10-Q, an amendment — is
+read as it stood on the observation's day, and the live dataset's
+latest-filed-wins dates never decide availability. The cut is EDGAR's day
+(`available_through`): a filing dated the observation's own US/Eastern day
+is not yet available (F5). A bridge over a dataset alone (no raw facts)
+cannot check any of this, and its availability line says so rather than
+guessing.
 
 Operating-lease liabilities are shown beside EV and never added to it: the
 engine's own total debt excludes them by design (`fields.py`, P0-10), and
@@ -23,11 +34,11 @@ with the field and the period named.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
-from typing import ClassVar, Literal
+from datetime import date, datetime, timedelta
+from typing import Literal
 
 from app.schemas.financials import CompanyDataset, PeriodFinancials, SourcedValue
-from app.services.valuation.observation import MarketObservation
+from app.services.valuation.observation import EASTERN, MarketObservation
 
 Basis = Literal["filing", "observation", "derived", "assumption"]
 
@@ -53,14 +64,6 @@ class BridgeComponent:
 
 @dataclass(frozen=True)
 class Bridge:
-    # The period fields the bridge reads; a period is "available" at an
-    # observation when every fact behind these was filed by then.
-    FILING_FIELDS: ClassVar[tuple[str, ...]] = (
-        "shares_outstanding", "shares_diluted", "total_debt", "cash_and_equivalents",
-        "short_term_investments", "minority_interest", "preferred_stock",
-        "operating_lease_liabilities", "stockholders_equity",
-    )
-
     fiscal_label: str | None
     period_end: date | None
     availability: str
@@ -89,46 +92,43 @@ class Bridge:
         return tuple(c for c in self.components() if c.basis == "filing" and c.value is not None)
 
 
-def _filed_by(period: PeriodFinancials) -> date | None:
-    """The latest filing date among the facts behind the period's bridge
-    fields (every field's, when none of those has a fact); None when the
-    period carries no provenance at all."""
-    refs = [ref for name, sv in period.sources.items() if name in Bridge.FILING_FIELDS
-            for ref in sv.inputs]
-    if not refs:
-        refs = [ref for sv in period.sources.values() for ref in sv.inputs]
-    return max((ref.filed for ref in refs), default=None)
+def available_through(observed_at: datetime) -> date:
+    """The last filing date an observation could have seen: the day before
+    its US/Eastern calendar day. EDGAR dates a filing by its Eastern day and
+    accepts it at any hour of it, so a filing dated the observation's own
+    day is treated as not yet available — a close at 16:00 and a 10-Q
+    accepted at 17:30 the same day are the common case, and the bridge must
+    not read that 10-Q into that price (F5). The mapper's cut is inclusive
+    (`filed <= as_of`), so this is the day before."""
+    return observed_at.astimezone(EASTERN).date() - timedelta(days=1)
 
 
-def select_period(
-    dataset: CompanyDataset, observed_at: datetime
-) -> tuple[PeriodFinancials | None, str]:
-    """The latest period whose bridge facts were all filed by the
-    observation's day, and a sentence saying so (or why not). A dataset
-    without per-value provenance (the API's, a synthetic one) cannot be
-    checked: its latest period is used and the sentence says the check was
-    not made — never a guess dressed as one."""
+def _missing_input(period: PeriodFinancials) -> str | None:
+    """The first bridge input the period lacks: a share count (either
+    kind), total debt or cash."""
+    if period.shares_outstanding is None and period.shares_diluted is None:
+        return "share count"
+    for name in ("total_debt", "cash_and_equivalents"):
+        if getattr(period, name) is None:
+            return name
+    return None
+
+
+def select_period(dataset: CompanyDataset) -> tuple[PeriodFinancials | None, list[str]]:
+    """The latest period carrying the bridge inputs, and the later periods
+    skipped for lacking one, each named with the field. When no period is
+    complete the latest is returned (the bridge then names what it lacks);
+    None only for a dataset without periods."""
     periods = dataset.sorted_periods()
     if not periods:
-        return None, "no periods in the dataset"
-    if not any(p.sources for p in periods):
-        latest = periods[-1]
-        return latest, (f"availability not checked (no per-value provenance in this dataset): "
-                        f"latest period {latest.fiscal_label} (ending {latest.period_end}) used")
-    on = observed_at.astimezone(UTC).date()
+        return None, []
     skipped: list[str] = []
     for period in reversed(periods):
-        filed = _filed_by(period)
-        if filed is None:
-            skipped.append(f"{period.fiscal_label} (no dated fact)")
-            continue
-        if filed <= on:
-            after = f"; filed after it: {', '.join(skipped)}" if skipped else ""
-            return period, (f"filing-derived facts filed by {filed} (observation {on}): "
-                            f"{period.fiscal_label}, ending {period.period_end}{after}")
-        skipped.append(f"{period.fiscal_label} (filed {filed})")
-    return None, (f"no period of the dataset was filed by {on}: "
-                  f"{', '.join(skipped)}")
+        missing = _missing_input(period)
+        if missing is None:
+            return period, skipped
+        skipped.append(f"{period.fiscal_label} ({missing} missing)")
+    return periods[-1], []
 
 
 def _filing(period: PeriodFinancials, name: str, label: str, sign: int, *,
@@ -180,12 +180,42 @@ def _empty(name: str, label: str, sign: int, note: str) -> BridgeComponent:
     return BridgeComponent(name, label, None, "filing", sign, note=note)
 
 
-def enterprise_value_bridge(dataset: CompanyDataset, obs: MarketObservation) -> Bridge:
+def _availability(dataset: CompanyDataset | None, period: PeriodFinancials | None,
+                  skipped: list[str], obs: MarketObservation, as_filed_by: date | None) -> str:
+    """The sentence over the filing block: which facts the bridge read and
+    whether their availability at the observation was checked."""
+    cut = f"filings dated {obs.eastern_day} treated as not yet available"
+    if dataset is None:
+        # The point-in-time cut mapped nothing: fewer than two quarter ends
+        # were filed by then.
+        return f"no period can be built from the facts filed by {as_filed_by} ({cut})"
+    if period is None:
+        return "no periods in the dataset"
+    if as_filed_by is None:
+        which = "latest period " if not skipped else ""
+        text = (f"filing availability at the observation date not checked (no raw facts): "
+                f"{which}{period.fiscal_label} (ending {period.period_end}) used")
+    else:
+        text = (f"filing-derived facts as filed by {as_filed_by} ({cut}): {period.fiscal_label}, "
+                f"ending {period.period_end}")
+    if skipped:
+        text += f"; skipped (bridge inputs missing): {', '.join(skipped)}"
+    return text
+
+
+def enterprise_value_bridge(
+    dataset: CompanyDataset | None, obs: MarketObservation, *, as_filed_by: date | None = None
+) -> Bridge:
     """EV = market cap + total debt − cash − short-term investments
-    + minority interest + preferred stock, over the period available at the
-    observation; `ev` is None, with the reason naming the field and period,
-    when the share count, debt or cash is missing."""
-    period, availability = select_period(dataset, obs.observed_at)
+    + minority interest + preferred stock, over the latest period of
+    `dataset` that carries the bridge inputs; `ev` is None, with the reason
+    naming the field and period, when the share count, debt or cash is
+    missing. `as_filed_by` is the point-in-time cut the dataset was mapped
+    through (the plane's; None for a dataset alone, whose availability is
+    then said to be unchecked); `dataset` is None when that cut mapped no
+    period at all."""
+    period, skipped = select_period(dataset) if dataset is not None else (None, [])
+    availability = _availability(dataset, period, skipped, obs, as_filed_by)
     price = BridgeComponent(
         "price", f"price {obs.price:,.2f} {obs.currency} observed {obs.observed_at.isoformat()}",
         obs.price, "observation",

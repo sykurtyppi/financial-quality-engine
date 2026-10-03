@@ -121,7 +121,12 @@ def test_coverage_is_over_the_scored_fields_only():
     scored = [d for d in diag.fields if F.is_scored(d.field_name)]
     assert diag.coverage() == (sum(d.periods_filled for d in scored)
                                / sum(d.periods_total for d in scored))
-    assert all(diag.field_by_name(n).periods_filled == 0 for n in NEW)  # trimmed fixture
+    # The committed fixtures were trimmed to the registry before these five
+    # fields existed (scripts/make_real_fixtures.py), so none of them maps
+    # on any of the three; this pins that state of the fixtures, not a
+    # property of the filers, and must be updated to the real counts when
+    # the fixtures are regenerated.
+    assert all(diag.field_by_name(n).periods_filled == 0 for n in NEW)
 
 
 def test_the_restatement_scan_neither_inspects_nor_lists_them():

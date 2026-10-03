@@ -135,6 +135,10 @@ TARGETS: tuple[Target, ...] = (
     Target("app/services/valuation/render.py", (
         "tests/unit/test_valuation_render.py", "tests/unit/test_valuation_report.py",
     )),
+    Target("app/services/valuation/plane.py", (
+        "tests/unit/test_valuation_bridge.py", "tests/unit/test_valuation_ledger.py",
+        "tests/unit/test_valuation_render.py", "tests/unit/test_valuation_report.py",
+    )),
 )
 
 _FLIPS: dict[type, type] = {

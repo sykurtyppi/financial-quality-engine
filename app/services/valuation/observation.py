@@ -13,9 +13,16 @@ should use instead of its documented defaults.
 
 Reading is strict: a file that is present but cannot be taken as an
 observation is an `ObservationError` naming the path — never "no
-observation" — so a report build fails closed on it. Nothing is read or
-written through a symlink (the journal's rule, Hermes audit of 424b0b4,
-finding 5).
+observation" — so a report build fails closed on it. A file dated in the
+future is refused the same way (review of 48b1f04, F2: observed_at ≤
+recorded_at held with both in 2999, and the card carried a negative age).
+Nothing is read or written through a symlink (the journal's rule, Hermes
+audit of 424b0b4, finding 5).
+
+Days are EDGAR's. A filing is dated by its US/Eastern calendar day, so the
+observation's own day — the one its availability and age are counted on —
+is its Eastern day too, not the UTC one (F5: 23:30 Eastern is the next day
+in UTC, and the bridge was reading that day's 10-Q into the price).
 """
 
 from __future__ import annotations
@@ -24,11 +31,13 @@ import errno
 import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
-from datetime import UTC, date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from pydantic import (
     AwareDatetime,
@@ -48,10 +57,32 @@ from app.services.reporting.report_files import own_dir, write_atomic
 # beside today's filing facts mixes two moments without saying so.
 STALE_AFTER_DAYS = 7
 MARKET_DIR = "market"
+# EDGAR's filing calendar.
+EASTERN = ZoneInfo("America/New_York")
 
 SOURCE_MAX = 200
 NOTE_MAX = 500
 SCENARIO_NAME_MAX = 60
+
+# The growth bracket the expectations block's bisection searches, and the
+# bound on a scenario's growth: FCF collapsing 99% a year to doubling every
+# year. A scenario past the top overflowed the present value to inf, which
+# the card printed and the ledger could not hold (F3).
+GROWTH_LOW = -0.99
+GROWTH_HIGH = 1.0
+
+# Anything that could break a line or hide in one: an operator's source,
+# note or scenario name is emitted into the report, and a newline in it
+# forged a heading there (F4).
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _plain_text(v: str, what: str) -> str:
+    found = _CONTROL.search(v)
+    if found:
+        raise ValueError(f"{what} must not contain control characters (newlines, tabs, ...): "
+                         f"found {found.group()!r}")
+    return v
 
 
 class ObservationError(ValueError):
@@ -92,7 +123,7 @@ class Scenario(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: Annotated[str, Field(min_length=1, max_length=SCENARIO_NAME_MAX)]
-    fcf_growth: Annotated[float, Field(gt=-1.0, allow_inf_nan=False)]
+    fcf_growth: Annotated[float, Field(gt=-1.0, le=GROWTH_HIGH, allow_inf_nan=False)]
     years: Annotated[int, Field(ge=1, le=50)]
     terminal_growth: Annotated[float, Field(gt=-1.0, allow_inf_nan=False)] | None = None
     required_return: Annotated[float, Field(gt=0.0, lt=1.0, allow_inf_nan=False)] | None = None
@@ -100,7 +131,7 @@ class Scenario(BaseModel):
     @field_validator("name")
     @classmethod
     def _named(cls, v: str) -> str:
-        v = v.strip()
+        v = _plain_text(v, "a scenario name").strip()
         if not v:
             raise ValueError("a scenario needs a name")
         return v
@@ -138,11 +169,16 @@ class MarketObservation(BaseModel):
     @field_validator("source")
     @classmethod
     def _source(cls, v: str) -> str:
-        v = v.strip()
+        v = _plain_text(v, "source").strip()
         if not v:
             raise ValueError("source must say what was looked at (an exchange close, a "
                              "broker statement, a terminal screen)")
         return v
+
+    @field_validator("note")
+    @classmethod
+    def _note(cls, v: str | None) -> str | None:
+        return None if v is None else _plain_text(v, "note")
 
     @model_validator(mode="after")
     def _consistent(self) -> MarketObservation:
@@ -158,9 +194,17 @@ class MarketObservation(BaseModel):
             raise ValueError(f"scenario names must be distinct: {dupes}")
         return self
 
+    @property
+    def eastern_day(self) -> date:
+        """The observation's US/Eastern calendar day — EDGAR's, on which a
+        filing's availability to it and its age are both counted (F5)."""
+        return self.observed_at.astimezone(EASTERN).date()
+
     def age_days(self, on: date) -> int:
-        """Whole days from the observation's own (UTC) day to `on`."""
-        return (on - self.observed_at.astimezone(UTC).date()).days
+        """Whole days from the observation's Eastern day to `on`, never
+        negative: the reader refuses the future (F2), and a report dated
+        before the observation's day by a clock's skew is age 0, not -1."""
+        return max(0, (on - self.eastern_day).days)
 
     def is_stale(self, on: date) -> bool:
         return self.age_days(on) > STALE_AFTER_DAYS
@@ -168,18 +212,21 @@ class MarketObservation(BaseModel):
 
 @dataclass(frozen=True)
 class LoadedObservation:
-    """An observation with the digest of what it was read from: the file's
+    """An observation with what it was read from and its digest: the file's
     bytes (the ledger's `observation_sha256`), or the canonical JSON of an
-    observation built in memory (`of`), which has no file."""
+    observation built in memory (`of`), which has no file. `raw` is kept so
+    that what is shown is what was read (`market.py show`, F10): the digest
+    is always of these bytes."""
 
     observation: MarketObservation
     sha256: str
     path: Path | None
+    raw: bytes
 
     @classmethod
     def of(cls, observation: MarketObservation) -> LoadedObservation:
-        digest = hashlib.sha256(observation.model_dump_json().encode()).hexdigest()
-        return cls(observation, digest, None)
+        raw = observation.model_dump_json().encode()
+        return cls(observation, hashlib.sha256(raw).hexdigest(), None, raw)
 
 
 def observation_path(journal_root: Path, ticker: str) -> Path:
@@ -204,11 +251,22 @@ def _read_regular(path: Path) -> bytes:
         return fh.read()
 
 
-def load_observation(path: Path) -> LoadedObservation:
+def _refuse_future(path: Path, observation: MarketObservation, now: datetime | None) -> None:
+    """A price cannot have been seen, nor recorded, after `now` (F2). The
+    model alone cannot know the time; the reader does."""
+    now = now if now is not None else datetime.now(UTC)
+    for name in ("observed_at", "recorded_at"):
+        when = getattr(observation, name)
+        if when > now:
+            raise ObservationError(path, f"{name} {when.isoformat()} is in the future "
+                                         f"(now {now.isoformat()})")
+
+
+def load_observation(path: Path, *, now: datetime | None = None) -> LoadedObservation:
     """The observation at `path`, with the digest of the bytes it was read
     from. Anything that is not exactly one observation — not a regular
-    file, not UTF-8, not JSON, not valid — is an `ObservationError` naming
-    the path."""
+    file, not UTF-8, not JSON, not valid, dated after `now` (the clock
+    unless given) — is an `ObservationError` naming the path."""
     raw = _read_regular(path)
     try:
         text = raw.decode("utf-8")
@@ -222,14 +280,17 @@ def load_observation(path: Path) -> LoadedObservation:
         observation = MarketObservation.model_validate(doc)
     except ValidationError as e:
         raise ObservationError(path, f"not a market observation ({e})") from None
-    return LoadedObservation(observation, hashlib.sha256(raw).hexdigest(), path)
+    _refuse_future(path, observation, now)
+    return LoadedObservation(observation, hashlib.sha256(raw).hexdigest(), path, raw)
 
 
-def read_observation(path: Path) -> MarketObservation:
-    return load_observation(path).observation
+def read_observation(path: Path, *, now: datetime | None = None) -> MarketObservation:
+    return load_observation(path, now=now).observation
 
 
-def find_observation(journal_root: Path, ticker: str) -> LoadedObservation | None:
+def find_observation(
+    journal_root: Path, ticker: str, *, now: datetime | None = None
+) -> LoadedObservation | None:
     """The ticker's observation, or None when nothing is at its path. A file
     that is there but is not this ticker's valid observation raises: it is
     never read as "none recorded"."""
@@ -238,7 +299,7 @@ def find_observation(journal_root: Path, ticker: str) -> LoadedObservation | Non
         os.lstat(path)
     except FileNotFoundError:
         return None
-    loaded = load_observation(path)
+    loaded = load_observation(path, now=now)
     if loaded.observation.ticker != safe_ticker(ticker):
         raise ObservationError(
             path, f"the observation names {loaded.observation.ticker}, not {safe_ticker(ticker)}")

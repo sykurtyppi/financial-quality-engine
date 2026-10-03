@@ -37,10 +37,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.valuation.observation import (
+    EASTERN,
     STALE_AFTER_DAYS,
     Assumptions,
     MarketObservation,
-    ObservationError,
     Scenario,
     find_observation,
     remove_observation,
@@ -140,18 +140,24 @@ def cmd_record(args: argparse.Namespace) -> int:
 def cmd_show(args: argparse.Namespace) -> int:
     try:
         loaded = find_observation(_journal(), args.ticker)
-    except (ValueError, ObservationError) as e:  # ValueError: the ticker itself
+    except ValueError as e:  # an ObservationError, or the ticker itself
         print(f"error: {e}", file=sys.stderr)
         return EXIT_INVALID
+    except OSError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_IO
     if loaded is None:
         print(f"no market observation recorded for {args.ticker.upper()}", file=sys.stderr)
         return EXIT_INVALID
     obs = loaded.observation
-    today = datetime.now(UTC).date()
+    # The age is counted on EDGAR's calendar, as the card counts it.
+    today = datetime.now(EASTERN).date()
     age = obs.age_days(today)
-    assert loaded.path is not None
-    print(loaded.path.read_text(encoding="utf-8").rstrip())
-    print(f"age: {age} day{'s' if age != 1 else ''} as of {today} (sha256 {loaded.sha256[:12]}…)"
+    # What was read is what is shown: the bytes behind the digest, not a
+    # second read of the file (review of 48b1f04, F10).
+    print(loaded.raw.decode("utf-8").rstrip())
+    print(f"age: {age} day{'s' if age != 1 else ''} as of {today} (US/Eastern; sha256 "
+          f"{loaded.sha256[:12]}…)"
           + (f" — STALE: older than {STALE_AFTER_DAYS} days" if obs.is_stale(today) else ""))
     return 0
 

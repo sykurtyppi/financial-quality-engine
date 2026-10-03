@@ -295,8 +295,13 @@ scripts/market.py show NVDA
 scripts/market.py remove NVDA
 ```
 
-The next report of the name (`generate_report.py`, `journal.py report`, the
-watch) appends the card; `--no-market` on `generate_report.py` leaves it out.
+The offset in `--at` matters: the card reads the filing facts **as filed by
+the observation**, counting days on EDGAR's US/Eastern calendar, and a filing
+dated the observation's own Eastern day is treated as not yet available (a
+close at 16:00 ET and a 10-Q accepted at 17:30 ET are the same day). Record
+the close with its real offset, not a UTC time of the next morning. The next
+report of the name (`generate_report.py`, `journal.py report`, the watch)
+appends the card; `--no-market` on `generate_report.py` leaves it out.
 Nothing is fetched, and a file under `journal/market/` that cannot be read as
 an observation fails the build closed (exit 3, nothing published) like a
 ledger that cannot be built. The card marks an observation older than seven

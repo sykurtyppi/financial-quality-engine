@@ -624,12 +624,14 @@ def build_report(
     coverage line, the raw-fact check cannot know what it missed — but a
     replay can never read past its day by omission.
     `market_observation`: the operator's recorded price, when the run has
-    one; the valuation shadow card is then computed over `dataset` and
-    appended to the appendix as its own section and to the ledger as its own
-    plane (Hermes review of 02c2aac). It reads the dataset and never the
-    result: the card, the thermometer, the scores, the flags and every other
-    ledger item are byte-identical with and without it
-    (tests/unit/test_valuation_report.py). `valuation_requested` says the
+    one; the valuation shadow card is then computed over the facts as filed
+    by the observation (`company_facts` through the point-in-time cut;
+    over `dataset` itself, saying the check was not made, when the run has
+    no raw payload) and appended to the appendix as its own section and to
+    the ledger as its own plane (Hermes review of 02c2aac). It reads the
+    data and never the result: the card, the thermometer, the scores, the
+    flags and every other ledger item are byte-identical with and without
+    it (tests/unit/test_valuation_report.py). `valuation_requested` says the
     caller looked for one: without an observation the appendix then says the
     card was not produced; a caller that did not ask (the API, a replay)
     gets no line at all.
@@ -708,7 +710,8 @@ def build_report(
         from app.services.valuation.plane import compute_plane
         from app.services.valuation.render import render_valuation_section
 
-        plane = compute_plane(dataset, market_observation, report_date)
+        plane = compute_plane(dataset, market_observation, report_date,
+                              company_facts=company_facts)
         body += "\n\n" + render_valuation_section(plane) + "\n"
     elif valuation_requested:
         from app.services.valuation.render import not_produced_line

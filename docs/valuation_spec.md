@@ -32,23 +32,69 @@ one authoritative-looking number:
 One per ticker, recorded once (no history). Validated on the way in:
 price finite and positive; currency three upper-case ASCII letters;
 `observed_at` timezone-aware and not after `recorded_at`; `source` non-empty
-(≤200 characters); `note` ≤500; the ticker by the journal's file-name rules.
-A file that is present but is not a valid observation **fails the report build
+(≤200 characters); `note` ≤500; a scenario's `fcf_growth` in `(−100%, +100%]`
+(the bisection bracket's top — past it a present value overflows a double);
+no control character (a newline, a tab, …) anywhere in `source`, `note` or a
+scenario name, since these are emitted into the report and a newline would
+let the file write a heading there (the renderer also escapes `#`, `-`,
+`*`, `>`, `+` where a line could start, and `|`); the ticker by the journal's
+file-name rules. The reader additionally refuses a file whose `observed_at`
+or `recorded_at` is after the clock: the model alone cannot know the time,
+and a file dated 2999 throughout is consistent but not an observation. A file
+that is present but is not a valid observation **fails the report build
 closed** (`NotPublished`, naming the file; `generate_report.py` exits 3) — a
 report must not go live while its one market datum is in doubt. The file is
-never read or written through a symlink. An observation more than
+never read or written through a symlink.
+
+**Days are EDGAR's.** A filing is dated by its US/Eastern calendar day, so the
+observation's own day — `MarketObservation.eastern_day`, on which both its
+availability cut and its age are counted — is its `America/New_York` calendar
+day, not the UTC one (23:30 Eastern is already the next day in UTC). Age is
+`generated_on − eastern_day`, clamped at 0, and an observation more than
 `STALE_AFTER_DAYS = 7` days older than the report's day is marked **STALE** on
 the card (the filing facts are as of the report; the price is not).
 
-## The period the facts come from
+## The period the facts come from: as filed by the observation
 
-The latest period of the dataset whose bridge facts were all **filed on or
-before the observation's day** (the filing dates behind the period's share
-count, debt, cash and the optional lines). A period re-filed after the
-observation (a comparative in a later 10-Q, an amendment) is skipped and
-named; an observation earlier than every filing asserts no EV. A dataset
-without per-value provenance (the API's, a synthetic one) cannot be checked:
-its latest period is used and the card says the check was not made.
+The report's dataset is latest-filed-wins over the whole payload, so an FY-end
+quarter carries the date of the 10-Q that later repeated it as a comparative,
+and a restated figure is the restated one. Neither is what an observation
+before that later filing could have seen, and a check on those dates skipped
+the 10-K's own period (review of 48b1f04, F1). So the plane does not read the
+report's dataset when it has the raw companyfacts payload (every report entry
+point passes it): it maps its own dataset through the mapper's point-in-time
+cut — `pit.build_pit_dataset`, i.e. `build_dataset(as_of=)`, the backtests'
+boundary, imported and not changed — with the same window length and profile
+as the report's, as of
+
+    as_filed_by = eastern_day(observed_at) − 1 day
+
+(`bridge.available_through`). The cut is inclusive (`filed ≤ as_of`), and a
+filing dated the observation's own Eastern day counts as **not yet
+available**: EDGAR accepts a filing at any hour of its day, and a close at
+16:00 with a 10-Q accepted at 17:30 is the common case. The card's filing
+block opens with the sentence `filing-derived facts as filed by <date>
+(filings dated <day> treated as not yet available): <period>, ending <end>`,
+and every filing row cites the as-filed accession and filing date; the ledger
+records the sentence in `valuation.availability`.
+
+Within that dataset the bridge takes the **latest period that carries its
+inputs** (a share count — either kind — total debt and cash); a later period
+short of one is skipped and named on the sentence with the missing field. With
+no complete period the latest is used and the EV line names what it lacks.
+When fewer than two quarter ends were filed by the cut the mapper refuses, no
+period is used and EV is not asserted (`no period can be built from the facts
+filed by <date>`). A restated figure therefore shows its original value while
+the observation predates the amendment and the amended one after it; the
+TTM figures and the ledger's TTM rows come from the same as-filed dataset. At
+or after the newest filing the as-filed dataset is the report's own, period
+for period and source for source — what the drill's step 13 rehearses.
+
+A caller with the dataset alone (no raw facts: the API's, a synthetic one)
+cannot check availability. Its latest complete period is used and the
+sentence says so — `filing availability at the observation date not checked
+(no raw facts): latest period <label> (ending <end>) used` — never a guess
+dressed as a check.
 
 ## The enterprise-value bridge
 
@@ -110,13 +156,19 @@ years) come from the observation file's `assumptions`; absent, the defaults
 `r = 0.09`, `g_T = 0.025`, `H = 10` are used and every line that uses them says
 **default assumptions (not operator-supplied)**. `g_T < r` is enforced.
 
+**The solves are against the market cap, not EV.** `FCF_ttm` is the engine's
+FCF (CFO − capex): after interest, a flow to *equity*. Equating its present
+value to EV would set a levered flow against an unlevered value and count the
+debt twice (review of 48b1f04, F7). EV serves the EV multiples only; an
+unlevered FCF / NOPAT reading is phase 2 (below).
+
 | Quantity | Formula | Not computable when |
 |---|---|---|
-| Gordon implied perpetual FCF growth | `g = r − FCF_ttm / EV` | FCF ≤ 0; EV ≤ 0 or not asserted; TTM window incomplete |
-| reverse two-stage DCF implied growth | the `g` with `Σ_{t=1..H} FCF_ttm(1+g)^t/(1+r)^t + FCF_ttm(1+g)^H(1+g_T)/((r−g_T)(1+r)^H) = EV`, by bisection over `[−99%, +100%]` (PV is increasing in `g`; deterministic, no numpy) | as above; or no solution in the bracket (said as "below −99%/yr" / "above +100%/yr") |
-| sensitivity | implied growth at `r ± 1pt` and at price ± 10% (EV ± 10% of market cap); the swing is the larger distance from the base case | base case not computable |
-| the main assumption that would change the conclusion | the sensitivity with the larger swing, named | no sensitivities |
-| scenario value per share | `(PV(FCF_ttm at the scenario's growth for its years, then its terminal growth, at its r) − (EV − market cap)) / share count`, vs the price (% upside/downside); each tagged `model assumption: <name>` | FCF ≤ 0; share count missing; EV not asserted; terminal growth ≥ r |
+| Gordon implied perpetual FCF growth | `g = r − FCF_ttm / market cap` | FCF ≤ 0; market cap not built (share count missing); TTM window incomplete |
+| reverse two-stage DCF implied growth | the `g` with `Σ_{t=1..H} FCF_ttm(1+g)^t/(1+r)^t + FCF_ttm(1+g)^H(1+g_T)/((r−g_T)(1+r)^H) = market cap`, by bisection over `[−99%, +100%]` (PV is increasing in `g`; deterministic, no numpy) | as above; no solution in the bracket (said as "below −99%/yr" / "above +100%/yr"); a present value past a double ("overflow (present value not finite)") |
+| sensitivity | implied growth at `r ± 1pt` and at price ± 10% (market cap × 0.9 and × 1.1); the swing is the larger distance from the base case. A move that cannot be valued — `r − 1pt` not above `g_T` (or not above 0), `r + 1pt` not below 100%, or an end of the move outside the bracket — is printed as **withheld** with the reason, never dropped | base case not computable (then no sensitivity line at all) |
+| the main assumption that would change the conclusion | the valued sensitivity with the larger swing, named; the withheld ones named after it (`… (price ± 10% withheld)`), so a one-sided answer never reads as the whole; "none: every sensitivity withheld" when neither is valued | no sensitivities |
+| scenario value per share | `PV(FCF_ttm at the scenario's growth for its years, then its terminal growth, at its r) / share count` — an equity value, no bridge claims taken off — vs the price (% upside/downside); each tagged `model assumption: <name>` | FCF ≤ 0; share count missing; terminal growth ≥ r; a present value past a double |
 
 No scenarios recorded → the card says "no scenarios recorded".
 
@@ -126,7 +178,9 @@ No scenarios recorded → the card says "no scenarios recorded".
 - no peer reference class;
 - no NOPAT, no tax normalisation, no invested capital — EBIT is the operating
   income the engine maps, EBITDA adds its D&A, FCF is CFO − capex as the
-  engine's `fcf_margin` reads them;
+  engine's `fcf_margin` reads them, and because that FCF is levered every
+  implied-growth solve and scenario is an equity-side one (against the market
+  cap, per share); an unlevered FCF or NOPAT against EV is phase 2;
 - no forward estimates of any kind, and **no PEG, ever** (it needs licensed
   consensus estimates: a data purchase and out of scope);
 - no currency conversion: the price's currency is shown beside it and the
@@ -135,18 +189,23 @@ No scenarios recorded → the card says "no scenarios recorded".
 
 ## The non-scoring guarantee
 
-The plane reads the dataset and the observation and never the analysis
-result. `build_report` with and without the observation produces a
-byte-identical decision card, thermometer, result and every non-valuation
-ledger item; only the appendix section and the `Plane.VALUATION` rows differ.
+The plane reads the raw facts (through the point-in-time cut), the dataset
+and the observation, and never the analysis result. `build_report` with and
+without the observation produces a byte-identical decision card, thermometer,
+result and every non-valuation ledger item; only the appendix section and the
+`Plane.VALUATION` rows differ.
 Pinned by `tests/unit/test_valuation_report.py::test_card_scores_and_every_other_ledger_item_are_byte_identical`
 (on the three real fixtures, with and without the evidence streams) and
 rehearsed by step 13 of the earnings-night drill. In the ledger every valuation
 row is `UNVALIDATED`: the plane is unscored, so no tier of the card ranks it and
 nothing in it was measured against an outcome. The price row rests on
-`kind="observation"` provenance, which the review console shows as
+`kind="observation"` provenance — which carries the observation's four fields
+and none of a filing's or a snapshot's, with aware timestamps, as the schema
+enforces in both directions — and which the review console shows as
 "market observation · `<source>` · observed `<ts>`" with no EDGAR link and no
-tick: it is not reconcilable to a filing.
+tick: it is not reconcilable to a filing. The ledger's `valuation` summary
+has two states, "produced" and "not produced: no market observation": a plane
+that cannot be computed fails the build closed and no ledger is written.
 
 ## Deliberately deferred
 

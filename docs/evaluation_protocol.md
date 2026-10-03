@@ -454,6 +454,18 @@ Mid-window changes (0.4.0 window):
     `tests/unit/test_valuation_bridge.py`, `tests/unit/test_valuation_multiples.py`,
     `tests/unit/test_valuation_expectations.py`, `tests/unit/test_valuation_observation.py`,
     `tests/integration/test_selection_snapshot.py`, drill step 13.
+    *Fix round 1 (review of 48b1f04):* the plane now reads the filing facts
+    **as filed by the observation** through the mapper's point-in-time cut
+    (`pit.build_pit_dataset`, imported, not changed; the cut is the day
+    before the observation's US/Eastern day), the implied-growth solves and
+    scenarios are equity-side (against the market cap, not EV), the
+    observation reader refuses the future and control characters, and the
+    ledger's provenance validator is two-directional. Still rendering and
+    ledger only: no anchor, weight, band or score moved; calibration
+    snapshot, golden report, `data/example_company.json` and the selection
+    snapshot all unchanged. Proof: `tests/unit/test_valuation_bridge.py`
+    (as-filed cases on the three fixtures, a restatement, the Eastern-day
+    boundary), the F2–F10 tests named in each test file's docstring.
 
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —

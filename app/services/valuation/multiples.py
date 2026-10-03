@@ -55,9 +55,10 @@ class Multiple:
     ttm_window: str | None
 
 
-def trailing(dataset: CompanyDataset, bridge: Bridge) -> TrailingFigures:
-    """`annualize` over the four quarters ending at the bridge's period."""
-    if bridge.fiscal_label is None:
+def trailing(dataset: CompanyDataset | None, bridge: Bridge) -> TrailingFigures:
+    """`annualize` over the four quarters ending at the bridge's period, of
+    the dataset the bridge read (None when it had none: no period then)."""
+    if bridge.fiscal_label is None or dataset is None:
         return TrailingFigures(None, "TTM window not built: no period available at the observation")
     periods = dataset.sorted_periods()
     idx = next(i for i, p in enumerate(periods) if p.fiscal_label == bridge.fiscal_label)
