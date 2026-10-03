@@ -98,6 +98,65 @@
 </section>
 {% endif %}
 
+{% if case.valuation or case.valuation_derived %}
+<section class="panel" id="valuation">
+  <h3>Valuation (shadow) ({{ case.valuation|length }} rows)</h3>
+  <p class="note">The valuation shadow card's rows: not scored and never validated. The price rests on the operator's market observation, which no filing can confirm, so it carries no tick; the bridge rows rest on filings and are reconciled like any other.</p>
+  <table>
+    <thead><tr><th>Row</th><th>Claim</th><th>Source</th><th>State</th></tr></thead>
+    <tbody>
+      {% for r in case.valuation %}
+      <tr id="{{ r.key }}">
+        <td><code>{{ r.key }}</code><br><b>{{ r.subject }}</b><br><span class="note">{{ r.kind }} · {{ r.period }}</span></td>
+        <td>
+          <span style="font-family:var(--mono)">{{ r.value }}</span><br>
+          <span class="note">{{ r.claim }}</span>
+          {% if r.note %}<div class="note">{{ r.note }}</div>{% endif %}
+        </td>
+        <td>
+          <ul class="sources">
+            {% for s in r.sources %}
+            <li>{% if s.url %}<a href="{{ s.url }}" rel="noopener noreferrer" target="_blank">{{ s.accession }}</a>{% elif s.accession %}{{ s.accession }}{% endif %} {{ s.text }}</li>
+            {% endfor %}
+          </ul>
+        </td>
+        <td>
+          {% if not r.reconcilable %}
+          <span class="note">not reconcilable to a filing (market observation)</span>
+          {% else %}
+          {% set st = r.tick.state if r.tick else "unchecked" %}
+          <span class="pill {{ 'ok' if st == 'reconciled' else 'bad' if st == 'disputed' else 'wait' }}">{{ st }}</span>
+          {% if r.tick and r.tick.note %}<div class="note">{{ r.tick.note }}</div>{% endif %}
+          {% if r.tick %}<div class="note">{{ r.tick.at }}</div>{% endif %}
+          {% if case.tickable %}
+          <form class="tick-form" method="post" action="/review/{{ case.ticker }}/reconcile">
+            <input type="hidden" name="date" value="{{ case.day }}">
+            <input type="hidden" name="generation" value="{{ case.generation_id }}">
+            <input type="hidden" name="key" value="{{ r.key }}">
+            <select name="state">
+              {% for s in states %}<option value="{{ s }}"{% if s == st %} selected{% endif %}>{{ s }}</option>{% endfor %}
+            </select>
+            <input name="note" maxlength="{{ note_max }}" placeholder="note" value="{{ r.tick.note if r.tick else '' }}">
+            <button class="btn small" type="submit">Save</button>
+          </form>
+          {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if case.valuation_derived %}
+  <p class="note">Derived from the rows above ({{ case.valuation_derived|length }}):</p>
+  <ul>
+    {% for i in case.valuation_derived %}
+    <li><code>{{ i.id }}</code> <b>{{ i.subject }}</b>: {{ i.claim }} <span class="note">rests on {{ i.derived_from|join(", ") }}</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="panel" id="unsourced">
   <h3>Unsourced: no document to check against ({{ case.unsourced|length }})</h3>
   {% if case.unsourced %}

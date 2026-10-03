@@ -117,6 +117,24 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_journal_resolver.py", "tests/unit/test_assumption_vocabulary.py",
         "tests/unit/test_properties_engine.py",
     )),
+    # The valuation shadow card (non-scoring plane).
+    Target("app/services/valuation/observation.py", (
+        "tests/unit/test_valuation_observation.py", "tests/unit/test_valuation_report.py",
+    )),
+    Target("app/services/valuation/bridge.py", (
+        "tests/unit/test_valuation_bridge.py", "tests/unit/test_valuation_multiples.py",
+        "tests/unit/test_valuation_expectations.py", "tests/unit/test_valuation_ledger.py",
+        "tests/unit/test_valuation_render.py",
+    )),
+    Target("app/services/valuation/multiples.py", (
+        "tests/unit/test_valuation_multiples.py", "tests/unit/test_valuation_expectations.py",
+    )),
+    Target("app/services/valuation/expectations.py", (
+        "tests/unit/test_valuation_expectations.py",
+    )),
+    Target("app/services/valuation/render.py", (
+        "tests/unit/test_valuation_render.py", "tests/unit/test_valuation_report.py",
+    )),
 )
 
 _FLIPS: dict[type, type] = {

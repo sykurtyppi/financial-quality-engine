@@ -86,6 +86,7 @@ from app.services.ingestion.fields import (
     Kind,
     candidate_table,
     composite_components,
+    is_scored,
     role_tags,
     unit_for,
 )
@@ -213,8 +214,12 @@ class IngestionDiagnostics(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
     def coverage(self) -> float:
-        total = sum(f.periods_total for f in self.fields)
-        filled = sum(f.periods_filled for f in self.fields)
+        """Filled over possible quarter-fields, scored fields only: the
+        valuation plane's unscored inputs are mapped beside them but must
+        not move the figure the card and the sweep gate read."""
+        scored = [f for f in self.fields if is_scored(f.field_name)]
+        total = sum(f.periods_total for f in scored)
+        filled = sum(f.periods_filled for f in scored)
         return filled / total if total else 0.0
 
     def field_by_name(self, name: str) -> FieldDiagnostic:

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     # Imported lazily at run time (the restatement module is loaded only
     # when a report runs the scan).
     from app.services.ingestion.restatements import Selected
+    from app.services.valuation.observation import LoadedObservation
 
 SNAPSHOT_UNAVAILABLE = (
     "filing index could not be read once for this run; each evidence stream "
@@ -598,6 +599,8 @@ def build_report(
     vintage_root: Path | None = None,
     ledger_out: Path | None = None,
     uncut_fundamentals: bool = False,
+    market_observation: LoadedObservation | None = None,
+    valuation_requested: bool = False,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -620,6 +623,16 @@ def build_report(
     less than it scored — the derived check then names the drift on the
     coverage line, the raw-fact check cannot know what it missed — but a
     replay can never read past its day by omission.
+    `market_observation`: the operator's recorded price, when the run has
+    one; the valuation shadow card is then computed over `dataset` and
+    appended to the appendix as its own section and to the ledger as its own
+    plane (Hermes review of 02c2aac). It reads the dataset and never the
+    result: the card, the thermometer, the scores, the flags and every other
+    ledger item are byte-identical with and without it
+    (tests/unit/test_valuation_report.py). `valuation_requested` says the
+    caller looked for one: without an observation the appendix then says the
+    card was not produced; a caller that did not ask (the API, a replay)
+    gets no line at all.
     """
     try:
         report_date = date.fromisoformat(generated_on)
@@ -687,6 +700,20 @@ def build_report(
             vintage_error=errors["vintage"],
             vintage_diff=vintage_diff.status_line() if vintage_diff is not None else None,
         ) + "\n"
+
+    # The valuation shadow card, last in the appendix: over the dataset and
+    # the observation only, after everything scored has been rendered.
+    plane = None
+    if market_observation is not None:
+        from app.services.valuation.plane import compute_plane
+        from app.services.valuation.render import render_valuation_section
+
+        plane = compute_plane(dataset, market_observation, report_date)
+        body += "\n\n" + render_valuation_section(plane) + "\n"
+    elif valuation_requested:
+        from app.services.valuation.render import not_produced_line
+
+        body += "\n\n" + not_produced_line(ticker or dataset.profile.ticker) + "\n"
 
     # Tier-1 sources that could NOT be checked this run — restatement footprints
     # and 8-K 4.02 events (offerings is Tier-2 context, not Tier-1). Round-2
@@ -772,6 +799,7 @@ def build_report(
                 "the companyfacts payload": (company_facts or {}).get("cik"),
                 "the filing index": (submissions or {}).get("cik"),
             },
+            valuation=plane, valuation_requested=valuation_requested,
         )
     return report, thermometer
 

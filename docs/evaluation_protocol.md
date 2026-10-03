@@ -427,6 +427,34 @@ Mid-window changes (0.4.0 window):
     0.3.0 wide sweep that set the anchors ran on the old mapping; anchors
     are not re-fit mid-window — a window-close item.
 
+17. **2026-10-03 — valuation shadow card: a non-scoring appendix section and
+    ledger plane, plus five additive ingestion fields.** Rendering and
+    ledger only (`app/services/valuation/`, `report_builder.build_report`
+    kwargs `market_observation` / `valuation_requested`,
+    `Plane.VALUATION`, `Provenance.kind="observation"`,
+    `LedgerDocument.valuation`), fed by one operator-recorded price
+    (`scripts/market.py`, `journal/market/<T>.json`). It reads the dataset
+    and the observation and never the result: the decision card, the
+    thermometer, every score, flag and change line and every non-valuation
+    ledger item are byte-identical with and without the observation. The
+    five new balance-sheet fields (`short_term_investments`,
+    `operating_lease_liabilities`, `minority_interest`, `preferred_stock`,
+    `stockholders_equity`) are mapped like any other but registered
+    `scored=False`: no metric reads them, the field-coverage figure, the
+    restatement scan and the silent-revision diff are over the scored
+    fields only, and `pit.py` trims to the scored set exactly. **No anchor,
+    weight, band or score moved.** Calibration snapshot unchanged; golden
+    report unchanged; `data/example_company.json` unchanged;
+    `selection_snapshot.json`: additive entries for the five new fields in
+    every case (none maps on the committed fixtures, which were trimmed to
+    the registry before these existed; every pre-existing entry
+    byte-identical). Spec: `docs/valuation_spec.md`. Proof:
+    `tests/unit/test_valuation_report.py::test_card_scores_and_every_other_ledger_item_are_byte_identical`,
+    `tests/unit/test_valuation_fields.py`, `tests/unit/test_valuation_ledger.py`,
+    `tests/unit/test_valuation_bridge.py`, `tests/unit/test_valuation_multiples.py`,
+    `tests/unit/test_valuation_expectations.py`, `tests/unit/test_valuation_observation.py`,
+    `tests/integration/test_selection_snapshot.py`, drill step 13.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

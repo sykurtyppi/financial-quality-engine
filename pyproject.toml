@@ -97,6 +97,7 @@ module = [
     "app.services.reporting.ledger",
     "app.services.corpus",
     "app.services.ingestion.filing_events",
+    "app.services.valuation.*",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

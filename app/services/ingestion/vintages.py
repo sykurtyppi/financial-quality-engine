@@ -1160,7 +1160,9 @@ def diff_scored(
     changes: list[VintageChange] = []
     for spec in FIELDS:
         name = spec.name
-        if name in SPLIT_ADJUSTED_FIELDS:
+        # Unscored (the valuation plane's inputs): mapped in both snapshots,
+        # never a scored change.
+        if name in SPLIT_ADJUSTED_FIELDS or not spec.scored:
             continue
         unit = _unit_for(name)
         old_series, new_series = a.values.get(name, {}), b.values.get(name, {})
@@ -1989,7 +1991,7 @@ def silent_revision_tier1_lines(
     descending)."""
     # Every field the engine scores — including total debt, which no
     # single-tag table lists and whose changes come from `diff_scored`.
-    scored = {f.name for f in FIELDS}
+    scored = {f.name for f in FIELDS if f.scored}
     out: list[str] = []
     for c in changes:
         if c.kind != "revised" or c.new_value is None or c.scope != "scored":

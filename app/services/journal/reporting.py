@@ -25,11 +25,15 @@ from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
-from app.services.reporting.report_files import replacing
+from app.services.reporting.report_files import NotPublished, replacing
 from app.services.scoring.thermometer import describe
+from app.services.valuation.observation import LoadedObservation, find_observation
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
+# The operator's market observations (`scripts/market.py`), one file per
+# ticker, read by the valuation shadow card.
+MARKET = ROOT / "journal" / "market"
 
 
 def replay_banner(as_of: date, source: str, rebuilt_on: date) -> str:
@@ -51,6 +55,16 @@ class UnmappablePayload(ValueError):
     audit F3)."""
 
 
+def load_market_observation(ticker: str) -> LoadedObservation | None:
+    """The ticker's observation under `MARKET`, or None when none is
+    recorded. Present but unreadable is `NotPublished`: the build that
+    asked for it must not publish."""
+    try:
+        return find_observation(MARKET.parent, ticker)
+    except (ValueError, OSError) as e:  # ObservationError is a ValueError; so is a bad ticker
+        raise NotPublished(f"market observation for {ticker}: {e}; nothing published") from e
+
+
 def report_path(ticker: str, day: str | None = None) -> Path:
     return REPORTS / f"{safe_ticker(ticker)}_{day or date.today().isoformat()}.md"
 
@@ -65,6 +79,7 @@ def build_report(
     banner: str | None = None,
     vintage: bool = True,
     replay: bool = False,
+    market: bool = True,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -93,6 +108,15 @@ def build_report(
     to that day). The report opens with a replay banner and is written to
     ``<TICKER>_<day>.replay.md``, never over a real report; a replay rerun
     keeps the earlier replay as any rebuild does.
+
+    ``market`` looks for the ticker's market observation under
+    ``journal/market/`` and, when one is recorded, appends the valuation
+    shadow card to the appendix (never to the card or a score). A file that
+    is there but cannot be read as an observation fails the build closed
+    (`NotPublished`, naming the file), as a ledger that cannot be built
+    does: a report must not go live while its one market datum is in
+    doubt. A replay never carries one: the price is of today, the report of
+    its day.
     """
     ticker = ticker.upper()
     as_of: date | None = None
@@ -101,6 +125,8 @@ def build_report(
         if not report_day:
             raise ValueError("a historical replay needs the day to replay (report_day)")
         as_of = date.fromisoformat(report_day)
+    valuation_requested = market and as_of is None
+    observation = load_market_observation(ticker) if valuation_requested else None
     client = SecClient(fresh=fresh)
     try:
         if as_of is not None:
@@ -172,6 +198,8 @@ def build_report(
             baseline_day=date.fromisoformat(report_day) if report_day else None,
             # The same claims as data, each with the filings behind it.
             ledger_out=staged.ledger,
+            market_observation=observation,
+            valuation_requested=valuation_requested,
         )
         if as_of is not None:
             report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"

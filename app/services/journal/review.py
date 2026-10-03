@@ -51,7 +51,13 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.schemas.ledger import EvidenceItem, LedgerDocument, Provenance, Unsourced
+from app.schemas.ledger import (
+    EvidenceItem,
+    LedgerDocument,
+    Plane,
+    Provenance,
+    Unsourced,
+)
 from app.services.journal import reporting, store
 from app.services.reporting import report_files
 from app.services.watch import watchlist as wl
@@ -285,7 +291,7 @@ def record_tick(ticker: str, day: str, generation_id: str, key: str, state: str,
                       "since the page was loaded. Reload it and check the live run.")
     if run.ledger is None:
         raise Refused(409, f"{t} {d}: {' '.join(run.problems)}")
-    if key not in {i.id for i in run.ledger.items if i.provenance}:
+    if key not in {i.id for i in run.ledger.items if _reconcilable(i)}:
         raise Refused(404, f"{key} is not a row with a filing to check in the ledger of run "
                       f"{generation_id}")
     path = reviews_dir() / f"{t}_{d}.review.json"
@@ -437,6 +443,9 @@ class Row:
     note: str | None
     sources: list[Source]
     tick: Tick | None
+    # False for a row resting on the operator's market observation: no
+    # filing to reconcile it to, so no tick is offered or recorded.
+    reconcilable: bool = True
 
 
 @dataclass
@@ -447,6 +456,10 @@ class Case:
     rows: list[Row] = field(default_factory=list)
     derived: list[EvidenceItem] = field(default_factory=list)
     unsourced: list[Unsourced] = field(default_factory=list)
+    # The valuation shadow card's rows (`Plane.VALUATION`), listed apart:
+    # unscored, never validated, and the price row not reconcilable at all.
+    valuation: list[Row] = field(default_factory=list)
+    valuation_derived: list[EvidenceItem] = field(default_factory=list)
     earlier: list[tuple[str, int]] = field(default_factory=list)  # (run, ticks)
     ticks_error: str | None = None
     cik: int | None = None
@@ -515,6 +528,11 @@ def _source(p: Provenance, cik: int | None) -> Source:
     if p.kind == "snapshot":
         return Source(f"companyfacts snapshot sha256 {(p.snapshot_sha256 or '')[:12]}… "
                       f"captured {p.captured}" + (f" · {p.role}" if p.role else ""), None, None)
+    if p.kind == "observation":
+        # The operator's own record: no accession, no EDGAR folder.
+        observed = p.observed_at.isoformat() if p.observed_at else "?"
+        return Source(f"market observation · {p.source} · observed {observed}"
+                      + (f" · {p.role}" if p.role else ""), None, None)
     period = (f"{p.period_start} → {p.period_end}" if p.period_start
               else str(p.period_end) if p.period_end else None)
     # The value as filed, what the reviewer finds in the filing; whether the
@@ -547,16 +565,24 @@ def case(ticker: str, day: str | None) -> Case:
         return c
     c.cik, c.cik_note = _cik(run.ledger)
     for item in run.ledger.items:
+        shadow = item.plane is Plane.VALUATION
         if not item.provenance:
-            c.derived.append(item)
+            (c.valuation_derived if shadow else c.derived).append(item)
             continue
-        c.rows.append(Row(
+        row = Row(
             key=item.id, kind=item.kind, subject=item.subject, period=item.fiscal_label or "—",
             value=fmt_value(item.value), claim=item.claim, change_state=item.change_state,
             note=item.note, sources=[_source(p, c.cik) for p in item.provenance],
-            tick=mine.get(item.id)))
+            tick=mine.get(item.id), reconcilable=_reconcilable(item))
+        (c.valuation if shadow else c.rows).append(row)
     c.unsourced = list(run.ledger.unsourced)
     return c
+
+
+def _reconcilable(item: EvidenceItem) -> bool:
+    """A row with a filing to check against: one resting on the market
+    observation has none (the operator's own record is not a document)."""
+    return bool(item.provenance) and not any(p.kind == "observation" for p in item.provenance)
 
 
 # --- the export ----------------------------------------------------------------------
@@ -582,7 +608,8 @@ def export(c: Case, fmt: str) -> str:
         raise Refused(409, f"{c.ticker} {c.day}: {' '.join(c.run.problems)}")
     gid = c.generation_id or ""
     lines = []
-    for r in c.rows:
+    rows = [*c.rows, *c.valuation]
+    for r in rows:
         tick = r.tick or Tick("unchecked", "", "")
         lines.append({"ticker": c.ticker, "day": c.day, "generation_id": gid, "key": r.key,
                       "kind": r.kind, "subject": _cell(r.subject), "period": r.period,
@@ -608,9 +635,20 @@ def export(c: Case, fmt: str) -> str:
           "",
           "| row | subject | period | value | change | accessions | state | note |",
           "|---|---|---|---|---|---|---|---|"]
-    md += [f"| {x['key']} | {_md(r.subject)} | {_md(r.period)} | {x['value']} | "
-           f"{_md(r.change_state or '')} | {x['accessions']} | {x['state']} | "
-           f"{_md(r.tick.note if r.tick else '')} |" for x, r in zip(lines, c.rows)]
+    def table(pairs: list[tuple[dict, Row]]) -> list[str]:
+        return [f"| {x['key']} | {_md(r.subject)} | {_md(r.period)} | {x['value']} | "
+                f"{_md(r.change_state or '')} | {x['accessions']} | {x['state']} | "
+                f"{_md(r.tick.note if r.tick else '')} |" for x, r in pairs]
+
+    pairs = list(zip(lines, rows))
+    md += table(pairs[:len(c.rows)])
+    if c.valuation:
+        md += ["", "## Valuation (shadow)", "",
+               "_Not scored, never validated; the price row rests on the operator's market "
+               "observation and has no filing to check._", "",
+               "| row | subject | period | value | change | accessions | state | note |",
+               "|---|---|---|---|---|---|---|---|"]
+        md += table(pairs[len(c.rows):])
     md += ["", "## No document to check against", ""]
     md += [f"- {_md(u.kind)} {_md(u.subject)}: {_md(u.claim)} ({_md(u.reason)})"
            for u in c.unsourced] or ["- none"]
