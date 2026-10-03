@@ -77,11 +77,50 @@ def test_filing_and_snapshot_rules_are_unchanged():
     assert Provenance(kind="snapshot", snapshot_sha256="a" * 64, captured=DAY).kind == "snapshot"
 
 
+FILING = dict(kind="filing", accession="0000021344-26-000010", form="10-Q", filed=date(2026, 4, 30))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("observed_at", OBSERVED), ("source", "NYSE"),
+    ("recorded_at", datetime(2026, 10, 3, 9, tzinfo=UTC)), ("observation_sha256", SHA),
+])
+@pytest.mark.parametrize("base", [FILING, dict(kind="snapshot", snapshot_sha256="a" * 64, captured=DAY)],
+                         ids=["filing", "snapshot"])
+def test_observation_fields_are_refused_on_the_other_kinds(base, field, value):
+    # Review of 48b1f04, F6: the validator was one-directional.
+    with pytest.raises(ValueError, match=f"{base['kind']} provenance does not carry {field}"):
+        Provenance(**{**base, field: value})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("accession", "0000021344-26-000010"), ("form", "10-Q"), ("filed", date(2026, 4, 30)),
+    ("concept", "us-gaap:Cash"), ("period_start", date(2026, 1, 1)), ("period_end", date(2026, 3, 31)),
+    ("snapshot_sha256", "a" * 64), ("captured", DAY),
+])
+def test_filing_and_snapshot_fields_are_refused_on_an_observation(field, value):
+    with pytest.raises(ValueError, match=f"observation provenance does not carry {field}"):
+        _observation_provenance(**{field: value})
+
+
+@pytest.mark.parametrize("field", ["observed_at", "recorded_at"])
+def test_observation_times_must_be_aware(field):
+    with pytest.raises(ValidationError, match="timezone"):
+        _observation_provenance(**{field: datetime(2026, 10, 2, 21)})
+    raw = json.loads(_observation_provenance().model_dump_json())
+    raw[field] = "2026-10-02T21:00:00"
+    with pytest.raises(ValidationError, match="timezone"):
+        Provenance.model_validate(raw)
+
+
 def test_plane_and_summary():
     assert Plane.VALUATION == "valuation"
     s = ValuationSummary(state="produced", ev=1.0, ev_reason=None, fiscal_label="FY2026Q2",
-                         observation=_observation_provenance())
+                         observation=_observation_provenance(),
+                         availability="filing-derived facts as filed by 2026-10-01: FY2026Q2")
     assert ValuationSummary.model_validate_json(s.model_dump_json()) == s
+    # Two states only: a plane that cannot be computed fails the build
+    # closed and writes no ledger at all (F8).
+    assert "not produced: <error>" not in (ValuationSummary.__doc__ or "")
 
 
 @functools.cache
@@ -159,14 +198,20 @@ def test_valuation_rows_rest_on_the_observation_the_filings_and_each_other():
     assert set(multiples["EV/EBITDA"].derived_from) == {ev.id, ttm["ebitda"].id}
     assert set(multiples["FCF yield"].derived_from) == {mcap.id, ttm["fcf"].id}
     growth = {i.subject: i for i in by_kind["implied_growth"]}
-    assert set(growth["reverse_dcf"].derived_from) == {ev.id, ttm["fcf"].id}
+    # The solves are against the market cap (F7): they rest on it, not on EV.
+    assert set(growth["reverse_dcf"].derived_from) == {mcap.id, ttm["fcf"].id}
+    assert set(growth["gordon"].derived_from) == {mcap.id, ttm["fcf"].id}
+    assert growth["gordon"].formula == "g = r − FCF_ttm / market cap"
     assert growth["gordon"].note == "default assumptions (not operator-supplied): r=9.0%"
     assert growth["reverse_dcf"].note.startswith(
         "default assumptions (not operator-supplied): r=9.0%, terminal 2.5%, 10 years; "
         "main assumption: ")
     assert doc.valuation is not None and doc.valuation.state == "produced"
     assert doc.valuation.ev == plane.bridge.ev
+    assert doc.valuation.availability == plane.bridge.availability
     assert doc.valuation.observation == p.model_copy(update={"role": None})
+    # The whole document survives JSON (F3: an inf used to serialize as null).
+    assert LedgerDocument.model_validate_json(doc.model_dump_json()) == doc
     # Nothing of the plane is listed as unsourced, and the other planes are as before.
     assert [u for u in doc.unsourced if u.plane is Plane.VALUATION] == []
     plain = _ledger()
@@ -205,6 +250,36 @@ def test_not_produced_states():
     assert _ledger(None, requested=False).valuation is None
     doc = _ledger(None, requested=True)
     assert doc.valuation == ValuationSummary(state="not produced: no market observation")
+
+
+def test_a_scenario_row_and_the_ttm_window_read_the_as_filed_dataset():
+    """With the raw facts the plane maps its own point-in-time dataset (F1);
+    the ledger's TTM rows cite that dataset's filings, and a scenario rests
+    on the price, the share count and TTM FCF — not on EV (F7)."""
+    from app.services.valuation.observation import Scenario
+
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, result = _ko()
+    obs = OBS.model_copy(update={"observed_at": datetime(2026, 2, 21, 21, tzinfo=UTC),
+                                 "scenarios": (Scenario(name="s", fcf_growth=0.05, years=5),)})
+    plane = compute_plane(ds, LoadedObservation.of(obs), DAY, company_facts=facts)
+    assert plane.as_filed_by == date(2026, 2, 20) and plane.bridge.fiscal_label == "FY2025Q4"
+    assert plane.dataset is not ds
+    doc = build_ledger(result=result, dataset=ds, ticker="KO", report_date=DAY,
+                       valuation=plane, valuation_requested=True)
+    rows = [i for i in doc.items if i.plane is Plane.VALUATION]
+    for item in rows:
+        assert all(p.kind != "filing" or p.filed <= date(2026, 2, 20) for p in item.provenance), item.id
+    ttm = {i.subject: i for i in rows if i.kind == "ttm_figure"}
+    assert ttm["fcf"].fiscal_label == plane.ttm.label == "TTM FY2025Q4"
+    (sc,) = [i for i in rows if i.kind == "scenario"]
+    price = next(i for i in rows if i.kind == "market_observation")
+    shares = next(i for i in rows if i.kind == "bridge_component" and i.subject == "shares_outstanding")
+    assert set(sc.derived_from) == {price.id, shares.id, ttm["fcf"].id}
+    assert sc.value == plane.expectations.scenarios[0].value_per_share
+    assert doc.valuation.fiscal_label == "FY2025Q4"
+    assert doc.valuation.availability.startswith("filing-derived facts as filed by 2026-02-20")
+    assert LedgerDocument.model_validate_json(doc.model_dump_json()) == doc
 
 
 # --- the console ----------------------------------------------------------------------

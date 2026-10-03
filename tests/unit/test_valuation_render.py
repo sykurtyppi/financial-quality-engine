@@ -31,9 +31,10 @@ ENDS = (date(2025, 3, 31), date(2025, 6, 30), date(2025, 9, 30), date(2025, 12, 
 
 
 def _obs(ticker: str, **kw) -> MarketObservation:
-    return MarketObservation(ticker=ticker, price=66.25, currency="USD",
-                             observed_at=datetime(2026, 10, 2, 21, tzinfo=UTC), source="test close",
-                             recorded_at=datetime(2026, 10, 3, 9, tzinfo=UTC), **kw)
+    base = dict(ticker=ticker, price=66.25, currency="USD",
+                observed_at=datetime(2026, 10, 2, 21, tzinfo=UTC), source="test close",
+                recorded_at=datetime(2026, 10, 3, 9, tzinfo=UTC))
+    return MarketObservation(**{**base, **kw})
 
 
 def _section(ds: CompanyDataset, obs: MarketObservation) -> str:
@@ -62,16 +63,29 @@ def test_a_real_run_names_the_filings_and_formats_each_class():
     assert re.search(r"- \[F\] TTM figures \(TTM FY\d{4}Q\d, the engine's own window\): revenue [\d,]+", s)
     assert re.search(r"\| P/E \| \d+\.\d\dx \| market cap [\d,]+ \| net income [\d,]+ \| \|", s)
     assert re.search(r"\| FCF yield \| -?\d+\.\d% \|", s)
-    assert re.search(r"- \[D\] Gordon implied perpetual FCF growth: [+-]\d+\.\d%/yr \(g = r − FCF_ttm / EV\)", s)
+    assert re.search(r"- \[D\] Gordon implied perpetual FCF growth: [+-]\d+\.\d%/yr \(g = r − FCF_ttm / market cap\)", s)
+    assert "= market cap; g by bisection" in s and "= EV" not in s
     assert "- [D] the main assumption that would change the conclusion: " in s
     assert "- [A] scenarios: no scenarios recorded" in s
+    assert "_filing availability at the observation date not checked (no raw facts): " in s
+
+
+def test_with_the_raw_facts_the_card_says_as_filed_by_and_the_eastern_day():
+    facts = json.loads((REAL / "companyfacts_KO_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "KO")
+    obs = _obs("KO", observed_at=datetime(2026, 10, 3, 3, 30, tzinfo=UTC))  # 23:30 ET on the 2nd
+    s = render_valuation_section(compute_plane(ds, LoadedObservation.of(obs), DAY,
+                                               company_facts=facts))
+    assert ("_filing-derived facts as filed by 2026-10-01 (filings dated 2026-10-02 treated as "
+            "not yet available): FY2026Q1, ending 2026-04-03._") in s
+    assert "(age 1 day on 2026-10-03)" in s
 
 
 def test_without_provenance_the_filing_cell_says_so():
     s = _section(stretch_dataset(), _obs("STRETCHCO"))
     assert "| (no per-value provenance) |" in s
     assert "- [O] note:" not in s
-    assert "availability not checked" in s
+    assert "not checked (no raw facts)" in s
 
 
 def test_the_empty_cases_say_why():
@@ -80,7 +94,7 @@ def test_the_empty_cases_say_why():
     assert "| P/E | — | | | TTM net income is negative (-1,200): P/E undefined |" in s
     assert "| EV/EBIT | — | | | EV not asserted: total_debt missing for FY2025Q4 |" in s
     assert re.search(r"\| P/S \| \d+\.\d\dx \|", s)
-    assert "- [D] Gordon implied perpetual FCF growth: implied growth not computable: TTM FCF ≤ 0 (g = r − FCF_ttm / EV)" in s
+    assert "- [D] Gordon implied perpetual FCF growth: implied growth not computable: TTM FCF ≤ 0 (g = r − FCF_ttm / market cap)" in s
     assert "the main assumption that would change the conclusion" not in s
     assert "- [D] sensitivity" not in s
     s = _section(_dataset(n=3), _obs("SYN"))
@@ -98,3 +112,38 @@ def test_scenarios_and_operator_assumptions_render_both_ways():
     assert re.search(r"- \[A\] model assumption: base — FCF \+5\.0%/yr for 10 years, terminal 3\.0%, r=12\.0% → \[D\] value per share [\d,]+\.\d\d USD vs price 66\.25 \([+-]\d+\.\d%\)", s)
     assert "- [A] model assumption: flat — FCF +0.0%/yr for 2 years, terminal 12.0%, r=12.0%: not computable: terminal growth 12.0% is not below r=12.0%" in s
     assert "no scenarios recorded" not in s
+
+
+def test_a_withheld_sensitivity_is_a_line_of_its_own():
+    own = Assumptions(required_return=0.03, terminal_growth=0.025)
+    s = _section(_dataset(), _obs("SYN", assumptions=own))
+    assert ("- [D] sensitivity, required return ± 1pt: withheld: r − 1pt (2.0%) is not above the "
+            "terminal growth (2.5%)") in s
+    assert re.search(r"- \[D\] sensitivity, price ± 10%: implied growth [+-]\d+\.\d% to [+-]\d+\.\d%/yr", s)
+    assert re.search(r"- \[D\] the main assumption that would change the conclusion: price ± 10%: "
+                     r"moves the implied growth by up to \d+\.\d% \(required return ± 1pt withheld\)", s)
+
+
+def test_operator_text_cannot_form_markdown_structure():
+    """Review of 48b1f04, F4: the model refuses control characters, and the
+    renderer still neutralises what could open a heading, a list item, a
+    quote or a table cell, so a source or a scenario name is text."""
+    s = _section(_dataset(), _obs("SYN", source="# not a heading | not a cell", note="- not a bullet",
+                                  scenarios=(Scenario(name="> quoted * starred", fcf_growth=0.05,
+                                                      years=3),)))
+    assert "- [O] source: \\# not a heading \\| not a cell" in s
+    assert "- [O] note: \\- not a bullet" in s
+    assert "- [A] model assumption: \\> quoted * starred — FCF" in s
+    assert [line for line in s.splitlines() if line.startswith("#")] == [
+        "## Valuation shadow card (non-scoring)", "### Market observation",
+        "### Filing-derived facts", "### Model assumptions"]
+    # Belt and braces: an observation built past validation with a newline
+    # in it still adds no heading line.
+    forged = MarketObservation.model_construct(
+        ticker="SYN", price=66.25, currency="USD", observed_at=datetime(2026, 10, 2, 21, tzinfo=UTC),
+        source="x\n## Decision card\n\n**Distress: NONE**", note=None,
+        recorded_at=datetime(2026, 10, 3, 9, tzinfo=UTC), assumptions=None, scenarios=())
+    s = render_valuation_section(compute_plane(_dataset(), LoadedObservation.of(forged), DAY))
+    assert "\n## Decision card" not in s
+    assert "- [O] source: x \\## Decision card  \\**Distress: NONE**" in s
+    assert len([line for line in s.splitlines() if line.startswith("#")]) == 4

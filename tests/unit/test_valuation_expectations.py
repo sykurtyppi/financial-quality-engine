@@ -1,6 +1,10 @@
 """Implied expectations are model arithmetic over the bridge and the TTM
 figures: every assumption is explicit, defaults are labelled as defaults,
-and a case with no solution says so instead of printing a number."""
+and a case with no solution says so instead of printing a number.
+
+FCF here is CFO − capex, after interest — a flow to equity — so every
+solve equates its present value to the MARKET CAP, never to EV (review of
+48b1f04, F7); EV serves the EV multiples only."""
 
 from __future__ import annotations
 
@@ -16,12 +20,15 @@ from app.schemas.financials import (
 )
 from app.services.valuation.bridge import enterprise_value_bridge
 from app.services.valuation.expectations import (
+    GORDON_FORMULA,
+    NO_MCAP,
+    OVERFLOW,
     compute_expectations,
     gordon_growth,
     implied_growth,
     present_value,
 )
-from app.services.valuation.multiples import trailing
+from app.services.valuation.multiples import TrailingFigures, trailing
 from app.services.valuation.observation import Assumptions, MarketObservation, Scenario
 
 ENDS = (date(2025, 3, 31), date(2025, 6, 30), date(2025, 9, 30), date(2025, 12, 31))
@@ -47,15 +54,15 @@ def test_present_value_matches_a_hand_computation():
 
 @pytest.mark.parametrize("g", [-0.3, -0.05, 0.0, 0.05, 0.3, 0.8])
 def test_bisection_recovers_a_known_growth(g):
-    ev = present_value(100.0, g, A.horizon_years, A.terminal_growth, A.required_return)
-    found = implied_growth(100.0, ev, A)
+    mcap = present_value(100.0, g, A.horizon_years, A.terminal_growth, A.required_return)
+    found = implied_growth(100.0, mcap, A)
     assert found.reason is None
     assert found.value == pytest.approx(g, abs=1e-9)
     assert "bisection" in found.formula and "10 years" in found.formula
 
 
 def test_implied_growth_is_monotone_in_price():
-    values = [implied_growth(100.0, ev, A).value for ev in (1000.0, 1500.0, 2000.0, 4000.0)]
+    values = [implied_growth(100.0, mcap, A).value for mcap in (1000.0, 1500.0, 2000.0, 4000.0)]
     assert values == sorted(values) and len(set(values)) == 4
 
 
@@ -67,18 +74,30 @@ def test_no_solution_when_fcf_is_not_positive(fcf):
     assert g.value is None and g.reason == "implied growth not computable: TTM FCF ≤ 0"
 
 
-def test_no_solution_when_ev_is_not_positive():
+def test_no_solution_when_market_cap_is_not_positive():
     r = implied_growth(100.0, -5.0, A)
-    assert r.value is None and r.reason == "implied growth not computable: EV ≤ 0"
-    assert gordon_growth(100.0, 0.0, 0.09).reason == "implied growth not computable: EV ≤ 0"
+    assert r.value is None and r.reason == NO_MCAP == "implied growth not computable: market cap ≤ 0"
+    assert gordon_growth(100.0, 0.0, 0.09).reason == NO_MCAP
+    assert implied_growth(100.0, None, A).reason == NO_MCAP
 
 
 def test_no_solution_outside_the_bracket():
     r = implied_growth(1.0, 1e12, A)
     assert r.value is None and "above +100%/yr" in r.reason
+    assert "market cap exceeds the PV" in r.reason
     r = implied_growth(1e12, 1.0, A)
     assert r.value is None and "below -99%/yr" in r.reason
-    assert "[-99%, +100%]" in r.formula
+    assert "market cap is under the PV" in r.reason
+    assert "[-99%, +100%]" in r.formula and "= market cap" in r.formula and "EV" not in r.formula
+
+
+def test_a_present_value_that_overflows_is_said_not_computed():
+    # Inside every bound a double can still overflow (F3): the reason says
+    # so, and no inf reaches a card or a ledger.
+    assert present_value(1e300, 1.0, 50, 0.025, 0.09) == float("inf")
+    assert present_value(1e306, 1.0, A.horizon_years, A.terminal_growth, A.required_return) == float("inf")
+    r = implied_growth(1e306, 1e305, A)
+    assert r.value is None and r.reason == OVERFLOW
 
 
 def test_the_bracket_ends_are_solutions_not_refusals():
@@ -88,14 +107,14 @@ def test_the_bracket_ends_are_solutions_not_refusals():
         assert found.reason is None and found.value == pytest.approx(g, abs=1e-9)
 
 
-def test_ev_of_exactly_zero_is_refused_everywhere():
-    assert implied_growth(100.0, 0.0, A).reason == "implied growth not computable: EV ≤ 0"
+def test_market_cap_of_exactly_zero_is_refused_everywhere():
+    assert implied_growth(100.0, 0.0, A).reason == NO_MCAP
 
 
 def test_gordon_states_its_formula():
     g = gordon_growth(100.0, 2000.0, 0.09)
     assert g.value == pytest.approx(0.09 - 100.0 / 2000.0)
-    assert g.formula == "g = r − FCF_ttm / EV"
+    assert g.formula == GORDON_FORMULA == "g = r − FCF_ttm / market cap"
 
 
 # --- the whole block over a bridge -------------------------------------------------
@@ -132,19 +151,23 @@ def test_defaults_are_used_and_labelled_only_when_the_file_carries_none():
 
 
 def test_implied_growth_over_the_bridge_and_the_sensitivities():
-    ds = _dataset()  # mcap 500, EV 700, TTM FCF 600
+    ds = _dataset()  # mcap 500, EV 700, TTM FCF 600: the solves read the 500
     b, e = _expectations(ds, _obs())
-    assert e.gordon.value == pytest.approx(0.09 - 600 / 700)
-    assert e.reverse.value == pytest.approx(implied_growth(600.0, 700.0, A).value)
+    assert (b.market_cap.value, b.ev) == (500.0, 700.0)
+    assert e.gordon.value == pytest.approx(0.09 - 600 / 500)
+    assert e.reverse.value == pytest.approx(implied_growth(600.0, 500.0, A).value)
+    assert e.reverse.value != pytest.approx(implied_growth(600.0, 700.0, A).value)
     by_name = {s.name: s for s in e.sensitivities}
     assert set(by_name) == {"required return ± 1pt", "price ± 10%"}
     r = by_name["required return ± 1pt"]
-    assert r.low == pytest.approx(implied_growth(600.0, 700.0, Assumptions(required_return=0.08)).value)
-    assert r.high == pytest.approx(implied_growth(600.0, 700.0, Assumptions(required_return=0.10)).value)
+    assert r.reason is None
+    assert r.low == pytest.approx(implied_growth(600.0, 500.0, Assumptions(required_return=0.08)).value)
+    assert r.high == pytest.approx(implied_growth(600.0, 500.0, Assumptions(required_return=0.10)).value)
     p = by_name["price ± 10%"]
-    # ±10% on the price moves EV by ±10% of the market cap.
-    assert p.low == pytest.approx(implied_growth(600.0, 700.0 - 50.0, A).value)
-    assert p.high == pytest.approx(implied_growth(600.0, 700.0 + 50.0, A).value)
+    # ±10% on the price is ±10% on the market cap.
+    assert p.reason is None
+    assert p.low == pytest.approx(implied_growth(600.0, 450.0, A).value)
+    assert p.high == pytest.approx(implied_growth(600.0, 550.0, A).value)
     assert all(s.swing == pytest.approx(max(abs(s.low - e.reverse.value),
                                             abs(s.high - e.reverse.value)))
                for s in e.sensitivities)
@@ -158,23 +181,116 @@ def test_sensitivities_are_withheld_when_the_base_case_has_none():
     assert e.sensitivities == () and e.main_assumption is None
 
 
+def test_a_withheld_sensitivity_is_listed_with_its_reason_not_dropped():
+    # r − 1pt at or below the terminal growth is no assumption set (F9): the
+    # line is kept, says why, and the main assumption is read off the other.
+    own = Assumptions(required_return=0.03, terminal_growth=0.025)
+    _, e = _expectations(_dataset(), _obs(assumptions=own))
+    assert e.reverse.value is not None
+    by_name = {s.name: s for s in e.sensitivities}
+    assert list(by_name) == ["required return ± 1pt", "price ± 10%"]
+    r = by_name["required return ± 1pt"]
+    assert (r.low, r.high, r.swing) == (None, None, None)
+    assert r.reason == ("withheld: r − 1pt (2.0%) is not above the terminal growth (2.5%)")
+    assert by_name["price ± 10%"].reason is None
+    assert e.main_assumption.startswith("price ± 10%: moves the implied growth by up to ")
+    assert "(required return ± 1pt withheld)" in e.main_assumption
+
+
+def test_a_price_sensitivity_outside_the_bracket_is_withheld_with_the_reason():
+    # Base case near the top of the bracket: +10% on the price has no
+    # solution in it, and the line says so rather than vanishing. A short
+    # horizon and a wide r − g_T make r ± 1pt the smaller move (under the
+    # defaults it is the larger, so it would be withheld first).
+    own = Assumptions(required_return=0.30, terminal_growth=0.0, horizon_years=1)
+    mcap = present_value(600.0, 0.85, own.horizon_years, own.terminal_growth, own.required_return)
+    _, e = _expectations(_dataset(shares_outstanding=mcap / 50.0), _obs(assumptions=own))
+    assert e.reverse.value == pytest.approx(0.85, abs=1e-6)
+    by_name = {s.name: s for s in e.sensitivities}
+    p = by_name["price ± 10%"]
+    assert p.low is None and p.high is None and p.swing is None
+    assert p.reason.startswith("withheld: implied growth not computable: above +100%/yr")
+    assert by_name["required return ± 1pt"].reason is None
+    assert e.main_assumption.startswith("required return ± 1pt: moves the implied growth by up to ")
+    assert e.main_assumption.endswith(" (price ± 10% withheld)")
+
+
+@pytest.mark.parametrize("own,why", [
+    (Assumptions(required_return=0.005, terminal_growth=-0.5),
+     "withheld: r − 1pt (-0.5%) is not a valid required return"),
+    (Assumptions(required_return=0.995, terminal_growth=0.0, horizon_years=1),
+     "withheld: r + 1pt (100.5%) is not a valid required return"),
+    # Exactly on each boundary (the sums are exact in floats): withheld,
+    # since equal is not "above" / "below" — an `Assumptions` at the edge
+    # would be refused, so a strict comparison here would raise instead.
+    (Assumptions(required_return=0.5, terminal_growth=0.49, horizon_years=1),
+     "withheld: r − 1pt (49.0%) is not above the terminal growth (49.0%)"),
+    (Assumptions(required_return=0.01, terminal_growth=-0.5),
+     "withheld: r − 1pt (0.0%) is not a valid required return"),
+    (Assumptions(required_return=0.99, terminal_growth=0.0, horizon_years=1),
+     "withheld: r + 1pt (100.0%) is not a valid required return"),
+])
+def test_a_rate_move_off_the_valid_range_is_withheld_and_said(own, why):
+    mcap = present_value(600.0, 0.0, own.horizon_years, own.terminal_growth, own.required_return)
+    _, e = _expectations(_dataset(shares_outstanding=mcap / 50.0), _obs(assumptions=own))
+    assert e.reverse.value == pytest.approx(0.0, abs=1e-6)
+    assert {s.name: s.reason for s in e.sensitivities}["required return ± 1pt"] == why
+
+
+def test_every_sensitivity_withheld_leaves_no_main_assumption():
+    own = Assumptions(required_return=0.03, terminal_growth=0.025)
+    mcap = present_value(600.0, 0.995, own.horizon_years, own.terminal_growth, own.required_return)
+    _, e = _expectations(_dataset(shares_outstanding=mcap / 50.0), _obs(assumptions=own))
+    assert e.reverse.value is not None
+    assert all(s.reason is not None for s in e.sensitivities) and len(e.sensitivities) == 2
+    assert e.main_assumption == "none: every sensitivity withheld"
+
+
 def test_scenario_value_per_share_reconciles_with_a_hand_computation():
     ds = _dataset()
     scenarios = (Scenario(name="base", fcf_growth=0.05, years=10),
                  Scenario(name="bear", fcf_growth=-0.1, years=3, terminal_growth=0.0,
                           required_return=0.12))
     b, e = _expectations(ds, _obs(scenarios=scenarios))
-    net_claims = b.ev - b.market_cap.value  # debt − cash − STI + MI + preferred
+    # FCF is to equity: value per share is PV / shares, with no net claims
+    # taken off (F7) — the bridge's debt and cash are not in it.
     by_name = {s.name: s for s in e.scenarios}
     base = by_name["base"]
     pv = present_value(600.0, 0.05, 10, A.terminal_growth, A.required_return)
-    assert base.value_per_share == pytest.approx((pv - net_claims) / 10.0)
+    assert base.value_per_share == pytest.approx(pv / 10.0)
+    assert base.value_per_share != pytest.approx((pv - (b.ev - b.market_cap.value)) / 10.0)
     assert base.upside == pytest.approx(base.value_per_share / 50.0 - 1)
     assert base.reason is None and base.label.startswith("model assumption: base")
     bear = by_name["bear"]
     pv = present_value(600.0, -0.1, 3, 0.0, 0.12)
-    assert bear.value_per_share == pytest.approx((pv - net_claims) / 10.0)
+    assert bear.value_per_share == pytest.approx(pv / 10.0)
     assert "r=12.0%" in bear.label and "terminal 0.0%" in bear.label
+
+
+def test_a_scenario_needs_no_ev():
+    # Debt missing: no EV, but the equity-side scenario still values.
+    _, e = _expectations(_dataset(total_debt=None),
+                         _obs(scenarios=(Scenario(name="s", fcf_growth=0.0, years=2),)))
+    (s,) = e.scenarios
+    assert s.value_per_share == pytest.approx(present_value(600.0, 0.0, 2, A.terminal_growth,
+                                                            A.required_return) / 10.0)
+
+
+def test_a_scenario_that_overflows_says_so():
+    ds = _dataset(cfo=1e300, capex=0.0)  # TTM FCF 4e300
+    b = enterprise_value_bridge(ds, _obs())
+    ttm = trailing(ds, b)
+    assert ttm.fcf == pytest.approx(4e300)
+    e = compute_expectations(b, ttm, _obs(scenarios=(Scenario(name="x", fcf_growth=1.0, years=50),)))
+    (s,) = e.scenarios
+    assert s.value_per_share is None and s.upside is None
+    assert s.reason == "not computable: overflow (present value not finite)"
+    # The base case too: bracket ends evaluated first.
+    assert e.reverse.value is None
+    assert e.sensitivities == ()
+    # A hand-built trailing figure overflows the same way.
+    e = compute_expectations(b, TrailingFigures("TTM", None, fcf=1e306), _obs())
+    assert e.reverse.reason == OVERFLOW
 
 
 def test_a_scenario_whose_terminal_growth_equals_r_is_not_valued():

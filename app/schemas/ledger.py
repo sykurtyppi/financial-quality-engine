@@ -20,11 +20,11 @@ so instead of offering a tick (Hermes review of 02c2aac, valuation plane).
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.financials import Sign
 
@@ -49,8 +49,18 @@ class ValidationStatus(StrEnum):
     UNVALIDATED = "unvalidated"
 
 
+# The fields of each kind. A provenance carries its own kind's fields and
+# none of another's: a "filing" with an observation's timestamp, or an
+# "observation" with an accession, would be a row the console renders as
+# one thing while it claims another (review of 48b1f04, F6).
+_OBSERVATION_FIELDS = ("observed_at", "source", "recorded_at", "observation_sha256")
+_FILED_FIELDS = ("accession", "form", "filed", "concept", "period_start", "period_end",
+                 "snapshot_sha256", "captured")
+
+
 class Provenance(BaseModel):
-    """One source of an item: a filed fact or document, or a stored snapshot."""
+    """One source of an item: a filed fact or document, a stored snapshot,
+    or the operator's market observation."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -73,13 +83,18 @@ class Provenance(BaseModel):
     captured: date | None = None
     # An observation: when the price was seen, what the operator looked at,
     # when it was recorded, and the digest of the observation file's bytes.
-    observed_at: datetime | None = None
+    # The times are aware: a naive one has no moment (F6).
+    observed_at: AwareDatetime | None = None
     source: str | None = None
-    recorded_at: datetime | None = None
+    recorded_at: AwareDatetime | None = None
     observation_sha256: str | None = None
 
     @model_validator(mode="after")
     def _complete(self) -> Provenance:
+        foreign = _FILED_FIELDS if self.kind == "observation" else _OBSERVATION_FIELDS
+        carried = [name for name in foreign if getattr(self, name) is not None]
+        if carried:
+            raise ValueError(f"{self.kind} provenance does not carry {', '.join(carried)}")
         if self.kind == "filing":
             if not (self.accession and self.form and self.filed):
                 raise ValueError(
@@ -90,8 +105,7 @@ class Provenance(BaseModel):
             if not (self.snapshot_sha256 and self.captured):
                 raise ValueError("snapshot provenance needs snapshot_sha256 and captured")
         else:
-            missing = [name for name in ("observed_at", "source", "recorded_at",
-                                         "observation_sha256") if not getattr(self, name)]
+            missing = [name for name in _OBSERVATION_FIELDS if not getattr(self, name)]
             if missing:
                 raise ValueError(f"observation provenance needs {', '.join(missing)}")
         return self
@@ -142,16 +156,20 @@ class Unsourced(BaseModel):
 
 
 class ValuationSummary(BaseModel):
-    """What the valuation shadow card did this run: `state` is "produced",
-    "not produced: no market observation" or "not produced: <error>"; the
-    rest is set only when produced — the observation's provenance, and the
-    EV or the reason none was asserted, for the period it rests on."""
+    """What the valuation shadow card did this run: `state` is "produced" or
+    "not produced: no market observation" — a plane that cannot be computed
+    fails the build closed, and no ledger is written at all. The rest is
+    set only when produced: the observation's provenance, the period the
+    bridge rests on and how its availability at the observation was
+    decided (`availability`, the card's own sentence), and the EV or the
+    reason none was asserted."""
 
     model_config = ConfigDict(frozen=True)
 
     state: str
     observation: Provenance | None = None
     fiscal_label: str | None = None
+    availability: str | None = None
     ev: float | None = None
     ev_reason: str | None = None
 

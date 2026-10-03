@@ -8,11 +8,14 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
 
 from app.services.valuation.observation import (
+    EASTERN,
+    GROWTH_HIGH,
     STALE_AFTER_DAYS,
     Assumptions,
     LoadedObservation,
@@ -52,6 +55,9 @@ def test_round_trip_write_read(tmp_path):
     loaded = load_observation(path)
     assert loaded.observation == obs and loaded.path == path
     assert loaded.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    # The bytes read are kept with their digest (`market.py show` prints
+    # them rather than reading the file a second time, F10).
+    assert loaded.raw == path.read_bytes()
     assert find_observation(tmp_path, "KO") == loaded
     assert find_observation(tmp_path, "AAPL") is None
     # Only the observation itself is on disk: no temporary beside it.
@@ -62,7 +68,8 @@ def test_loaded_of_an_in_memory_observation_hashes_its_canonical_json():
     obs = _obs()
     loaded = LoadedObservation.of(obs)
     assert loaded.path is None and loaded.observation == obs
-    assert loaded.sha256 == hashlib.sha256(obs.model_dump_json().encode()).hexdigest()
+    assert loaded.raw == obs.model_dump_json().encode()
+    assert loaded.sha256 == hashlib.sha256(loaded.raw).hexdigest()
 
 
 @pytest.mark.parametrize("bad", [
@@ -74,10 +81,24 @@ def test_loaded_of_an_in_memory_observation_hashes_its_canonical_json():
     dict(ticker="../KO"), dict(ticker=""), dict(ticker="K O"),
     dict(source=""), dict(source="   "), dict(source="x" * 201),
     dict(note="n" * 501),
+    # Control characters (review of 48b1f04, F4): a newline in the source
+    # would let the operator file write a heading into the report.
+    dict(source="NYSE close\n## Decision card"), dict(source="tab\there"),
+    dict(source="nul\x00"), dict(source="del\x7f"), dict(source="\x1b[31mred"),
+    dict(note="line one\nline two"), dict(note="\r"),
 ])
 def test_invalid_observations_are_refused(bad):
     with pytest.raises(ValidationError):
         _obs(**bad)
+
+
+def test_control_characters_are_named_in_the_refusal():
+    with pytest.raises(ValidationError, match="control character"):
+        _obs(source="x\n## y")
+    with pytest.raises(ValidationError, match="control character"):
+        Scenario(name="a\nb", fcf_growth=0.05, years=5)
+    # Ordinary punctuation and non-ASCII text are not control characters.
+    assert _obs(source="Börse Frankfurt | Xetra close (€)").source == "Börse Frankfurt | Xetra close (€)"
 
 
 def test_observed_at_may_equal_recorded_at():
@@ -114,6 +135,9 @@ def test_default_assumptions_are_the_documented_ones():
 @pytest.mark.parametrize("bad", [
     dict(name=""), dict(name="x" * 61), dict(years=0), dict(years=51),
     dict(fcf_growth=-1.0), dict(fcf_growth=float("nan")),
+    # Growth above the bisection bracket (review of 48b1f04, F3): 1e300
+    # overflowed the present value to inf, which the ledger could not hold.
+    dict(fcf_growth=1e300), dict(fcf_growth=GROWTH_HIGH + 1e-9), dict(fcf_growth=float("inf")),
     dict(terminal_growth=0.5, required_return=0.1),   # terminal not below required
     dict(terminal_growth=0.1, required_return=0.1),   # equal is not below either
     dict(required_return=1.5),
@@ -121,6 +145,11 @@ def test_default_assumptions_are_the_documented_ones():
 def test_scenario_bounds(bad):
     with pytest.raises(ValidationError):
         Scenario(**{"name": "s", "fcf_growth": 0.05, "years": 5, **bad})
+
+
+def test_scenario_growth_may_reach_the_bracket_end():
+    assert GROWTH_HIGH == 1.0
+    assert Scenario(name="s", fcf_growth=GROWTH_HIGH, years=50).fcf_growth == 1.0
 
 
 def test_malformed_file_is_a_typed_error_naming_the_path(tmp_path):
@@ -184,5 +213,46 @@ def test_age_and_staleness():
     assert STALE_AFTER_DAYS == 7
     assert obs.age_days(date(2026, 10, 2)) == 7 and not obs.is_stale(date(2026, 10, 2))
     assert obs.age_days(date(2026, 10, 3)) == 8 and obs.is_stale(date(2026, 10, 3))
-    # The day is the observation's own (UTC), not a local one.
+    # The day is the observation's US/Eastern calendar day — EDGAR's
+    # (review of 48b1f04, F5) — not the UTC one.
+    assert EASTERN == ZoneInfo("America/New_York")
+    late = _obs(observed_at=datetime(2026, 10, 3, 3, 30, tzinfo=UTC))  # 23:30 ET on the 2nd
+    assert late.eastern_day == date(2026, 10, 2)
+    assert late.age_days(date(2026, 10, 3)) == 1
     assert _obs(observed_at=datetime(2026, 10, 2, 23, 59, tzinfo=UTC)).age_days(date(2026, 10, 3)) == 1
+
+
+def test_age_is_never_negative():
+    # 22:30 Eastern on the report's own day: age 0, not -1 (F5); a report
+    # dated before the observation's day (a clock skew) still reads 0.
+    same_day = _obs(observed_at=datetime(2026, 10, 3, 22, 30, tzinfo=EASTERN),
+                    recorded_at=datetime(2026, 10, 4, 3, 0, tzinfo=UTC))
+    assert same_day.age_days(date(2026, 10, 3)) == 0 and not same_day.is_stale(date(2026, 10, 3))
+    assert same_day.age_days(date(2026, 10, 1)) == 0
+
+
+# --- the future is refused on the way in (F2) --------------------------------------
+
+
+def test_a_future_observation_is_refused_on_read_naming_the_path(tmp_path):
+    # observed_at ≤ recorded_at is consistent, so the model accepts a file
+    # dated 2999 throughout; the reader does not (review of 48b1f04, F2).
+    future = _obs(observed_at=datetime(2999, 1, 1, tzinfo=UTC),
+                  recorded_at=datetime(2999, 1, 2, tzinfo=UTC))
+    path = write_observation(tmp_path, future)
+    for reader in (lambda: read_observation(path), lambda: load_observation(path),
+                   lambda: find_observation(tmp_path, "KO")):
+        with pytest.raises(ObservationError, match="future") as e:
+            reader()
+        assert str(path) in str(e.value)
+    # With the clock set past it, the same file reads.
+    assert read_observation(path, now=datetime(2999, 1, 3, tzinfo=UTC)) == future
+    assert find_observation(tmp_path, "KO", now=datetime(2999, 1, 3, tzinfo=UTC)).observation == future
+
+
+def test_a_future_recorded_at_alone_is_refused_too(tmp_path):
+    obs = _obs(observed_at=NOW - timedelta(hours=1), recorded_at=NOW + timedelta(days=1))
+    path = write_observation(tmp_path, obs)
+    with pytest.raises(ObservationError, match="recorded_at"):
+        read_observation(path, now=NOW)
+    assert read_observation(path, now=NOW + timedelta(days=1)) == obs
