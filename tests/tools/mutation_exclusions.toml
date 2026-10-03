@@ -162,3 +162,31 @@ operator = "cmp"
 source = "twins = {cell: tuple(g) for g in groups.values() if len(g) > 1 for cell in g}"
 change = "> -> >="
 reason = "Every group has at least one member, so the mutant only adds a one-member group mapping a cell to itself. `revised_inputs` looks the cell up first and then its twins, so looking itself up a second time returns the same entry: the result is the same."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/valuation/expectations.py"
+operator = "const"
+source = "_ITERATIONS = 200"
+reason = "The loop breaks on `hi - lo < _TOLERANCE` long before the cap: the bracket starts 1.99 wide and halves every pass, so it is under 1e-12 after 41 passes (1.99 / 2^41 ≈ 9.0e-13) whichever side each pass keeps. Passes 42 onward never run, so a cap of 200 or 201 is the same loop."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/valuation/expectations.py"
+operator = "const"
+source = "_TOLERANCE = 1e-12"
+reason = "The bracket width after k halvings is 1.99 / 2^k: 1.81e-12 at k = 40 and 9.05e-13 at k = 41, so the first width under 1e-12 is also the first under 1.01e-12. The loop breaks on the same pass with the same bracket, and returns the same midpoint."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/valuation/expectations.py"
+operator = "cmp"
+source = "if pv(mid) < ev:"
+reason = "The branches differ only when pv(mid) == ev exactly, a measure-zero float equality (the root is then `mid` itself). Either branch keeps the root in the bracket (pv is strictly increasing in g, so the invariant pv(lo) ≤ ev ≤ pv(hi) holds both ways), the bisection then closes on `mid` from the other side, and both return a value within _TOLERANCE of it (probed: 4.5e-13 either side of mid) — the same answer to the precision the function promises."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/valuation/expectations.py"
+operator = "cmp"
+source = "if hi - lo < _TOLERANCE:"
+reason = "Differs only when `hi - lo` is exactly 1e-12, which the widths 1.99 / 2^k never hit (1.81e-12 at k = 40, 9.05e-13 at k = 41). Even then the mutant would stop one halving earlier and return a midpoint at most 2.5e-13 from the original's, below _TOLERANCE — the same answer to the precision the function promises."
