@@ -34,25 +34,31 @@ price finite and positive; currency three upper-case ASCII letters;
 `observed_at` timezone-aware and not after `recorded_at`; `source` non-empty
 (≤200 characters); `note` ≤500; a scenario's `fcf_growth` in `(−100%, +100%]`
 (the bisection bracket's top — past it a present value overflows a double);
-no control character (a newline, a tab, …) anywhere in `source`, `note` or a
-scenario name, since these are emitted into the report and a newline would
-let the file write a heading there (the renderer also escapes `#`, `-`,
-`*`, `>`, `+` where a line could start, and `|`); the ticker by the journal's
-file-name rules. The reader additionally refuses a file whose `observed_at`
-or `recorded_at` is after the clock: the model alone cannot know the time,
-and a file dated 2999 throughout is consistent but not an observation. A file
-that is present but is not a valid observation **fails the report build
-closed** (`NotPublished`, naming the file; `generate_report.py` exits 3) — a
-report must not go live while its one market datum is in doubt. The file is
-never read or written through a symlink.
+no control character (a newline, a tab, a C1 control, …) and no Unicode
+line or paragraph separator (NEL U+0085, U+2028, U+2029) anywhere in
+`source`, `note` or a scenario name, since these are emitted into the report
+and a line break would let the file write a heading there (the renderer
+also escapes `#`, `-`, `*`, `>`, `+` where a line could start, and `|`); the
+ticker by the journal's file-name rules. The reader additionally refuses a
+file whose `observed_at` or `recorded_at` is after the clock: the model
+alone cannot know the time, and a file dated 2999 throughout is consistent
+but not an observation. A file that is present but is not a valid
+observation **fails the report build closed** (`NotPublished`, naming the
+file; `generate_report.py` exits 3) — a report must not go live while its
+one market datum is in doubt. The file is never read or written through a
+symlink.
 
 **Days are EDGAR's.** A filing is dated by its US/Eastern calendar day, so the
 observation's own day — `MarketObservation.eastern_day`, on which both its
 availability cut and its age are counted — is its `America/New_York` calendar
 day, not the UTC one (23:30 Eastern is already the next day in UTC). Age is
-`generated_on − eastern_day`, clamped at 0, and an observation more than
-`STALE_AFTER_DAYS = 7` days older than the report's day is marked **STALE** on
-the card (the filing facts are as of the report; the price is not).
+`eastern_today − eastern_day`, clamped at 0, where `eastern_today` is the
+build clock's `America/New_York` day (`observation.eastern_today`) — not
+`generated_on`, the host-local date that anchors the streams (on a UTC host
+an evening observation read "age 1 day" on the card and 0 in `market.py
+show`). The card names the day it counted on. An observation more than
+`STALE_AFTER_DAYS = 7` days old on that day is marked **STALE** on the card
+(the filing facts are as of the report; the price is not).
 
 ## The period the facts come from: as filed by the observation
 

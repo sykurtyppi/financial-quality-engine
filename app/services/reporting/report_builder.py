@@ -21,7 +21,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -601,6 +601,7 @@ def build_report(
     uncut_fundamentals: bool = False,
     market_observation: LoadedObservation | None = None,
     valuation_requested: bool = False,
+    now: datetime | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -634,7 +635,10 @@ def build_report(
     it (tests/unit/test_valuation_report.py). `valuation_requested` says the
     caller looked for one: without an observation the appendix then says the
     card was not produced; a caller that did not ask (the API, a replay)
-    gets no line at all.
+    gets no line at all. `now` is the build's clock (the clock unless
+    given): the observation's age on the card is counted on its US/Eastern
+    day, not on `generated_on`, the host-local date that anchors the
+    streams (review of f73b059, R2) — the only thing it dates.
     """
     try:
         report_date = date.fromisoformat(generated_on)
@@ -711,7 +715,7 @@ def build_report(
         from app.services.valuation.render import render_valuation_section
 
         plane = compute_plane(dataset, market_observation, report_date,
-                              company_facts=company_facts)
+                              company_facts=company_facts, now=now)
         body += "\n\n" + render_valuation_section(plane) + "\n"
     elif valuation_requested:
         from app.services.valuation.render import not_produced_line
