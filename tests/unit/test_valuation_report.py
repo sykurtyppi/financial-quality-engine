@@ -21,6 +21,7 @@ from app.services.journal import reporting as journal_reporting
 from app.services.reporting.report_builder import build_report, ledger_path
 from app.services.reporting.report_files import NotPublished
 from app.services.valuation.observation import (
+    EASTERN,
     LoadedObservation,
     MarketObservation,
     observation_path,
@@ -36,6 +37,9 @@ DAY = "2026-10-03"
 OBSERVED = datetime(2026, 10, 2, 21, 0, tzinfo=UTC)
 RECORDED = datetime(2026, 10, 3, 9, 0, tzinfo=UTC)
 FETCHED = "2026-10-03 09:00 UTC"
+# The build's own clock: the age on the card is counted on its Eastern day
+# (R2), so a test that reads an age pins it rather than the host's.
+BUILT = RECORDED
 
 
 def _facts(ticker: str) -> dict:
@@ -86,7 +90,7 @@ class _Client:
 
 
 def _build(ticker: str, tmp_path: Path, *, with_client: bool, observation=None,
-           requested: bool = False, generated_on: str = DAY):
+           requested: bool = False, generated_on: str = DAY, now: datetime = BUILT):
     facts = _facts(ticker)
     ds, diag = build_dataset(facts, ticker)
     result = analyze(ds)
@@ -98,7 +102,7 @@ def _build(ticker: str, tmp_path: Path, *, with_client: bool, observation=None,
         result, ds, generated_on=generated_on, coverage=diag.coverage(),
         field_tags=diag.selected_series(), ticker=ticker, fetched_at=FETCHED,
         field_notes=diag.field_notes(), ledger_out=out,
-        market_observation=observation, valuation_requested=requested, **kw,
+        market_observation=observation, valuation_requested=requested, now=now, **kw,
     )
     assert result.model_dump_json() == before  # the plane never writes into the result
     return report, thermometer, LedgerDocument.model_validate_json(out.read_text())
@@ -176,6 +180,28 @@ def test_the_section_keeps_the_three_data_classes_apart(tmp_path):
     assert "peer range: no reference class (none defined)" in section
     assert "no scenarios recorded" in section
     assert "not in EV (lessee comparability caveat)" in section
+
+
+def test_the_age_is_counted_on_the_eastern_day_of_the_build_not_the_host_date(tmp_path):
+    """Review of f73b059, R2: `generated_on` is the host-local date (UTC on
+    a server) and anchors the streams, so it stays; the age is counted on
+    EDGAR's day at build time, as `market.py show` counts it. An observation
+    at 21:00 ET built at 01:05 UTC the next day — still that evening in New
+    York — is age 0, not 1; a build clock behind the observation's day
+    (skew) still reads 0."""
+    observed = datetime(2026, 10, 2, 21, 0, tzinfo=EASTERN)
+    obs = LoadedObservation.of(_obs(observed_at=observed, recorded_at=observed))
+    report, _, _ = _build("KO", tmp_path, with_client=False, observation=obs, requested=True,
+                          generated_on="2026-10-03", now=datetime(2026, 10, 3, 1, 5, tzinfo=UTC))
+    section = report.split(SECTION_TITLE)[1]
+    assert "(age 0 days on 2026-10-02)" in section and "STALE" not in section
+    assert "As of 2026-10-03." in _card(report)  # generated_on is not what moved
+    report, _, _ = _build("KO", tmp_path, with_client=False, observation=obs, requested=True,
+                          generated_on="2026-10-03", now=datetime(2026, 10, 3, 5, 5, tzinfo=UTC))
+    assert "(age 1 day on 2026-10-03)" in report.split(SECTION_TITLE)[1]
+    report, _, _ = _build("KO", tmp_path, with_client=False, observation=obs, requested=True,
+                          generated_on="2026-10-03", now=datetime(2026, 10, 2, 12, 0, tzinfo=UTC))
+    assert "(age 0 days on 2026-10-02)" in report.split(SECTION_TITLE)[1]
 
 
 def test_stale_marker_after_seven_days(tmp_path):
@@ -431,6 +457,25 @@ def test_market_record_names_the_control_character(market, capsys):
     assert market.main(["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00",
                         "--source", "x\n## y"]) == 2
     assert "control character" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("sep", ["\x85", "\u2028", "\u2029"])
+@pytest.mark.parametrize("field", ["--source", "--note", "--scenario"])
+def test_market_refuses_a_unicode_line_break_in_every_text_field(market, tmp_path, field, sep,
+                                                                  capsys):
+    """Review of f73b059, R1: NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR
+    are refused like a newline — exit 2, the reason named, nothing written."""
+    text = f"x{sep}## heading"
+    argv = ["record", "KO", "--price", "1", "--at", "2026-10-02T21:00:00+00:00"]
+    if field == "--source":
+        argv += ["--source", text]
+    else:
+        argv += ["--source", "s", field, f"{text}:0.05:5" if field == "--scenario" else text]
+    assert market.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "control character" in err and "Traceback" not in err
+    assert not (tmp_path / "journal" / "market").exists() or not list(
+        (tmp_path / "journal" / "market").iterdir())
 
 
 def test_market_show_refuses_a_future_dated_file(market, tmp_path, capsys):

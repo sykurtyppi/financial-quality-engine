@@ -37,11 +37,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.valuation.observation import (
-    EASTERN,
     STALE_AFTER_DAYS,
     Assumptions,
     MarketObservation,
     Scenario,
+    eastern_today,
     find_observation,
     remove_observation,
     write_observation,
@@ -150,8 +150,8 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(f"no market observation recorded for {args.ticker.upper()}", file=sys.stderr)
         return EXIT_INVALID
     obs = loaded.observation
-    # The age is counted on EDGAR's calendar, as the card counts it.
-    today = datetime.now(EASTERN).date()
+    # The age is counted on EDGAR's calendar, as the card counts it (R2).
+    today = eastern_today()
     age = obs.age_days(today)
     # What was read is what is shown: the bytes behind the digest, not a
     # second read of the file (review of 48b1f04, F10).

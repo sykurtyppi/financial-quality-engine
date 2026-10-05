@@ -22,6 +22,7 @@ from app.services.valuation.observation import (
     MarketObservation,
     ObservationError,
     Scenario,
+    eastern_today,
     find_observation,
     load_observation,
     observation_path,
@@ -99,6 +100,21 @@ def test_control_characters_are_named_in_the_refusal():
         Scenario(name="a\nb", fcf_growth=0.05, years=5)
     # Ordinary punctuation and non-ASCII text are not control characters.
     assert _obs(source="Börse Frankfurt | Xetra close (€)").source == "Börse Frankfurt | Xetra close (€)"
+
+
+# NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR (review of f73b059, R1): not
+# in the ASCII control range, but each breaks a line in an editor and in
+# some renderers, so a source holding one could still start a heading in
+# the report. Refused like a newline, in every operator-written field.
+@pytest.mark.parametrize("sep", ["\x85", "\u2028", "\u2029"])
+@pytest.mark.parametrize("field", ["source", "note", "scenario name"])
+def test_unicode_line_breaks_are_refused_in_every_text_field(sep, field):
+    text = f"x{sep}## heading"
+    with pytest.raises(ValidationError, match="control character"):
+        if field == "scenario name":
+            Scenario(name=text, fcf_growth=0.05, years=5)
+        else:
+            _obs(**{field: text})
 
 
 def test_observed_at_may_equal_recorded_at():
@@ -229,6 +245,18 @@ def test_age_is_never_negative():
                     recorded_at=datetime(2026, 10, 4, 3, 0, tzinfo=UTC))
     assert same_day.age_days(date(2026, 10, 3)) == 0 and not same_day.is_stale(date(2026, 10, 3))
     assert same_day.age_days(date(2026, 10, 1)) == 0
+
+
+def test_the_build_day_is_the_eastern_one():
+    """Review of f73b059, R2: the age is counted on EDGAR's day at build
+    time — 01:05 UTC on the 3rd is still the evening of the 2nd in New
+    York — never on the host-local date."""
+    assert eastern_today(datetime(2026, 10, 3, 1, 5, tzinfo=UTC)) == date(2026, 10, 2)
+    assert eastern_today(datetime(2026, 10, 3, 4, 5, tzinfo=UTC)) == date(2026, 10, 3)
+    assert eastern_today(datetime(2026, 10, 3, 0, 5, tzinfo=EASTERN)) == date(2026, 10, 3)
+    assert eastern_today() == datetime.now(EASTERN).date()
+    with pytest.raises(ValueError, match="offset"):
+        eastern_today(datetime(2026, 10, 3, 1, 5))
 
 
 # --- the future is refused on the way in (F2) --------------------------------------

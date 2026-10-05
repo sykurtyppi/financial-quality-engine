@@ -73,15 +73,18 @@ GROWTH_HIGH = 1.0
 
 # Anything that could break a line or hide in one: an operator's source,
 # note or scenario name is emitted into the report, and a newline in it
-# forged a heading there (F4).
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# forged a heading there (F4). The C0 and C1 controls (Unicode category Cc)
+# and the two separators Zl/Zp: NEL (U+0085), LINE SEPARATOR (U+2028) and
+# PARAGRAPH SEPARATOR (U+2029) are line breaks to an editor and to some
+# renderers, and were passing (review of f73b059, R1).
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 def _plain_text(v: str, what: str) -> str:
     found = _CONTROL.search(v)
     if found:
-        raise ValueError(f"{what} must not contain control characters (newlines, tabs, ...): "
-                         f"found {found.group()!r}")
+        raise ValueError(f"{what} must not contain control characters or line separators "
+                         f"(newlines, tabs, NEL, U+2028, U+2029, ...): found {found.group()!r}")
     return v
 
 
@@ -208,6 +211,19 @@ class MarketObservation(BaseModel):
 
     def is_stale(self, on: date) -> bool:
         return self.age_days(on) > STALE_AFTER_DAYS
+
+
+def eastern_today(now: datetime | None = None) -> date:
+    """The day an age is counted on: `now` (the clock unless given) on
+    EDGAR's calendar. A report's `generated_on` is the host's local date —
+    UTC on a server — and anchors the streams; counted on it, an evening
+    observation read "age 1 day" on the card and 0 in `market.py show`
+    (review of f73b059, R2). A naive `now` is refused, not assumed."""
+    if now is None:
+        now = datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now has no UTC offset: an age is counted on an aware clock")
+    return now.astimezone(EASTERN).date()
 
 
 @dataclass(frozen=True)

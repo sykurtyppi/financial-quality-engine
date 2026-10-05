@@ -8,6 +8,8 @@ import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pytest
+
 from app.schemas.financials import (
     CompanyDataset,
     CompanyProfile,
@@ -22,11 +24,14 @@ from app.services.valuation.observation import (
     Scenario,
 )
 from app.services.valuation.plane import compute_plane
-from app.services.valuation.render import render_valuation_section
+from app.services.valuation.render import operator_text, render_valuation_section
 from tests.fixtures.companies import stretch_dataset
 
 REAL = Path(__file__).resolve().parents[1] / "fixtures" / "real"
 DAY = date(2026, 10, 3)
+# The build's clock: the age is counted on its Eastern day (R2), so it is
+# pinned, not the host's.
+BUILT = datetime(2026, 10, 3, 9, tzinfo=UTC)
 ENDS = (date(2025, 3, 31), date(2025, 6, 30), date(2025, 9, 30), date(2025, 12, 31))
 
 
@@ -38,7 +43,7 @@ def _obs(ticker: str, **kw) -> MarketObservation:
 
 
 def _section(ds: CompanyDataset, obs: MarketObservation) -> str:
-    return render_valuation_section(compute_plane(ds, LoadedObservation.of(obs), DAY))
+    return render_valuation_section(compute_plane(ds, LoadedObservation.of(obs), DAY, now=BUILT))
 
 
 def _dataset(n: int = 4, **overrides) -> CompanyDataset:
@@ -75,7 +80,7 @@ def test_with_the_raw_facts_the_card_says_as_filed_by_and_the_eastern_day():
     ds, _ = build_dataset(facts, "KO")
     obs = _obs("KO", observed_at=datetime(2026, 10, 3, 3, 30, tzinfo=UTC))  # 23:30 ET on the 2nd
     s = render_valuation_section(compute_plane(ds, LoadedObservation.of(obs), DAY,
-                                               company_facts=facts))
+                                               company_facts=facts, now=BUILT))
     assert ("_filing-derived facts as filed by 2026-10-01 (filings dated 2026-10-02 treated as "
             "not yet available): FY2026Q1, ending 2026-04-03._") in s
     assert "(age 1 day on 2026-10-03)" in s
@@ -143,7 +148,18 @@ def test_operator_text_cannot_form_markdown_structure():
         ticker="SYN", price=66.25, currency="USD", observed_at=datetime(2026, 10, 2, 21, tzinfo=UTC),
         source="x\n## Decision card\n\n**Distress: NONE**", note=None,
         recorded_at=datetime(2026, 10, 3, 9, tzinfo=UTC), assumptions=None, scenarios=())
-    s = render_valuation_section(compute_plane(_dataset(), LoadedObservation.of(forged), DAY))
+    s = render_valuation_section(compute_plane(_dataset(), LoadedObservation.of(forged), DAY,
+                                               now=BUILT))
     assert "\n## Decision card" not in s
     assert "- [O] source: x \\## Decision card  \\**Distress: NONE**" in s
     assert len([line for line in s.splitlines() if line.startswith("#")]) == 4
+
+
+@pytest.mark.parametrize("sep", ["\x85", "\u2028", "\u2029"])
+def test_operator_text_breaks_no_line_on_a_unicode_separator(sep):
+    """Review of f73b059, R1: the model refuses NEL, LINE SEPARATOR and
+    PARAGRAPH SEPARATOR; past it (model_construct), the renderer still
+    treats each as a line break — a space, and the piece after it escaped
+    where it could open structure."""
+    assert operator_text(f"x{sep}## heading") == "x \\## heading"
+    assert operator_text(f"a{sep}|{sep}- b") == "a \\| \\- b"

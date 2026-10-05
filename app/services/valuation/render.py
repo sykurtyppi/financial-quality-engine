@@ -32,7 +32,9 @@ PREAMBLE = (
     "[D] marks arithmetic over them. The card is a lens on the price, not a verdict._"
 )
 _TAG = {"filing": "F", "observation": "O", "assumption": "A", "derived": "D"}
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# The model's set (observation.py): C0/C1 controls and the Unicode line
+# and paragraph separators.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 # What opens a heading, a list item, a quote: escaped where a line could
 # have started. `|` ends a table cell anywhere.
 _OPENERS = "#-*>+"
@@ -115,7 +117,7 @@ def render_valuation_section(plane: ValuationPlane) -> str:
     lines = [SECTION_TITLE, "", PREAMBLE, "", "### Market observation", ""]
     age = plane.age_days
     lines.append(f"- [O] price {obs.price:,.2f} {obs.currency} observed "
-                 f"{obs.observed_at.isoformat()} (age {_days(age)} on {plane.generated_on})")
+                 f"{obs.observed_at.isoformat()} (age {_days(age)} on {plane.age_on})")
     if plane.stale:
         lines.append(f"- **STALE**: the observation is older than {STALE_AFTER_DAYS} days; the "
                      "filing facts below are as of the report, the price is not")
