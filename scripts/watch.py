@@ -862,7 +862,7 @@ def _print_night_brief(watch: wl.Watch, submissions: dict, args: argparse.Namesp
     try:
         k = latest_earnings_8k(submissions)
     except (BriefSourceError, PollerError) as e:
-        if args.verbose:
+        if getattr(args, "verbose", False):
             print(f"[{stamp}] {watch.ticker}: no earnings 8-K to brief ({e})")
         return 0
     # UTC calendar days against EDGAR's US-Eastern filing date: at most a
@@ -1123,6 +1123,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
     while True:
         attempt += 1
         stamp = _utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+        submissions = None
         try:
             submissions = client.submissions_by_cik(cik)
             decision = decide(watch, submissions, since=since,
@@ -1141,7 +1142,30 @@ def cmd_poll(args: argparse.Namespace) -> int:
             return 1
 
         if decision is not None:
+            assert submissions is not None
             print(f"[{stamp}] attempt {attempt}: {decision.action} — {decision.message}")
+            if decision.action == "wait" and not args.dry_run \
+                    and not getattr(args, "no_brief", False):
+                # A dedicated poll is commonly the earnings-night job for one
+                # ticker. The deterministic engine still waits for an
+                # XBRL-bearing 10-Q/10-K, but a qualifying Item 2.02 8-K can
+                # already support the release-only brief. Use the same lock,
+                # queue, freshness, and idempotency path as `sweep`.
+                pending = 0
+                with _activity_lock(timeout=0) as held:
+                    if held:
+                        try:
+                            pending = _retry_pending_brief(ticker)
+                        except Exception as e:  # noqa: BLE001 — keep the poll alive
+                            print(f"[{stamp}] {ticker}: queued brief retry crashed: "
+                                  f"{type(e).__name__}: {e} — still queued.",
+                                  file=sys.stderr)
+                            pending = BRIEF_PENDING_RC
+                        pending = pending or _print_night_guarded(
+                            watch, submissions, args, _utcnow(),
+                        )
+                if pending:
+                    return pending
             if decision.action != "wait":
                 if args.dry_run:
                     return _act(ticker, watch, decision, args)

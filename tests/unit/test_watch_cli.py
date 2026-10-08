@@ -949,6 +949,40 @@ class TestPrintNightBrief:
         assert len(built) == 3  # the brief on disk is the idempotency key
         assert sweep_env.rearm == []  # the 10-Q track did not move
 
+    def test_one_shot_poll_also_briefs_a_fresh_8k_while_waiting_for_the_10q(
+            self, poll_env, monkeypatch, capsys):
+        # A dedicated earnings-night monitor uses `poll TICKER --once`, not the
+        # portfolio-wide sweep. It must not ignore the release just because the
+        # XBRL-bearing 10-Q/10-K has not landed yet.
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow",
+                            lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        _force_decision(monkeypatch, "wait")
+        built = []
+
+        def run_brief(t, report):
+            built.append((t, report))
+            watch_cli.BRIEFS.mkdir(parents=True, exist_ok=True)
+            (watch_cli.BRIEFS / f"{t}_2026-10-13.md").write_text("# brief")
+            return 0
+
+        monkeypatch.setattr(watch_cli, "_run_brief", run_brief)
+        assert watch_cli.cmd_poll(_poll_args()) == 3  # periodic filing still pending
+        assert built == [("NVDA", None)]
+        assert "print-night brief" in capsys.readouterr().out
+        assert watch_cli.cmd_poll(_poll_args()) == 3
+        assert built == [("NVDA", None)]  # top-level brief is the idempotency key
+        assert poll_env.generate == [] and poll_env.generate_auto == []
+        assert poll_env.rearm == []  # the 10-Q/10-K watch remains armed
+
+    def test_one_shot_poll_surfaces_a_failed_print_night_brief(self, poll_env, monkeypatch):
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow",
+                            lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        _force_decision(monkeypatch, "wait")
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, report: 2)
+        assert watch_cli.cmd_poll(_poll_args()) == watch_cli.BRIEF_PENDING_RC
+
     def test_stale_8k_is_last_quarters_news(self, sweep_env, monkeypatch):
         self._k(monkeypatch, filed="2026-08-26")
         monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-01T00:00:00+00:00"))
