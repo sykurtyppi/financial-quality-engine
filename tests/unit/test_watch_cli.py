@@ -135,6 +135,19 @@ def test_the_fake_reports_audit_counters_stay_in_the_tests_tmp_path(poll_env, tm
     assert watch_cli._audit_attempts_path(Path("/tmp/fake_auto.md")).parent == tmp_path
 
 
+def test_a_waiting_poll_keeps_polling_until_its_deadline_then_gives_up(
+        poll_env, monkeypatch, capsys):
+    """The loop's deadline check (`time.monotonic() + interval > deadline`)
+    had no test: negated, the poll gave up on its first attempt and still
+    returned 1 with the same message."""
+    _force_decision(monkeypatch, "wait")
+    rc = watch_cli.cmd_poll(_poll_args(once=False, interval=0.01, max_wait=0.3, no_brief=True))
+    assert rc == 1
+    out, err = capsys.readouterr()
+    assert "Gave up after" in err
+    assert out.count("attempt ") >= 2  # it waited, not just checked once
+
+
 class TestPollAutoTrack:
     def test_refuse_routes_to_auto_artifact_and_audit(self, poll_env, monkeypatch):
         _force_decision(monkeypatch, "refuse")
@@ -1002,6 +1015,17 @@ class TestPrintNightBrief:
         assert "queued brief retry crashed" in err and "still queued" not in err
         assert f"the brief queue {watch_cli.BRIEF_PENDING} cannot be used" in err
         assert "nothing queued for NVDA is being retried" in err
+
+    def test_one_shot_poll_says_there_is_no_8k_only_when_verbose(
+            self, poll_env, monkeypatch, capsys):
+        # `poll` has no --verbose flag: the gate reads it with a default
+        # (#117), so a one-shot poll with no 8-K yet stays quiet, and a
+        # verbose caller is told.
+        _force_decision(monkeypatch, "wait")
+        assert watch_cli.cmd_poll(_poll_args()) == 3  # the fake payload has no 8-K
+        assert "no earnings 8-K to brief" not in capsys.readouterr().out
+        assert watch_cli.cmd_poll(_poll_args(verbose=True)) == 3
+        assert "no earnings 8-K to brief" in capsys.readouterr().out
 
     def test_stale_8k_is_last_quarters_news(self, sweep_env, monkeypatch):
         self._k(monkeypatch, filed="2026-08-26")
