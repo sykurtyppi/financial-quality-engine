@@ -160,7 +160,7 @@ def test_the_note_reaches_the_data_quality_appendix():
 # --- both entry points archive the scored payload ----------------------------
 
 def _snapshot(company_facts: dict) -> SimpleNamespace:
-    diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_tags=lambda: {}, field_notes=lambda: [])
+    diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_tags=lambda: {}, selected_series=lambda: {}, field_notes=lambda: [])
     return SimpleNamespace(dataset=stretch_dataset(), diagnostics=diagnostics, company_facts=company_facts)
 
 

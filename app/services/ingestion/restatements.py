@@ -42,6 +42,7 @@ from app.services.ingestion.composition import compose_total_debt, resolve_by_st
 from app.services.ingestion.fields import FIELDS
 from app.services.ingestion.payloads import concept_rows
 from app.services.ingestion.precedence import Rank, conflicts, earliest, latest, rank
+from app.services.ingestion.selection import Composer, SeriesSelection, parse_components
 
 # Relative change below which a same-period revision is treated as rounding or
 # an immaterial reclassification rather than a restatement. The XBRL survey
@@ -55,6 +56,7 @@ DEFAULT_MATERIALITY_PCT = 0.01
 # every prior share count appear "revised" +600%).
 # The registry flags them (`FieldSpec.split_adjusted`).
 SPLIT_ADJUSTED_FIELDS = frozenset(f.name for f in FIELDS if f.split_adjusted)
+_REGISTRY_FIELDS = frozenset(f.name for f in FIELDS)
 
 
 @dataclass(frozen=True)
@@ -274,33 +276,6 @@ def _eligible_rows(
     return out
 
 
-def _parse_selection(selected: str) -> list[tuple[str, str]]:
-    """Expand `FieldDiagnostic.tag_used` into the series it names.
-
-    A composite returns all of its components, which are then AGGREGATED (see
-    `_composite_vintages`) rather than reported individually. Reporting one
-    component as a revision of the derived field states a number that was
-    never scored: with SG&A = S&M 1000 + G&A 10, a G&A move of 10 -> 11 reads
-    as `sga_expense: 10 -> 11`, a 10% revision clearing the 1% materiality
-    bar, while the sga_expense the engine scored went 1010 -> 1011, 0.099%.
-    """
-    parts: list[tuple[str, str]] = []
-    for piece in selected.split("+"):
-        piece = piece.strip()
-        if not piece or piece == "none":
-            continue
-        taxonomy, sep, tag = piece.partition(":")
-        if sep:
-            if taxonomy and tag:
-                parts.append((taxonomy, tag))
-        else:
-            # Composite components are recorded unqualified; every tag the
-            # mapper composes from is us-gaap (SGA_COMPONENTS, DA_COMPONENTS,
-            # the debt tags), pinned by test so the assumption cannot rot.
-            parts.append(("us-gaap", piece))
-    return parts
-
-
 def _compose_debt(present: Mapping[str, float]) -> tuple[float, tuple[str, ...]] | None:
     c = compose_total_debt(present)
     return None if c is None else (c.total, c.used)
@@ -313,12 +288,29 @@ def _resolver(name: str) -> Callable[[Mapping[str, float]], tuple[float, tuple[s
     return compose
 
 
-# Fields the mapper composes per date: rebuilt here with the same rule.
-_COMPOSERS = {
-    "total_debt": _compose_debt,
-    "sga_expense": _resolver("sga_expense"),
-    "depreciation_amortization": _resolver("depreciation_amortization"),
-}
+def composer_of(
+    selection: SeriesSelection,
+) -> Callable[[Mapping[str, float]], tuple[float, tuple[str, ...]] | None] | None:
+    """The per-date rule that rebuilds the figure the selection names — the
+    mapper's own (composition.py) — or None for a single concept, which is
+    compared fact by fact. Taken from the selection, not the field's name:
+    what the mapper did is the authority."""
+    if selection.composer is Composer.DEBT:
+        return _compose_debt
+    if selection.composer is Composer.STRATEGY:
+        return _resolver(selection.field)
+    return None
+
+
+# What callers pass as the mapper's selection: `IngestionDiagnostics.
+# selected_series()` (objects), or the legacy `selected_tags()` strings.
+Selected = Mapping[str, "SeriesSelection | str | None"]
+
+
+def _as_selection(field_name: str, selected: SeriesSelection | str | None) -> SeriesSelection | None:
+    if selected is None or isinstance(selected, SeriesSelection):
+        return selected
+    return SeriesSelection.from_tag_used(field_name, selected)
 
 
 def _trail(
@@ -432,16 +424,28 @@ def _composite_vintages(
     return out
 
 
+def _composer_for(
+    field_name: str, selected_tags: Selected | None
+) -> Callable[[Mapping[str, float]], tuple[float, tuple[str, ...]] | None] | None:
+    """The rule the mapper composed `field_name` with — from its selection
+    when supplied, else from the registry (the approximation path)."""
+    if field_name not in _REGISTRY_FIELDS:
+        return None
+    selection = _as_selection(field_name, (selected_tags or {}).get(field_name))
+    return composer_of(selection or SeriesSelection.of(field_name, ()))
+
+
 def _resolve_tags(
     facts_json: dict,
     field_name: str,
     candidates: tuple[tuple[str, str], ...],
     unit: str,
     as_of: date | None,
-    selected_tags: Mapping[str, str | None] | None,
+    selected_tags: Selected | None,
 ) -> list[tuple[str, str]]:
     """The series to inspect for `field_name`: the mapper's own selection when
-    the caller supplied one, else the coverage approximation.
+    the caller supplied one (an object, or a legacy string — its unqualified
+    pieces are us-gaap), else the coverage approximation.
 
     A supplied selection is authoritative even when it is None — the mapper
     found no usable series for that field, so there is nothing the engine
@@ -451,13 +455,15 @@ def _resolve_tags(
     """
     if selected_tags is not None and field_name in selected_tags:
         selected = selected_tags[field_name]
-        return _parse_selection(selected) if selected else []
+        if isinstance(selected, SeriesSelection):
+            return selected.concepts
+        return [(t, c) for t, _, c in (x.partition(":") for x in parse_components(selected))]
     active = _active_tag(facts_json, candidates, unit, as_of)
     return [active] if active is not None else []
 
 
 def _fields_to_inspect(
-    selected_tags: Mapping[str, str | None] | None,
+    selected_tags: Selected | None,
 ) -> dict[str, tuple[tuple[str, str], ...]]:
     """Every canonical field whose revision history should be checked.
 
@@ -489,7 +495,7 @@ def detect_restatements(
     materiality_pct: float = DEFAULT_MATERIALITY_PCT,
     period_since: date | None = None,
     as_of: date | None = None,
-    selected_tags: Mapping[str, str | None] | None = None,
+    selected_tags: Selected | None = None,
 ) -> list[RestatementFootprint]:
     """The footprints of `scan_restatements` alone, for callers that only
     consume revisions (the vintage store, tests). Anything that RENDERS a
@@ -505,7 +511,7 @@ def scan_restatements(
     materiality_pct: float = DEFAULT_MATERIALITY_PCT,
     period_since: date | None = None,
     as_of: date | None = None,
-    selected_tags: Mapping[str, str | None] | None = None,
+    selected_tags: Selected | None = None,
     n_quarters: int = 8,
 ) -> RestatementScan:
     """Find same-period figures a later filing revised beyond `materiality_pct`,
@@ -527,8 +533,9 @@ def scan_restatements(
     known at the report date. The filter applies before TAG SELECTION too, or
     a series filed years later decides which tag a historical report inspects.
 
-    `selected_tags` maps a canonical field name to the qualified tag the mapper
-    actually scored (`FieldDiagnostic.tag_used`). Supply it whenever the caller
+    `selected_tags` maps a canonical field name to what the mapper actually
+    scored: `IngestionDiagnostics.selected_series()` (objects, preferred), or
+    the legacy `selected_tags()` strings. Supply it whenever the caller
     has run the mapper: the evidence then names the same series as the score,
     which is the contract this module claims. Without it, `_active_tag`
     approximates the choice and can diverge — a legacy tag with a long history
@@ -582,7 +589,7 @@ def scan_restatements(
         if composite:
             qualified = "+".join(f"{tax}:{tag}" for tax, tag in series)
             groups.append((qualified, _composite_vintages(
-                facts_json, series, unit, as_of, compose=_COMPOSERS.get(field_name)
+                facts_json, series, unit, as_of, compose=_composer_for(field_name, selected_tags)
             )))
         else:
             for taxonomy, tag in series:

@@ -127,6 +127,9 @@ def test_both_entry_points_thread_the_notes(monkeypatch, tmp_path):
         def selected_tags(self):
             return {}
 
+        def selected_series(self):
+            return {}
+
         def field_notes(self):
             return list(sentinel)
 

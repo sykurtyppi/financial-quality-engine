@@ -344,6 +344,9 @@ def test_journal_threads_the_entry_day_and_the_cli_passes_nothing(monkeypatch, t
         def selected_tags(self):
             return {}
 
+        def selected_series(self):
+            return {}
+
         def field_notes(self):
             return []
 

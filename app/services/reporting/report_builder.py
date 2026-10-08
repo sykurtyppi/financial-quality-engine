@@ -18,11 +18,11 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.schemas.financials import CompanyDataset
 from app.schemas.report import AnalysisResult
@@ -31,6 +31,11 @@ from app.services.ingestion.sec_client import SecClientError
 from app.services.reporting.decision_card import render_decision_card
 from app.services.reporting.markdown_report import render
 from app.services.scoring.thermometer import DistressThermometer, compute_thermometer
+
+if TYPE_CHECKING:
+    # Imported lazily at run time (the restatement module is loaded only
+    # when a report runs the scan).
+    from app.services.ingestion.restatements import Selected
 
 SNAPSHOT_UNAVAILABLE = (
     "filing index could not be read once for this run; each evidence stream "
@@ -253,7 +258,7 @@ def _collect_streams(
     report_date: date,
     company_facts: dict | None = None,
     submissions: dict | None = None,
-    field_tags: Mapping[str, str | None] | None = None,
+    field_tags: Selected | None = None,
     baseline_day: date | None = None,
     vintage_root: Path | None = None,
     n_quarters: int = 8,
@@ -492,7 +497,7 @@ def build_report(
     company_facts: dict | None = None,
     submissions: dict | None = None,
     index_degraded: bool = False,
-    field_tags: Mapping[str, str | None] | None = None,
+    field_tags: Selected | None = None,
     vintage_note: str | None = None,
     field_notes: list[str] | None = None,
     baseline_day: date | None = None,
