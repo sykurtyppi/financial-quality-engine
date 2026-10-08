@@ -983,6 +983,26 @@ class TestPrintNightBrief:
         monkeypatch.setattr(watch_cli, "_run_brief", lambda t, report: 2)
         assert watch_cli.cmd_poll(_poll_args()) == watch_cli.BRIEF_PENDING_RC
 
+    def test_one_shot_poll_does_not_say_an_unusable_queue_holds_the_brief(
+            self, poll_env, monkeypatch, tmp_path, capsys):
+        # `poll --once` ported the sweep's brief path (#117) from before the
+        # finding-5 fix: with ``.pending`` a link (refused) its crashed retry
+        # said "— still queued." when nothing could be queued or retried
+        # there. One-shot polls say what the sweep says (`_still_queued`).
+        self._k(monkeypatch)
+        monkeypatch.setattr(watch_cli, "_utcnow",
+                            lambda: watch_cli._now("2026-10-13T22:05:00+00:00"))
+        _force_decision(monkeypatch, "wait")
+        away = tmp_path / "away"
+        away.mkdir()
+        watch_cli.BRIEF_PENDING.symlink_to(away)
+        monkeypatch.setattr(watch_cli, "_run_brief", lambda t, p: pytest.fail("nothing to run"))
+        assert watch_cli.cmd_poll(_poll_args()) == watch_cli.BRIEF_PENDING_RC
+        err = capsys.readouterr().err
+        assert "queued brief retry crashed" in err and "still queued" not in err
+        assert f"the brief queue {watch_cli.BRIEF_PENDING} cannot be used" in err
+        assert "nothing queued for NVDA is being retried" in err
+
     def test_stale_8k_is_last_quarters_news(self, sweep_env, monkeypatch):
         self._k(monkeypatch, filed="2026-08-26")
         monkeypatch.setattr(watch_cli, "_utcnow", lambda: watch_cli._now("2026-10-01T00:00:00+00:00"))
@@ -1842,6 +1862,38 @@ class TestBriefQueuePerEvent:
         briefs.rcs["NVDA"] = 0
         assert watch_cli.cmd_sweep(_sweep_args()) == 0
         assert briefs.runs == [("NVDA", None)]
+        assert (watch_cli.BRIEFS / f"NVDA_{self.DAY}.md").exists()
+
+    # --- `poll --once` is the earnings-night job: the same rules hold -------
+
+    def test_a_one_shot_poll_keeps_a_given_up_print_night_brief_given_up(
+            self, briefs, monkeypatch, capsys):
+        # The poll's brief path (#117) retried the queue without the pass's
+        # EDGAR payload, so a print-night brief giving up there recorded no
+        # 8-K. An entry that names no 8-K yields to any (`_superseded`): the
+        # next poll read its own give-up as a new print, cleared it, and
+        # started the count over — the paid run every pass for the window
+        # that c51cd7a closed for the sweep, back on the one-ticker job.
+        briefs.rcs["NVDA"] = 2
+        watch_cli._queue_write("NVDA", "-", watch_cli.PRINT_BRIEF_MAX_ATTEMPTS)
+        codes = [watch_cli.cmd_poll(_poll_args()) for _ in range(21)]
+        err = capsys.readouterr().err
+        assert briefs.runs == []
+        assert err.count("giving up") == 1  # said once ...
+        assert codes == [5] + [3] * 20  # ... reported once; then plain waiting
+        assert "accession=k-b" in self._queued()["NVDA__print-night"]
+
+    def test_a_one_shot_poll_still_briefs_the_print_when_an_older_events_retry_alerts(
+            self, briefs, monkeypatch, tmp_path):
+        # Last quarter's full brief, kept past its cap and alerting once a
+        # day, is another event. The sweep asks the print-night trigger even
+        # when that retry "failed"; the ported poll path stopped at the
+        # retry's 5 and held tonight's brief back a pass — on a one-shot job,
+        # until someone ran it again.
+        report = self._report(tmp_path, "NVDA_2026-07-15.md")
+        watch_cli._queue_write("NVDA", str(report), watch_cli.BRIEF_MAX_ATTEMPTS)
+        assert watch_cli.cmd_poll(_poll_args()) == 5  # the kept entry's daily alert
+        assert briefs.runs == [("NVDA", None)]  # and tonight's brief, the same pass
         assert (watch_cli.BRIEFS / f"NVDA_{self.DAY}.md").exists()
 
 

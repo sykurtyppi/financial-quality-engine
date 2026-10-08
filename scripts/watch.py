@@ -1155,15 +1155,22 @@ def cmd_poll(args: argparse.Namespace) -> int:
                 with _activity_lock(timeout=0) as held:
                     if held:
                         try:
-                            pending = _retry_pending_brief(ticker)
+                            # With the pass's payload: a print-night brief
+                            # giving up here must name its 8-K, or the next
+                            # poll reads the give-up as a new print and starts
+                            # the count over (`_superseded`).
+                            pending = _retry_pending_brief(ticker, submissions)
                         except Exception as e:  # noqa: BLE001 — keep the poll alive
                             print(f"[{stamp}] {ticker}: queued brief retry crashed: "
-                                  f"{type(e).__name__}: {e} — still queued.",
+                                  f"{type(e).__name__}: {e} — {_still_queued(ticker)}.",
                                   file=sys.stderr)
                             pending = BRIEF_PENDING_RC
-                        pending = pending or _print_night_guarded(
-                            watch, submissions, args, _utcnow(),
-                        )
+                        # Asked even when the retry failed, as in `_sweep_one`:
+                        # another event's kept entry alerting is no reason to
+                        # hold tonight's brief back — on a one-shot job, until
+                        # someone runs it again.
+                        night = _print_night_guarded(watch, submissions, args, _utcnow())
+                        pending = pending or night
                 if pending:
                     return pending
             if decision.action != "wait":
