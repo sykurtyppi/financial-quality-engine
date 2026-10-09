@@ -388,12 +388,15 @@ def test_impact_rejects_forged_conviction_after(client):
     # or curl call could send anything. The route must reject it at the boundary.
     _seed("KO", "steady staple", 3, "hold")
     client.post("/report/KO")  # AFTER fields are only writable once the report exists
+    # Refused like the form's other choices (review of 6bf9f9e): 400, the
+    # form back, nothing written (it was skipped silently, the rest saved).
     r = client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "99"})
-    assert r.status_code == 303
-    assert store.parse_entry(store.find_entry("KO"))["conviction_after"] is None
+    assert r.status_code == 400 and "conviction_after" in r.text
+    e = store.parse_entry(store.find_entry("KO"))
+    assert e["conviction_after"] is None and not e["impact"]
 
     r2 = client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "not-a-number"})
-    assert r2.status_code == 303
+    assert r2.status_code == 400
     assert store.parse_entry(store.find_entry("KO"))["conviction_after"] is None
 
     # a legitimate value still writes normally
@@ -811,3 +814,32 @@ def test_a_field_left_blank_keeps_what_was_recorded(client):
     assert r.status_code == 303
     e = store.parse_entry(path)
     assert (e["impact"], e["verdict"]) == ("changed_thesis", "helped")
+
+
+
+def test_a_legacy_outcome_date_typed_by_hand_can_be_saved_unchanged(client):
+    """L7: an entry whose stored outcome_date was typed by hand ("2026-8-15")
+    could not be re-saved at all once dates were validated. Sent back as it
+    is, it is kept; a new value must be YYYY-MM-DD."""
+    path = _seed("KO", "steady staple", 3, "hold")
+    client.post("/report/KO")
+    store.set_field(path, "outcome_date", "2026-8-15")
+    r = client.post("/impact/KO", data={"outcome_date": "2026-8-15", "what_happened": "x"})
+    assert r.status_code == 303
+    e = store.parse_entry(path)
+    assert e["outcome_date"] == "2026-8-15" and e["what_happened"] == "x"
+    r = client.post("/impact/KO", data={"outcome_date": "2026-8-16"})
+    assert r.status_code == 400 and "outcome_date" in r.text
+    assert store.parse_entry(path)["outcome_date"] == "2026-8-15"
+
+
+def test_the_impact_forms_fields_are_tied_to_its_error(client):
+    _seed("KO", "steady staple", 3, "hold")
+    client.post("/report/KO")
+    r = client.post("/impact/KO", data={"verdict": "great"})
+    assert '<div class="err" role="alert" id="impact-error">' in r.text
+    for name in ("impact", "outcome_date", "verdict", "conviction_after"):
+        tag = re.search(rf'<(?:select|input) id="{name}"[^>]*>', r.text).group(0)
+        assert 'aria-describedby="impact-error"' in tag, name
+    page = client.get("/impact/KO").text
+    assert "aria-describedby" not in page

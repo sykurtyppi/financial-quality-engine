@@ -40,6 +40,8 @@ holder that never lets go must not freeze every page.
 from __future__ import annotations
 
 import errno
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from app.services.journal import review, store
@@ -49,6 +51,18 @@ from app.services.workbench import views
 EPOCHS_DIR = ".epochs"
 # Beside the counter `<T>`: the ticker's high-water mark of published fences.
 MARK_SUFFIX = ".published"
+
+
+@dataclass(frozen=True)
+class Request:
+    """A run as it was asked for: its ``number`` (its fence) and the
+    ``day`` its report is named for (YYYY-MM-DD), both taken under the
+    ticker's lock, so day order follows request order (review of 6bf9f9e,
+    M1: a build named its day after its SEC fetch, and around midnight an
+    older request could take the newer day)."""
+
+    number: int
+    day: str
 
 
 class EpochError(RuntimeError):
@@ -110,8 +124,14 @@ def fence(ticker: str, number: int) -> report_files.Fence:
 
 
 def request(ticker: str) -> int:
+    """`request_run`'s number."""
+    return request_run(ticker).number
+
+
+def request_run(ticker: str) -> Request:
     """Take the ticker's next request number (1 for the first run): what a
-    run asked for now is fenced with. One more than the highest of the
+    run asked for now is fenced with, and the day its report is named for
+    (today, read under the same lock). One more than the highest of the
     counter, the kept runs' fences and the high-water mark. Raises
     `EpochError` when any of them cannot be read, the counter cannot be
     written, or the lock is held past `review.PUBLISH_WAIT_S`; ValueError
@@ -123,6 +143,7 @@ def request(ticker: str) -> int:
         with report_files.sidecar_lock(f.lock, timeout=review.PUBLISH_WAIT_S,
                                        busy=f"the request counter's lock of {t}"):
             n = max(_read(counter, t) or 0, _kept_fences(t), _read(f.mark, t) or 0) + 1
+            day = date.today().isoformat()
             try:
                 report_files.write_count(counter, n)
             except OSError as e:
@@ -132,7 +153,7 @@ def request(ticker: str) -> int:
     except OSError as e:
         raise EpochError(f"the request counter's lock cannot be opened ({e}): no run "
                          "started") from e
-    return n
+    return Request(n, day)
 
 
 def current(ticker: str) -> int:

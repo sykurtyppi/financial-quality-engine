@@ -1233,3 +1233,60 @@ def test_workbench_pages_have_their_own_titles(client, fake_build):
                       ("/t/KO/runs/" + "0" * 32, "No such run")):
         title = re.search(r"<title>(.*?)</title>", client.get(url).text).group(1)
         assert want in title and "FQE Workbench" in title, (url, title)
+
+
+# --- fix round 5 (independent review of 6bf9f9e) ---------------------------------------
+
+
+def test_the_report_day_is_the_requests_not_the_one_after_the_fetch(client, sec, env,
+                                                                    monkeypatch):
+    """M1, through the real offline build: the run is asked for on day 1 and
+    its fetch ends on day 2; its report is day 1's, the day it was numbered
+    on, so day order follows request order."""
+    from app.services.workbench import fencing
+
+    d1, d2 = date(2026, 10, 9), date(2026, 10, 10)
+
+    class Asked(date):
+        @classmethod
+        def today(cls):
+            return d1
+
+    class Built(date):
+        @classmethod
+        def today(cls):
+            return d2
+
+    monkeypatch.setattr(fencing, "date", Asked)
+    monkeypatch.setattr(reporting, "date", Built)
+    client.post("/t/KO/run", data={"fresh": "0"})
+    job = _wait("KO")
+    assert job.state == jobs.DONE, job.error
+    assert job.day == d1.isoformat()
+    assert read_live(_workbench("KO", d1.isoformat())).generation_id == job.generation_id
+    assert read_live(_workbench("KO", d2.isoformat())) is None
+    # The card still says when it was generated.
+    assert "As of 2026-10-10" in read_live(_workbench("KO", d1.isoformat())).text
+
+
+def test_review_and_past_run_pages_answer_head(client, fake_build):
+    client.post("/t/KO/run", data={"fresh": "0"})
+    job = _wait("KO")
+    assert client.head(f"/t/KO/runs/{job.generation_id}").status_code == 200
+    assert client.head("/review").status_code == 200
+
+
+def test_no_alert_is_nested_in_a_live_region(client, fake_build, monkeypatch):
+    """A `role="alert"` inside `aria-live` is announced twice (or not at
+    all) depending on the reader: the status box is the live region."""
+    def build(ticker, with_docs=True, report_day=None, fresh=False, **kw):
+        raise sec_client.SecClientError("HTTP 503")
+
+    monkeypatch.setattr(reporting, "build_report", build)
+    client.post("/t/KO/run", data={"fresh": "0"})
+    _wait("KO")
+    frag = client.get("/t/KO/status").text
+    assert 'aria-live="polite"' in frag and "The last run failed" in frag
+    assert 'role="alert"' not in frag
+    js = client.get("/static/app.js").text
+    assert 'setAttribute("role", "alert")' not in js

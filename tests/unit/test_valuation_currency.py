@@ -298,7 +298,10 @@ def test_the_ledger_states_the_currency_and_the_unit_of_every_monetary_figure():
                               now=BUILT)
         doc = build_ledger(result=analyze(ds), dataset=ds, ticker="KO", report_date=DAY,
                            cik_sources={"the companyfacts payload": 21344}, valuation=plane)
-        assert doc.valuation.currency == currency
+        # One meaning each (review of 6bf9f9e): the card's figures are USD;
+        # the price is in its own currency, refused or not.
+        assert doc.valuation.currency == "USD"
+        assert doc.valuation.observation_currency == currency
         rows = {(i.kind, i.subject): i for i in doc.items if i.plane is Plane.VALUATION}
         assert rows[("market_observation", "price")].currency == currency
         assert rows[("bridge_component", "total_debt")].currency == "USD"
@@ -314,7 +317,46 @@ def test_the_ledger_states_the_currency_and_the_unit_of_every_monetary_figure():
         assert debt.provenance and {p.unit for p in debt.provenance} == {"USD"}
         shares = rows[("bridge_component", "shares_outstanding")]
         assert {p.unit for p in shares.provenance} == {"shares"}
+        ttm = rows[("ttm_figure", "revenue")]
+        assert ttm.provenance and {p.unit for p in ttm.provenance} == {"USD"}
         assert LedgerDocument.model_validate_json(doc.model_dump_json()) == doc
     # Old ledgers, without either field, load.
     old = ValuationSummary.model_validate({"state": "produced"})
-    assert old.currency is None
+    assert old.currency is None and old.observation_currency is None
+
+
+def test_a_ttm_sum_that_overflows_is_refused_with_its_field():
+    """L2 (review of 6bf9f9e): four quarters of revenue 1e308 sum to inf;
+    the TTM row was written with no number and no reason, and P/S = market
+    cap / inf = 0.0 was published as a finite multiple."""
+    import math
+
+    from app.schemas.ledger import LedgerDocument
+
+    ds = _synthetic(revenue=1e308)
+    plane = _overflow_plane(ds, 61.0)
+    assert plane.ttm.label is None
+    assert plane.ttm.reason == "not computable: overflow (TTM revenue)"
+    for m in plane.multiples:
+        assert m.value is None or math.isfinite(m.value)
+        if m.denominator_name == "revenue" or m.numerator_name == "FCF":
+            assert m.value is None and "overflow (TTM revenue)" in m.reason, m
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="KO", report_date=DAY,
+                       cik_sources={"the companyfacts payload": 21344}, valuation=plane)
+    text = doc.model_dump_json()
+    assert LedgerDocument.model_validate_json(text) == doc
+    assert not [i for i in doc.items if i.kind == "ttm_figure"]
+    assert not [u for u in doc.unsourced if "inf" in u.claim]
+    assert all(i.value != 0.0 for i in doc.items if i.kind == "multiple")
+
+
+def test_a_multiple_needs_a_finite_numerator_and_denominator():
+    from app.services.valuation.multiples import TrailingFigures, compute_multiples
+
+    plane = _overflow_plane(_synthetic(), 61.0)
+    ttm = TrailingFigures("TTM FY2025Q4", None, revenue=float("inf"), net_income=100.0,
+                          ebit=150.0, ebitda=200.0, fcf=float("inf"))
+    by = {m.name: m for m in compute_multiples(plane.bridge, ttm)}
+    for name in ("P/S", "EV/Sales", "FCF yield", "P/FCF"):
+        assert by[name].value is None and "not computable" in by[name].reason, by[name]
+    assert by["P/E"].value is not None

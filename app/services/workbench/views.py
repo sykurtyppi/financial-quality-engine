@@ -86,7 +86,11 @@ class RunRef:
     names), ``generation_id`` the id that directory carries, ``built``
     when it was published (UTC). ``superseded``: kept, never made live
     (`report_files.Superseded`: it finished after a run asked for later had
-    published)."""
+    published). ``pending``: it holds `report_files.PENDING_MARK`; not
+    live, it was left by a publishing process that stopped before its
+    switch, and was never published (review of 6bf9f9e, L5). ``fence``:
+    the request number it was sealed with, for a live run (None otherwise,
+    or when it states none)."""
 
     ticker: str
     day: str
@@ -96,6 +100,12 @@ class RunRef:
     live: bool
     report: Path
     superseded: bool = False
+    pending: bool = False
+    fence: int | None = None
+
+    @property
+    def never_published(self) -> bool:
+        return self.pending and not self.live
 
 
 @dataclass(frozen=True)
@@ -231,14 +241,25 @@ def _refs(ticker: str, day: str) -> list[RunRef]:
     for gen in reversed(gens):
         m = _GEN_NAME_RE.match(gen.name)
         gid = m.group(3) if m and m.group(3) != "adopted" else None
-        refs.append(RunRef(ticker, day, gen.name, gid, _built(gen.name),
-                           current is not None and gen == current, gen / report.name,
-                           (gen / report_files.SUPERSEDED_MARK).exists()))
+        live = current is not None and gen == current
+        refs.append(RunRef(ticker, day, gen.name, gid, _built(gen.name), live,
+                           gen / report.name, (gen / report_files.SUPERSEDED_MARK).exists(),
+                           (gen / report_files.PENDING_MARK).exists(),
+                           _live_fence(report, gen) if live else None))
     if not gens and report.is_file():
         # Files from before generations, read at their live names.
         mtime = datetime.fromtimestamp(report.stat().st_mtime, UTC)
         refs.append(RunRef(ticker, day, None, None, mtime, True, report))
     return refs
+
+
+def _live_fence(report: Path, gen: Path) -> int | None:
+    """A live run's fence for ordering the card; one that cannot be read
+    orders like a run without one (the page still shows the run)."""
+    try:
+        return report_files.fence_of(report, gen)
+    except OSError:
+        return None
 
 
 def runs(ticker: str, problems: list[str] | None = None) -> list[RunRef]:
@@ -263,12 +284,23 @@ def newest_run(ticker: str) -> RunRef | None:
     return refs[0] if refs else None
 
 
+def card_order(refs: list[RunRef]) -> list[RunRef]:
+    """The live runs among ``refs``, the card first: the highest request
+    number among those that state one, then the newest day (a run from
+    before fences never outranks one that states its fence). Day order
+    alone let an older request on a newer day be the card (review of
+    6bf9f9e, M1: around midnight a build named its day after its fetch)."""
+    live = [r for r in refs if r.live]  # `runs` lists newest day first
+    return sorted(live, key=lambda r: -1 if r.fence is None else r.fence, reverse=True)
+
+
 def live_run(ticker: str) -> RunRef | None:
-    """The run the ticker page shows as its card: the newest live run, or
-    None. What `journal.py openv2` names when the card was there to read
-    before the thesis (review of 2cbba1c, N2: a newer kept run may be one
+    """The run the ticker page shows as its card (`card_order`), or None.
+    What `journal.py openv2` names when the card was there to read before
+    the thesis (review of 2cbba1c, N2: a newer kept run may be one
     superseded, never the card)."""
-    return next((r for r in runs(ticker) if r.live), None)
+    order = card_order(runs(ticker))
+    return order[0] if order else None
 
 
 def live_generation(ticker: str) -> str | None:
@@ -290,7 +322,7 @@ def published_since(ticker: str, when: datetime) -> bool:
     better than one hidden by a run that preceded it."""
     second = when.replace(microsecond=0)
     return any(r.built is not None and r.built > second and (r.live or not r.superseded)
-               for r in runs(ticker))
+               and not r.never_published for r in runs(ticker))
 
 
 def _ledger(live: report_files.LiveRun) -> tuple[LedgerSummary | None, str | None]:
@@ -321,9 +353,9 @@ def read_run(ref: RunRef) -> RunView | None:
 
 
 def _latest(refs: list[RunRef], day: str | None, problems: list[str]) -> RunView | None:
-    """The newest live run (of ``day``, when given)."""
-    for ref in refs:
-        if not ref.live or (day is not None and ref.day != day):
+    """The card's run (`card_order`; of ``day``, when given)."""
+    for ref in card_order(refs):
+        if day is not None and ref.day != day:
             continue
         try:
             view = read_run(ref)
@@ -429,7 +461,8 @@ def watchlist_rows(now: datetime | None = None) -> tuple[list[WatchRow], str | N
     rows = []
     for w in watches:
         problems: list[str] = []
-        latest = next((r for r in runs(w.ticker, problems) if r.live), None)
+        order = card_order(runs(w.ticker, problems))
+        latest = order[0] if order else None
         tiers = _card_tiers(latest) if latest is not None else None
         stale = (stale_reason(w.print_at, latest.built, now)
                  if latest is not None and latest.built is not None else None)

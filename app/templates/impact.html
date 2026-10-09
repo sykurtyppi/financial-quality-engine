@@ -36,7 +36,7 @@
     </div>
     <div>
       <label for="conviction_after">Conviction after (1–5)</label>
-      <select id="conviction_after" name="conviction_after">
+      <select id="conviction_after" name="conviction_after"{{ described|safe }}>
         <option value="">— unchanged / select —</option>
         {% for n in conviction_choices %}
         <option value="{{ n }}" {% if entry.conviction_after == n %}selected{% endif %}>{{ n }}{% if entry.conviction == n %} (prior){% endif %}</option>

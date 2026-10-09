@@ -111,7 +111,7 @@
       {% for r in v.runs %}
       <div class="run-row">
         <span>{% if r.generation_id %}<a href="/t/{{ v.ticker }}/runs/{{ r.generation_id }}">{{ r.day }}</a>{% else %}{{ r.day }}{% endif %}
-          {% if r.live %}<span class="pill ok">live</span>{% elif r.superseded %}<span class="pill wait" title="finished after a run asked for later had published; never live">superseded</span>{% endif %}</span>
+          {% if r.live %}<span class="pill ok">live</span>{% elif r.superseded %}<span class="pill wait" title="finished after a run asked for later had published; never live">superseded</span>{% elif r.never_published %}<span class="pill bad">never published: the publishing process stopped</span>{% endif %}</span>
         <span class="when">{{ r.built|utc }}{% if r.generation_id %} · {{ r.generation_id[:8] }}{% endif %}</span>
       </div>
       {% endfor %}

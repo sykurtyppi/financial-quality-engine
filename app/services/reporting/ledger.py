@@ -581,8 +581,6 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
     derived from them `fields.FILING_CURRENCY`; none for a count, a ratio
     or a rate) and each filed fact's `unit`, the companyfacts unit its field
     is read in (`fields.unit_for`)."""
-    from app.services.valuation.bridge import currency_mismatch
-
     obs = plane.observation
     bridge = plane.bridge
     sha = plane.loaded.sha256
@@ -716,7 +714,7 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
     return ValuationSummary(state="produced", observation=observed, fiscal_label=label,
                             availability=bridge.availability, ev=bridge.ev,
                             ev_reason=bridge.ev_reason,
-                            currency=obs.currency if currency_mismatch(obs) else FILING_CURRENCY)
+                            currency=FILING_CURRENCY, observation_currency=obs.currency)
 
 
 # --- the document -------------------------------------------------------------
