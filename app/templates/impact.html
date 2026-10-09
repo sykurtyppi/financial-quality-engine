@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block title %}{{ entry.ticker }} impact · FQE Workbench{% endblock %}
 {% block body %}
 <div class="toolbar">
   <div>
@@ -10,6 +11,9 @@
     <a class="btn ghost" href="/journal">Dashboard</a>
   </div>
 </div>
+
+{% if error %}<div class="err" role="alert" id="impact-error">{{ error }}</div>{% endif %}
+{% set described = ' aria-describedby="impact-error"' if error else '' %}
 
 <div class="panel">
   <h3>Prior View</h3>
@@ -23,7 +27,7 @@
   <div class="row">
     <div>
       <label for="impact">Impact</label>
-      <select id="impact" name="impact">
+      <select id="impact" name="impact"{{ described|safe }}>
         <option value="">— select —</option>
         {% for code in impact_codes %}
         <option value="{{ code }}" {% if entry.impact == code %}selected{% endif %}>{{ code }}</option>
@@ -49,11 +53,11 @@
   <div class="row">
     <div>
       <label for="outcome_date">Outcome date</label>
-      <input id="outcome_date" name="outcome_date" value="{{ entry.outcome_date or '' }}" placeholder="2026-08-15">
+      <input id="outcome_date" name="outcome_date" value="{{ entry.outcome_date or '' }}" placeholder="2026-08-15"{{ described|safe }}>
     </div>
     <div>
       <label for="verdict">Verdict</label>
-      <select id="verdict" name="verdict">
+      <select id="verdict" name="verdict"{{ described|safe }}>
         <option value="">— select —</option>
         {% for v in verdicts %}
         <option value="{{ v }}" {% if entry.verdict == v %}selected{% endif %}>{{ v }}</option>

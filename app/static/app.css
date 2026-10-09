@@ -80,6 +80,10 @@ td.num, th.num { text-align: right; font-family: var(--mono); }
 label { display: block; margin: 14px 0 6px; font-size: 13px; color: var(--muted); }
 input, textarea, select { width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
   border-radius: 8px; padding: 10px 12px; font: 14px/1.5 var(--sans); }
+/* Skip link: off screen until focused (keyboard users jump past the nav). */
+.skip { position: absolute; left: -9999px; top: 8px; z-index: 10; padding: 8px 12px;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; }
+.skip:focus { left: 12px; }
 input[readonly] { background: var(--panel); color: var(--muted); }
 input:focus, textarea:focus, select:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
 textarea { min-height: 84px; resize: vertical; }

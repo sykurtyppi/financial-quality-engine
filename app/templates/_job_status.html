@@ -16,14 +16,14 @@
     </div>
   </div>
 {%- elif job and job.stalled %}
-  <div class="err"><b>The last run looks stalled</b>: started {{ (job.started_at or job.created_at)|utc }}, no result after {{ stall_minutes }} minutes (a hung SEC read, or a publish lock held elsewhere). It is no longer waited on; if it ever ends, it cannot replace a run asked for after it.
+  <div class="err" role="alert"><b>The last run looks stalled</b>: started {{ (job.started_at or job.created_at)|utc }}, no result after {{ stall_minutes }} minutes (a hung SEC read, or a publish lock held elsewhere). It is no longer waited on; if it ever ends, it cannot replace a run asked for after it.
     <form method="post" action="/t/{{ t }}/run" style="display:inline">
       <input type="hidden" name="fresh" value="{{ 1 if job.fresh else 0 }}">
       <button class="btn small js-busy" type="submit" data-loading-text="Starting…">Run it again</button>
     </form>
   </div>
 {%- elif job and job.state == "failed" and not failure_old %}
-  <div class="err"><b>The last run failed</b> ({{ job.finished_at|utc }}): {{ job.error }}</div>
+  <div class="err" role="alert"><b>The last run failed</b> ({{ job.finished_at|utc }}): {{ job.error }}</div>
 {%- elif job and job.state == "superseded" %}
   <p class="note" style="margin:0 0 14px">The last run was superseded ({{ job.finished_at|utc }}): it finished after a run asked for later, and a newer run is live{% if live_generation %} (generation <code>{{ live_generation }}</code>){% endif %}. Its report, generation <code>{{ job.generation_id }}</code>, is kept in History, not live.</p>
 {%- elif job and job.state == "done" %}

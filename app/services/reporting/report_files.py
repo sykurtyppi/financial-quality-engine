@@ -427,8 +427,10 @@ def read_count(path: Path) -> int | None:
 
 
 def write_count(path: Path, n: int) -> None:
-    """``n`` at ``path``, written whole (`write_atomic`)."""
-    write_atomic(path, f"{n}\n")
+    """``n`` at ``path``, written whole and durable, its folder fsynced
+    (`write_atomic(durable=True)`): a counter or a mark that a power loss
+    could take back is no order at all."""
+    write_atomic(path, f"{n}\n", durable=True)
 
 
 @dataclass
@@ -589,14 +591,19 @@ def existing_mode(path: Path) -> int | None:
     return st.st_mode & 0o777
 
 
-def write_atomic(path: Path, text: str, *, mode: int | None = None) -> None:
+def write_atomic(path: Path, text: str, *, mode: int | None = None,
+                 durable: bool = False) -> None:
     """Write ``text`` to ``path`` through a temporary file beside it,
     fsynced, and ``os.replace``: a reader sees the old file or the new one,
     and a failed write leaves no temporary behind. ``mode``, when given, is
     set before the file takes its name; otherwise a regular file already
     there keeps its own (a state file made 0o600 stays so; the temporary
     has the umask's, which a new file keeps), as the journal's entries do.
-    A symlink at the name lends nothing: it is replaced, never followed."""
+    A symlink at the name lends nothing: it is replaced, never followed.
+    ``durable``: the folder is fsynced after the rename too, without which
+    the rename itself can be lost on power loss (Hermes re-audit of #118 @
+    34836cf); for state whose loss matters (the workbench's request
+    counter and high-water mark)."""
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         with tmp.open("w") as fh:
@@ -608,6 +615,8 @@ def write_atomic(path: Path, text: str, *, mode: int | None = None) -> None:
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
+        if durable:
+            _fsync(path.parent)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -678,12 +687,22 @@ def replacing(report: Path, *, now: datetime | None = None,
 def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
              fence: Fence | None = None) -> None:
     """The publish; the caller holds ``publish_lock`` (and, fenced, the
-    ticker's lock). What it reports as archived is read before the switch:
-    nothing that can fail runs after it but the directory's fsync
-    (``_switch``) and, fenced, the mark's raise, which a failure undoes the
-    switch for. The fences are read here, under the locks and immediately
-    before the switch, so no publish can come between the comparison and
-    the switch it decides."""
+    ticker's lock). What it reports as archived is read before the switch.
+    The fences are read here, under the locks and immediately before the
+    switch, so no publish can come between the comparison and the switch it
+    decides.
+
+    Fenced, the high-water mark is raised BEFORE the switch, written and
+    its folder fsynced (Hermes re-audit of #118 @ 34836cf: raised after it,
+    a process killed between the two left the run live above the mark, and
+    an older run for another report day saw only the mark). A kill in
+    between leaves the mark ahead of the live run: the safe direction (an
+    older run is refused; the next request is numbered above it). Any
+    failure or interrupt once the pointer may have moved switches it back
+    first, then sets the generation apart (set apart while the pointer
+    still named it, it dangled); a switch back that fails is
+    `PublishInDoubt`, and the generation stays where the pointer may name
+    it. A publish that ends without its run live puts the mark back."""
     home = _home(report)
     home.mkdir(parents=True, exist_ok=True)
     _adopt(report, now)
@@ -692,7 +711,7 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
         p for name in _names(_base(report)).values() if (p := previous / name).exists()]
     gen = home / _name_next(report, _stamp(now), staged.generation_id)
     try:
-        held = None if fence is None else _held_fence(report, previous, fence)
+        held, mark = (None, None) if fence is None else _held_fence(report, fence)
     except NotPublished:
         os.rename(work, gen)
         _set_apart(gen)  # kept for diagnosis; never a run
@@ -701,17 +720,36 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
     if superseded:
         (work / SUPERSEDED_MARK).write_text(f"superseded: request {held} had published\n")
     os.rename(work, gen)
+    what = f"publishing {gen.name}"
+    marked = switched = False
     try:
         _fsync(home)
         if not superseded:
-            _link_live_names(report)
-            _switch(report, gen, previous, f"publishing {gen.name}")
             if fence is not None:
-                _raise_mark(report, gen, previous, fence)
+                marked = True
+                write_count(fence.mark, fence.number)  # write-ahead
+            _link_live_names(report)
+            # Set before the call: `_switch` may move the pointer and then be
+            # interrupted, and switching back to `previous` is harmless when
+            # it never moved.
+            switched = True
+            _switch(report, gen, previous, what)
     except PublishInDoubt:
         raise  # the new generation may be live: it stays where the pointer may name it
-    except BaseException:
-        _set_apart(gen)  # never live, or switched back: not a run
+    except BaseException as e:
+        if switched:
+            _switch_back(report, gen, previous, what, e)  # PublishInDoubt: gen stays put
+        try:
+            if marked:
+                assert fence is not None
+                _restore_mark(fence, mark)
+        finally:
+            _set_apart(gen)  # never live, or switched back: not a run
+        if marked and not switched and isinstance(e, OSError):
+            assert fence is not None
+            raise NotPublished(
+                f"{report.name}: raising the high-water mark to {fence.number} failed "
+                f"({type(e).__name__}: {e}); nothing published, the live run is unchanged") from e
         raise
     if superseded:
         # Kept whole in the archive, where `generations` lists it and
@@ -726,15 +764,35 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
         made.append(Published(report, gen / report.name, staged.generation_id))
 
 
-def _held_fence(report: Path, previous: Path | None, fence: Fence) -> int | None:
-    """The fence a run must reach to publish: the higher of the ticker's
-    high-water mark and the live generation's own fence (None when neither
-    states one). The mark alone holds across days and restores (review of
-    2cbba1c: a run asked for before midnight published after it on a new
-    day's report, where nothing was live; a restore or an unfenced publish
-    took the live fence away); the live generation's covers a mark that is
-    missing (lost, or runs fenced before the mark existed). Either one that
-    cannot be read refuses the publish: a failed read is not "no fence"."""
+# A report's base name, `<T>_<YYYY-MM-DD>`: its ticker and its day. A replay
+# (`.replay`) is not one of the ticker's live days.
+_DAY_RE = re.compile(r"(.+)_([0-9]{4}-[0-9]{2}-[0-9]{2})", re.ASCII)
+
+
+def _day_reports(report: Path) -> list[Path]:
+    """``report`` and every other day's report of its ticker in its folder
+    (those with a generations folder: never published, nothing is live)."""
+    found = {report}
+    m = _DAY_RE.fullmatch(_base(report))
+    gens = own_dir(report.parent / GENERATIONS_DIR)
+    if m is not None and gens.is_dir():
+        for d in gens.iterdir():
+            day = _DAY_RE.fullmatch(d.name)
+            if day is not None and day.group(1) == m.group(1):
+                found.add(report.with_name(f"{d.name}.md"))
+    return sorted(found)
+
+
+def _held_fence(report: Path, fence: Fence) -> tuple[int | None, int | None]:
+    """(the fence a run must reach to publish, the mark as read). The
+    fence is the highest of the ticker's high-water mark and the live fence
+    of EVERY report day of the ticker in this folder (None when none states
+    one). The mark holds across days and restores (review of 2cbba1c); the
+    days' live runs cover a mark that is lost or rewound (a power loss, an
+    old backup, runs fenced before it existed; Hermes re-audit of #118 @
+    34836cf). A generation set apart or superseded is never a day's live
+    one. Any of them that cannot be read refuses the publish: a failed read
+    is not "no fence"."""
     try:
         mark = read_count(fence.mark)
     except (OSError, ValueError) as e:
@@ -742,31 +800,31 @@ def _held_fence(report: Path, previous: Path | None, fence: Fence) -> int | None
             else str(e)
         raise NotPublished(f"{report.name}: the ticker's high-water mark unreadable ({why}: "
                            f"{fence.mark}); nothing published, the live run is unchanged") from e
+    stated = [] if mark is None else [mark]
     try:
-        live = None if previous is None else fence_of(report, previous)
+        for day in _day_reports(report):
+            gen = current_generation(day)
+            live = None if gen is None else fence_of(day, gen)
+            if live is not None:
+                stated.append(live)
     except OSError as e:
         why = errno.errorcode.get(e.errno, str(e.errno)) if e.errno else str(e)
         raise NotPublished(f"{report.name}: live fence unreadable ({why}: {e.strerror or e}); "
                            "nothing published, the live run is unchanged") from e
-    stated = [f for f in (mark, live) if f is not None]
-    return max(stated) if stated else None
+    return (max(stated) if stated else None), mark
 
 
-def _raise_mark(report: Path, gen: Path, previous: Path | None, fence: Fence) -> None:
-    """After the switch: the ticker's high-water mark raised to this run's
-    fence. Written as is: the run published only because its fence is at
-    least the mark (`_held_fence`, read under the same lock), so this never
-    lowers it. One that cannot be raised undoes the switch (`_switch_back`),
-    as a failed fsync does: a live run the mark does not cover could be
-    replaced by an older request on another day."""
-    try:
-        write_count(fence.mark, fence.number)
-    except OSError as e:
-        what = f"raising the high-water mark to {fence.number}"
-        _switch_back(report, gen, previous, what, e)
-        back = "no run is live, as before" if previous is None else f"{previous.name} is live again"
-        raise NotPublished(f"{report.name}: {what} failed ({type(e).__name__}: {e}); the switch "
-                           f"was undone: {back}") from e
+def _restore_mark(fence: Fence, mark: int | None) -> None:
+    """The mark as it was before a publish that did not make its run live:
+    safe under the ticker's lock, which no other publish or request holds
+    meanwhile. One that cannot be put back stays ahead, the safe
+    direction."""
+    with contextlib.suppress(OSError):
+        if mark is None:
+            fence.mark.unlink(missing_ok=True)
+            _fsync(fence.mark.parent)
+        else:
+            write_count(fence.mark, mark)
 
 
 def fence_of(report: Path, gen: Path) -> int | None:

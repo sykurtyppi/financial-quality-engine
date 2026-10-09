@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}{{ title }} · Decision-Impact Journal{% endblock %}
+{% block title %}{{ title }} · FQE Workbench{% endblock %}
 {% block body %}
 <div class="toolbar">
   <h2>{{ title }}</h2>
   <a class="btn ghost" href="/review">Board</a>
 </div>
-<div class="err">{{ message }}</div>
+<div class="err" role="alert">{{ message }}</div>
 {% if back %}<p><a href="{{ back }}">Back to the case</a></p>{% endif %}
 {% endblock %}

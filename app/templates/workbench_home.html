@@ -11,7 +11,7 @@
 <section class="hero">
   <h2>Look up a company</h2>
   <p class="sub">Type a ticker to see its decision card: a 90-second triage of what the latest SEC filings show, every claim traceable to its filing. Screening prompts for analyst review — not predictions, and not a calibrated score.</p>
-  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
   {% if msg %}<div class="ok-msg">{{ msg }}</div>{% endif %}
   <form class="search" method="post" action="/t">
     <input name="ticker" value="{{ typed }}" placeholder="KO" aria-label="Ticker" autocomplete="off"
@@ -31,7 +31,7 @@
 
 <section class="panel" id="watchlist">
   <div class="case-title"><h3>Watchlist</h3><span class="note" style="margin:0 0 12px">the earnings calendar <code>scripts/watch.py</code> polls</span></div>
-  {% if watchlist_problem %}<div class="err">{{ watchlist_problem }}</div>{% endif %}
+  {% if watchlist_problem %}<div class="err" role="alert">{{ watchlist_problem }}</div>{% endif %}
   {% if rows %}
   <div class="table-wrap">
   <table>

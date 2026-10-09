@@ -15,4 +15,4 @@
   <dt>Ledger</dt><dd>{{ run.ledger.items }} evidence rows · coverage {{ "%.0f%%"|format(run.ledger.coverage * 100) if run.ledger.coverage is not none else "n/a" }}{{ " · fetched fresh" if run.ledger.fresh }}</dd>
   {% endif %}
 </dl>
-{% if run.ledger_problem %}<div class="err">{{ run.ledger_problem }}</div>{% endif %}
+{% if run.ledger_problem %}<div class="err" role="alert">{{ run.ledger_problem }}</div>{% endif %}

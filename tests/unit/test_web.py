@@ -726,3 +726,88 @@ def test_the_dashboard_shows_a_cases_declared_contamination(client):
     assert "contamination" in row and "saw the workbench card for MXL on 2026-07-26" in row
     other = re.search(r"<tr>\s*<td><b>AAA</b>.*?</tr>", r.text, re.S).group(0)
     assert "contamination" not in other
+
+
+# --- Hermes re-audit of #118 @ 34836cf: the impact form, and page polish -------------
+
+
+@pytest.mark.parametrize("field,value,says", [
+    ("impact", "changed everything", "impact"),
+    ("impact", "no_value, changed_thesis", "impact"),
+    ("verdict", "great", "verdict"),
+    ("outcome_date", "next week", "outcome_date"),
+    ("outcome_date", "2026-02-30", "outcome_date"),
+    ("outcome_date", "2026-08-15T10:00", "outcome_date"),
+    ("outcome_date", "2026-8-5", "outcome_date"),  # a date, but not YYYY-MM-DD
+])
+def test_the_impact_form_refuses_a_value_it_does_not_offer_and_writes_nothing(
+        client, field, value, says):
+    path = _seed("KO", "steady staple", 3, "hold")
+    client.post("/report/KO")
+    before = path.read_text()
+    form = {"impact": "no_value", "verdict": "helped", "outcome_date": "2026-08-15",
+            "what_happened": "guided down", "what_it_surfaced": "a risk"}
+    form[field] = value
+    r = client.post("/impact/KO", data=form)
+    assert r.status_code == 400 and says in r.text
+    assert path.read_text() == before  # nothing persisted, not even the valid fields
+    assert 'role="alert"' in r.text
+    # What was typed is kept.
+    assert "guided down" in r.text and "a risk" in r.text
+    if field == "outcome_date":
+        assert f'value="{value}"' in r.text
+
+
+def test_the_impact_form_still_saves_valid_values(client):
+    path = _seed("KO", "steady staple", 3, "hold")
+    client.post("/report/KO")
+    r = client.post("/impact/KO", data={"impact": "changed_thesis", "verdict": "too_early",
+                                        "outcome_date": "2026-08-15", "what_happened": "x"})
+    assert r.status_code == 303
+    e = store.parse_entry(path)
+    assert (e["impact"], e["verdict"], e["outcome_date"]) == ("changed_thesis", "too_early",
+                                                              "2026-08-15")
+
+
+def test_journal_pages_have_their_own_titles(client):
+    _seed("KO", "steady staple", 3, "hold")
+    titles = {"/journal": "Journal", "/open": "New case", "/report/KO": "KO report",
+              "/impact/KO": "KO impact", "/review": "Review"}
+    for url, want in titles.items():
+        r = client.get(url)
+        title = re.search(r"<title>(.*?)</title>", r.text).group(1)
+        assert want in title and "FQE Workbench" in title, (url, title)
+
+
+def test_every_page_is_reachable_by_head_and_html_is_not_stored(client):
+    _seed("KO", "steady staple", 3, "hold")
+    for url in ("/", "/journal", "/open", "/report/KO", "/impact/KO", "/review", "/t/KO",
+                "/t/KO/status"):
+        r = client.head(url)
+        assert r.status_code == 200, url
+        g = client.get(url)
+        assert g.headers.get("cache-control") == "no-store", url
+    assert client.get("/static/app.css").headers.get("cache-control") != "no-store"
+
+
+def test_pages_offer_a_skip_link_to_the_content(client):
+    r = client.get("/journal")
+    assert re.search(r'<a class="skip" href="#main">Skip to content</a>', r.text)
+    assert '<main id="main"' in r.text
+    assert r.text.index('class="skip"') < r.text.index("<header")
+
+
+def test_errors_are_announced(client):
+    r = client.get("/journal?error=Something+broke")
+    assert re.search(r'<div class="err" role="alert">Something broke</div>', r.text)
+
+
+def test_a_field_left_blank_keeps_what_was_recorded(client):
+    path = _seed("KO", "steady staple", 3, "hold")
+    client.post("/report/KO")
+    client.post("/impact/KO", data={"impact": "no_value", "verdict": "helped"})
+    r = client.post("/impact/KO", data={"impact": "changed_thesis", "verdict": "",
+                                        "outcome_date": ""})
+    assert r.status_code == 303
+    e = store.parse_entry(path)
+    assert (e["impact"], e["verdict"]) == ("changed_thesis", "helped")

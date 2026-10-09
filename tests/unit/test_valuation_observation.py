@@ -305,3 +305,20 @@ def test_a_typed_time_is_iso_8601_with_its_offset_and_nothing_else():
     # The CLI names its flag, as it always has.
     with pytest.raises(ValueError, match=r"^--at '0': "):
         parse_observed_at("0", name="--at")
+
+
+def test_a_recorded_observation_is_durable_with_its_folder(tmp_path, monkeypatch):
+    """The folder is fsynced after the rename (Hermes re-audit of #118 @
+    34836cf): a rename alone can be lost on power loss."""
+    import os
+
+    seen: list[str] = []
+    real = os.fsync
+
+    def fsync(fd):
+        seen.append(os.readlink(f"/proc/self/fd/{fd}"))
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    path = write_observation(tmp_path, _obs())
+    assert seen[-1] == str(path.parent)

@@ -35,6 +35,7 @@ from app.schemas.metrics import MetricResult
 from app.schemas.report import AnalysisResult, EvidenceEntry, NarrativeEvidence
 from app.services.formulas import ttm
 from app.services.formulas.registry import MetricsBundle, compute_metrics
+from app.services.ingestion.fields import FILING_CURRENCY, unit_for
 from app.services.metrics_registry import (
     BASIS,
     FINANCIAL_METRICS,
@@ -573,7 +574,15 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
     one mapped as filed by the observation when the raw facts were in hand
     (review of 48b1f04, F1) — never the report's. A line that dataset
     cannot source (no per-value provenance) is listed as unsourced, as a
-    metric would be."""
+    metric would be.
+
+    Units are stated (Hermes re-audit of #118 @ 34836cf): each monetary
+    row's `currency` (the price's own; the filing figures' and what is
+    derived from them `fields.FILING_CURRENCY`; none for a count, a ratio
+    or a rate) and each filed fact's `unit`, the companyfacts unit its field
+    is read in (`fields.unit_for`)."""
+    from app.services.valuation.bridge import currency_mismatch
+
     obs = plane.observation
     bridge = plane.bridge
     sha = plane.loaded.sha256
@@ -586,7 +595,7 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
         claim=f"price {obs.price:,.2f} {obs.currency} observed {obs.observed_at.isoformat()} "
               f"({obs.source})",
         value=obs.price, provenance=(observed.model_copy(update={"role": "price"}),),
-        validation_status=status,
+        validation_status=status, currency=obs.currency,
     )
     label = bridge.fiscal_label
     components: dict[str, str] = {}
@@ -595,13 +604,15 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
             p for sv in c.sources for ref in sv.inputs
             if (p := _filing(ref.accession, ref.form, ref.filed, concept=ref.concept,
                              period_start=ref.start, period_end=ref.end, value=ref.value,
-                             sign=ref.sign, method=sv.method, role=c.name)) is not None
+                             sign=ref.sign, method=sv.method, role=c.name,
+                             unit=unit_for(c.name))) is not None
         ]
         added = b.add(
             _id("bridge_component", c.name, bridge.period_end),
             plane=Plane.VALUATION, kind="bridge_component", subject=c.name,
             claim=f"{c.label}: {c.value:,.0f} for {label}", fiscal_label=label, value=c.value,
             provenance=tuple(prov), validation_status=status, why_unsourced=_NO_VALUE_PROVENANCE,
+            currency=FILING_CURRENCY if unit_for(c.name) == FILING_CURRENCY else None,
         )
         if added is not None:
             components[c.name] = added
@@ -621,7 +632,7 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
         "market_cap", "market_cap", "market_cap",
         f"{mcap.label}: {mcap.value:,.0f}" if mcap.value is not None else f"{mcap.label}: {mcap.note}",
         mcap.value, [price_id, components.get(bridge.shares.name)],
-        formula="price × share count",
+        formula="price × share count", currency=FILING_CURRENCY,
     )
     assumed = [c.name for c in (bridge.short_term_investments, bridge.minority_interest,
                                 bridge.preferred_stock) if c.basis == "assumption"]
@@ -636,6 +647,7 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
                 "+ preferred stock",
         note=(f"{', '.join(assumed)} not reported (assumed 0): model assumption" if assumed
               else None),
+        currency=FILING_CURRENCY,
     )
 
     # The TTM figures the multiples read: each summed over the window's four
@@ -655,13 +667,15 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
                 for ref in sv.inputs
                 if (p := _filing(ref.accession, ref.form, ref.filed, concept=ref.concept,
                                  period_start=ref.start, period_end=ref.end, value=ref.value,
-                                 sign=ref.sign, method=sv.method, role=f)) is not None
+                                 sign=ref.sign, method=sv.method, role=f,
+                                 unit=unit_for(f))) is not None
             ]
             added = b.add(
                 _id("ttm_figure", name, bridge.period_end), plane=Plane.VALUATION,
                 kind="ttm_figure", subject=name, claim=f"{plane.ttm.label} {name}: {value:,.0f}",
                 fiscal_label=plane.ttm.label, value=value, provenance=tuple(prov),
                 validation_status=status, why_unsourced=_NO_VALUE_PROVENANCE,
+                currency=FILING_CURRENCY,
             )
             if added is not None:
                 ttm_ids[name] = added
@@ -697,11 +711,12 @@ def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
                  f"{obs.price:,.2f} ({sc.upside:+.1%})") if sc.value_per_share is not None
                 else f"{sc.label}: {sc.reason}",
                 sc.value_per_share, [price_id, components.get(bridge.shares.name),
-                                     ttm_ids.get("fcf")])
+                                     ttm_ids.get("fcf")], currency=FILING_CURRENCY)
 
     return ValuationSummary(state="produced", observation=observed, fiscal_label=label,
                             availability=bridge.availability, ev=bridge.ev,
-                            ev_reason=bridge.ev_reason)
+                            ev_reason=bridge.ev_reason,
+                            currency=obs.currency if currency_mismatch(obs) else FILING_CURRENCY)
 
 
 # --- the document -------------------------------------------------------------

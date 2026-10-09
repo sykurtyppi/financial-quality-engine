@@ -28,7 +28,10 @@ lessee comparability across filers is the caveat on the line. Equity (book)
 is shown for the same reason — context, not a bridge component.
 
 A bridge is never guessed: a missing share count, debt or cash means no EV,
-with the field and the period named. Nor is a currency converted: the
+with the field and the period named. Nor is a number past a double: a
+finite price can still overflow (1e308 × the share count is inf, which the
+ledger wrote as null with no reason; Hermes re-audit of #118 @ 34836cf), so
+the market cap and EV are checked finite and say why when they are not. Nor is a currency converted: the
 filing figures are in `fields.FILING_CURRENCY`, and a price recorded in any
 other currency asserts no market cap and no EV (`currency_mismatch`; Hermes
 audit of PR #118, finding 2: a EUR price was multiplied by the share count
@@ -37,6 +40,7 @@ and added to USD debt). The filing lines are still shown: they are facts.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Literal
@@ -106,6 +110,10 @@ def available_through(observed_at: datetime) -> date:
     not read that 10-Q into that price (F5). The mapper's cut is inclusive
     (`filed <= as_of`), so this is the day before."""
     return observed_at.astimezone(EASTERN).date() - timedelta(days=1)
+
+
+# The market cap's reason when price × shares is past a double.
+MCAP_OVERFLOW = "market cap not computable: overflow (price × shares)"
 
 
 def currency_mismatch(obs: MarketObservation) -> str | None:
@@ -257,8 +265,13 @@ def enterprise_value_bridge(
     shares = _share_count(period)
     mismatch = currency_mismatch(obs)
     market_cap = None if shares.value is None or mismatch else obs.price * shares.value
+    overflow = market_cap is not None and not math.isfinite(market_cap)
+    if overflow:
+        market_cap = None
     if mismatch:
         mcap_note: str | None = f"market cap not asserted: {mismatch}"
+    elif overflow:
+        mcap_note = MCAP_OVERFLOW
     elif market_cap is None:
         mcap_note = f"share count missing for {period.fiscal_label}"
     else:
@@ -276,6 +289,8 @@ def enterprise_value_bridge(
     reason: str | None = None
     if mismatch:
         reason = f"EV not asserted: {mismatch}"
+    elif overflow:
+        reason = f"EV not asserted: {MCAP_OVERFLOW}"
     elif market_cap is None:
         reason = f"EV not asserted: share count missing for {period.fiscal_label}"
     elif debt.value is None:
@@ -285,6 +300,9 @@ def enterprise_value_bridge(
     else:
         ev = (market_cap + debt.value - cash.value
               - (sti.value or 0.0) + (mi.value or 0.0) + (pref.value or 0.0))
+        if not math.isfinite(ev):
+            ev, reason = None, ("EV not computable: overflow (market cap + debt − cash − "
+                                "short-term investments + minority interest + preferred stock)")
     return Bridge(
         period.fiscal_label, period.period_end, availability, price, shares, mcap, debt, cash,
         sti, mi, pref, leases, equity, ev, reason,

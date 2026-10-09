@@ -178,7 +178,7 @@ def test_home_with_no_runs_shows_the_setup_card_and_the_ticker_box(client, monke
 
 def test_home_without_setup_problems_has_no_setup_card(client):
     r = client.get("/")
-    assert r.status_code == 200 and "setup" not in r.text.split("<main>", 1)[1]
+    assert r.status_code == 200 and "setup" not in r.text.split("<main", 1)[1]
 
 
 def test_home_lists_the_watchlist_and_recent_runs(client, fake_build, env):
@@ -1207,3 +1207,29 @@ def test_an_unhandled_error_page_refuses_to_be_framed_too(client, monkeypatch):
     assert r.status_code == 500 and "boom" not in r.text
     assert r.headers.get("x-frame-options") == "DENY"
     assert r.headers.get("content-security-policy") == "frame-ancestors 'none'"
+
+
+# --- fix round 4 (Hermes re-audit of #118 @ 34836cf): polish ----------------------------
+
+
+def test_a_refused_price_is_announced_and_tied_to_its_fields(client, env, fake_build):
+    r = client.post("/t/KO/price", data=_price_form(price="-3"))
+    assert r.status_code == 400
+    m = re.search(r'<div class="err" role="alert" id="([a-z-]+)">Price not recorded', r.text)
+    assert m, "the refusal is not announced"
+    for name in ("price", "observed_at", "source", "note"):
+        tag = re.search(rf'<input id="{name}"[^>]*>', r.text).group(0)
+        assert f'aria-describedby="{m.group(1)}"' in tag, name
+    # No refusal: no field points at an error that is not there.
+    page = client.get("/t/KO").text
+    assert 'aria-describedby="price-error"' not in page
+
+
+def test_workbench_pages_have_their_own_titles(client, fake_build):
+    client.post("/t/KO/run", data={"fresh": "0"})
+    job = _wait("KO")
+    for url, want in (("/", "Workbench"), ("/t/KO", "KO"),
+                      (f"/t/KO/runs/{job.generation_id}", "KO"),
+                      ("/t/KO/runs/" + "0" * 32, "No such run")):
+        title = re.search(r"<title>(.*?)</title>", client.get(url).text).group(1)
+        assert want in title and "FQE Workbench" in title, (url, title)
