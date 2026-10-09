@@ -181,10 +181,12 @@ class ValuationSummary(BaseModel):
     availability: str | None = None
     ev: float | None = None
     ev_reason: str | None = None
-    # The currency of the card's figures: the filing currency, or the
-    # observation's own when the price was refused for being in another
-    # (`bridge.currency_mismatch`). None in ledgers written before it.
+    # One meaning each (review of 6bf9f9e): `currency` is the currency of the
+    # card's figures, always the filing currency; `observation_currency` the
+    # price's own, as recorded (refused when it is not the filing currency,
+    # `bridge.currency_mismatch`). None in ledgers written before them.
     currency: str | None = None
+    observation_currency: str | None = None
 
 
 class LedgerDocument(BaseModel):

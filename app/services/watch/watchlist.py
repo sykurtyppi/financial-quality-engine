@@ -246,14 +246,23 @@ def add_entry(raw: dict, path: Path | None = None) -> Watch:
 
 def _atomic_write(p: Path, data: dict) -> None:
     """Temp-file + rename so a crash mid-write can never leave the calendar a
-    cron job reads half-written."""
+    cron job reads half-written; the file fsynced before the rename and the
+    folder after it, so a power loss cannot take the rename back either
+    (review of 6bf9f9e, L6: the thesis pins and the sweep's calendar)."""
     fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name, suffix=".tmp")
     try:
         # UTF-8, as it is read (`_read`), whatever the locale (review of
         # eeb1e51, L-1: a latin-1 locale wrote a note the sweep then refused).
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, p)
+        dfd = os.open(p.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

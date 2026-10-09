@@ -461,3 +461,27 @@ def test_the_console_shows_the_unit_beside_each_monetary_value(client):
     assert shown(row) == f"{review.fmt_value(shares.value)} shares"
     price = next(i for i in doc.items if i.kind == "market_observation")
     assert shown(_row(section, price.id)) == f"{review.fmt_value(price.value)} USD"
+
+
+def test_a_row_of_mixed_units_shows_none_and_the_case_answers_head(client):
+    from app.schemas.ledger import EvidenceItem
+    from app.schemas.ledger import Provenance as P
+
+    def filed(unit):
+        return P(kind="filing", accession="0000021344-26-000010", form="10-Q",
+                 filed=date(2026, 4, 28), unit=unit)
+
+    item = EvidenceItem(id="EV-x", plane=Plane.VALUATION, kind="k", subject="s", claim="c",
+                        provenance=(filed("USD"), filed("shares")),
+                        validation_status="unvalidated")
+    assert review._unit(item) is None
+    assert review._unit(item.model_copy(update={"provenance": (filed("USD"),)})) == "USD"
+    assert review._unit(item.model_copy(update={"currency": "EUR"})) == "EUR"
+    # Only filed facts carry a unit: an observation beside one says nothing.
+    seen = P(kind="observation", observed_at=datetime(2026, 10, 2, 21, tzinfo=UTC),
+             source="close", recorded_at=datetime(2026, 10, 3, tzinfo=UTC),
+             observation_sha256="0" * 64)
+    assert review._unit(item.model_copy(update={"provenance": (seen, filed("USD"))})) == "USD"
+    day = _entry()
+    _publish(day, _ledger(_plane(), requested=True))
+    assert client.head(f"/review/KO?date={day}").status_code == 200

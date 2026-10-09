@@ -22,7 +22,7 @@
       var said = document.createElement("div");
       said.className = "err poll-lost";
       said.setAttribute("data-poll-lost", "");
-      said.setAttribute("role", "alert");
+      // No role="alert": the box is already the page's live region.
       said.appendChild(document.createTextNode(
         "Lost contact with the local server (" + why + "): this run's status is no longer " +
         "updating. The run itself may still finish; is the workbench still running? "));

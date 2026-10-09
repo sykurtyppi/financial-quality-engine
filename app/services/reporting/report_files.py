@@ -166,6 +166,12 @@ class Fence:
 # Inside a superseded generation's directory: it was never live. Hidden, and
 # not one of a run's files, so readers of a generation never meet it.
 SUPERSEDED_MARK = ".superseded"
+# Inside a generation from before its rename into the history until its
+# switch (review of 6bf9f9e, L5): one that holds it and is not live was left
+# by a publishing process that stopped before the switch, and was never
+# published. Cleared once the run is live (and, if that clear was lost, by
+# the next publish of the report, which finds it live).
+PENDING_MARK = ".pending"
 
 
 class ForeignPointer(OSError):
@@ -679,6 +685,8 @@ def replacing(report: Path, *, now: datetime | None = None,
                 contextlib.nullcontext() if fence is None else
                 sidecar_lock(fence.lock, timeout=timeout,
                              busy=f"{report.name}: the ticker's lock")):
+            if fence is not None:
+                _heal_mark(report, fence)
             _publish(report, staged, work, now, fence)
     finally:
         shutil.rmtree(work, ignore_errors=True)  # gone already once published
@@ -719,21 +727,39 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
     superseded = held is not None and fence is not None and fence.number < held
     if superseded:
         (work / SUPERSEDED_MARK).write_text(f"superseded: request {held} had published\n")
+    else:
+        # Durable before the rename: a process stopped after it and before
+        # the switch leaves a generation that says it was never published.
+        (work / PENDING_MARK).write_text("pending: not yet switched to\n")
+        _fsync(work / PENDING_MARK)
+        _fsync(work)
     os.rename(work, gen)
     what = f"publishing {gen.name}"
+    step = "fsyncing the generations folder"
     marked = switched = False
     try:
         _fsync(home)
         if not superseded:
             if fence is not None:
+                step = f"raising the high-water mark to {fence.number}"
                 marked = True
                 write_count(fence.mark, fence.number)  # write-ahead
+            step = "linking the live names"
             _link_live_names(report)
             # Set before the call: `_switch` may move the pointer and then be
             # interrupted, and switching back to `previous` is harmless when
             # it never moved.
+            step = "switching the pointer"
             switched = True
-            _switch(report, gen, previous, what)
+            try:
+                _switch(report, gen, previous, what)
+            except NotPublished:
+                # `_switch` switched back and read the pointer back itself:
+                # a second switch back could only turn that verified answer
+                # into a doubt (review of 6bf9f9e, L4).
+                switched = False
+                raise
+            _clear_pending(gen, previous)
     except PublishInDoubt:
         raise  # the new generation may be live: it stays where the pointer may name it
     except BaseException as e:
@@ -742,14 +768,15 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
         try:
             if marked:
                 assert fence is not None
-                _restore_mark(fence, mark)
+                # Never below what was read as held (review of 6bf9f9e, L1):
+                # a mark lost or rewound below a live fence is healed here.
+                _restore_mark(fence, held)
         finally:
             _set_apart(gen)  # never live, or switched back: not a run
         if marked and not switched and isinstance(e, OSError):
-            assert fence is not None
             raise NotPublished(
-                f"{report.name}: raising the high-water mark to {fence.number} failed "
-                f"({type(e).__name__}: {e}); nothing published, the live run is unchanged") from e
+                f"{report.name}: {step} failed ({type(e).__name__}: {e}); nothing published, "
+                "the live run is unchanged") from e
         raise
     if superseded:
         # Kept whole in the archive, where `generations` lists it and
@@ -814,10 +841,42 @@ def _held_fence(report: Path, fence: Fence) -> tuple[int | None, int | None]:
     return (max(stated) if stated else None), mark
 
 
+def _heal_mark(report: Path, fence: Fence) -> None:
+    """First thing under the ticker's lock: a mark found below a live fence
+    (lost or rewound: a power loss, an old backup, runs fenced before it
+    existed) is raised to it before anything of this publish is written, so
+    whatever stops the publish from here on, the mark is never left below a
+    live run (review of 6bf9f9e, L1 and its fault sweep). Best effort: a
+    fence that cannot be read is `_publish`'s to refuse, and a mark that
+    cannot be raised here is raised by its write-ahead or refused there."""
+    try:
+        held, mark = _held_fence(report, fence)
+    except NotPublished:
+        return
+    if held is not None and (mark is None or mark < held):
+        with contextlib.suppress(OSError):
+            write_count(fence.mark, held)
+
+
+def _clear_pending(gen: Path, previous: Path | None) -> None:
+    """After the switch: the new run's pending marker goes (it is live), and
+    the previous run's if it still had one (it was live: a clear lost to a
+    kill after its own switch). Best effort: a marker left on a run that is
+    or was live is cleared by the next publish of its report."""
+    for g in (gen, previous):
+        if g is None:
+            continue
+        with contextlib.suppress(OSError):
+            (g / PENDING_MARK).unlink(missing_ok=True)
+            _fsync(g)
+
+
 def _restore_mark(fence: Fence, mark: int | None) -> None:
-    """The mark as it was before a publish that did not make its run live:
-    safe under the ticker's lock, which no other publish or request holds
-    meanwhile. One that cannot be put back stays ahead, the safe
+    """The mark as it was before a publish that did not make its run live,
+    given as the fence that was held (the mark read and every day's live
+    fence: never lower than a live run, so a lost or rewound mark comes back
+    healed): safe under the ticker's lock, which no other publish or request
+    holds meanwhile. One that cannot be put back stays ahead, the safe
     direction."""
     with contextlib.suppress(OSError):
         if mark is None:
@@ -1067,6 +1126,13 @@ def restore(report: Path, generation: str) -> Path:
             # No live run to keep or to put back on a rollback: the pointer is
             # replaced, never followed (a dereferenced copy is still refused).
             previous = None
+        if gen != previous and (gen / PENDING_MARK).exists():
+            # Left by a publish stopped before its switch (review of
+            # 6bf9f9e, L5): its files are whole, but nothing ever published
+            # it, so it is not restored as if it had been.
+            raise ValueError(f"{report.name}: {gen.name} was never published (its publishing "
+                             "process stopped before the switch); it is not restored. Rebuild "
+                             "the report instead")
         _link_live_names(report)
         _switch(report, gen, previous, f"restoring {gen.name}")
         return gen / report.name

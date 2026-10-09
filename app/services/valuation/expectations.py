@@ -257,7 +257,9 @@ def _scenario(s: Scenario, a: Assumptions, fcf: float | None, bridge: Bridge,
                              "not computable: overflow (present value not finite)")
     per_share = pv / bridge.shares.value
     upside = per_share / bridge.price.value - 1.0
-    if not (math.isfinite(per_share) and math.isfinite(upside)):
+    # One check covers both: the price is finite and positive, so a value
+    # per share past a double makes the upside past one too.
+    if not math.isfinite(upside):
         return ScenarioValue(s.name, terms, None, None, SCENARIO_OVERFLOW)
     return ScenarioValue(s.name, terms, per_share, upside, None)
 

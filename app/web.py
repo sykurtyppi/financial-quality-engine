@@ -591,18 +591,25 @@ def impact_form(request: Request, ticker: str, date: str | None = None):
 _ISO_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 
 
-def _impact_problems(impact: str, verdict: str, outcome_date: str) -> list[str]:
-    """Why the impact form's choices cannot be recorded: an impact or a
-    verdict the form does not offer, an outcome date that is not a calendar
-    day as YYYY-MM-DD (Hermes re-audit of #118 @ 34836cf: any string was
-    written into the entry, and `store.tally` counted what it found)."""
+def _impact_problems(impact: str, verdict: str, outcome_date: str, conviction_after: str,
+                     stored_outcome_date: str | None) -> list[str]:
+    """Why the impact form's choices cannot be recorded: an impact, a
+    verdict or a conviction the form does not offer, an outcome date that is
+    not a calendar day as YYYY-MM-DD (Hermes re-audit of #118 @ 34836cf:
+    any string was written into the entry, and `store.tally` counted what it
+    found). An outcome date sent back exactly as the entry already holds it
+    is kept, whatever its form: a legacy entry typed by hand ("2026-8-15")
+    could not be saved again at all (review of 6bf9f9e, L7)."""
     problems = []
+    if conviction_after.strip() and conviction_after.strip() not in store.CONVICTION_CHOICES:
+        problems.append(f"conviction_after {conviction_after.strip()!r} is not one of "
+                        f"{', '.join(store.CONVICTION_CHOICES)}")
     if impact.strip() and impact.strip() not in store.IMPACT_CODES:
         problems.append(f"impact {impact.strip()!r} is not one of {', '.join(store.IMPACT_CODES)}")
     if verdict.strip() and verdict.strip() not in store.VERDICTS:
         problems.append(f"verdict {verdict.strip()!r} is not one of {', '.join(store.VERDICTS)}")
     day = outcome_date.strip()
-    if day:
+    if day and day != (stored_outcome_date or "").strip():
         try:
             if not _ISO_DAY_RE.fullmatch(day):
                 raise ValueError
@@ -645,7 +652,8 @@ def impact_submit(
     typed = {"impact": impact, "conviction_after": conviction_after,
              "what_it_surfaced": what_it_surfaced, "what_i_disagreed_with": what_i_disagreed_with,
              "outcome_date": outcome_date, "what_happened": what_happened, "verdict": verdict}
-    problems = _impact_problems(impact, verdict, outcome_date)
+    problems = _impact_problems(impact, verdict, outcome_date, conviction_after,
+                                store.parse_entry(path).get("outcome_date"))
     if problems:
         # Nothing is written, not even the fields that were fine; the form
         # comes back with everything typed in it.
@@ -664,12 +672,9 @@ def impact_submit(
         val = val.strip()
         if not val:
             continue
-        # conviction_after is a <select>; the browser can only submit 1-5. Reject
-        # anything else at the boundary (a forged POST or hand-edited value)
-        # rather than trust the client — this is the one field a stray value would
-        # silently corrupt (see store.tally()'s isdigit()-guarded conviction math).
-        if key == "conviction_after" and val not in store.CONVICTION_CHOICES:
-            continue
+        # conviction_after is a <select>; the browser can only submit 1-5.
+        # Anything else (a forged POST or hand-edited value) was refused above
+        # with the form's other choices (`_impact_problems`).
         store.set_field(path, key, val)
     return RedirectResponse("/journal", status_code=303)
 

@@ -75,10 +75,11 @@ ERROR_MAX = 300
 
 log = logging.getLogger(__name__)
 
-# (ticker, fresh, fence) -> the generation id the run published, or None.
-Build = Callable[[str, bool, int | None], str | None]
-# ticker -> the run's request number (`fencing.request`).
-FenceSource = Callable[[str], int]
+# (ticker, fresh, request) -> the generation id the run published, or None.
+Build = Callable[[str, bool, "fencing.Request | None"], str | None]
+# ticker -> the run's request: its number and its report's day
+# (`fencing.request_run`).
+FenceSource = Callable[[str], "fencing.Request"]
 
 
 @dataclass(frozen=True)
@@ -92,9 +93,17 @@ class Job:
     finished_at: datetime | None = None
     error: str | None = None
     generation_id: str | None = None
-    # The run's request number, sealed into what it publishes; None for a
+    # The run's request number, sealed into what it publishes, and the day
+    # its report is named for, both fixed when it was asked for; None for a
     # registry that does not fence (a test's stand-in build).
     fence: int | None = None
+    day: str | None = None
+
+    @property
+    def request(self) -> fencing.Request | None:
+        if self.fence is None or self.day is None:
+            return None
+        return fencing.Request(self.fence, self.day)
 
     @property
     def stalled(self) -> bool:
@@ -137,26 +146,29 @@ def describe_failure(e: BaseException) -> str:
     return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1] + "…"
 
 
-def _build(ticker: str, fresh: bool, fence: int | None) -> str | None:
+def _build(ticker: str, fresh: bool, request: fencing.Request | None) -> str | None:
     """The CLI's build (`reporting.build_report`, looked up at call time),
     with documents, dated today, published under ``reports/workbench/``,
     waiting for the publish lock at most `review.PUBLISH_WAIT_S` (the review
     console's wait: a publish holds it for a moment), fenced with the run's
     request number and its ticker's high-water mark (`fencing.fence`; the
-    ticker's lock is waited for as long). Returns the generation THIS run published
-    (`report_files.recording`), never one read back from the live name,
-    which another run may have taken meanwhile."""
-    fenced = None if fence is None else fencing.fence(ticker, fence)
+    ticker's lock is waited for as long), for the day fixed when it was
+    asked for (review of 6bf9f9e, M1: dated after its fetch, an older
+    request could take the newer day). Returns the generation THIS run
+    published (`report_files.recording`), never one read back from the live
+    name, which another run may have taken meanwhile."""
+    fenced = None if request is None else fencing.fence(ticker, request.number)
     with recording() as published:
         reporting.build_report(ticker, with_docs=True, fresh=fresh,
                                out_dir=views.reports_dir(),
-                               publish_timeout=review.PUBLISH_WAIT_S, fence=fenced)
+                               publish_timeout=review.PUBLISH_WAIT_S, fence=fenced,
+                               day=None if request is None else request.day)
     return published[-1].generation_id if published else None
 
 
-def _request_fence(ticker: str) -> int:
-    """`fencing.request`, looked up at call time."""
-    return fencing.request(ticker)
+def _request_fence(ticker: str) -> fencing.Request:
+    """`fencing.request_run`, looked up at call time."""
+    return fencing.request_run(ticker)
 
 
 class Registry:
@@ -219,14 +231,16 @@ class Registry:
                 # The new run reads every input as it starts: it is the run
                 # that was to follow, and fresh if that one was to be.
                 fresh = self._again.pop(t, False) or fresh
-            fence: int | None = None
+            asked: fencing.Request | None = None
             refused: str | None = None
             if self._fence is not None:
                 try:
-                    fence = self._fence(t)
+                    asked = self._fence(t)
                 except (fencing.EpochError, OSError) as e:
                     refused = str(e)
-            job = Job(uuid.uuid4().hex, t, fresh, QUEUED, _now(), fence=fence)
+            job = Job(uuid.uuid4().hex, t, fresh, QUEUED, _now(),
+                      fence=None if asked is None else asked.number,
+                      day=None if asked is None else asked.day)
             if refused is not None:
                 job = dataclasses.replace(job, state=FAILED, finished_at=job.created_at,
                                           error=refused)
@@ -252,7 +266,7 @@ class Registry:
         outcome: dict[str, object]
         try:
             try:
-                gid = build(job.ticker, job.fresh, job.fence)
+                gid = build(job.ticker, job.fresh, job.request)
             except Superseded as e:
                 # Not a failure: the run asked for later is live, and this
                 # one's report is kept in the history (its generation).

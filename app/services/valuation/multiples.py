@@ -69,6 +69,13 @@ def trailing(dataset: CompanyDataset | None, bridge: Bridge) -> TrailingFigures:
         return TrailingFigures(
             None, f"TTM window incomplete: fewer than 4 consecutive quarters ending "
                   f"{bridge.fiscal_label}")
+    # Four finite quarters can sum past a double (review of 6bf9f9e, L2: an
+    # inf TTM revenue made P/S 0.0, a finite-looking multiple): refused.
+    figures = {"revenue": ttm.revenue, "net income": ttm.net_income, "EBIT": ttm.ebit,
+               "EBITDA": ttm.ebitda, "FCF": ttm.fcf}
+    for name, value in figures.items():
+        if value is not None and not math.isfinite(value):
+            return TrailingFigures(None, f"not computable: overflow (TTM {name})")
     return TrailingFigures(ttm.fiscal_label, None, ttm.revenue, ttm.net_income, ttm.ebit,
                            ttm.ebitda, ttm.fcf)
 
@@ -103,6 +110,9 @@ def compute_multiples(bridge: Bridge, ttm: TrailingFigures) -> tuple[Multiple, .
             reason = bridge.ev_reason
         elif ttm.reason is not None:
             reason = ttm.reason
+        elif any(v is not None and not math.isfinite(v) for v in (num, den)):
+            # Only from a caller's own figures: `trailing` refuses them.
+            reason = f"not computable: a non-finite figure ({name})"
         elif is_yield:
             if num is None:
                 reason = f"TTM {num_name} missing"

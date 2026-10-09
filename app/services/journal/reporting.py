@@ -82,6 +82,7 @@ def build_report(
     market: bool = True,
     publish_timeout: float | None = None,
     fence: Fence | None = None,
+    day: str | None = None,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -136,6 +137,13 @@ def build_report(
     day of the file is taken after the fetch, so the mark, not the day's
     live run, is what decides. Every other caller passes none, and
     publishes as before.
+
+    ``day`` names the report's file (YYYY-MM-DD) when the caller fixed it
+    beforehand: the workbench fixes it when the run is asked for, under the
+    ticker's lock, so day order follows request order (review of 6bf9f9e,
+    M1). It is not ``report_day``, which also pins a journal thesis's
+    silent-revision baseline: the workbench has no thesis. None: today,
+    read after the fetch, as before.
     """
     ticker = ticker.upper()
     as_of: date | None = None
@@ -183,7 +191,10 @@ def build_report(
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     target_dir = out_dir if out_dir is not None else REPORTS
     suffix = ".replay.md" if replay else ".md"
-    out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}{suffix}"
+    if day is not None and report_day is not None:
+        raise ValueError("build_report: day and report_day both name the file; give one")
+    file_day = report_day or day or date.today().isoformat()
+    out = target_dir / f"{safe_ticker(ticker)}_{file_day}{suffix}"
     warnings = list(diag.warnings)
     if as_of is not None:
         warnings.append(f"HISTORICAL REPLAY as of {as_of}: fundamentals from {replay_source}.")

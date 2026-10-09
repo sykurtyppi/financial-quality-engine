@@ -459,8 +459,9 @@ def _run_audit_capped(report: Path) -> tuple[int, bool]:
         return 0, False
     attempts = prior + 1
     try:
-        # Whole or not at all: a torn count read as 0 and reset the cap.
-        write_atomic(marker, f"{attempts}\n")
+        # Whole or not at all: a torn count read as 0 and reset the cap. And
+        # durable (review of 6bf9f9e, L6): a lost count re-opens paid runs.
+        write_atomic(marker, f"{attempts}\n", durable=True)
     except OSError as e:
         # Unrecorded, every later pass would spend another paid run on this
         # report, without limit. Give up on it now instead, and say why.

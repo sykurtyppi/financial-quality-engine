@@ -497,7 +497,7 @@ def test_a_corrupt_counter_fails_the_run_readably_and_publishes_nothing(reports,
 
 def test_each_run_asked_for_is_given_the_next_number(reports, monkeypatch):
     seen: list = []
-    monkeypatch.setattr(jobs, "_build", lambda t, fresh, fence: seen.append(fence))
+    monkeypatch.setattr(jobs, "_build", lambda t, fresh, fence: seen.append(fence.number))
     reg = jobs.Registry()
     for _ in range(3):
         reg.wait(reg.start("KO").id, timeout=10)
@@ -1081,3 +1081,268 @@ def test_a_kill_at_any_step_leaves_one_run_live_and_no_older_run_after_it(tmp_pa
     assert mark is not None and mark >= fence  # never behind the live run
     gid = _publish(tmp_path / DAY_B, "D", fence=4)
     assert read_live(tmp_path / DAY_B).generation_id == gid
+
+
+# --- fix round 5 (independent review of 6bf9f9e) ---------------------------------------
+
+
+def test_a_failed_publish_puts_the_mark_back_no_lower_than_a_live_fence(tmp_path, monkeypatch):
+    """L1: the rollback put back the mark it READ, even when the scan had
+    just seen a higher live fence on another day (a mark lost or rewound):
+    with that day then set aside, an older request published."""
+    _publish(tmp_path / DAY_B, "B", fence=2)
+    mark = tmp_path / fencing.EPOCHS_DIR / "KO.published"
+    mark.write_text("1\n")  # rewound
+    real = report_files._symlink
+
+    def failing(link, target):
+        if link.name == "current" and "KO_2026-10-09" in str(link):
+            raise OSError(errno.EIO, "injected: the pointer's rename failed")
+        return real(link, target)
+
+    monkeypatch.setattr(report_files, "_symlink", failing)
+    with pytest.raises(report_files.NotPublished):
+        _publish(tmp_path / DAY_A, "A", fence=3)
+    monkeypatch.setattr(report_files, "_symlink", real)
+    assert mark.read_text() == "2\n"
+    report_files.set_aside(tmp_path / DAY_B)
+    with pytest.raises(Superseded):
+        _publish(tmp_path / "KO_2026-10-11.md", "C", fence=1)
+
+
+def test_a_failed_first_fenced_publish_removes_the_mark_it_wrote(tmp_path, monkeypatch):
+    """The put-back's other branch: no mark before, none after."""
+    _publish(tmp_path / DAY_A, "A")  # unfenced: no mark
+    real = report_files._symlink
+
+    def failing(link, target):
+        if link.name == "current":
+            failing.n += 1
+            if failing.n == 1:
+                raise OSError(errno.EIO, "injected")
+        return real(link, target)
+
+    failing.n = 0
+    monkeypatch.setattr(report_files, "_symlink", failing)
+    with pytest.raises(report_files.NotPublished):
+        _publish(tmp_path / DAY_A, "C", fence=3)
+    assert not (tmp_path / fencing.EPOCHS_DIR / "KO.published").exists()
+
+
+def test_the_message_names_the_step_that_failed(tmp_path, monkeypatch):
+    """L3: a failure linking the live names was said as "raising the
+    high-water mark to 3 failed"."""
+    _publish(tmp_path / DAY_A, "A", fence=1)
+
+    def failing(report):
+        raise OSError(errno.ENOSPC, "injected: no space")
+
+    monkeypatch.setattr(report_files, "_link_live_names", failing)
+    with pytest.raises(report_files.NotPublished) as e:
+        _publish(tmp_path / DAY_A, "C", fence=3)
+    assert "linking the live names failed" in str(e.value)
+    assert "raising the high-water mark" not in str(e.value)
+    monkeypatch.undo()
+
+    def refuse(path, n):
+        raise OSError(errno.ENOSPC, "injected: no space")
+
+    monkeypatch.setattr(report_files, "write_count", refuse)
+    with pytest.raises(report_files.NotPublished) as e:
+        _publish(tmp_path / DAY_A, "D", fence=4)
+    assert "raising the high-water mark to 4 failed" in str(e.value)
+
+
+def test_a_verified_rollback_is_not_switched_back_again(tmp_path, monkeypatch):
+    """L4: `_switch` rolls back and reads the pointer back on its own
+    failure; a second switch back that met a transient error turned that
+    verified NotPublished into PublishInDoubt."""
+    day_a = tmp_path / DAY_A
+    first = _publish(day_a, "A", fence=1)
+    home = tmp_path / report_files.GENERATIONS_DIR / "KO_2026-10-09"
+    real, seen = report_files._fsync, [0]
+
+    def flaky(path):
+        # The generations folder's fsyncs during the publish: #1 before the
+        # switch works, #2 (in `_switch`, after the pointer moved) fails, #3
+        # (`_switch`'s own switch back) works, and a #4 (a second switch
+        # back) would fail.
+        if Path(path) == home:
+            seen[0] += 1
+            if seen[0] in (2, 4):
+                raise OSError(errno.EIO, f"injected EIO #{seen[0]}")
+        return real(path)
+
+    monkeypatch.setattr(report_files, "_fsync", flaky)
+    with pytest.raises(report_files.NotPublished):
+        _publish(day_a, "C", fence=3)
+    monkeypatch.setattr(report_files, "_fsync", real)
+    assert read_live(day_a).generation_id == first
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "1\n"
+    assert any(g.name.startswith(".failed-") for g in home.iterdir())
+
+
+def test_a_switch_in_doubt_is_never_set_apart(tmp_path, monkeypatch):
+    """`_switch` itself ending in doubt: the new run may be live, so it
+    stays where the pointer may name it and the mark stays raised."""
+    day_a = tmp_path / DAY_A
+    _publish(day_a, "A", fence=1)
+    real = report_files._switch
+
+    def in_doubt(*a, **k):
+        real(*a, **k)
+        raise report_files.PublishInDoubt("injected: in doubt")
+
+    monkeypatch.setattr(report_files, "_switch", in_doubt)
+    with pytest.raises(report_files.PublishInDoubt):
+        _publish(day_a, "C", fence=3)
+    gen = current_generation(day_a)
+    assert gen is not None and read_live(day_a).text.startswith("# C report")
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "3\n"
+
+
+def _kill_before_switch(args):
+    import signal
+
+    report = args
+    real = report_files.write_count
+
+    def write_count(path, n):
+        real(path, n)
+        if path.name.endswith(".published"):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+    report_files.write_count = write_count
+    _publish(report, "killed", fence=fencing.fence("KO", fencing.request("KO")))
+    os._exit(0)
+
+
+def test_a_run_killed_before_its_switch_is_listed_as_never_published(reports):
+    """L5: the leftover of a publish killed before its switch was listed as
+    an ordinary kept run, counted as published news, and restorable. It
+    carries a pending marker now: never published, said so, refused."""
+    import multiprocessing as mp
+
+    from app.services.workbench import views
+
+    report = reports / "workbench" / DAY_A
+    report.parent.mkdir(parents=True)
+    first = _publish(report, "first", fence=fencing.fence("KO", fencing.request("KO")))
+    before = datetime.now(UTC)
+    time.sleep(1.1)  # the leftover is stamped in a later second than `before`
+    proc = mp.get_context("fork").Process(target=_kill_before_switch, args=(report,))
+    proc.start()
+    proc.join(60)
+    assert proc.exitcode == -9
+    refs = views.runs("KO")
+    leftover = [r for r in refs if not r.live]
+    assert len(leftover) == 1 and leftover[0].pending
+    assert not [r for r in refs if r.live][0].pending
+    assert not views.published_since("KO", before)
+    assert views.live_run("KO").generation_id == first
+    with pytest.raises(ValueError, match="never published"):
+        report_files.restore(report, leftover[0].name)
+    from fastapi.testclient import TestClient
+
+    from app.web import app
+
+    page = TestClient(app, base_url="http://127.0.0.1",
+                      client=("127.0.0.1", 50000)).get("/t/KO").text
+    assert "never published: the publishing process stopped" in page.split('id="history"')[1]
+    # A published run carries no marker; one live with a marker left (killed
+    # after its switch) is cleared by the next publish of its report.
+    assert not (current_generation(report) / report_files.PENDING_MARK).exists()
+
+
+def test_the_card_is_the_highest_fence_live_not_the_newest_day(reports, monkeypatch):
+    """M1's belt: request 3 published on day 2, then request 4 on day 1 (the
+    days a build named after its fetch). The card follows the fence."""
+    from app.services.workbench import views
+
+    wb = reports / "workbench"
+    wb.mkdir(parents=True)
+    _publish(wb / DAY_B, "three", fence=fencing.fence("KO", 3))
+    four = _publish(wb / DAY_A, "four", fence=fencing.fence("KO", 4))
+    assert views.live_run("KO").generation_id == four
+    assert views.live_generation("KO") == four
+    assert views.ticker_view("KO").latest.generation_id == four
+    from app.services.watch import watchlist as wl
+
+    monkeypatch.setattr(wl, "WATCHLIST", reports.parent / "watchlist.json")
+    wl.add_entry({"ticker": "KO", "print_at": "2026-10-21T11:00:00+00:00"})
+    rows, _ = views.watchlist_rows()
+    assert [r.latest.generation_id for r in rows] == [four]
+    # A run from before fences never outranks one that states its fence.
+    _publish(wb / "KO_2026-10-12.md", "unfenced, newer day")
+    assert views.live_run("KO").generation_id == four
+
+
+def test_a_live_run_left_pending_is_live_and_cleared_by_the_next_publish(reports):
+    """Killed after its switch, before its marker went: the run is live
+    (never listed as "never published"), and the next publish of its
+    report clears the marker, so once replaced it reads as published."""
+    from app.services.workbench import views
+
+    report = reports / "workbench" / DAY_A
+    report.parent.mkdir(parents=True)
+    a = _publish(report, "A", fence=fencing.fence("KO", 1))
+    gen = current_generation(report)
+    (gen / report_files.PENDING_MARK).write_text("pending\n")
+    ref = views.live_run("KO")
+    assert ref.generation_id == a and ref.live and ref.pending
+    # Live, it is a run like any other: restoring it is allowed (a no-op).
+    report_files.restore(report, ref.name)
+    assert current_generation(report) == gen
+    since = datetime.now(UTC) - timedelta(hours=1)
+    assert views.published_since("KO", since)
+    _publish(report, "B", fence=fencing.fence("KO", 2))
+    assert not (gen / report_files.PENDING_MARK).exists()
+    assert not next(r for r in views.runs("KO") if r.generation_id == a).pending
+
+
+def test_a_request_fixes_its_report_day_in_request_order(reports, monkeypatch):
+    """M1: the day a run is published for is fixed when it is asked for,
+    under the ticker's lock, so day order follows request order."""
+    days = iter([date(2026, 10, 9), date(2026, 10, 10)])
+
+    class Day(date):
+        @classmethod
+        def today(cls):
+            return next(days)
+
+    monkeypatch.setattr(fencing, "date", Day)
+    first, second = fencing.request_run("KO"), fencing.request_run("KO")
+    assert (first.number, first.day) == (1, "2026-10-09")
+    assert (second.number, second.day) == (2, "2026-10-10")
+
+
+def _killed_entering_publish(args):
+    import signal
+
+    report = args
+
+    def stop(*a, **k):
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    report_files._publish = stop  # the first thing the publish would do
+    _publish(report, "C", fence=3)
+    os._exit(0)
+
+
+def test_a_rewound_mark_is_healed_before_the_publish_writes_anything(tmp_path):
+    """The fault sweep's lost-mark case (review of 6bf9f9e): day B live at
+    fence 2, the mark rewound to 1. A publish stopped at its very first
+    step left the mark below the live run; it is healed under the ticker's
+    lock before any of the publish is written."""
+    import multiprocessing as mp
+
+    _publish(tmp_path / DAY_A, "A", fence=1)
+    _publish(tmp_path / DAY_B, "B", fence=2)
+    mark = tmp_path / fencing.EPOCHS_DIR / "KO.published"
+    mark.write_text("1\n")
+    proc = mp.get_context("fork").Process(target=_killed_entering_publish,
+                                          args=(tmp_path / DAY_A,))
+    proc.start()
+    proc.join(60)
+    assert proc.exitcode == -9
+    assert mark.read_text() == "2\n"
