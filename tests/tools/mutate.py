@@ -139,6 +139,17 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_valuation_bridge.py", "tests/unit/test_valuation_ledger.py",
         "tests/unit/test_valuation_render.py", "tests/unit/test_valuation_report.py",
     )),
+    # The workbench (r36): its runs, its reads, its setup check, its watchlist add.
+    Target("app/services/workbench/jobs.py", (
+        "tests/unit/test_workbench_jobs.py", "tests/unit/test_workbench_routes.py",
+    )),
+    Target("app/services/workbench/views.py", (
+        "tests/unit/test_workbench_views.py", "tests/unit/test_workbench_routes.py",
+    )),
+    Target("app/services/workbench/setup.py", (
+        "tests/unit/test_workbench_views.py", "tests/unit/test_workbench_routes.py",
+    )),
+    Target("app/services/workbench/watching.py", ("tests/unit/test_workbench_routes.py",)),
 )
 
 _FLIPS: dict[type, type] = {

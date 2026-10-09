@@ -1,0 +1,17 @@
+{# One run's card (prominent) and its appendix (folded), both rendered through
+   `_render_report` (escaped first: the report quotes filer text). #}
+<article class="panel report card">{{ card_html|safe }}</article>
+{% if appendix_html %}
+<details class="panel appendix" id="appendix">
+  <summary>Full report (appendix)</summary>
+  <div class="report">{{ appendix_html|safe }}</div>
+</details>
+{% endif %}
+<dl class="kv note">
+  <dt>Generation</dt><dd><code>{{ run.generation_id or "none (from before generations)" }}</code></dd>
+  <dt>Engine</dt><dd>{{ run.engine or "not stated" }}</dd>
+  {% if run.ledger %}
+  <dt>Ledger</dt><dd>{{ run.ledger.items }} evidence rows · coverage {{ "%.0f%%"|format(run.ledger.coverage * 100) if run.ledger.coverage is not none else "n/a" }}{{ " · fetched fresh" if run.ledger.fresh }}</dd>
+  {% endif %}
+</dl>
+{% if run.ledger_problem %}<div class="err">{{ run.ledger_problem }}</div>{% endif %}

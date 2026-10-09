@@ -1,12 +1,20 @@
-"""Local web UI for the decision-impact journal — a dogfooding tool, not the product.
+"""Local web UI: the workbench (the way in) and the decision-impact journal.
 
-It wraps the exact CLI loop (open thesis -> generate report -> record impact ->
-outcome) over the identical ``journal/entries/*.md`` files via
-``app.services.journal.store``. No new capability, no scoring changes; it exists
-only to reduce the friction of running the journal so it actually gets run.
+The workbench (r36) is the product's front door on the operator's own
+machine: type a ticker and see its decision card, the watchlist, a ticker's
+report history, and a price box that produces the valuation shadow card. It
+runs `reporting.build_report`, the CLI's own publish path, and reads what
+that path writes (`app.services.workbench`); it changes no score and no
+report text.
+
+The journal pages (``/journal``, ``/report``, ``/impact``) and the review
+console (``/review``) are the dogfooding tools they were: the journal wraps
+the CLI loop (open thesis -> generate report -> record impact -> outcome)
+over the identical ``journal/entries/*.md`` files via
+``app.services.journal.store``.
 
     export EDGAR_IDENTITY="Your Name you@example.com"
-    .venv/bin/uvicorn app.web:app        # then open http://127.0.0.1:8000
+    python scripts/ui.py                 # opens http://127.0.0.1:8000
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ import ipaddress
 import logging
 import os
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote_plus, urlsplit
 
@@ -27,15 +36,29 @@ from fastapi.responses import (
     RedirectResponse,
     Response,
 )
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 
 from app.services.journal import reporting, review, store
 from app.services.reporting.report_files import PublishInDoubt, recording
+from app.services.valuation.observation import (
+    MarketObservation,
+    eastern_today,
+    find_observation,
+    remove_observation,
+    write_observation,
+)
+from app.services.valuation.render import SECTION_TITLE as VALUATION_TITLE
+from app.services.workbench import jobs, setup, views, watching
 
 BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
-app = FastAPI(title="Decision-Impact Journal", docs_url=None, redoc_url=None)
+app = FastAPI(title="FQE Workbench", docs_url=None, redoc_url=None)
+# The stylesheet and the status poller. Behind `_guard` like every page: the
+# middleware wraps the whole app, mounts included.
+app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
 log = logging.getLogger(__name__)
 
@@ -267,7 +290,7 @@ def _v2_rows() -> list[dict]:
     return rows
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/journal", response_class=HTMLResponse)
 def dashboard(request: Request, error: str | None = None):
     return templates.TemplateResponse(
         request, "dashboard.html",
@@ -305,12 +328,12 @@ def report_view(request: Request, ticker: str, date: str | None = None,
     try:
         path = store.find_entry(ticker, date)
     except ValueError:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/journal", status_code=303)
     if path is None:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/journal", status_code=303)
     if store.is_v2(path):
         return RedirectResponse(
-            "/?error=" + quote_plus(
+            "/journal?error=" + quote_plus(
                 f"{store.safe_ticker(ticker)} is a preregistered (v2) case. The web UI shows "
                 "it read-only; generate its report with `scripts/journal.py report "
                 f"{store.safe_ticker(ticker)} --date {path.stem.split('_', 1)[1]}` so the "
@@ -480,12 +503,12 @@ def impact_form(request: Request, ticker: str, date: str | None = None):
     try:
         path = store.find_entry(ticker, date)
     except ValueError:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/journal", status_code=303)
     if path is None:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/journal", status_code=303)
     if store.is_v2(path):
         return RedirectResponse(
-            "/?error=" + quote_plus(
+            "/journal?error=" + quote_plus(
                 f"{store.safe_ticker(ticker)} is a preregistered (v2) case. Record its AFTER "
                 "block with `scripts/journal.py after`, which verifies the lock first."),
             status_code=303)
@@ -512,11 +535,11 @@ def impact_submit(
     try:
         path = store.find_entry(ticker, date)
     except ValueError:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/journal", status_code=303)
     if path is None:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/journal", status_code=303)
     if store.is_v2(path):
-        return RedirectResponse("/?error=" + quote_plus(
+        return RedirectResponse("/journal?error=" + quote_plus(
             f"{store.safe_ticker(ticker)} is a preregistered (v2) case; use "
             "`scripts/journal.py after`."), status_code=303)
     if not store.is_reported(path.read_text(encoding="utf-8")):
@@ -541,7 +564,7 @@ def impact_submit(
         if key == "conviction_after" and val not in store.CONVICTION_CHOICES:
             continue
         store.set_field(path, key, val)
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/journal", status_code=303)
 
 
 # --- the review console: supervised shadow runs (app.services.journal.review) ---------
@@ -618,3 +641,283 @@ def review_export(request: Request, ticker: str, date: str | None = None,
     media, ext = _EXPORTS[fmt]
     return Response(text, media_type=media, headers={
         "Content-Disposition": f'attachment; filename="{t}_{d}_review.{ext}"'})
+
+
+# --- the workbench (r36): a ticker in, a decision card out ------------------------------
+# Everything it writes goes through the CLI's own code: a run is
+# `reporting.build_report` (`workbench.jobs`), a price is the valuation
+# module's validated writer, a watchlist add is `scripts/watch.py`'s `_arm`.
+# Every POST below is refused to another site's page by `_guard`, like the
+# journal's.
+
+
+def _utc(when: datetime | None) -> str:
+    return when.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC") if when is not None else "—"
+
+
+templates.env.filters["utc"] = _utc
+
+
+def _ticker(raw: str) -> str | None:
+    """``raw`` as the journal names a ticker (`store.safe_ticker`), or None.
+    Every path the workbench builds from a ticker is built from this."""
+    try:
+        return store.safe_ticker(raw)
+    except ValueError:
+        return None
+
+
+def _not_a_ticker(raw: str) -> str:
+    return (f"{raw!r} is not a ticker: 1-12 letters, digits, '.' or '-', starting with a "
+            "letter or digit (e.g. KO, BRK.B).")
+
+
+def _home(request: Request, *, error: str | None = None, msg: str | None = None,
+          typed: str = "", status: int = 200) -> HTMLResponse:
+    rows, watchlist_problem = views.watchlist_rows()
+    return templates.TemplateResponse(request, "workbench_home.html", {
+        "setup": setup.setup_problems(), "error": error, "msg": msg, "typed": typed,
+        "rows": rows, "watchlist_problem": watchlist_problem, "recent": views.recent_runs(),
+        "active": jobs.active(), "stale_days": views.RUN_STALE_DAYS,
+    }, status_code=status)
+
+
+@app.get("/", response_class=HTMLResponse)
+def workbench_home(request: Request, error: str | None = None, msg: str | None = None):
+    return _home(request, error=error, msg=msg)
+
+
+@app.post("/t")
+def ticker_submit(request: Request, ticker: str = Form("")):
+    t = _ticker(ticker)
+    if t is None:
+        # Said back escaped (autoescape), and nothing is touched.
+        return _home(request, error=_not_a_ticker(ticker), typed=ticker, status=400)
+    return RedirectResponse(f"/t/{t}", status_code=303)
+
+
+_TIER_BLOCK_RE = re.compile(
+    r'<p><strong>Tier ([123]) — (.*?)</strong></p>\s*<ul>(.*?)</ul>', re.S)
+
+
+def _decorate_card(html: str) -> str:
+    """Classes on the card's tier headings, lists and warning lines, for the
+    stylesheet: the report's markdown is the report's and is not changed.
+    Sound for the reason `_render_report`'s link rewrite is: the input was
+    escaped before markdown, so the only tags here are markdown's own."""
+    def tier(m: re.Match[str]) -> str:
+        n, title, items = m.group(1), m.group(2), m.group(3)
+        items = items.replace("<li>⚠ not checked", '<li class="not-checked">⚠ not checked')
+        items = items.replace("<li>none surfaced this run</li>",
+                              '<li class="none">none surfaced this run</li>')
+        return (f'<p class="tier tier-{n}"><strong>Tier {n} — {title}</strong></p>\n'
+                f'<ul class="tier-list tier-{n}">{items}</ul>')
+    html = _TIER_BLOCK_RE.sub(tier, html)
+    return html.replace("<li>⚠ ", '<li class="warn">⚠ ')
+
+
+def _card_lists(card: str) -> str:
+    """The card's markdown with a blank line before each list that follows
+    a line of text. The card writes a tier's flags straight under its bold
+    heading (``**Tier 2 — ...:**`` then ``- flag``), which markdown reads as
+    one paragraph: every flag ran into one line. For display only, and only
+    on the card (engine text; the appendix quotes filers): the report file
+    is not changed."""
+    out: list[str] = []
+    for line in card.splitlines():
+        if line.startswith("- ") and out and out[-1].strip() and not out[-1].startswith("- "):
+            out.append("")
+        out.append(line)
+    return "\n".join(out)
+
+
+# The valuation shadow card's heading in the rendered appendix, given an id
+# so the price box can link to it (`#valuation`).
+_VALUATION_H2 = f"<h2>{_html.escape(VALUATION_TITLE.lstrip('# '), quote=False)}</h2>"
+
+
+def _run_html(run: views.RunView) -> dict:
+    appendix = _render_report(run.appendix) if run.appendix else None
+    if appendix is not None:
+        appendix = appendix.replace(_VALUATION_H2, _VALUATION_H2.replace("<h2>", '<h2 id="valuation">'), 1)
+    return {"run": run, "card_html": _decorate_card(_render_report(_card_lists(run.card))),
+            "appendix_html": appendix}
+
+
+def _price_form(**typed: str) -> dict:
+    """The price box's fields: what was typed (after a refusal, kept as it
+    was), else the defaults. The time defaults to now on this machine's
+    clock with its offset; app.js replaces it with the browser's own."""
+    form = {"price": "", "currency": "USD", "source": "", "note": "",
+            "observed_at": datetime.now().astimezone().isoformat(timespec="minutes"),
+            "kept": False}
+    if typed:
+        form.update(typed, kept=True)
+    return form
+
+
+def _ticker_page(request: Request, t: str, *, error: str | None = None,
+                 msg: str | None = None, status: int = 200,
+                 form: dict | None = None) -> HTMLResponse:
+    v = views.ticker_view(t)
+    ctx: dict = {"v": v, "t": t, "job": jobs.latest(t), "error": error, "msg": msg,
+                 "form": form or _price_form(), "run": None, "card_html": None,
+                 "appendix_html": None, "obs_age": None, "obs_stale": False}
+    if v.latest is not None:
+        ctx.update(_run_html(v.latest))
+    if v.observation is not None:
+        today = eastern_today()  # the card counts the age on EDGAR's calendar
+        ctx["obs_age"] = v.observation.observation.age_days(today)
+        ctx["obs_stale"] = v.observation.observation.is_stale(today)
+    return templates.TemplateResponse(request, "ticker.html", ctx, status_code=status)
+
+
+@app.get("/t/{ticker}", response_class=HTMLResponse)
+def ticker_page(request: Request, ticker: str, error: str | None = None, msg: str | None = None):
+    t = _ticker(ticker)
+    if t is None:
+        return _home(request, error=_not_a_ticker(ticker), status=400)
+    if t != ticker:
+        return RedirectResponse(f"/t/{t}", status_code=303)
+    return _ticker_page(request, t, error=error, msg=msg)
+
+
+def _status(request: Request, t: str) -> HTMLResponse:
+    return templates.TemplateResponse(request, "_job_status.html",
+                                      {"job": jobs.latest(t), "t": t})
+
+
+@app.post("/t/{ticker}/run")
+def ticker_run(request: Request, ticker: str, fresh: str = Form("0")):
+    t = _ticker(ticker)
+    if t is None:
+        return _home(request, error=_not_a_ticker(ticker), status=400)
+    # "Refresh from SEC" bypasses the SEC cache (a filing-night fetch);
+    # "Run" uses it, so a repeat view is fast.
+    jobs.start(t, fresh=fresh == "1")
+    if request.headers.get("hx-request"):
+        return _status(request, t)
+    return RedirectResponse(f"/t/{t}", status_code=303)
+
+
+@app.get("/t/{ticker}/status", response_class=HTMLResponse)
+def ticker_status(request: Request, ticker: str):
+    t = _ticker(ticker)
+    if t is None:
+        return PlainTextResponse(_not_a_ticker(ticker), status_code=400)
+    return _status(request, t)
+
+
+def _message(request: Request, title: str, message: str, back: str,
+             status: int) -> HTMLResponse:
+    return templates.TemplateResponse(request, "workbench_message.html",
+                                      {"title": title, "message": message, "back": back},
+                                      status_code=status)
+
+
+@app.get("/t/{ticker}/runs/{generation_id}", response_class=HTMLResponse)
+def ticker_past_run(request: Request, ticker: str, generation_id: str):
+    t = _ticker(ticker)
+    if t is None:
+        return _message(request, "No such run", _not_a_ticker(ticker), "/", 404)
+    try:
+        # Matched against the ticker's own listed generations; never joined
+        # into a path (`views.past_run`).
+        run = views.past_run(t, generation_id)
+    except (OSError, ValueError) as e:
+        return _message(request, "Run not shown", f"The run cannot be read: {e}", f"/t/{t}", 500)
+    if run is None:
+        return _message(request, "No such run",
+                        f"{t} has no kept run with generation {generation_id!r}.", f"/t/{t}", 404)
+    return templates.TemplateResponse(request, "workbench_run.html", _run_html(run))
+
+
+def _invalid(e: ValidationError) -> str:
+    """A refused observation's reasons, one per field, in pydantic's words."""
+    return "; ".join(f"{'.'.join(str(x) for x in err['loc']) or 'observation'}: {err['msg']}"
+                     for err in e.errors())
+
+
+@app.post("/t/{ticker}/price")
+def ticker_price(request: Request, ticker: str, price: str = Form(""),
+                 currency: str = Form("USD"), observed_at: str = Form(""),
+                 source: str = Form(""), note: str = Form("")):
+    t = _ticker(ticker)
+    if t is None:
+        return _home(request, error=_not_a_ticker(ticker), status=400)
+    typed = {"price": price, "currency": currency, "observed_at": observed_at,
+             "source": source, "note": note}
+    journal = reporting.MARKET.parent
+    try:
+        # Model assumptions and scenarios are recorded on the CLI only;
+        # recording a price here keeps them, where `market.py record` would
+        # replace the file whole. A file that cannot be read keeps nothing
+        # (and is replaced, as `record` replaces it; a symlink is refused).
+        kept = find_observation(journal, t)
+    except (OSError, ValueError):
+        kept = None
+    try:
+        # Validated by the model `market.py record` builds, from the text as
+        # typed: a non-finite or non-positive price, a time without an
+        # offset or after now, control characters in any text, a currency
+        # that is not three capitals are each refused there, not here.
+        obs = MarketObservation.model_validate({
+            "ticker": t, "price": price.strip(), "currency": currency.strip().upper(),
+            "observed_at": observed_at.strip(), "source": source, "note": note or None,
+            "recorded_at": datetime.now(UTC),
+            "assumptions": kept.observation.assumptions if kept else None,
+            "scenarios": kept.observation.scenarios if kept else (),
+        })
+    except ValidationError as e:
+        return _ticker_page(request, t, error=f"Price not recorded: {_invalid(e)}",
+                            status=400, form=_price_form(**typed))
+    try:
+        write_observation(journal, obs)
+    except OSError as e:
+        return _ticker_page(request, t, error=f"Price not recorded: {e}", status=500,
+                            form=_price_form(**typed))
+    # A run already in flight read the old price as it started: one more
+    # follows it.
+    jobs.start(t, again=True)
+    return RedirectResponse(f"/t/{t}", status_code=303)
+
+
+@app.post("/t/{ticker}/price/remove")
+def ticker_price_remove(request: Request, ticker: str):
+    t = _ticker(ticker)
+    if t is None:
+        return _home(request, error=_not_a_ticker(ticker), status=400)
+    try:
+        removed = remove_observation(reporting.MARKET.parent, t)
+    except (OSError, ValueError) as e:
+        return RedirectResponse(f"/t/{t}?error=" + quote_plus(f"Price not removed: {e}"),
+                                status_code=303)
+    if removed is None:
+        return RedirectResponse(f"/t/{t}?error=" + quote_plus(f"No price is recorded for {t}."),
+                                status_code=303)
+    # The live card still carries the old shadow card until a run without it.
+    jobs.start(t, again=True)
+    return RedirectResponse(f"/t/{t}", status_code=303)
+
+
+@app.post("/watchlist")
+def watchlist_submit(request: Request, ticker: str = Form(""), action: str = Form(""),
+                     back: str = Form("home")):
+    t = _ticker(ticker)
+    if t is None:
+        return _home(request, error=_not_a_ticker(ticker), status=400)
+    if action not in ("add", "remove"):
+        return _home(request, error=f"Unknown watchlist action {action!r}: add or remove.",
+                     status=400)
+    # Back to this UI's own page only, never a URL the form names.
+    dest = f"/t/{t}" if back == "ticker" else "/"
+    try:
+        if action == "add":
+            w = watching.add(t)
+            msg = f"Added {t}: prints ~{_utc(w.print_at)} (a scheduling hint)."
+        else:
+            watching.remove(t)
+            msg = f"Removed {t} from the watchlist."
+    except watching.WatchRefused as e:
+        return RedirectResponse(f"{dest}?error=" + quote_plus(str(e)), status_code=303)
+    return RedirectResponse(f"{dest}?msg=" + quote_plus(msg), status_code=303)
