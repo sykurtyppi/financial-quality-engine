@@ -1131,3 +1131,79 @@ def test_the_status_box_names_the_live_run_after_a_done_run(client, fake_build):
     job = _wait("KO")
     frag = client.get("/t/KO/status").text
     assert job.generation_id in frag and "is the live run" in frag
+
+
+# --- fix round 3 (independent review of 2cbba1c) ---------------------------------------
+
+
+def test_a_run_asked_for_before_midnight_never_becomes_the_card_after_it(client, sec, env,
+                                                                          monkeypatch):
+    """H1, through the real offline build: run A hangs on its SEC read, B
+    is asked for and publishes on day 1, midnight passes, A ends and names
+    its report for day 2 (the build dates its file after the fetch), where
+    nothing is live. The ticker's high-water mark refuses it there too."""
+    import threading
+
+    from app.services.workbench import views
+
+    d1, d2 = date(2026, 10, 9), date(2026, 10, 10)
+    today = [d1]
+
+    class Day(date):
+        @classmethod
+        def today(cls):
+            return today[0]
+
+    monkeypatch.setattr(reporting, "date", Day)
+    gate, entered, calls = threading.Event(), threading.Event(), []
+    real_fetch = reporting.fetch_dataset_snapshot
+
+    def fetch(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:  # A: a hung SEC read
+            entered.set()
+            gate.wait(60)
+        return real_fetch(*a, **k)
+
+    monkeypatch.setattr(reporting, "fetch_dataset_snapshot", fetch)
+    now = [datetime(2026, 10, 9, 23, 40, tzinfo=UTC)]
+    monkeypatch.setattr(jobs, "_now", lambda: now[0])
+    a = jobs.start("KO")
+    assert entered.wait(30)
+    now[0] += timedelta(seconds=jobs.STALL_AFTER_S + 1)
+    b = jobs.wait(jobs.start("KO").id, timeout=120)
+    assert b.state == jobs.DONE, b.error
+    today[0] = d2
+    gate.set()
+    a = jobs.wait(a.id, timeout=120)
+    assert a.state == jobs.SUPERSEDED, a
+    assert read_live(_workbench("KO", d2.isoformat())) is None
+    assert read_live(_workbench("KO", d1.isoformat())).generation_id == b.generation_id
+    assert views.live_generation("KO") == b.generation_id
+    assert views.ticker_view("KO").latest.generation_id == b.generation_id
+    page = client.get("/t/KO").text
+    assert f"generation <code>{b.generation_id}</code>" in page
+    history = page.split('id="history"', 1)[1]
+    assert "superseded" in history  # A is kept, said as such
+    wl.add_entry({"ticker": "KO", "print_at": "2026-10-21T11:00:00+00:00"})
+    rows, _ = views.watchlist_rows()
+    assert [r.latest.generation_id for r in rows] == [b.generation_id]
+    assert [r.ref.generation_id for r in views.recent_runs()] == [b.generation_id]
+
+
+def test_an_unhandled_error_page_refuses_to_be_framed_too(client, monkeypatch):
+    """N1: a 500 from an unhandled exception is answered outside `_guard`
+    (Starlette's outermost error middleware): it carries the two headers
+    from the app's own handler."""
+    from app.services.workbench import views
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(views, "ticker_view", boom)
+    c = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000),
+                   raise_server_exceptions=False)
+    r = c.get("/t/KO")
+    assert r.status_code == 500 and "boom" not in r.text
+    assert r.headers.get("x-frame-options") == "DENY"
+    assert r.headers.get("content-security-policy") == "frame-ancestors 'none'"

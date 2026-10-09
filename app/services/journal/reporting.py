@@ -25,7 +25,7 @@ from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
-from app.services.reporting.report_files import NotPublished, replacing
+from app.services.reporting.report_files import Fence, NotPublished, replacing
 from app.services.scoring.thermometer import describe
 from app.services.valuation.observation import LoadedObservation, find_observation
 
@@ -81,7 +81,7 @@ def build_report(
     replay: bool = False,
     market: bool = True,
     publish_timeout: float | None = None,
-    fence: int | None = None,
+    fence: Fence | None = None,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -128,11 +128,14 @@ def build_report(
     publisher fails as busy instead of showing "running" for as long as
     the lock is held (review of 9d00328); every other caller waits.
 
-    ``fence`` is the workbench's request number for this run
-    (`workbench.fencing`): the publish seals it and, should a run asked for
-    later already be live, keeps this one in the archive instead of making
-    it live (`report_files.Superseded`; Hermes audit of PR #118, finding
-    1). Every other caller passes none, and publishes as before.
+    ``fence`` is the workbench's request number for this run, with its
+    ticker's high-water mark (`workbench.fencing.fence`): the publish seals
+    it and, should a run asked for later already have published (on any
+    day's report), keeps this one in the archive instead of making it live
+    (`report_files.Superseded`; Hermes audit of PR #118, finding 1). The
+    day of the file is taken after the fetch, so the mark, not the day's
+    live run, is what decides. Every other caller passes none, and
+    publishes as before.
     """
     ticker = ticker.upper()
     as_of: date | None = None

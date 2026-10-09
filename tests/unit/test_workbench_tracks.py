@@ -236,6 +236,28 @@ def test_openv2_says_a_workbench_run_was_there_to_read(client, builds, env, caps
     assert entry.before.contamination is None
 
 
+def test_openv2_names_the_live_run_not_a_newer_superseded_one(env, builds, capsys):
+    """N2: the warning named the newest KEPT run; a run superseded after the
+    live one is newer and was never the card. The live run is named."""
+    from app.services.reporting.report_files import Superseded
+    from app.services.workbench import fencing
+
+    out = reporting.REPORTS / "workbench" / f"KO_{TODAY}.md"
+    out.parent.mkdir(parents=True)
+    gids = {}
+    for tag, n in (("live", 2), ("superseded", 1)):
+        try:
+            with replacing(out, fence=fencing.fence("KO", n)) as staged:
+                staged.report.write_text(_report_text("KO", tag))
+                staged.ledger.write_text("{}")
+        except Superseded:
+            pass
+        gids[tag] = staged.generation_id
+    assert _journal(*OPEN) == 0
+    err = capsys.readouterr().err
+    assert gids["live"] in err and gids["superseded"] not in err
+
+
 def test_openv2_says_nothing_without_a_workbench_run(env, builds, capsys):
     # The journal's own run of the ticker is not one.
     out = reporting.REPORTS / "KO_2026-10-01.md"
