@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ case.ticker }} {{ case.day }} review · Decision-Impact Journal{% endblock %}
+{% block title %}{{ case.ticker }} {{ case.day }} review · FQE Workbench{% endblock %}
 {% block body %}
 <div class="toolbar">
   <div>
@@ -23,17 +23,17 @@
   {% if case.run.audit == "matches" %}
   <p class="note"><span class="pill ok">audit of this run</span> present (below the report)</p>
   {% elif case.run.audit == "stale" %}
-  <div class="err">A stale audit is beside this report: it names run {{ case.run.stale_audit }}, not this run's {{ case.generation_id }}. It is not shown.</div>
+  <div class="err" role="alert">A stale audit is beside this report: it names run {{ case.run.stale_audit }}, not this run's {{ case.generation_id }}. It is not shown.</div>
   {% else %}
   <p class="note"><span class="pill wait">no audit yet</span></p>
   {% endif %}
 </section>
 
-{% for p in case.run.problems %}<div class="err">{{ p }}</div>{% endfor %}
-{% if case.ticks_error %}<div class="err">{{ case.ticks_error }}</div>{% endif %}
-{% if case.why_not_tickable and case.run.ledger %}<div class="err">Ticks cannot be recorded: {{ case.why_not_tickable }}</div>{% endif %}
+{% for p in case.run.problems %}<div class="err" role="alert">{{ p }}</div>{% endfor %}
+{% if case.ticks_error %}<div class="err" role="alert">{{ case.ticks_error }}</div>{% endif %}
+{% if case.why_not_tickable and case.run.ledger %}<div class="err" role="alert">Ticks cannot be recorded: {{ case.why_not_tickable }}</div>{% endif %}
 {% for g, n in case.earlier %}
-<div class="err">{{ n }} tick{{ "s" if n != 1 }} recorded for an earlier run {{ g }}: they are that run's, not this one's, and are not shown as applying here.</div>
+<div class="err" role="alert">{{ n }} tick{{ "s" if n != 1 }} recorded for an earlier run {{ g }}: they are that run's, not this one's, and are not shown as applying here.</div>
 {% endfor %}
 
 {% if case.run.ledger %}
@@ -50,7 +50,7 @@
       <tr id="{{ r.key }}">
         <td><code>{{ r.key }}</code><br><b>{{ r.subject }}</b><br><span class="note">{{ r.kind }} · {{ r.period }}</span></td>
         <td>
-          <span style="font-family:var(--mono)">{{ r.value }}</span><br>
+          <span style="font-family:var(--mono)">{{ r.value }}{% if r.unit and r.value != "—" %} {{ r.unit }}{% endif %}</span><br>
           <span class="note">{{ r.claim }}</span>
           {% if r.change_state %}<br><span class="pill need">{{ r.change_state }}</span>{% endif %}
           {% if r.note %}<div class="note">{{ r.note }}</div>{% endif %}
@@ -109,7 +109,7 @@
       <tr id="{{ r.key }}">
         <td><code>{{ r.key }}</code><br><b>{{ r.subject }}</b><br><span class="note">{{ r.kind }} · {{ r.period }}</span></td>
         <td>
-          <span style="font-family:var(--mono)">{{ r.value }}</span><br>
+          <span style="font-family:var(--mono)">{{ r.value }}{% if r.unit and r.value != "—" %} {{ r.unit }}{% endif %}</span><br>
           <span class="note">{{ r.claim }}</span>
           {% if r.note %}<div class="note">{{ r.note }}</div>{% endif %}
         </td>

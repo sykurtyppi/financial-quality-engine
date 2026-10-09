@@ -37,6 +37,7 @@ from app.services.reporting.report_files import (
     Superseded,
     current_generation,
     generations,
+    read_count,
     read_live,
     replacing,
 )
@@ -828,9 +829,10 @@ def test_a_lost_mark_still_leaves_the_live_runs_own_fence(tmp_path):
     assert read_live(report).generation_id == newer
 
 
-def test_a_mark_that_cannot_be_raised_undoes_the_switch(tmp_path, monkeypatch):
+def test_a_mark_that_cannot_be_raised_publishes_nothing(tmp_path, monkeypatch):
     """A run live with the mark below it could be replaced by an older
-    request on another day: a failed raise puts the earlier run back."""
+    request on another day: the mark is raised first, and a failed raise
+    publishes nothing."""
     report = tmp_path / NAME
     older = _publish(report, "A", fence=1)
 
@@ -844,3 +846,238 @@ def test_a_mark_that_cannot_be_raised_undoes_the_switch(tmp_path, monkeypatch):
     assert read_live(report).generation_id == older
     assert len(generations(report)) == 1
     assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "1\n"
+
+
+# --- fix round 4 (Hermes re-audit of #118 @ 34836cf) -----------------------------------
+# The mark was raised AFTER the switch, as a second durable step: a process
+# killed between the two left the run live with the mark below it, and an
+# older run for another report day, seeing only the mark, published. Now the
+# mark is raised before the switch (written and its folder fsynced), and the
+# comparison also takes every report day's live fence, so a lost or rewound
+# mark cannot admit an older run either.
+
+DAY_A, DAY_B = "KO_2026-10-09.md", "KO_2026-10-10.md"
+
+
+def _crash_publisher(args):
+    """Publish fence 3 on day A in this (forked) process and SIGKILL it at
+    ``kill_at``: right after the mark is written, or right after the
+    pointer's switch. Never returns."""
+    import signal
+
+    report, kill_at = args
+    real_write, real_switch = report_files.write_count, report_files._switch
+
+    def write_count(path, n):
+        real_write(path, n)
+        if kill_at == "after_mark" and path.name.endswith(".published"):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+    def switch(*a, **k):
+        real_switch(*a, **k)
+        if kill_at == "after_switch":
+            os.kill(os.getpid(), signal.SIGKILL)
+
+    report_files.write_count = write_count
+    report_files._switch = switch
+    _publish(report, "C", fence=3)
+    os._exit(3)  # not reached: the kill came first
+
+
+def _killed_mid_publish(tmp_path, kill_at):
+    import multiprocessing as mp
+
+    day_a = tmp_path / DAY_A
+    first = _publish(day_a, "A", fence=1)
+    proc = mp.get_context("fork").Process(target=_crash_publisher, args=((day_a, kill_at),))
+    proc.start()
+    proc.join(60)
+    assert proc.exitcode == -9, proc.exitcode
+    return day_a, first
+
+
+@pytest.mark.parametrize("kill_at", ["after_mark", "after_switch"])
+def test_a_publisher_killed_mid_publish_never_lets_an_older_run_in_on_another_day(
+        tmp_path, kill_at):
+    day_a, first = _killed_mid_publish(tmp_path, kill_at)
+    live = read_live(day_a)  # the pointer resolves: never dangling
+    assert live is not None
+    if kill_at == "after_mark":
+        assert live.generation_id == first  # killed before the switch: the earlier run
+    else:
+        assert live.text.startswith("# C report") and _ledger(day_a)["fence"] == 3
+    with pytest.raises(Superseded):
+        _publish(tmp_path / DAY_B, "B", fence=2)
+    assert read_live(tmp_path / DAY_B) is None
+
+
+@pytest.mark.parametrize("mark", ["deleted", "rewound"])
+def test_after_a_kill_a_lost_or_rewound_mark_still_refuses_an_older_run(tmp_path, mark):
+    day_a, _ = _killed_mid_publish(tmp_path, "after_switch")
+    path = tmp_path / fencing.EPOCHS_DIR / "KO.published"
+    if mark == "deleted":
+        path.unlink()
+    else:
+        path.write_text("1\n")
+    with pytest.raises(Superseded) as e:
+        _publish(tmp_path / DAY_B, "B", fence=2)
+    assert e.value.live_fence == 3
+    assert _ledger(day_a)["fence"] == 3 and read_live(tmp_path / DAY_B) is None
+
+
+@pytest.mark.parametrize("mark", ["deleted", "rewound"])
+def test_a_lost_mark_is_covered_by_every_days_live_run(tmp_path, mark):
+    _publish(tmp_path / DAY_A, "C", fence=3)
+    path = tmp_path / fencing.EPOCHS_DIR / "KO.published"
+    if mark == "deleted":
+        path.unlink()
+    else:
+        path.write_text("1\n")
+    with pytest.raises(Superseded):
+        _publish(tmp_path / DAY_B, "B", fence=2)
+    # A replay of a day is not one of the ticker's live days: with the mark
+    # lost again, its fence holds nothing back.
+    _publish(tmp_path / "KO_2026-10-08.replay.md", "replay", fence=9)
+    path.unlink()
+    gid = _publish(tmp_path / DAY_B, "D", fence=4)
+    assert read_live(tmp_path / DAY_B).generation_id == gid
+
+
+def test_another_tickers_runs_do_not_hold_this_one_back(tmp_path):
+    epochs = tmp_path / fencing.EPOCHS_DIR
+    _publish(tmp_path / "KOF_2026-10-09.md", "other", fence=report_files.Fence(
+        9, epochs / "KOF.published", epochs / "KOF.lock"))
+    gid = _publish(tmp_path / DAY_B, "B", fence=2)
+    assert read_live(tmp_path / DAY_B).generation_id == gid
+
+
+def test_an_interrupt_during_the_mark_write_restores_the_mark_and_publishes_nothing(
+        tmp_path, monkeypatch):
+    day_a = tmp_path / DAY_A
+    first = _publish(day_a, "A", fence=1)
+    real = report_files.write_count
+
+    def interrupted(path, n):
+        real(path, n)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(report_files, "write_count", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _publish(day_a, "C", fence=3)
+    monkeypatch.setattr(report_files, "write_count", real)
+    assert current_generation(day_a) is not None
+    assert read_live(day_a).generation_id == first
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "1\n"
+    assert len(generations(day_a)) == 1
+
+
+def test_an_interrupt_right_after_the_switch_switches_back_never_leaving_a_dangling_pointer(
+        tmp_path, monkeypatch):
+    day_a = tmp_path / DAY_A
+    first = _publish(day_a, "A", fence=1)
+    real = report_files._switch
+
+    def switch(*a, **k):
+        real(*a, **k)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(report_files, "_switch", switch)
+    with pytest.raises(KeyboardInterrupt):
+        _publish(day_a, "C", fence=3)
+    monkeypatch.setattr(report_files, "_switch", real)
+    gen = current_generation(day_a)  # resolves: not a set-apart directory
+    assert gen is not None and not gen.name.startswith(".failed-")
+    assert read_live(day_a).generation_id == first
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "1\n"
+    # A switch back that fails too leaves the new run where the pointer
+    # names it, and says so (PublishInDoubt), never sets it apart.
+    monkeypatch.setattr(report_files, "_switch", switch)
+
+    def no_way_back(*a, **k):
+        raise report_files.PublishInDoubt("injected: switching back failed")
+
+    monkeypatch.setattr(report_files, "_switch_back", no_way_back)
+    with pytest.raises(report_files.PublishInDoubt):
+        _publish(day_a, "D", fence=4)
+    gen = current_generation(day_a)
+    assert gen is not None and gen.is_dir() and read_live(day_a).text.startswith("# D report")
+
+
+def _fsynced(monkeypatch) -> list[str]:
+    seen: list[str] = []
+    real = os.fsync
+
+    def fsync(fd):
+        seen.append(os.readlink(f"/proc/self/fd/{fd}"))
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    return seen
+
+
+def test_the_counter_and_the_mark_are_durable_with_their_folder(reports, monkeypatch):
+    """`os.replace` is durable only once its directory is fsynced: a power
+    loss could otherwise lose the counter's or the mark's new value."""
+    seen = _fsynced(monkeypatch)
+    folder = str(reports / "workbench" / fencing.EPOCHS_DIR)
+    assert fencing.request("KO") == 1
+    assert seen and seen[-1] == folder
+    seen.clear()
+    report = reports / "workbench" / DAY_A
+    _publish(report, "A", fence=fencing.fence("KO", 1))
+    assert folder in seen  # the mark's folder, after its rename
+
+
+def test_write_atomic_is_durable_only_when_asked(tmp_path, monkeypatch):
+    seen = _fsynced(monkeypatch)
+    report_files.write_atomic(tmp_path / "plain", "x")
+    assert str(tmp_path) not in seen
+    report_files.write_atomic(tmp_path / "durable", "x", durable=True)
+    assert seen[-1] == str(tmp_path)
+
+
+def _killed_at_step(args):
+    """Publish fence 3 on day A; SIGKILL on entering the ``k``-th fsync of
+    the publish (each durable step: the sealed files, the staged folder,
+    the generations folder, the mark, the live names, the pointer)."""
+    import signal
+
+    report, k = args
+    real, n = report_files._fsync, [0]
+
+    def fsync(path):
+        n[0] += 1
+        if n[0] == k:
+            os.kill(os.getpid(), signal.SIGKILL)
+        real(path)
+
+    report_files._fsync = fsync
+    _publish(report, "C", fence=3)
+    os._exit(0)
+
+
+@pytest.mark.parametrize("k", range(1, 9))
+def test_a_kill_at_any_step_leaves_one_run_live_and_no_older_run_after_it(tmp_path, k):
+    """The publish transaction under SIGKILL at every durable step: the
+    pointer always resolves, the live run is the earlier one or the new one,
+    never anything else, and once the new one is live no older request
+    publishes on any day; a request asked for after the crash publishes."""
+    import multiprocessing as mp
+
+    day_a = tmp_path / DAY_A
+    first = _publish(day_a, "A", fence=1)
+    proc = mp.get_context("fork").Process(target=_killed_at_step, args=((day_a, k),))
+    proc.start()
+    proc.join(60)
+    assert proc.exitcode in (-9, 0), proc.exitcode
+    live = read_live(day_a)
+    assert live is not None
+    fence = _ledger(day_a)["fence"]
+    assert (live.generation_id == first) == (fence == 1) and fence in (1, 3)
+    if fence == 3:
+        with pytest.raises(Superseded):
+            _publish(tmp_path / DAY_B, "B", fence=2)
+    mark = read_count(tmp_path / fencing.EPOCHS_DIR / "KO.published")
+    assert mark is not None and mark >= fence  # never behind the live run
+    gid = _publish(tmp_path / DAY_B, "D", fence=4)
+    assert read_live(tmp_path / DAY_B).generation_id == gid

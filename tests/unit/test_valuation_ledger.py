@@ -436,3 +436,28 @@ def test_a_ledger_without_valuation_rows_shows_no_section(client):
     _publish(day, _ledger())
     page = client.get(f"/review/KO?date={day}").text
     assert "Valuation (shadow)" not in page
+
+
+def test_the_console_shows_the_unit_beside_each_monetary_value(client):
+    """Hermes re-audit of #118 @ 34836cf: the console printed bare numbers;
+    the ledger now states each monetary row's currency and each filed
+    fact's unit, and the console shows them."""
+    day = _entry()
+    doc = _ledger(_plane(), requested=True)
+    _publish(day, doc)
+    page = client.get(f"/review/KO?date={day}").text
+    section = page.split("Valuation (shadow)")[1]
+    debt = next(i for i in doc.items if i.kind == "bridge_component" and i.subject == "total_debt")
+    def shown(row: str) -> str:
+        return re.search(r'<span style="font-family:var\(--mono\)">(.*?)</span>', row).group(1)
+
+    row = _row(section, debt.id)
+    assert shown(row) == f"{review.fmt_value(debt.value)} USD"
+    filed = debt.provenance[0]
+    assert f"{review.fmt_value(filed.value)} USD" in row  # the fact as filed, with its unit
+    shares = next(i for i in doc.items if i.kind == "bridge_component"
+                  and i.subject == "shares_outstanding")
+    row = _row(section, shares.id)
+    assert shown(row) == f"{review.fmt_value(shares.value)} shares"
+    price = next(i for i in doc.items if i.kind == "market_observation")
+    assert shown(_row(section, price.id)) == f"{review.fmt_value(price.value)} USD"

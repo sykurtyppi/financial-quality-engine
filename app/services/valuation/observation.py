@@ -351,7 +351,10 @@ def write_observation(journal_root: Path, observation: MarketObservation) -> Pat
     """Write the observation whole (`report_files.write_atomic`) under
     ``<journal>/market/``, which is created when absent and refused when it
     is a symlink (`own_dir`); a link at the file's own name is refused too.
-    ASCII JSON: readable whatever the locale of the next reader."""
+    ASCII JSON: readable whatever the locale of the next reader. Durable,
+    its folder fsynced after the rename (Hermes re-audit of #118 @
+    34836cf): the price a recorded run was told about must survive a power
+    loss."""
     market = journal_root / MARKET_DIR
     market.mkdir(parents=True, exist_ok=True)
     own_dir(market)
@@ -359,7 +362,7 @@ def write_observation(journal_root: Path, observation: MarketObservation) -> Pat
     _refuse_link(path)
     text = json.dumps(observation.model_dump(mode="json"), indent=1, sort_keys=True,
                       ensure_ascii=True) + "\n"
-    write_atomic(path, text)
+    write_atomic(path, text, durable=True)
     return path
 
 

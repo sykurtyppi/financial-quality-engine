@@ -17,6 +17,7 @@ than approximated.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from app.schemas.financials import CompanyDataset
@@ -112,6 +113,8 @@ def compute_multiples(bridge: Bridge, ttm: TrailingFigures) -> tuple[Multiple, .
         value = None
         if reason is None and num is not None and den is not None:
             value = num / den
+            if not math.isfinite(value):  # past a double: no number, said why
+                value, reason = None, f"not computable: overflow ({name})"
         out.append(Multiple(name, value, reason, num_name, num, den_name, den,
                             ttm.label if reason is None else None))
     return tuple(out)

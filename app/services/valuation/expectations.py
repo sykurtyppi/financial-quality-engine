@@ -27,7 +27,9 @@ that cannot be valued is listed as withheld with the reason, never dropped
 the price. None of it is a forecast, and none of it reaches a score. A
 present value that overflows a double is said to be not computable (F3).
 A price in another currency than the filing figures' values nothing: the
-implied growth and every scenario say so (`bridge.currency_mismatch`).
+implied growth and every scenario say so (`bridge.currency_mismatch`). A
+result past a double is no number either, with the reason (Hermes
+re-audit of #118 @ 34836cf).
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from app.services.valuation.bridge import Bridge, currency_mismatch
+from app.services.valuation.bridge import MCAP_OVERFLOW, Bridge, currency_mismatch
 from app.services.valuation.multiples import TrailingFigures
 from app.services.valuation.observation import (
     GROWTH_HIGH,
@@ -50,6 +52,8 @@ _TOLERANCE = 1e-12
 NO_FCF = "implied growth not computable: TTM FCF ≤ 0"
 NO_MCAP = "implied growth not computable: market cap ≤ 0"
 OVERFLOW = "implied growth not computable: overflow (present value not finite)"
+GORDON_OVERFLOW = "implied growth not computable: overflow (FCF ÷ market cap)"
+SCENARIO_OVERFLOW = "not computable: overflow (value per share)"
 GORDON_FORMULA = "g = r − FCF_ttm / market cap"
 RATE_SENSITIVITY = "required return ± 1pt"
 PRICE_SENSITIVITY = "price ± 10%"
@@ -121,7 +125,10 @@ def gordon_growth(fcf: float | None, mcap: float | None, required_return: float)
         return ImpliedGrowth(None, NO_FCF, GORDON_FORMULA)
     if mcap is None or mcap <= 0:
         return ImpliedGrowth(None, NO_MCAP, GORDON_FORMULA)
-    return ImpliedGrowth(required_return - fcf / mcap, None, GORDON_FORMULA)
+    g = required_return - fcf / mcap
+    if not math.isfinite(g):
+        return ImpliedGrowth(None, GORDON_OVERFLOW, GORDON_FORMULA)
+    return ImpliedGrowth(g, None, GORDON_FORMULA)
 
 
 def _two_stage_formula(a: Assumptions) -> str:
@@ -249,7 +256,10 @@ def _scenario(s: Scenario, a: Assumptions, fcf: float | None, bridge: Bridge,
         return ScenarioValue(s.name, terms, None, None,
                              "not computable: overflow (present value not finite)")
     per_share = pv / bridge.shares.value
-    return ScenarioValue(s.name, terms, per_share, per_share / bridge.price.value - 1.0, None)
+    upside = per_share / bridge.price.value - 1.0
+    if not (math.isfinite(per_share) and math.isfinite(upside)):
+        return ScenarioValue(s.name, terms, None, None, SCENARIO_OVERFLOW)
+    return ScenarioValue(s.name, terms, per_share, upside, None)
 
 
 def compute_expectations(bridge: Bridge, ttm: TrailingFigures, obs: MarketObservation) -> Expectations:
@@ -259,7 +269,8 @@ def compute_expectations(bridge: Bridge, ttm: TrailingFigures, obs: MarketObserv
     gordon = gordon_growth(fcf, mcap, a.required_return)
     reverse = implied_growth(fcf, mcap, a)
     mismatch = currency_mismatch(obs)
-    why = mismatch if mismatch is not None else ttm.reason
+    overflow = bridge.market_cap.note == MCAP_OVERFLOW
+    why = mismatch if mismatch is not None else MCAP_OVERFLOW if overflow else ttm.reason
     if why is not None:
         gordon = ImpliedGrowth(None, f"implied growth not computable: {why}", gordon.formula)
         reverse = ImpliedGrowth(None, f"implied growth not computable: {why}", reverse.formula)

@@ -141,7 +141,17 @@ The card, the flags and every score are the same as without the price
 (Hermes audit of PR #118, finding 2: a EUR price was multiplied by the share
 count and added to USD debt). Every monetary figure on the card says its
 currency: the price the one it was recorded in, every filing figure and
-everything derived from them USD; a share count is a count.
+everything derived from them USD; a share count is a count. The ledger
+states the same: each monetary valuation row carries `currency`, each
+filed fact behind a valuation row its companyfacts `unit` ("USD",
+"shares"), and the valuation summary `currency`; the review console shows
+the unit beside each value. Both fields are optional: older ledgers load.
+
+**Overflow.** A finite price can still overflow a double (1e308 × the share
+count). Every market cap, EV, multiple, implied growth and scenario value is
+checked finite; one that is not has no number and says why ("market cap not
+computable: overflow (price × shares)", "not computable: overflow (P/S)",
+…), on the card and in the ledger, never an `inf` or a bare null.
 
 ## Multiples
 

@@ -55,7 +55,7 @@ class ValidationStatus(StrEnum):
 # one thing while it claims another (review of 48b1f04, F6).
 _OBSERVATION_FIELDS = ("observed_at", "source", "recorded_at", "observation_sha256")
 _FILED_FIELDS = ("accession", "form", "filed", "concept", "period_start", "period_end",
-                 "snapshot_sha256", "captured")
+                 "snapshot_sha256", "captured", "unit")
 
 
 class Provenance(BaseModel):
@@ -88,6 +88,11 @@ class Provenance(BaseModel):
     source: str | None = None
     recorded_at: AwareDatetime | None = None
     observation_sha256: str | None = None
+    # A filed fact's unit, the companyfacts unit it was read under ("USD",
+    # "shares"); set where the ledger states it (the valuation plane's
+    # filing rows; Hermes re-audit of #118 @ 34836cf). None in every ledger
+    # written before it existed.
+    unit: str | None = None
 
     @model_validator(mode="after")
     def _complete(self) -> Provenance:
@@ -131,6 +136,10 @@ class EvidenceItem(BaseModel):
     change_state: str | None = None  # revised, withdrawn, recomposed, amended, …
     validation_status: ValidationStatus
     note: str | None = None
+    # The currency of a monetary `value` (the valuation plane's price, its
+    # filing figures and what is derived from them); None for a count, a
+    # ratio, a rate, and in every ledger written before it existed.
+    currency: str | None = None
 
     @model_validator(mode="after")
     def _sourced(self) -> EvidenceItem:
@@ -172,6 +181,10 @@ class ValuationSummary(BaseModel):
     availability: str | None = None
     ev: float | None = None
     ev_reason: str | None = None
+    # The currency of the card's figures: the filing currency, or the
+    # observation's own when the price was refused for being in another
+    # (`bridge.currency_mismatch`). None in ledgers written before it.
+    currency: str | None = None
 
 
 class LedgerDocument(BaseModel):

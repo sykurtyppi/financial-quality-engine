@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Review board · Decision-Impact Journal{% endblock %}
+{% block title %}Review board · FQE Workbench{% endblock %}
 {% block body %}
 <div class="toolbar">
   <div>
@@ -9,7 +9,7 @@
   <a class="btn ghost" href="/journal">Dashboard</a>
 </div>
 
-{% for p in problems %}<div class="err">{{ p }}</div>{% endfor %}
+{% for p in problems %}<div class="err" role="alert">{{ p }}</div>{% endfor %}
 
 <section class="panel">
   {% if rows %}

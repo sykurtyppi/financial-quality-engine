@@ -446,6 +446,10 @@ class Row:
     # False for a row resting on the operator's market observation: no
     # filing to reconcile it to, so no tick is offered or recorded.
     reconcilable: bool = True
+    # The value's unit, shown beside it: the row's currency, else the one
+    # unit its filed facts share ("shares"); None when the ledger states
+    # none (Hermes re-audit of #118 @ 34836cf).
+    unit: str | None = None
 
 
 @dataclass
@@ -538,7 +542,7 @@ def _source(p: Provenance, cik: int | None) -> Source:
     # The value as filed, what the reviewer finds in the filing; whether the
     # metric subtracted it is said beside it, not folded into its sign.
     bits = [f"{p.form} filed {p.filed}", p.concept, period,
-            None if p.value is None else fmt_value(p.value),
+            None if p.value is None else " ".join(b for b in (fmt_value(p.value), p.unit) if b),
             "subtracted" if p.sign == -1 else None, p.method, p.role]
     url = None
     if cik is not None and p.accession and _ACCESSION_RE.match(p.accession):
@@ -573,10 +577,19 @@ def case(ticker: str, day: str | None) -> Case:
             key=item.id, kind=item.kind, subject=item.subject, period=item.fiscal_label or "—",
             value=fmt_value(item.value), claim=item.claim, change_state=item.change_state,
             note=item.note, sources=[_source(p, c.cik) for p in item.provenance],
-            tick=mine.get(item.id), reconcilable=_reconcilable(item))
+            tick=mine.get(item.id), reconcilable=_reconcilable(item), unit=_unit(item))
         (c.valuation if shadow else c.rows).append(row)
     c.unsourced = list(run.ledger.unsourced)
     return c
+
+
+def _unit(item: EvidenceItem) -> str | None:
+    """The unit a row's value is in: its currency, else the one unit its
+    filed facts share; None when the ledger states none or they differ."""
+    if item.currency:
+        return item.currency
+    units = {p.unit for p in item.provenance if p.kind == "filing"}
+    return units.pop() if len(units) == 1 else None
 
 
 def _reconcilable(item: EvidenceItem) -> bool:

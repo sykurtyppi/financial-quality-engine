@@ -187,3 +187,134 @@ def test_every_monetary_figure_on_the_card_carries_its_currency():
     scen = [line for line in lines if "value per share" in line]
     assert scen and all(re.search(r"value per share [\d,.]+ USD vs price 61\.00 USD", line)
                         for line in scen)
+
+
+# --- fix round 4 (Hermes re-audit of #118 @ 34836cf) -----------------------------------
+# A finite price can still overflow: 1e308 × the share count is inf, which
+# the ledger wrote as null with no reason. Every derived value is checked
+# finite, and units are stated in the ledger.
+
+
+def _synthetic(**overrides):
+    from app.schemas.financials import (
+        CompanyDataset,
+        CompanyProfile,
+        PeriodFinancials,
+        PeriodType,
+    )
+
+    ends = (date(2025, 3, 31), date(2025, 6, 30), date(2025, 9, 30), date(2025, 12, 31))
+    base = dict(revenue=1000.0, net_income=100.0, ebit=150.0, depreciation_amortization=50.0,
+                cfo=200.0, capex=50.0, cash_and_equivalents=100.0, total_debt=300.0,
+                shares_outstanding=10.0)
+    base.update(overrides)
+    periods = [PeriodFinancials(period_end=e, period_type=PeriodType.QUARTER,
+                                fiscal_label=f"FY2025Q{i + 1}", **base) for i, e in enumerate(ends)]
+    return CompanyDataset(profile=CompanyProfile(ticker="KO"), periods=periods)
+
+
+def _overflow_plane(ds, price):
+    obs = MarketObservation(ticker="KO", price=price, currency="USD",
+                            observed_at=datetime(2026, 10, 2, 21, tzinfo=UTC),
+                            source="test", recorded_at=datetime(2026, 10, 3, 9, tzinfo=UTC),
+                            scenarios=(Scenario(name="base", fcf_growth=0.04, years=5),))
+    return compute_plane(ds, LoadedObservation.of(obs), DAY, now=BUILT)
+
+
+def _finite_or_said(plane):
+    import math
+
+    b = plane.bridge
+    values = [(b.market_cap.value, b.market_cap.note), (b.ev, b.ev_reason)]
+    values += [(m.value, m.reason) for m in plane.multiples]
+    e = plane.expectations
+    values += [(g.value, g.reason) for g in (e.gordon, e.reverse)]
+    values += [(sc.value_per_share, sc.reason) for sc in e.scenarios]
+    values += [(sc.upside, sc.reason) for sc in e.scenarios]
+    for value, reason in values:
+        assert value is None or math.isfinite(value), (value, reason)
+        if value is None:
+            assert reason, "no number and no reason"
+    return values
+
+
+def test_a_price_whose_market_cap_overflows_asserts_nothing_and_says_why():
+    plane = _overflow_plane(build_dataset(_facts(), "KO")[0], 1e308)
+    _finite_or_said(plane)
+    b = plane.bridge
+    assert b.market_cap.value is None
+    assert b.market_cap.note == "market cap not computable: overflow (price × shares)"
+    assert b.ev is None and "overflow (price × shares)" in b.ev_reason
+    assert all(m.value is None and "overflow" in m.reason for m in plane.multiples)
+    e = plane.expectations
+    assert e.gordon.value is None and "overflow" in e.gordon.reason
+    assert e.reverse.value is None and "overflow" in e.reverse.reason
+    # A scenario values FCF per share, not the price: finite here (against
+    # the price it is -100%), and said if it ever is not (below).
+
+
+def test_an_ev_a_multiple_a_growth_or_a_scenario_that_overflows_says_so():
+    # EV: a finite market cap plus a debt near the largest double.
+    plane = _overflow_plane(_synthetic(total_debt=1.7e308), 1.7e307)
+    _finite_or_said(plane)
+    assert plane.bridge.market_cap.value is not None and plane.bridge.ev is None
+    assert plane.bridge.ev_reason.startswith("EV not computable: overflow")
+    # A multiple: a revenue so small the ratio is past a double.
+    plane = _overflow_plane(_synthetic(revenue=1e-310), 61.0)
+    _finite_or_said(plane)
+    ps = next(m for m in plane.multiples if m.name == "P/S")
+    assert ps.value is None and ps.reason == "not computable: overflow (P/S)"
+    # The implied growth and a scenario: a share count so small that FCF over
+    # the market cap, and the value per share, are past a double.
+    plane = _overflow_plane(_synthetic(shares_outstanding=1e-300), 1e-10)
+    _finite_or_said(plane)
+    e = plane.expectations
+    assert e.gordon.value is None and "overflow" in e.gordon.reason
+    assert e.scenarios[0].value_per_share is None and "overflow" in e.scenarios[0].reason
+
+
+def test_an_overflowing_price_round_trips_through_the_ledger_with_its_reasons():
+    from app.schemas.ledger import LedgerDocument
+
+    ds, _ = build_dataset(_facts(), "KO")
+    plane = _overflow_plane(ds, 1e308)
+    doc = build_ledger(result=analyze(ds), dataset=ds, ticker="KO", report_date=DAY,
+                       cik_sources={"the companyfacts payload": 21344}, valuation=plane)
+    text = doc.model_dump_json()
+    assert "Infinity" not in text and "NaN" not in text
+    assert LedgerDocument.model_validate_json(text) == doc
+    for item in doc.items:
+        if item.plane is Plane.VALUATION and item.value is None:
+            assert "not computable" in item.claim or "not asserted" in item.claim, item
+
+
+def test_the_ledger_states_the_currency_and_the_unit_of_every_monetary_figure():
+    from app.schemas.ledger import LedgerDocument, ValuationSummary
+
+    facts = _facts()
+    ds, _ = build_dataset(facts, "KO")
+    for currency in ("USD", "EUR"):
+        plane = compute_plane(ds, LoadedObservation.of(_obs(currency)), DAY, company_facts=facts,
+                              now=BUILT)
+        doc = build_ledger(result=analyze(ds), dataset=ds, ticker="KO", report_date=DAY,
+                           cik_sources={"the companyfacts payload": 21344}, valuation=plane)
+        assert doc.valuation.currency == currency
+        rows = {(i.kind, i.subject): i for i in doc.items if i.plane is Plane.VALUATION}
+        assert rows[("market_observation", "price")].currency == currency
+        assert rows[("bridge_component", "total_debt")].currency == "USD"
+        assert rows[("bridge_component", "cash_and_equivalents")].currency == "USD"
+        assert rows[("bridge_component", "shares_outstanding")].currency is None  # a count
+        assert rows[("market_cap", "market_cap")].currency == "USD"
+        assert rows[("enterprise_value", "enterprise_value")].currency == "USD"
+        assert rows[("ttm_figure", "revenue")].currency == "USD"
+        assert all(i.currency is None for (k, _), i in rows.items()
+                   if k in ("multiple", "implied_growth"))
+        assert all(i.currency == "USD" for (k, _), i in rows.items() if k == "scenario")
+        debt = rows[("bridge_component", "total_debt")]
+        assert debt.provenance and {p.unit for p in debt.provenance} == {"USD"}
+        shares = rows[("bridge_component", "shares_outstanding")]
+        assert {p.unit for p in shares.provenance} == {"shares"}
+        assert LedgerDocument.model_validate_json(doc.model_dump_json()) == doc
+    # Old ledgers, without either field, load.
+    old = ValuationSummary.model_validate({"state": "produced"})
+    assert old.currency is None

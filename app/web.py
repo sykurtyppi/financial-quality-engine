@@ -212,11 +212,16 @@ FRAME_HEADERS = {"Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-O
 @app.middleware("http")
 async def _guard(request: Request, call_next):
     """Every request goes through `_admit`; every response, its refusals
-    included, says it may not be framed (`FRAME_HEADERS`)."""
+    included, says it may not be framed (`FRAME_HEADERS`), and an HTML one
+    that it is not to be stored."""
     refused = _admit(request)
     response = refused if refused is not None else await call_next(request)
     for name, value in FRAME_HEADERS.items():
         response.headers[name] = value
+    # A page shows the reports and the journal as they are now: never kept
+    # by the browser or a proxy (Hermes re-audit of #118 @ 34836cf).
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -328,7 +333,7 @@ def _v2_rows() -> list[dict]:
     return rows
 
 
-@app.get("/journal", response_class=HTMLResponse)
+@app.api_route("/journal", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def dashboard(request: Request, error: str | None = None):
     return templates.TemplateResponse(
         request, "dashboard.html",
@@ -336,7 +341,7 @@ def dashboard(request: Request, error: str | None = None):
     )
 
 
-@app.get("/open", response_class=HTMLResponse)
+@app.api_route("/open", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def open_form(request: Request, error: str | None = None):
     # The v1 form is retired, not repaired: a v1 entry has no hash-locked
     # BEFORE block, so it can never be preregistered evidence. New cases are
@@ -395,7 +400,7 @@ def _report_page(request: Request, path: Path, ticker: str, day: str, error: str
     )
 
 
-@app.get("/report/{ticker}", response_class=HTMLResponse)
+@app.api_route("/report/{ticker}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def report_view(request: Request, ticker: str, date: str | None = None,
                 error: str | None = None):
     """A case's report, as it is: the live report, or, before one is
@@ -561,7 +566,7 @@ def _render_report(markdown_text: str) -> str:
         lambda m: f"{m.group(1)}{m.group(2)}{_safe_url(m.group(3))}{m.group(2)}", html)
 
 
-@app.get("/impact/{ticker}", response_class=HTMLResponse)
+@app.api_route("/impact/{ticker}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def impact_form(request: Request, ticker: str, date: str | None = None):
     try:
         path = store.find_entry(ticker, date)
@@ -583,8 +588,33 @@ def impact_form(request: Request, ticker: str, date: str | None = None):
     )
 
 
+_ISO_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
+
+
+def _impact_problems(impact: str, verdict: str, outcome_date: str) -> list[str]:
+    """Why the impact form's choices cannot be recorded: an impact or a
+    verdict the form does not offer, an outcome date that is not a calendar
+    day as YYYY-MM-DD (Hermes re-audit of #118 @ 34836cf: any string was
+    written into the entry, and `store.tally` counted what it found)."""
+    problems = []
+    if impact.strip() and impact.strip() not in store.IMPACT_CODES:
+        problems.append(f"impact {impact.strip()!r} is not one of {', '.join(store.IMPACT_CODES)}")
+    if verdict.strip() and verdict.strip() not in store.VERDICTS:
+        problems.append(f"verdict {verdict.strip()!r} is not one of {', '.join(store.VERDICTS)}")
+    day = outcome_date.strip()
+    if day:
+        try:
+            if not _ISO_DAY_RE.fullmatch(day):
+                raise ValueError
+            datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            problems.append(f"outcome_date {day!r} is not a date (YYYY-MM-DD)")
+    return problems
+
+
 @app.post("/impact/{ticker}")
 def impact_submit(
+    request: Request,
     ticker: str,
     date: str | None = Form(None),
     impact: str = Form(""),
@@ -612,6 +642,20 @@ def impact_submit(
         return RedirectResponse(
             f"/report/{store.safe_ticker(ticker)}?error=Generate+the+report+before+"
             "recording+its+impact.", status_code=303)
+    typed = {"impact": impact, "conviction_after": conviction_after,
+             "what_it_surfaced": what_it_surfaced, "what_i_disagreed_with": what_i_disagreed_with,
+             "outcome_date": outcome_date, "what_happened": what_happened, "verdict": verdict}
+    problems = _impact_problems(impact, verdict, outcome_date)
+    if problems:
+        # Nothing is written, not even the fields that were fine; the form
+        # comes back with everything typed in it.
+        return templates.TemplateResponse(
+            request, "impact.html",
+            {"entry": {**store.parse_entry(path), **typed},
+             "impact_codes": store.IMPACT_CODES, "verdicts": store.VERDICTS,
+             "conviction_choices": store.CONVICTION_CHOICES,
+             "error": "Not recorded: " + "; ".join(problems) + "."},
+            status_code=400)
     for key, val in (
         ("impact", impact), ("conviction_after", conviction_after),
         ("what_it_surfaced", what_it_surfaced), ("what_i_disagreed_with", what_i_disagreed_with),
@@ -640,14 +684,14 @@ def _refused(request: Request, e: review.Refused, title: str, back: str | None =
         status_code=e.status)
 
 
-@app.get("/review", response_class=HTMLResponse)
+@app.api_route("/review", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def review_board(request: Request):
     rows, problems = review.board()
     return templates.TemplateResponse(
         request, "review_board.html", {"rows": rows, "problems": problems})
 
 
-@app.get("/review/{ticker}", response_class=HTMLResponse)
+@app.api_route("/review/{ticker}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def review_case(request: Request, ticker: str, date: str | None = None):
     try:
         case = review.case(ticker, date)
@@ -691,7 +735,7 @@ _EXPORTS = {"csv": ("text/csv; charset=utf-8", "csv"),
             "md": ("text/markdown; charset=utf-8", "md")}
 
 
-@app.get("/review/{ticker}/export")
+@app.api_route("/review/{ticker}/export", methods=["GET", "HEAD"])
 def review_export(request: Request, ticker: str, date: str | None = None,
                   fmt: str = Query("csv", alias="format")):
     try:
@@ -748,7 +792,7 @@ def _home(request: Request, *, error: str | None = None, msg: str | None = None,
     }, status_code=status)
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def workbench_home(request: Request, error: str | None = None, msg: str | None = None):
     return _home(request, error=error, msg=msg)
 
@@ -863,7 +907,7 @@ def _ticker_page(request: Request, t: str, *, error: str | None = None,
     return templates.TemplateResponse(request, "ticker.html", ctx, status_code=status)
 
 
-@app.get("/t/{ticker}", response_class=HTMLResponse)
+@app.api_route("/t/{ticker}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def ticker_page(request: Request, ticker: str, error: str | None = None, msg: str | None = None):
     t = _ticker(ticker)
     if t is None:
@@ -891,7 +935,7 @@ def ticker_run(request: Request, ticker: str, fresh: str = Form("0")):
     return RedirectResponse(f"/t/{t}", status_code=303)
 
 
-@app.get("/t/{ticker}/status", response_class=HTMLResponse)
+@app.api_route("/t/{ticker}/status", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def ticker_status(request: Request, ticker: str):
     t = _ticker(ticker)
     if t is None:
@@ -906,7 +950,7 @@ def _message(request: Request, title: str, message: str, back: str,
                                       status_code=status)
 
 
-@app.get("/t/{ticker}/runs/{generation_id}", response_class=HTMLResponse)
+@app.api_route("/t/{ticker}/runs/{generation_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def ticker_past_run(request: Request, ticker: str, generation_id: str):
     t = _ticker(ticker)
     if t is None:
