@@ -72,11 +72,11 @@
             <input type="hidden" name="date" value="{{ case.day }}">
             <input type="hidden" name="generation" value="{{ case.generation_id }}">
             <input type="hidden" name="key" value="{{ r.key }}">
-            <select name="state">
+            <select name="state" aria-label="State of {{ r.key }}">
               {% for s in states %}<option value="{{ s }}"{% if s == st %} selected{% endif %}>{{ s }}</option>{% endfor %}
             </select>
-            <input name="note" maxlength="{{ note_max }}" placeholder="note" value="{{ r.tick.note if r.tick else '' }}">
-            <button class="btn small" type="submit">Save</button>
+            <input name="note" maxlength="{{ note_max }}" placeholder="note" aria-label="Note on {{ r.key }}" value="{{ r.tick.note if r.tick else '' }}">
+            <button class="btn small" type="submit" aria-label="Save the tick of {{ r.key }}">Save</button>
           </form>
           {% endif %}
         </td>
@@ -133,11 +133,11 @@
             <input type="hidden" name="date" value="{{ case.day }}">
             <input type="hidden" name="generation" value="{{ case.generation_id }}">
             <input type="hidden" name="key" value="{{ r.key }}">
-            <select name="state">
+            <select name="state" aria-label="State of {{ r.key }}">
               {% for s in states %}<option value="{{ s }}"{% if s == st %} selected{% endif %}>{{ s }}</option>{% endfor %}
             </select>
-            <input name="note" maxlength="{{ note_max }}" placeholder="note" value="{{ r.tick.note if r.tick else '' }}">
-            <button class="btn small" type="submit">Save</button>
+            <input name="note" maxlength="{{ note_max }}" placeholder="note" aria-label="Note on {{ r.key }}" value="{{ r.tick.note if r.tick else '' }}">
+            <button class="btn small" type="submit" aria-label="Save the tick of {{ r.key }}">Save</button>
           </form>
           {% endif %}
           {% endif %}

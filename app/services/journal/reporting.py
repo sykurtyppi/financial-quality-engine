@@ -81,6 +81,7 @@ def build_report(
     replay: bool = False,
     market: bool = True,
     publish_timeout: float | None = None,
+    fence: int | None = None,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -126,6 +127,12 @@ def build_report(
     publishes nothing. The workbench passes it, so a run behind a stalled
     publisher fails as busy instead of showing "running" for as long as
     the lock is held (review of 9d00328); every other caller waits.
+
+    ``fence`` is the workbench's request number for this run
+    (`workbench.fencing`): the publish seals it and, should a run asked for
+    later already be live, keeps this one in the archive instead of making
+    it live (`report_files.Superseded`; Hermes audit of PR #118, finding
+    1). Every other caller passes none, and publishes as before.
     """
     ticker = ticker.upper()
     as_of: date | None = None
@@ -181,7 +188,7 @@ def build_report(
     # day goes live only once its report and ledger exist, the earlier run is
     # kept whole as the previous generation, and a build that fails leaves the
     # live report as it was.
-    with replacing(out, timeout=publish_timeout) as staged:
+    with replacing(out, timeout=publish_timeout, fence=fence) as staged:
         report, thermometer = build_full_report(
             result, dataset,
             generated_on=generated_on,

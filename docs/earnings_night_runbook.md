@@ -215,11 +215,14 @@ console from another machine, forward the port over SSH and open
 ssh -L 8000:127.0.0.1:8000 <this machine>
 ```
 
-Anything that changes something (a tick, the impact form, a report's first
-view, which builds and stamps it) is refused (403) to a page that is not
-this UI's own, as its `Sec-Fetch-Site` or `Origin` header says; a request
-with neither is not from a browser page (`curl` on this machine) and is
-accepted. That guard protects only a UI no other machine can reach:
+Anything that changes something (a tick, the impact form, building a
+journal case's report, which publishes it and stamps the thesis) is a POST,
+refused (403) to a page that is not this UI's own, as its `Sec-Fetch-Site`
+or `Origin` header says; a request with neither is not from a browser page
+(`curl` on this machine) and is accepted. A GET only shows: a case's report
+page builds nothing until its "Build report" button is pressed. No page may
+be framed by another site (`X-Frame-Options: DENY` and CSP
+`frame-ancestors 'none'` on every response). That guard protects only a UI no other machine can reach:
 browsers send no `Sec-Fetch-*` to a plain-http origin that is not loopback,
 and a request from another machine can simply leave the headers out.
 
@@ -253,8 +256,10 @@ entry) and every journal entry with a live or pending report, read-only:
   command are the report page's, above);
 - *stamped reported* — the entry's `reported` stamp; *entry not stamped* —
   none yet;
-- *audit matches* / *stale audit* — an audit of this run, or one beside it
-  that names another run (never shown as this run's);
+- *audit refers to this generation* / *stale audit* — an audit that names
+  this run's generation, or one beside it that names another run (never
+  shown as this run's). It says which run the audit is of, not that the
+  audit agrees with the report;
 - *N / M rows reconciled* — ticks recorded for the live run, out of its
   ledger rows that name a filing.
 

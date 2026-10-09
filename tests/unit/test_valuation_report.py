@@ -48,9 +48,10 @@ def _facts(ticker: str) -> dict:
 
 def _obs(ticker: str = "KO", observed_at: datetime = OBSERVED,
          recorded_at: datetime = RECORDED, **kw) -> MarketObservation:
-    return MarketObservation(ticker=ticker, price=66.25, currency="USD", observed_at=observed_at,
+    return MarketObservation(**{"currency": "USD", **kw}, ticker=ticker, price=66.25,
+                             observed_at=observed_at,
                              source="NYSE official close (broker statement)",
-                             recorded_at=recorded_at, **kw)
+                             recorded_at=recorded_at)
 
 
 def _obs_now(ticker: str = "KO") -> MarketObservation:
@@ -116,11 +117,16 @@ def _non_valuation(doc: LedgerDocument) -> list:
     return [i for i in doc.items if i.plane is not Plane.VALUATION]
 
 
+# EUR: a price in another currency than the filing figures' (Hermes audit
+# of PR #118, finding 2) is refused inside the plane; the card, the scores
+# and every other ledger row are the no-observation build's all the same.
+@pytest.mark.parametrize("currency", ["USD", "EUR"])
 @pytest.mark.parametrize("ticker", sorted(CIKS))
 @pytest.mark.parametrize("with_client", [False, True], ids=["dataset-only", "with-streams"])
-def test_card_scores_and_every_other_ledger_item_are_byte_identical(ticker, tmp_path, with_client):
+def test_card_scores_and_every_other_ledger_item_are_byte_identical(ticker, tmp_path, with_client,
+                                                                     currency):
     plain, therm0, doc0 = _build(ticker, tmp_path, with_client=with_client)
-    loaded = LoadedObservation.of(_obs(ticker))
+    loaded = LoadedObservation.of(_obs(ticker, currency=currency))
     with_obs, therm1, doc1 = _build(ticker, tmp_path, with_client=with_client,
                                     observation=loaded, requested=True)
     assert therm0 == therm1
@@ -146,6 +152,10 @@ def test_card_scores_and_every_other_ledger_item_are_byte_identical(ticker, tmp_
     assert doc1.valuation.observation is not None
     assert doc1.valuation.observation.kind == "observation"
     assert doc1.valuation.observation.observation_sha256 == loaded.sha256
+    refused = "price in EUR, filing figures in USD — no FX conversion"
+    assert (doc1.valuation.ev is None and refused in str(doc1.valuation.ev_reason)) == (
+        currency == "EUR")
+    assert (refused in with_obs) == (currency == "EUR")
 
 
 def test_requested_without_an_observation_says_not_produced_only_when_asked(tmp_path):

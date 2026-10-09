@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 from datetime import UTC
 from pathlib import Path
 
@@ -90,7 +91,9 @@ def test_open_page_points_at_the_cli(client):
 
 def test_report_locks_and_renders(client):
     _seed("AAPL", "clean compounder", 4, "hold")
-    r = client.get("/report/AAPL")
+    r = client.post("/report/AAPL")
+    assert r.status_code == 303 and r.headers["location"].startswith("/report/AAPL?date=")
+    r = client.get(r.headers["location"])
     assert r.status_code == 200
     assert "AAPL report" in r.text and "<table>" in r.text          # markdown rendered to HTML
     entry = store.parse_entry(store.find_entry("AAPL"))
@@ -100,8 +103,8 @@ def test_report_locks_and_renders(client):
 def test_report_requires_thesis(client):
     # open with a placeholder thesis via the store directly, then hit report
     store.open_entry("XYZ")  # placeholder thesis
-    r = client.get("/report/XYZ")
-    assert r.status_code == 303 and "/open" in r.headers["location"]
+    for r in (client.get("/report/XYZ"), client.post("/report/XYZ")):
+        assert r.status_code == 303 and "/open" in r.headers["location"]
 
 
 def test_first_report_is_generated_fresh(client, monkeypatch):
@@ -116,7 +119,7 @@ def test_first_report_is_generated_fresh(client, monkeypatch):
 
     monkeypatch.setattr(reporting, "build_report", build)
     _seed("KO", "steady staple", 3, "hold")
-    assert client.get("/report/KO").status_code == 200
+    assert client.post("/report/KO").status_code == 303
     assert seen["fresh"] is True  # the thesis locks against what was fetched
 
 
@@ -183,7 +186,7 @@ def test_report_generation_failure_leaves_entry_unreported(client, monkeypatch):
     monkeypatch.setattr(reporting, "build_report", fail_build)
     _seed("CRM", "margin reset credible", 3, "hold")
 
-    r = client.get("/report/CRM")
+    r = client.post("/report/CRM")
 
     assert r.status_code == 200
     assert "Report generation failed" in r.text
@@ -208,7 +211,7 @@ def test_report_waits_for_the_entrys_report_lock_then_rechecks(client, monkeypat
         yield
 
     monkeypatch.setattr(store, "report_lock", lock, raising=False)
-    assert client.get("/report/KO").status_code == 200
+    assert client.post("/report/KO").status_code == 303
     assert built == [] and store.parse_entry(path)["is_reported"]
 
 
@@ -224,7 +227,7 @@ def test_a_publish_in_doubt_is_said_plainly_and_nothing_is_stamped(client, monke
 
     path = _seed("KO", "steady staple", 3, "hold")
     monkeypatch.setattr(reporting, "build_report", in_doubt)
-    r = client.get("/report/KO")
+    r = client.post("/report/KO")
     assert r.status_code == 500
     assert "the NEW generation g may be live" in r.text and "generation failed" not in r.text
     assert not store.parse_entry(path)["is_reported"]
@@ -246,7 +249,7 @@ def test_the_report_page_refuses_while_the_sweep_audits_that_report(client, monk
         "name": "watch.py", "pid": 4242, "host": os.uname().nodename,
         "token": "0123456789abcdef", "lock": "/j/sweep.lock"}))
     store.set_report_pending(path, "journal.py report --defer-mark")
-    r = client.get("/report/KO")
+    r = client.post("/report/KO")
     assert r.status_code == 409
     assert "pending (being audited by the sweep, or left by an interrupted run" in r.text
     assert "pid 4242" in r.text and "/j/sweep.lock" in r.text  # its owner, shown
@@ -265,7 +268,7 @@ def test_a_stamp_that_fails_says_the_report_is_live_but_not_stamped(client, monk
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(store, "mark_reported", refuse)
-    r = client.get("/report/KO")
+    r = client.post("/report/KO")
     assert r.status_code == 500
     assert "generation failed" not in r.text
     assert "is live" in r.text and "NOT stamped" in r.text and "No space left" in r.text
@@ -280,7 +283,9 @@ def test_report_for_dated_entry_reads_same_file_it_generates(client):
     old = p.with_name("KO_2026-01-15.md")
     p.rename(old)
 
-    r = client.get("/report/KO?date=2026-01-15")
+    r = client.post("/report/KO", data={"date": "2026-01-15"})
+    assert r.status_code == 303 and r.headers["location"] == "/report/KO?date=2026-01-15"
+    r = client.get(r.headers["location"])
 
     assert r.status_code == 200
     assert "KO report" in r.text
@@ -290,7 +295,7 @@ def test_report_for_dated_entry_reads_same_file_it_generates(client):
 
 def test_impact_saves_fields(client):
     _seed("KO", "steady staple", 3, "hold")
-    client.get("/report/KO")  # the AFTER block is only writable once the report exists
+    client.post("/report/KO")  # the AFTER block is only writable once the report exists
     r = client.post("/impact/KO", data={"impact": "changed_confidence", "conviction_after": "4",
                                         "verdict": "helped", "what_happened": "guided down"})
     assert r.status_code == 303
@@ -312,17 +317,20 @@ def test_dashboard_with_entries_renders(client):
     r = client.get("/journal")
     assert r.status_code == 200
     assert "KO" in r.text and "report pending" in r.text  # unreported case shows in the queue
+    assert "unreadable" not in r.text  # a v1 entry is not read as a broken v2 one
 
 
 def test_missing_entry_redirects(client):
     assert client.get("/impact/NOPE").status_code == 303
     assert client.get("/report/NOPE").status_code == 303
+    assert client.post("/report/NOPE").status_code == 303
 
 
 def test_no_web_path_writes_outside_the_entries_dir(client, tmp_path):
     for bad in ("../../../pwned", "..%2Fpwned", "PWNED/../x"):
         client.post("/open", data={"ticker": bad, "thesis": "x", "conviction": 3})
         client.get(f"/report/{bad}")
+        client.post(f"/report/{bad}")
         client.get(f"/impact/{bad}")
     assert not list(tmp_path.rglob("*pwned*")) and not list(tmp_path.rglob("*PWNED*"))
 
@@ -337,10 +345,17 @@ def test_conviction_after_is_a_validated_select(client):
     assert 'input id="conviction_after"' not in r.text
 
 
-def test_unreported_report_links_get_loading_class(client):
+def test_an_unreported_case_is_generated_by_a_form_not_a_link(client):
+    """Finding 5: "Generate" was a link (a GET that built, published and
+    stamped). It is a POST form whose button relabels itself while it
+    waits; the case's "Report" link only shows."""
     _seed("KO", "steady staple", 3, "hold")
     r = client.get("/journal")
-    assert "js-gen" in r.text and "data-loading-text" in r.text
+    form = re.search(r'<form method="post" action="/report/KO">.*?</form>', r.text, re.S)
+    assert form is not None
+    assert 'name="date"' in form.group(0) and "js-busy" in form.group(0)
+    assert "data-loading-text" in form.group(0) and "Generate" in form.group(0)
+    assert "js-gen" not in r.text
 
 
 def test_dashboard_shows_stale_outcome_banner(client):
@@ -372,7 +387,7 @@ def test_impact_rejects_forged_conviction_after(client):
     # Codex review catch: the <select> only ever submits 1-5, but a forged POST
     # or curl call could send anything. The route must reject it at the boundary.
     _seed("KO", "steady staple", 3, "hold")
-    client.get("/report/KO")  # AFTER fields are only writable once the report exists
+    client.post("/report/KO")  # AFTER fields are only writable once the report exists
     r = client.post("/impact/KO", data={"impact": "no_value", "conviction_after": "99"})
     assert r.status_code == 303
     assert store.parse_entry(store.find_entry("KO"))["conviction_after"] is None
@@ -386,7 +401,8 @@ def test_impact_rejects_forged_conviction_after(client):
     assert store.parse_entry(store.find_entry("KO"))["conviction_after"] == "4"
 
 
-def _seed_v2(locked: bool = True, ticker: str = "MXL", day: str = "2026-07-27"):
+def _seed_v2(locked: bool = True, ticker: str = "MXL", day: str = "2026-07-27",
+             contamination: str | None = None):
     """A preregistered (v2) case, written the way `openv2` writes one."""
     from datetime import date, datetime
 
@@ -405,6 +421,7 @@ def _seed_v2(locked: bool = True, ticker: str = "MXL", day: str = "2026-07-27"):
             thesis="One of three optical DSP suppliers.",
             conviction=4,
             intended_action="hold",
+            contamination=contamination,
             assumptions=[Assumption(
                 metric="revenue", comparator=">", threshold=1_000_000_000.0,
                 window="FY2026Q2", source="10-Q", resolve_by=date(2026, 8, 15))],
@@ -465,6 +482,8 @@ class TestV2ReadOnly:
             r = client.get(url)
             assert r.status_code == 303 and r.headers["location"].startswith("/journal?error=")
             assert "journal.py" in r.headers["location"]
+        r = client.post("/report/MXL")
+        assert r.status_code == 303 and "journal.py" in r.headers["location"]
         r = client.post("/impact/MXL", data={"verdict": "helped"})
         assert r.status_code == 303 and "journal.py" in r.headers["location"]
         # nothing was written into the locked file
@@ -528,14 +547,14 @@ def test_a_stamp_failure_on_the_page_leaves_the_report_pending(client, monkeypat
         return real_mark(p)
 
     monkeypatch.setattr(store, "mark_reported", once)
-    r = client.get("/report/KO")
+    r = client.post("/report/KO")
     gid = read_live(builds[0]).generation_id
     assert r.status_code == 500
     assert "NOT stamped" in r.text and "No space left on device" in r.text
     assert f"mark-reported KO --date {path.stem.split('_', 1)[1]} --generation {gid}" in r.text
     pending = store.pending_marker(path)
     assert pending is not None and pending.generation_id == gid
-    assert client.get("/report/KO").status_code == 409  # not built again
+    assert client.post("/report/KO").status_code == 409  # not built again
     assert len(builds) == 1 and not store.parse_entry(path)["is_reported"]
 
 
@@ -562,7 +581,7 @@ def test_a_stamp_that_landed_on_the_page_is_a_stamp(client, monkeypatch):
 
     monkeypatch.setattr(os, "fsync", fsync)
     monkeypatch.setattr(store, "mark_reported", mark)
-    r = client.get("/report/KO")
+    r = client.post("/report/KO")
     assert r.status_code == 200
     assert "could not be confirmed durable" in r.text
     assert store.parse_entry(path)["is_reported"] and store.report_pending(path) is None
@@ -597,9 +616,9 @@ def test_the_pages_unstamped_run_is_refused_in_its_own_words_and_retryable(
     builds: list = []
     _publishing_build(monkeypatch, builds)
     _page_stamp_fails(monkeypatch)
-    assert client.get("/report/KO").status_code == 500
+    assert client.post("/report/KO").status_code == 500
     gid = read_live(builds[0]).generation_id
-    r = client.get("/report/KO")
+    r = client.post("/report/KO")
     assert r.status_code == 409 and len(builds) == 1
     assert "was published but its thesis was NOT stamped" in r.text
     assert f"mark-reported KO --date {day} --generation {gid}" in r.text
@@ -634,8 +653,76 @@ def test_the_pages_marker_in_place_is_said_in_place(client, monkeypatch):
         monkeypatch.setattr(os, "fsync", fsync)
 
     _page_stamp_fails(monkeypatch, then=dir_fsyncs_fail)
-    r = client.get("/report/KO")
+    r = client.post("/report/KO")
     assert r.status_code == 500
     assert "builds its report again" not in r.text
     assert "Its pending marker is in place, but its write could not be confirmed durable" in r.text
     assert store.pending_marker(path).not_stamped
+
+
+# --- Hermes audit of PR #118 @ 3983f8a, finding 5: GET /report built --------------------
+# The report page built, published and stamped on its first GET: a prefetch,
+# a link preview or a reload did it, and only the page's own Sec-Fetch check
+# stood between another site's <img> and a published, stamped case. GET now
+# only shows; building is a POST, behind `_guard`'s Origin check like every
+# other write, then 303 back to the view.
+
+
+def _tree(root: Path) -> dict:
+    return {p: (p.read_bytes() if p.is_file() else None) for p in root.rglob("*")}
+
+
+def test_get_report_never_builds_publishes_or_stamps(client, tmp_path, monkeypatch):
+    built = []
+    monkeypatch.setattr(reporting, "build_report", lambda *a, **k: built.append(a))
+    path = _seed("KO", "steady staple", 3, "hold")
+    before = _tree(tmp_path)
+    for headers in ({}, {"sec-fetch-site": "cross-site"}, {"sec-fetch-site": "same-origin"}):
+        r = client.get("/report/KO", headers=headers)
+        assert r.status_code == 200
+    assert built == [] and _tree(tmp_path) == before
+    assert not store.parse_entry(path)["is_reported"]
+    assert not reporting.REPORTS.exists()
+    day = path.stem.split("_", 1)[1]
+    form = re.search(r'<form method="post" action="/report/KO">.*?</form>', r.text, re.S)
+    assert form is not None and f'name="date" value="{day}"' in form.group(0)
+    assert "Build report" in form.group(0)
+
+
+def test_post_report_builds_stamps_and_returns_to_the_view(client):
+    path = _seed("KO", "steady staple", 3, "hold")
+    day = path.stem.split("_", 1)[1]
+    r = client.post("/report/KO", data={"date": day},
+                    headers={"origin": "http://127.0.0.1", "sec-fetch-site": "same-origin"})
+    assert r.status_code == 303 and r.headers["location"] == f"/report/KO?date={day}"
+    assert store.parse_entry(path)["is_reported"]
+    page = client.get(r.headers["location"]).text
+    assert "KO report" in page and 'action="/report/KO"' not in page
+    # A second POST (a double click) builds nothing more.
+    stamped = path.read_text()
+    assert client.post("/report/KO", data={"date": day}).status_code == 303
+    assert path.read_text() == stamped
+
+
+def test_post_report_from_another_site_is_refused(client, monkeypatch):
+    built = []
+    monkeypatch.setattr(reporting, "build_report", lambda *a, **k: built.append(a))
+    path = _seed("KO", "steady staple", 3, "hold")
+    for headers in ({"origin": "https://evil.example"}, {"sec-fetch-site": "cross-site"},
+                    {"origin": "http://127.0.0.1", "sec-fetch-site": "same-site"}):
+        r = client.post("/report/KO", headers=headers)
+        assert r.status_code == 403, headers
+    assert built == [] and not store.parse_entry(path)["is_reported"]
+
+
+def test_the_dashboard_shows_a_cases_declared_contamination(client):
+    """Finding 6: `openv2 --contamination` records what the operator read
+    before the thesis (the workbench card, a call); the dashboard listed
+    the case without it."""
+    _seed_v2(contamination="saw the workbench card for MXL on 2026-07-26")
+    _seed_v2(ticker="AAA")
+    r = client.get("/journal")
+    row = re.search(r"<tr>\s*<td><b>MXL</b>.*?</tr>", r.text, re.S).group(0)
+    assert "contamination" in row and "saw the workbench card for MXL on 2026-07-26" in row
+    other = re.search(r"<tr>\s*<td><b>AAA</b>.*?</tr>", r.text, re.S).group(0)
+    assert "contamination" not in other

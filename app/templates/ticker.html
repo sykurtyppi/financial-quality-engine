@@ -57,7 +57,7 @@
   </div>
 
   <aside>
-    <section class="panel" id="price">
+    <section class="panel" id="price-panel">
       <h3>Price → valuation shadow card</h3>
       <p class="note" style="margin-top:0">A share price you looked at, recorded as an observation (<code>journal/market/{{ v.ticker }}.json</code>). The next run adds the valuation shadow card to the appendix: unscored, never validated, and never part of the card or a score.</p>
       {% if run and run.ledger and run.ledger.valuation %}<p class="note">In the live run: {{ run.ledger.valuation }}{% if run.ledger.valuation == "produced" %} (<a href="#valuation">see it in the appendix</a>){% endif %}.</p>{% endif %}
@@ -70,6 +70,7 @@
         <dt>Source</dt><dd>{{ o.source }}</dd>
         {% if o.note %}<dt>Note</dt><dd>{{ o.note }}</dd>{% endif %}
       </dl>
+      {% if o.currency != filing_currency %}<p class="note warn-note">This price is in {{ o.currency }} and the filing figures are in {{ filing_currency }}: nothing is converted, so the shadow card asserts no market cap, EV, multiple or implied growth from it. Record the price in {{ filing_currency }} to have them.</p>{% endif %}
       {% if o.assumptions or o.scenarios %}
       <p class="note">Kept when you record a new price: {% if o.assumptions %}the model assumptions{% endif %}{% if o.assumptions and o.scenarios %} and {% endif %}{% if o.scenarios %}{{ o.scenarios|length }} scenario{{ "s" if o.scenarios|length != 1 }}{% endif %} recorded with <code>scripts/market.py</code>.</p>
       {% endif %}
@@ -78,10 +79,12 @@
       </form>
       {% endif %}
       <form method="post" action="/t/{{ v.ticker }}/price">
+        <input type="hidden" name="currency" value="{{ filing_currency }}">
         <div class="row">
           <div><label for="price">Price</label><input id="price" name="price" inputmode="decimal" autocomplete="off" value="{{ form.price }}" required></div>
-          <div><label for="currency">Currency</label><input id="currency" name="currency" value="{{ form.currency }}" maxlength="3" required></div>
+          <div><label for="currency-shown">Currency</label><input id="currency-shown" value="{{ filing_currency }}" readonly aria-describedby="currency-why"></div>
         </div>
+        <p class="note" id="currency-why">{{ filing_currency }} only: the currency of the filing figures the card sets a price against. Nothing is converted; a price in another currency can be recorded with <code>scripts/market.py record --currency</code>, and the card then shows no market cap, EV or multiple.</p>
         <label for="observed_at">Observed at <span class="note">(local time with its UTC offset)</span></label>
         <input id="observed_at" name="observed_at" value="{{ form.observed_at }}" data-local-now{% if form.kept %} data-kept="1"{% endif %} required>
         <label for="source">Source</label>

@@ -80,6 +80,7 @@ td.num, th.num { text-align: right; font-family: var(--mono); }
 label { display: block; margin: 14px 0 6px; font-size: 13px; color: var(--muted); }
 input, textarea, select { width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
   border-radius: 8px; padding: 10px 12px; font: 14px/1.5 var(--sans); }
+input[readonly] { background: var(--panel); color: var(--muted); }
 input:focus, textarea:focus, select:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
 textarea { min-height: 84px; resize: vertical; }
 .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -125,6 +126,10 @@ textarea { min-height: 84px; resize: vertical; }
 /* --- ticker page ------------------------------------------------------------- */
 .ticker-title { font: 700 28px/1.1 var(--mono); letter-spacing: .5px; }
 .job-status:empty { display: none; }
+/* A recorded price in another currency than the filing figures'. */
+.warn-note { color: var(--warn); }
+/* A status poll that lost the server (app.js): said, with Retry and Reload. */
+.poll-lost { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .job-status .running { display: flex; align-items: center; gap: 10px; padding: 12px 16px; margin-bottom: 18px;
   border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; background: var(--panel); }
 .spinner { width: 16px; height: 16px; border: 2px solid var(--line); border-top-color: var(--accent);

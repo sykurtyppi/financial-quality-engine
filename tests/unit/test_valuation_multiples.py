@@ -68,7 +68,7 @@ def test_every_multiple_reconciles_to_ttm_figures():
 def test_negative_net_income_makes_pe_not_meaningful_with_the_reason():
     _, _, m = _multiples(_dataset(net_income=-300.0))
     assert m["P/E"].value is None
-    assert m["P/E"].reason == "TTM net income is negative (-1,200): P/E undefined"
+    assert m["P/E"].reason == "TTM net income is negative (-1,200 USD): P/E undefined"
     # A yield on a positive market cap is still a number, a negative one.
     assert m["earnings yield"].value == pytest.approx(-1200 / 500)
     assert m["EV/EBIT"].value is not None
@@ -77,8 +77,8 @@ def test_negative_net_income_makes_pe_not_meaningful_with_the_reason():
 def test_zero_or_negative_ebitda():
     _, _, m = _multiples(_dataset(ebit=-50.0, depreciation_amortization=50.0))
     assert m["EV/EBITDA"].value is None
-    assert m["EV/EBITDA"].reason == "TTM EBITDA is zero (0): EV/EBITDA undefined"
-    assert m["EV/EBIT"].reason == "TTM EBIT is negative (-200): EV/EBIT undefined"
+    assert m["EV/EBITDA"].reason == "TTM EBITDA is zero (0 USD): EV/EBITDA undefined"
+    assert m["EV/EBIT"].reason == "TTM EBIT is negative (-200 USD): EV/EBIT undefined"
 
 
 def test_missing_denominator():

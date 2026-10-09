@@ -190,3 +190,11 @@ path = "app/services/valuation/expectations.py"
 operator = "cmp"
 source = "if hi - lo < _TOLERANCE:"
 reason = "Differs only when `hi - lo` is exactly 1e-12, which the widths 1.99 / 2^k never hit (1.81e-12 at k = 40, 9.05e-13 at k = 41). Even then the mutant would stop one halving earlier and return a midpoint at most 2.5e-13 from the original's, below _TOLERANCE — the same answer to the precision the function promises."
+
+[[exclusion]]
+kind = "equivalent"
+path = "app/services/reporting/report_files.py"
+operator = "cmp"
+function = "fence_of"
+source = "if isinstance(fence, bool) or not isinstance(fence, int) or fence < 0:"
+reason = "`< 0 -> <= 0` reads a live fence of 0 as no fence. The only use of the result is `fence < held` in `_publish`, and `replacing` refuses a fence below 0, so the new fence is >= 0: `fence < 0` is false, as is the no-fence branch. Either way the run publishes; no input tells them apart (r36 fix round 2, Hermes audit of PR #118, finding 1)."

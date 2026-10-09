@@ -12,8 +12,18 @@ A run publishes under ``reports/workbench/`` (`views.reports_dir`), never at
 a journal case's live name, and waits for the publish lock at most
 `review.PUBLISH_WAIT_S` (then fails as busy). A run that has not ended
 after `STALL_AFTER_S` is stalled: a thread cannot be stopped, so it is
-abandoned — the next start is a new run, and what the old one ends with is
-not recorded (independent review of 9d00328).
+abandoned — the next start is a new run, and the old one no longer leads
+the ticker (independent review of 9d00328).
+
+Which run is live is decided on disk, not here (Hermes audit of PR #118,
+finding 1): ignoring an abandoned run's result in this registry did not stop
+its publish, which had already switched the live names when it returned.
+Each run asked for takes the ticker's next request number
+(`fencing.request`, a counter file shared by every process on the reports
+folder) before its thread starts; the publish seals it and never makes a
+run live over one asked for later (`report_files.Superseded`): such a run
+ends `SUPERSEDED`, its report kept in the history. A counter that cannot be
+read fails the run at once, with nothing built.
 
 What the page shows of a run is a `Job`, a frozen snapshot taken under the
 registry's lock, so a template never reads a run half-updated. A failure is
@@ -39,13 +49,17 @@ from app.services.reporting.report_files import (
     NotPublished,
     PublishBusy,
     PublishInDoubt,
+    Superseded,
     recording,
 )
-from app.services.workbench import views
+from app.services.workbench import fencing, views
 
 QUEUED, RUNNING, DONE, FAILED = "queued", "running", "done", "failed"
 # A run abandoned as stalled (see STALL_AFTER_S).
 STALLED = "stalled"
+# A run that finished after a run asked for later was live: kept in the
+# history, never made live (`report_files.Superseded`).
+SUPERSEDED = "superseded"
 # Seconds a run may go without ending before it is stalled: a build is
 # 10-20 s, documents and all, and its SEC reads time out and retry within a
 # minute or two; ten minutes is a hang (a read that never returns, a lock
@@ -60,8 +74,10 @@ ERROR_MAX = 300
 
 log = logging.getLogger(__name__)
 
-# (ticker, fresh) -> the generation id the run published, or None.
-Build = Callable[[str, bool], str | None]
+# (ticker, fresh, fence) -> the generation id the run published, or None.
+Build = Callable[[str, bool, int | None], str | None]
+# ticker -> the run's request number (`fencing.request`).
+FenceSource = Callable[[str], int]
 
 
 @dataclass(frozen=True)
@@ -75,6 +91,9 @@ class Job:
     finished_at: datetime | None = None
     error: str | None = None
     generation_id: str | None = None
+    # The run's request number, sealed into what it publishes; None for a
+    # registry that does not fence (a test's stand-in build).
+    fence: int | None = None
 
     @property
     def stalled(self) -> bool:
@@ -117,27 +136,36 @@ def describe_failure(e: BaseException) -> str:
     return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1] + "…"
 
 
-def _build(ticker: str, fresh: bool) -> str | None:
+def _build(ticker: str, fresh: bool, fence: int | None) -> str | None:
     """The CLI's build (`reporting.build_report`, looked up at call time),
     with documents, dated today, published under ``reports/workbench/``,
     waiting for the publish lock at most `review.PUBLISH_WAIT_S` (the review
-    console's wait: a publish holds it for a moment). Returns the
-    generation THIS run published (`report_files.recording`), never one
-    read back from the live name, which another run may have taken
-    meanwhile."""
+    console's wait: a publish holds it for a moment), fenced with the run's
+    request number. Returns the generation THIS run published
+    (`report_files.recording`), never one read back from the live name,
+    which another run may have taken meanwhile."""
     with recording() as published:
         reporting.build_report(ticker, with_docs=True, fresh=fresh,
                                out_dir=views.reports_dir(),
-                               publish_timeout=review.PUBLISH_WAIT_S)
+                               publish_timeout=review.PUBLISH_WAIT_S, fence=fence)
     return published[-1].generation_id if published else None
+
+
+def _request_fence(ticker: str) -> int:
+    """`fencing.request`, looked up at call time."""
+    return fencing.request(ticker)
 
 
 class Registry:
     """The runs of one server process, bounded and thread-safe."""
 
-    def __init__(self, max_jobs: int = MAX_JOBS, build: Build | None = None) -> None:
+    def __init__(self, max_jobs: int = MAX_JOBS, build: Build | None = None,
+                 fence: FenceSource | None = _request_fence) -> None:
         self.max_jobs = max_jobs
         self._build = build
+        # Where each run's request number comes from; None: runs are not
+        # fenced (a stand-in build that publishes nothing).
+        self._fence = fence
         self._lock = threading.Lock()
         self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._done: dict[str, threading.Event] = {}
@@ -165,7 +193,13 @@ class Registry:
         fetch asked for, so a fresh one follows it (review of 9d00328).
 
         A run in flight past `STALL_AFTER_S` is abandoned here (`STALLED`)
-        and a new one starts, taking over what was asked to follow it."""
+        and a new one starts, taking over what was asked to follow it.
+
+        A new run takes its request number here, under the registry's lock
+        and before its thread starts, so runs are numbered in the order they
+        were asked for (a run joined is not asked for again). A number that
+        cannot be taken (`fencing.EpochError`) is the run's failure, said at
+        once, and nothing is built."""
         t = store.safe_ticker(ticker)
         with self._lock:
             running = self._latest(t)
@@ -178,14 +212,27 @@ class Registry:
                     running, state=STALLED, finished_at=_now(),
                     error=(f"no result after {STALL_AFTER_S // 60} minutes: abandoned as "
                            "stalled (a hung SEC read, or a publish lock held elsewhere). "
-                           "If it ever ends, what it ends with is ignored."))
+                           "If it ever ends, it cannot replace a run asked for after it."))
                 # The new run reads every input as it starts: it is the run
                 # that was to follow, and fresh if that one was to be.
                 fresh = self._again.pop(t, False) or fresh
-            job = Job(uuid.uuid4().hex, t, fresh, QUEUED, _now())
+            fence: int | None = None
+            refused: str | None = None
+            if self._fence is not None:
+                try:
+                    fence = self._fence(t)
+                except (fencing.EpochError, OSError) as e:
+                    refused = str(e)
+            job = Job(uuid.uuid4().hex, t, fresh, QUEUED, _now(), fence=fence)
+            if refused is not None:
+                job = dataclasses.replace(job, state=FAILED, finished_at=job.created_at,
+                                          error=refused)
             self._jobs[job.id] = job
-            self._done[job.id] = threading.Event()
+            self._done[job.id] = done = threading.Event()
             self._prune()
+        if refused is not None:
+            done.set()
+            return job
         threading.Thread(target=self._run, args=(job.id,), daemon=True,
                          name=f"workbench-{t}").start()
         return job
@@ -202,25 +249,32 @@ class Registry:
         outcome: dict[str, object]
         try:
             try:
-                gid = build(job.ticker, job.fresh)
+                gid = build(job.ticker, job.fresh, job.fence)
+            except Superseded as e:
+                # Not a failure: the run asked for later is live, and this
+                # one's report is kept in the history (its generation).
+                log.info("workbench run of %s superseded: %s", job.ticker, e)
+                outcome = {"state": SUPERSEDED, "generation_id": e.generation_id, "error": None}
             except BaseException as e:  # noqa: BLE001 - a thread's error is the job's state
                 # Its traceback is the server log's; the page gets one line.
                 log.exception("workbench run of %s failed", job.ticker)
                 outcome = {"state": FAILED, "error": describe_failure(e)}
             else:
-                outcome = {"state": DONE, "generation_id": gid}
+                outcome = {"state": DONE, "generation_id": gid, "error": None}
             with self._lock:
                 current = self._jobs.get(job_id)
                 # Abandoned as stalled (and maybe pruned since): a newer run
                 # is the ticker's now, and so is what was asked to follow it.
+                # How it ended is still recorded (superseded, once the newer
+                # run is live: the publish decides that, not this registry).
                 abandoned = current is None or current.state == STALLED
-                if current is not None and not abandoned:
+                if current is not None:
                     self._jobs[job_id] = dataclasses.replace(
                         current, finished_at=_now(), **outcome)  # type: ignore[arg-type]
                 again = None if abandoned else self._again.pop(job.ticker, None)
             if abandoned:
-                log.warning("workbench run of %s ended after it was abandoned as stalled; "
-                            "its result (%s) is ignored", job.ticker, outcome["state"])
+                log.warning("workbench run of %s ended after it was abandoned as stalled: "
+                            "%s; it no longer leads the ticker", job.ticker, outcome["state"])
             if again is not None:
                 self.start(job.ticker, fresh=again)
         finally:

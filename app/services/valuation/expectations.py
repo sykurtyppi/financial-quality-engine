@@ -26,6 +26,8 @@ that cannot be valued is listed as withheld with the reason, never dropped
 (F9). A scenario is the operator's own FCF path, valued per share against
 the price. None of it is a forecast, and none of it reaches a score. A
 present value that overflows a double is said to be not computable (F3).
+A price in another currency than the filing figures' values nothing: the
+implied growth and every scenario say so (`bridge.currency_mismatch`).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from app.services.valuation.bridge import Bridge
+from app.services.valuation.bridge import Bridge, currency_mismatch
 from app.services.valuation.multiples import TrailingFigures
 from app.services.valuation.observation import (
     GROWTH_HIGH,
@@ -221,12 +223,15 @@ def _main_assumption(sensitivities: tuple[Sensitivity, ...]) -> str | None:
     return text
 
 
-def _scenario(s: Scenario, a: Assumptions, fcf: float | None, bridge: Bridge) -> ScenarioValue:
+def _scenario(s: Scenario, a: Assumptions, fcf: float | None, bridge: Bridge,
+              mismatch: str | None = None) -> ScenarioValue:
     r = s.required_return if s.required_return is not None else a.required_return
     tg = s.terminal_growth if s.terminal_growth is not None else a.terminal_growth
     terms = f"FCF {s.fcf_growth:+.1%}/yr for {s.years} years, terminal {tg:.1%}, r={r:.1%}"
     reason: str | None = None
-    if tg >= r:
+    if mismatch is not None:
+        reason = f"not computable: {mismatch}"
+    elif tg >= r:
         reason = f"not computable: terminal growth {tg:.1%} is not below r={r:.1%}"
     elif fcf is None:
         reason = "not computable: TTM FCF missing"
@@ -253,12 +258,14 @@ def compute_expectations(bridge: Bridge, ttm: TrailingFigures, obs: MarketObserv
     mcap = bridge.market_cap.value
     gordon = gordon_growth(fcf, mcap, a.required_return)
     reverse = implied_growth(fcf, mcap, a)
-    if ttm.reason is not None:
-        gordon = ImpliedGrowth(None, f"implied growth not computable: {ttm.reason}", gordon.formula)
-        reverse = ImpliedGrowth(None, f"implied growth not computable: {ttm.reason}", reverse.formula)
+    mismatch = currency_mismatch(obs)
+    why = mismatch if mismatch is not None else ttm.reason
+    if why is not None:
+        gordon = ImpliedGrowth(None, f"implied growth not computable: {why}", gordon.formula)
+        reverse = ImpliedGrowth(None, f"implied growth not computable: {why}", reverse.formula)
     sensitivities: tuple[Sensitivity, ...] = ()
     if reverse.value is not None and fcf is not None and mcap is not None:
         sensitivities = _sensitivities(fcf, mcap, reverse.value, a)
-    scenarios = tuple(_scenario(s, a, fcf, bridge) for s in obs.scenarios)
+    scenarios = tuple(_scenario(s, a, fcf, bridge, mismatch) for s in obs.scenarios)
     return Expectations(a, obs.assumptions is None, gordon, reverse, sensitivities,
                         _main_assumption(sensitivities), scenarios)

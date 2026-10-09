@@ -108,13 +108,13 @@ dressed as a check.
 |---|---|---|---|
 | price | the observation | `[O]` | — |
 | share count | `shares_outstanding` (dei cover-page count, labelled with its cover date); else `shares_diluted` (weighted-average diluted, labelled as such) | `[F]` | neither reported for the period |
-| market cap | price × share count | `[D]` | share count missing |
+| market cap | price × share count | `[D]` | share count missing; the price not in USD (below) |
 | total debt | `total_debt` (incl. finance leases, excl. operating leases — the engine's own definition) | `[F]` | missing → **EV not asserted: total_debt missing for `<period>`** |
 | cash and equivalents | `cash_and_equivalents` | `[F]` | missing → EV not asserted |
 | short-term investments | `short_term_investments` | `[F]`, or `[A]` "not reported (assumed 0)" | — |
 | minority interest | `minority_interest` | `[F]` or `[A]` assumed 0 | — |
 | preferred stock | `preferred_stock` | `[F]` or `[A]` assumed 0 | — |
-| **enterprise value** | market cap + total debt − cash − short-term investments + minority interest + preferred stock | `[D]` | any of share count, debt, cash missing (the reason names the field and period) |
+| **enterprise value** | market cap + total debt − cash − short-term investments + minority interest + preferred stock | `[D]` | the price not in USD; any of share count, debt, cash missing (the reason names the field and period) |
 | operating lease liabilities | `operating_lease_liabilities` — **shown, never in EV** (lessee comparability caveat) | `[F]` | — |
 | stockholders' equity (book) | `stockholders_equity` — shown, not a bridge component | `[F]` | — |
 
@@ -126,6 +126,22 @@ over the scored fields only, and `pit.py` trims to the scored set exactly. A
 filer that reports only the operating-lease split (current + noncurrent) maps
 no aggregate and the line says "not reported" (composing the split is deferred:
 the per-quarter resolver is flow-only and the debt composer is total-debt-only).
+
+**Currency.** Every monetary fact is read in USD (`fields.FILING_CURRENCY`,
+the companyfacts unit the mapper collects; a fact filed only in another
+currency is not read). Nothing converts a currency. A price recorded in any
+other currency (the CLI's `market.py record --currency` accepts one; the
+workbench's price box records USD only) is shown as recorded, the filing
+lines are shown as they are, and nothing that would mix the two is
+asserted: market cap and EV say **EV not asserted: price in EUR, filing
+figures in USD — no FX conversion**, and every multiple, both implied
+growths and every scenario carry that reason instead of a number, on the
+card and in the ledger (whose valuation summary records it as `ev_reason`).
+The card, the flags and every score are the same as without the price
+(Hermes audit of PR #118, finding 2: a EUR price was multiplied by the share
+count and added to USD debt). Every monetary figure on the card says its
+currency: the price the one it was recorded in, every filing figure and
+everything derived from them USD; a share count is a count.
 
 ## Multiples
 
@@ -189,8 +205,8 @@ No scenarios recorded → the card says "no scenarios recorded".
   cap, per share); an unlevered FCF or NOPAT against EV is phase 2;
 - no forward estimates of any kind, and **no PEG, ever** (it needs licensed
   consensus estimates: a data purchase and out of scope);
-- no currency conversion: the price's currency is shown beside it and the
-  filing figures are in the filer's reporting currency, unscaled;
+- no currency conversion: the filing figures are USD, unscaled, and a price
+  in any other currency derives nothing (see **Currency** above);
 - a replay (`--as-of`) never carries an observation: the price is of today.
 
 ## The non-scoring guarantee

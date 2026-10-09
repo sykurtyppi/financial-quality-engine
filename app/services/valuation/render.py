@@ -8,6 +8,12 @@ Rendered only when the caller asked for the plane; with no observation on
 disk the section is one line saying so and how to record one. Nothing here
 is read back by anything that scores.
 
+Every monetary figure says its currency: the price the one it was recorded
+in, every filing figure and what is derived from them
+`fields.FILING_CURRENCY` (a share count is a count). A price in another
+currency than the filing figures' derives nothing (`bridge.currency_mismatch`),
+so no figure here mixes the two (Hermes audit of PR #118, finding 2).
+
 The operator's own text (source, note, scenario names) is emitted as text:
 the model refuses control characters, and `operator_text` still escapes
 what could open markdown structure, so the one file an operator writes
@@ -19,6 +25,7 @@ from __future__ import annotations
 
 import re
 
+from app.services.ingestion.fields import FILING_CURRENCY
 from app.services.valuation.bridge import EV_FORMULA, BridgeComponent
 from app.services.valuation.expectations import ImpliedGrowth, ScenarioValue
 from app.services.valuation.multiples import HISTORY_LINE, PEER_LINE, Multiple
@@ -63,7 +70,8 @@ def not_produced_line(ticker: str) -> str:
 
 
 def _money(v: float | None) -> str:
-    return "—" if v is None else f"{v:,.0f}"
+    """A filing figure, or one derived from them, in their currency."""
+    return "—" if v is None else f"{v:,.0f} {FILING_CURRENCY}"
 
 
 def _pct(v: float | None) -> str:
@@ -83,8 +91,20 @@ def _filing_cell(c: BridgeComponent) -> str:
     return seen if c.note is None else f"{seen}; {c.note}"
 
 
-def _bridge_row(c: BridgeComponent, period: str | None) -> str:
-    value = "—" if c.value is None else f"{c.value:,.2f}" if c.name == "price" else _money(c.value)
+# The bridge's share counts: a count, not money.
+_COUNTS = ("shares_outstanding", "shares_diluted")
+
+
+def _bridge_row(c: BridgeComponent, period: str | None, currency: str) -> str:
+    """One line of the bridge table; ``currency`` is the price's."""
+    if c.value is None:
+        value = "—"
+    elif c.name == "price":
+        value = f"{c.value:,.2f} {currency}"
+    elif c.name in _COUNTS:
+        value = f"{c.value:,.0f}"
+    else:
+        value = _money(c.value)
     detail = _filing_cell(c) if c.basis == "filing" else (c.note or "")
     where = period or ""
     if c.basis == "observation":
@@ -132,13 +152,13 @@ def render_valuation_section(plane: ValuationPlane) -> str:
     period = b.fiscal_label
     for c in (b.price, b.shares, b.market_cap, b.debt, b.cash, b.short_term_investments,
               b.minority_interest, b.preferred_stock):
-        lines.append(_bridge_row(c, period))
+        lines.append(_bridge_row(c, period, obs.currency))
     if b.ev is None:
         lines.append(f"| **enterprise value** | D | — | {period or ''} | {b.ev_reason} |")
     else:
         lines.append(f"| **enterprise value** | D | {_money(b.ev)} | {period} | {EV_FORMULA} |")
     for c in (b.operating_leases, b.equity):
-        lines.append(_bridge_row(c, period))
+        lines.append(_bridge_row(c, period, obs.currency))
     lines.append("")
     if plane.ttm.reason is not None:
         lines.append(f"- [F] TTM figures: {plane.ttm.reason}")
@@ -175,6 +195,6 @@ def render_valuation_section(plane: ValuationPlane) -> str:
             lines.append(f"- [A] {_scenario_label(sc)}: {sc.reason}")
         else:
             lines.append(f"- [A] {_scenario_label(sc)} → [D] value per share "
-                         f"{sc.value_per_share:,.2f} {obs.currency} vs price {obs.price:,.2f} "
-                         f"({_pct(sc.upside)})")
+                         f"{sc.value_per_share:,.2f} {FILING_CURRENCY} vs price {obs.price:,.2f} "
+                         f"{obs.currency} ({_pct(sc.upside)})")
     return "\n".join(lines)

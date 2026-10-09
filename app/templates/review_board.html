@@ -51,7 +51,7 @@
         </td>
         <td>
           {% if r.report != "live" %}<span class="muted">—</span>
-          {% elif r.audit == "matches" %}<span class="pill ok">audit matches</span>
+          {% elif r.audit == "matches" %}<span class="pill ok">audit refers to this generation</span>
           {% elif r.audit == "stale" %}<span class="pill bad">stale audit</span>
           <div class="note">names run {{ r.stale_audit }}</div>
           {% else %}<span class="pill wait">no audit yet</span>{% endif %}

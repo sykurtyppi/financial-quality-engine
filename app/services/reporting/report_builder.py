@@ -832,7 +832,10 @@ def write_ledger(path: Path, **kw) -> Path:
         fd, tmp = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
         try:
             with os.fdopen(fd, "w") as fh:
-                fh.write(doc.model_dump_json(indent=1) + "\n")
+                # `fence` is the publish's to seal (`report_files.replacing`),
+                # and only a fenced one's: left out here, a ledger is as it
+                # was before the field existed.
+                fh.write(doc.model_dump_json(indent=1, exclude={"fence"}) + "\n")
             os.replace(tmp, path)
         except BaseException:
             with contextlib.suppress(OSError):

@@ -61,12 +61,14 @@ def test_a_real_run_names_the_filings_and_formats_each_class():
     ds, _ = build_dataset(json.loads((REAL / "companyfacts_KO_trimmed.json").read_text()), "KO")
     s = _section(ds, _obs("KO", note="after the print"))
     assert "- [O] note: after the print" in s
-    assert "| 66.25 |" in s and "| the observation above |" in s
-    assert re.search(r"\| [\d,]+\.00 \|", s) is None  # only the price carries decimals
+    # Every monetary figure says its currency (Hermes audit of PR #118,
+    # finding 2); a share count is a count.
+    assert "| 66.25 USD |" in s and "| the observation above |" in s
+    assert re.findall(r"\| [\d,]+\.\d\d(?: [A-Z]{3})? \|", s) == ["| 66.25 USD |"]  # only the price carries decimals
     assert re.search(r"\| cover-page count dated \d{4}-\d{2}-\d{2} \| F \| [\d,]+ \| FY\d{4}Q\d \| 10-[QK] \d{10}-\d{2}-\d{6} filed \d{4}-\d{2}-\d{2}", s)
     assert "| **enterprise value** | D | " in s and "| **enterprise value** | D | — |" not in s
-    assert re.search(r"- \[F\] TTM figures \(TTM FY\d{4}Q\d, the engine's own window\): revenue [\d,]+", s)
-    assert re.search(r"\| P/E \| \d+\.\d\dx \| market cap [\d,]+ \| net income [\d,]+ \| \|", s)
+    assert re.search(r"- \[F\] TTM figures \(TTM FY\d{4}Q\d, the engine's own window\): revenue [\d,]+ USD", s)
+    assert re.search(r"\| P/E \| \d+\.\d\dx \| market cap [\d,]+ USD \| net income [\d,]+ USD \| \|", s)
     assert re.search(r"\| FCF yield \| -?\d+\.\d% \|", s)
     assert re.search(r"- \[D\] Gordon implied perpetual FCF growth: [+-]\d+\.\d%/yr \(g = r − FCF_ttm / market cap\)", s)
     assert "= market cap; g by bisection" in s and "= EV" not in s
@@ -96,7 +98,7 @@ def test_without_provenance_the_filing_cell_says_so():
 def test_the_empty_cases_say_why():
     s = _section(_dataset(net_income=-300.0, cfo=0.0, total_debt=None), _obs("SYN"))
     assert "| **enterprise value** | D | — | FY2025Q4 | EV not asserted: total_debt missing for FY2025Q4 |" in s
-    assert "| P/E | — | | | TTM net income is negative (-1,200): P/E undefined |" in s
+    assert "| P/E | — | | | TTM net income is negative (-1,200 USD): P/E undefined |" in s
     assert "| EV/EBIT | — | | | EV not asserted: total_debt missing for FY2025Q4 |" in s
     assert re.search(r"\| P/S \| \d+\.\d\dx \|", s)
     assert "- [D] Gordon implied perpetual FCF growth: implied growth not computable: TTM FCF ≤ 0 (g = r − FCF_ttm / market cap)" in s
@@ -114,7 +116,7 @@ def test_scenarios_and_operator_assumptions_render_both_ways():
     s = _section(_dataset(), _obs("SYN", assumptions=own, scenarios=scenarios))
     assert "- [A] required return 12.0%, terminal growth 3.0%, horizon 5 years — operator-supplied" in s
     assert "default assumptions" not in s
-    assert re.search(r"- \[A\] model assumption: base — FCF \+5\.0%/yr for 10 years, terminal 3\.0%, r=12\.0% → \[D\] value per share [\d,]+\.\d\d USD vs price 66\.25 \([+-]\d+\.\d%\)", s)
+    assert re.search(r"- \[A\] model assumption: base — FCF \+5\.0%/yr for 10 years, terminal 3\.0%, r=12\.0% → \[D\] value per share [\d,]+\.\d\d USD vs price 66\.25 USD \([+-]\d+\.\d%\)", s)
     assert "- [A] model assumption: flat — FCF +0.0%/yr for 2 years, terminal 12.0%, r=12.0%: not computable: terminal growth 12.0% is not below r=12.0%" in s
     assert "no scenarios recorded" not in s
 

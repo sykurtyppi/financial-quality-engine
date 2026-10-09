@@ -112,6 +112,7 @@ TARGETS: tuple[Target, ...] = (
     Target("app/services/reporting/report_files.py", (
         "tests/unit/test_report_files.py", "tests/unit/test_earnings_brief.py",
         "tests/unit/test_watch_cli.py", "tests/unit/test_symlink_containment.py",
+        "tests/unit/test_workbench_fencing.py",
     )),
     Target("app/services/journal/resolver.py", (
         "tests/unit/test_journal_resolver.py", "tests/unit/test_assumption_vocabulary.py",
@@ -124,16 +125,18 @@ TARGETS: tuple[Target, ...] = (
     Target("app/services/valuation/bridge.py", (
         "tests/unit/test_valuation_bridge.py", "tests/unit/test_valuation_multiples.py",
         "tests/unit/test_valuation_expectations.py", "tests/unit/test_valuation_ledger.py",
-        "tests/unit/test_valuation_render.py",
+        "tests/unit/test_valuation_render.py", "tests/unit/test_valuation_currency.py",
     )),
     Target("app/services/valuation/multiples.py", (
         "tests/unit/test_valuation_multiples.py", "tests/unit/test_valuation_expectations.py",
+        "tests/unit/test_valuation_currency.py",
     )),
     Target("app/services/valuation/expectations.py", (
-        "tests/unit/test_valuation_expectations.py",
+        "tests/unit/test_valuation_expectations.py", "tests/unit/test_valuation_currency.py",
     )),
     Target("app/services/valuation/render.py", (
         "tests/unit/test_valuation_render.py", "tests/unit/test_valuation_report.py",
+        "tests/unit/test_valuation_currency.py",
     )),
     Target("app/services/valuation/plane.py", (
         "tests/unit/test_valuation_bridge.py", "tests/unit/test_valuation_ledger.py",
@@ -142,12 +145,14 @@ TARGETS: tuple[Target, ...] = (
     # The workbench (r36): its runs, its reads, its setup check, its watchlist add.
     Target("app/services/workbench/jobs.py", (
         "tests/unit/test_workbench_jobs.py", "tests/unit/test_workbench_routes.py",
-        "tests/unit/test_workbench_tracks.py",
+        "tests/unit/test_workbench_tracks.py", "tests/unit/test_workbench_fencing.py",
     )),
     Target("app/services/workbench/views.py", (
         "tests/unit/test_workbench_views.py", "tests/unit/test_workbench_routes.py",
-        "tests/unit/test_workbench_tracks.py",
+        "tests/unit/test_workbench_tracks.py", "tests/unit/test_workbench_fencing.py",
     )),
+    # Each run's request number (Hermes audit of PR #118, finding 1).
+    Target("app/services/workbench/fencing.py", ("tests/unit/test_workbench_fencing.py",)),
     Target("app/services/workbench/setup.py", (
         "tests/unit/test_workbench_views.py", "tests/unit/test_workbench_routes.py",
     )),

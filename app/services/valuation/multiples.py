@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from app.schemas.financials import CompanyDataset
 from app.services.formulas.ttm import annualize
+from app.services.ingestion.fields import FILING_CURRENCY
 from app.services.valuation.bridge import Bridge
 
 HISTORY_LINE = ("own-history range: not available (one price observation; no price history "
@@ -73,7 +74,7 @@ def trailing(dataset: CompanyDataset | None, bridge: Bridge) -> TrailingFigures:
 
 def _not_positive(name: str, value: float, multiple: str) -> str:
     how = "negative" if value < 0 else "zero"
-    return f"TTM {name} is {how} ({value:,.0f}): {multiple} undefined"
+    return f"TTM {name} is {how} ({value:,.0f} {FILING_CURRENCY}): {multiple} undefined"
 
 
 def compute_multiples(bridge: Bridge, ttm: TrailingFigures) -> tuple[Multiple, ...]:

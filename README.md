@@ -33,8 +33,11 @@ and has no authentication (`--port`, `--no-browser`; from another machine use
 - **Ticker page** (`/t/KO`): the card; **Run** (uses the SEC cache) or
   **Refresh from SEC** (bypasses it); the history of every kept run, each
   readable as it was published; **Add to / Remove from watchlist**; and a
-  **price box**: record the price you looked at and the next run appends the
-  valuation shadow card (unscored, never part of the card or a score).
+  **price box**: record the price you looked at (in USD, the filing figures'
+  currency: nothing is converted) and the next run appends the valuation
+  shadow card (unscored, never part of the card or a score). A run asked for
+  later is never replaced by one that finishes after it: the earlier run is
+  kept in the history as superseded.
 - **Journal** (`/journal`) and **Review** (`/review`): the decision-impact
   journal and the shadow-run review console, as before.
 
