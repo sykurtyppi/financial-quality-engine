@@ -62,7 +62,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_dashboard_empty(client):
-    r = client.get("/")
+    r = client.get("/journal")
     assert r.status_code == 200
     assert "Dashboard" in r.text and "No cases yet" in r.text
 
@@ -309,7 +309,7 @@ def test_impact_form_renders(client):
 def test_dashboard_with_entries_renders(client):
     # Exercises the queue/table markup that only appears once cases exist.
     _seed("KO", "steady staple", 3, "hold")
-    r = client.get("/")
+    r = client.get("/journal")
     assert r.status_code == 200
     assert "KO" in r.text and "report pending" in r.text  # unreported case shows in the queue
 
@@ -339,7 +339,7 @@ def test_conviction_after_is_a_validated_select(client):
 
 def test_unreported_report_links_get_loading_class(client):
     _seed("KO", "steady staple", 3, "hold")
-    r = client.get("/")
+    r = client.get("/journal")
     assert "js-gen" in r.text and "data-loading-text" in r.text
 
 
@@ -350,7 +350,7 @@ def test_dashboard_shows_stale_outcome_banner(client):
     store.set_field(p, "impact", "no_value")
     store.set_field(p, "reported", "2020-01-01T00:00:00Z")
 
-    r = client.get("/")
+    r = client.get("/journal")
     assert "awaiting outcome" in r.text.lower()
     assert "outcome overdue" in r.text.lower()
 
@@ -363,7 +363,7 @@ def test_dashboard_omits_reported_but_after_not_filled_from_stale_banner(client)
     store.mark_reported(p)
     store.set_field(p, "reported", "2020-01-01T00:00:00Z")  # old, AFTER left blank
 
-    r = client.get("/")
+    r = client.get("/journal")
     assert "awaiting outcome" not in r.text.lower()
     assert "after needed" in r.text.lower()
 
@@ -422,18 +422,18 @@ class TestV2ReadOnly:
 
     def test_dashboard_lists_preregistered_cases(self, client):
         _seed_v2()
-        r = client.get("/")
+        r = client.get("/journal")
         assert r.status_code == 200
         assert "Preregistered cases" in r.text and "MXL" in r.text
         assert "locked" in r.text and "2026-07-27" in r.text
 
     def test_unlocked_and_tampered_cases_are_labelled(self, client):
         p = _seed_v2(locked=False, ticker="AAA")
-        assert "unlocked" in client.get("/").text
+        assert "unlocked" in client.get("/journal").text
         p.unlink()
         p2 = _seed_v2(locked=True, ticker="BBB")
         p2.write_text(p2.read_text().replace("One of three", "Rewritten after the fact"))
-        assert "lock broken" in client.get("/").text
+        assert "lock broken" in client.get("/journal").text
 
     def test_an_unreadable_entry_is_shown_as_unreadable(self, client):
         # The fence has to be the real one (`---json`) or the file is not a
@@ -441,7 +441,7 @@ class TestV2ReadOnly:
         # for — which is exactly how this test passed while testing nothing.
         _seed_v2()
         (store.ENTRIES / "CCC_2026-07-28.md").write_text("---json\n{not json at all\n---\n")
-        r = client.get("/")
+        r = client.get("/journal")
         assert r.status_code == 200
         assert "MXL" in r.text and "CCC" in r.text and "unreadable" in r.text
 
@@ -455,7 +455,7 @@ class TestV2ReadOnly:
         p = store.ENTRIES / "DDD_2026-07-29.md"
         p.write_text("---json\n{}\n---\n")
         _unreadable(monkeypatch, p, err)
-        r = client.get("/")
+        r = client.get("/journal")
         assert r.status_code == 200 and "DDD" in r.text and "unreadable" in r.text
         assert f"cannot be read ({os.strerror(err)})" in r.text
 
@@ -463,7 +463,7 @@ class TestV2ReadOnly:
         _seed_v2()
         for url in ("/report/MXL", "/impact/MXL"):
             r = client.get(url)
-            assert r.status_code == 303 and r.headers["location"].startswith("/?error=")
+            assert r.status_code == 303 and r.headers["location"].startswith("/journal?error=")
             assert "journal.py" in r.headers["location"]
         r = client.post("/impact/MXL", data={"verdict": "helped"})
         assert r.status_code == 303 and "journal.py" in r.headers["location"]
@@ -488,7 +488,7 @@ def test_one_unreadable_entry_does_not_lose_every_other_case(client, monkeypatch
     bad = store.ENTRIES / "ZZZ_2026-07-29.md"
     bad.write_text("# not really an entry\n")
     _unreadable(monkeypatch, bad)
-    r = client.get("/")
+    r = client.get("/journal")
     assert r.status_code == 200 and "KO" in r.text
     assert store.tally()["unreadable"] == ["ZZZ_2026-07-29.md"]
 

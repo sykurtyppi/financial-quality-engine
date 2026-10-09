@@ -181,7 +181,14 @@ scripts/journal.py tally
 
 The engine is cleared for supervised shadow runs only: every fact a report
 surfaces is reconciled by hand to its accession before anyone relies on it.
-The review console is the screen for that. Open it with the journal UI:
+The review console is the screen for that. Open it with the web UI:
+
+```
+python scripts/ui.py          # then http://127.0.0.1:8000/review
+```
+
+`scripts/ui.py` starts uvicorn on 127.0.0.1:8000 (`--port`, `--no-browser`)
+with `--forwarded-allow-ips 127.0.0.1`, the same as starting it by hand:
 
 ```
 .venv/bin/uvicorn app.web:app --forwarded-allow-ips 127.0.0.1   # then http://127.0.0.1:8000/review
@@ -191,6 +198,7 @@ The review console is the screen for that. Open it with the journal UI:
 `X-Forwarded-For` uvicorn believes about who the client is; given on the
 command line, it overrides a `FORWARDED_ALLOW_IPS=*` left in the
 environment, which would let any peer claim to be this machine.
+`scripts/ui.py` refuses any host but a loopback one.
 
 The UI has **no authentication**. It serves only this machine: a request
 from any other address is refused (403), and so is one naming a host other

@@ -1,0 +1,19 @@
+{# The run-status box: the ticker page includes it, and /t/<T>/status serves it
+   alone for app.js to poll while a run is in flight. #}
+{% set state = job.state if job else "idle" %}
+<div class="job-status" data-job-status data-state="{{ state }}" data-status-url="/t/{{ t }}/status" aria-live="polite">
+{%- if job and job.active %}
+  <div class="running">
+    <span class="spinner" aria-hidden="true"></span>
+    <div>
+      <b>{{ "Refreshing from SEC" if job.fresh else "Building the report" }}…</b>
+      <span class="note" style="margin:0">started {{ (job.started_at or job.created_at)|utc }}. This page updates itself when the run finishes (usually 10–20 s).</span>
+      <noscript><span class="note">Reload the page to see the result.</span></noscript>
+    </div>
+  </div>
+{%- elif job and job.state == "failed" %}
+  <div class="err"><b>The last run failed</b> ({{ job.finished_at|utc }}): {{ job.error }}</div>
+{%- elif job and job.state == "done" %}
+  <p class="note" style="margin:0 0 14px">Last run finished {{ job.finished_at|utc }}{% if job.generation_id %} and published generation <code>{{ job.generation_id }}</code>{% endif %}.</p>
+{%- endif %}
+</div>

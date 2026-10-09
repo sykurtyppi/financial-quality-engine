@@ -10,6 +10,34 @@ source period. **This is not an AI filing summarizer and not a fraud-accusation
 tool** — outputs are formula-driven screening prompts for analyst review (see
 [docs/legal_framing.md](docs/legal_framing.md)).
 
+## Use it (local web app)
+
+```bash
+.venv/bin/pip install -e ".[web]"
+export EDGAR_IDENTITY="Your Name you@example.com"   # SEC requires a name and an email
+python scripts/ui.py                                 # opens http://127.0.0.1:8000
+```
+
+Type a ticker (`KO`) and, 10–20 seconds later, its **decision card** — the
+same report `scripts/generate_report.py` publishes to `reports/`, card first,
+full appendix folded below. Single-user and local: it listens on loopback only
+and has no authentication (`--port`, `--no-browser`; from another machine use
+`ssh -L 8000:127.0.0.1:8000`).
+
+- **Workbench** (`/`): the ticker box, a setup card if anything blocks a first
+  run, the watchlist with each name's next print, latest run and flag counts
+  per tier, and the most recent runs.
+- **Ticker page** (`/t/KO`): the card; **Run** (uses the SEC cache) or
+  **Refresh from SEC** (bypasses it); the history of every kept run, each
+  readable as it was published; **Add to / Remove from watchlist**; and a
+  **price box**: record the price you looked at and the next run appends the
+  valuation shadow card (unscored, never part of the card or a score).
+- **Journal** (`/journal`) and **Review** (`/review`): the decision-impact
+  journal and the shadow-run review console, as before.
+
+The card's flags are screening prompts for analyst review, not predictions
+(see below for what the engine can and cannot do).
+
 ## The headline finding
 
 The engine was built to be a forensic earnings-quality detector. Six
@@ -160,8 +188,9 @@ export EDGAR_IDENTITY="Your Name you@example.com"
 .venv/bin/python scripts/journal.py report NVDA
 .venv/bin/python scripts/journal.py tally
 
-# The web UI (pip install -e ".[web]") READS the journal; it no longer opens cases:
-.venv/bin/uvicorn app.web:app        # http://127.0.0.1:8000
+# The web UI (pip install -e ".[web]") READS the journal at /journal; it no
+# longer opens cases:
+python scripts/ui.py                 # http://127.0.0.1:8000/journal
 ```
 
 New cases are opened on the CLI only. The web form used to write the older
