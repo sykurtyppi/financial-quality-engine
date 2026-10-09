@@ -84,7 +84,9 @@ class RunRef:
     """One published run of a ticker: ``name`` is its generation
     directory (None for files from before generations, read at their live
     names), ``generation_id`` the id that directory carries, ``built``
-    when it was published (UTC)."""
+    when it was published (UTC). ``superseded``: kept, never made live
+    (`report_files.Superseded`: it finished after a run asked for later had
+    published)."""
 
     ticker: str
     day: str
@@ -93,6 +95,7 @@ class RunRef:
     built: datetime | None
     live: bool
     report: Path
+    superseded: bool = False
 
 
 @dataclass(frozen=True)
@@ -229,7 +232,8 @@ def _refs(ticker: str, day: str) -> list[RunRef]:
         m = _GEN_NAME_RE.match(gen.name)
         gid = m.group(3) if m and m.group(3) != "adopted" else None
         refs.append(RunRef(ticker, day, gen.name, gid, _built(gen.name),
-                           current is not None and gen == current, gen / report.name))
+                           current is not None and gen == current, gen / report.name,
+                           (gen / report_files.SUPERSEDED_MARK).exists()))
     if not gens and report.is_file():
         # Files from before generations, read at their live names.
         mtime = datetime.fromtimestamp(report.stat().st_mtime, UTC)
@@ -254,28 +258,39 @@ def runs(ticker: str, problems: list[str] | None = None) -> list[RunRef]:
 
 def newest_run(ticker: str) -> RunRef | None:
     """The workbench's newest kept run of ``ticker`` (live or not), or
-    None: what `journal.py openv2` names when the card was there to read
-    before the thesis."""
+    None."""
     refs = runs(ticker)
     return refs[0] if refs else None
 
 
+def live_run(ticker: str) -> RunRef | None:
+    """The run the ticker page shows as its card: the newest live run, or
+    None. What `journal.py openv2` names when the card was there to read
+    before the thesis (review of 2cbba1c, N2: a newer kept run may be one
+    superseded, never the card)."""
+    return next((r for r in runs(ticker) if r.live), None)
+
+
 def live_generation(ticker: str) -> str | None:
-    """The generation id of the run the ticker page shows: its newest live
-    run (None when none is, or it is from before generations). What a
-    finished job is compared with: a run that published is not the live
-    one once a later run has (Hermes audit of PR #118, finding 1)."""
-    return next((r.generation_id for r in runs(ticker) if r.live), None)
+    """The generation id of the run the ticker page shows (`live_run`;
+    None when none is, or it is from before generations). What a finished
+    job is compared with: a run that published is not the live one once a
+    later run has (Hermes audit of PR #118, finding 1)."""
+    ref = live_run(ticker)
+    return ref.generation_id if ref is not None else None
 
 
 def published_since(ticker: str, when: datetime) -> bool:
     """Whether a run of ``ticker`` (any day, kept) was published after
-    ``when``. A generation's stamp has whole seconds, so only one stamped in
-    a later second than ``when``'s counts: one stamped in the same second
-    may be from before it, and a failure said once too often is better than
-    one hidden by a run that preceded it."""
+    ``when``: one that is or was live, never one kept as superseded, which
+    no reader ever saw as the card (review of 2cbba1c, L2: it hid the
+    latest run's failure). A generation's stamp has whole seconds, so only
+    one stamped in a later second than ``when``'s counts: one stamped in the
+    same second may be from before it, and a failure said once too often is
+    better than one hidden by a run that preceded it."""
     second = when.replace(microsecond=0)
-    return any(r.built is not None and r.built > second for r in runs(ticker))
+    return any(r.built is not None and r.built > second and (r.live or not r.superseded)
+               for r in runs(ticker))
 
 
 def _ledger(live: report_files.LiveRun) -> tuple[LedgerSummary | None, str | None]:

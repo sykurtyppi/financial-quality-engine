@@ -19,7 +19,9 @@ history and never made live (`Superseded`). These read what is live
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import shutil
 import threading
 import time
@@ -49,10 +51,20 @@ def reports(tmp_path, monkeypatch):
     return tmp_path / "reports"
 
 
-def _publish(report: Path, tag: str, fence: int | None = None, **kw) -> str:
+def _fence(report: Path, number: int) -> report_files.Fence:
+    """Request ``number`` of KO, with the ticker's high-water mark and lock
+    beside ``report`` as `fencing.fence` places them in reports/workbench."""
+    epochs = report.parent / fencing.EPOCHS_DIR
+    return report_files.Fence(number, epochs / "KO.published", epochs / "KO.lock")
+
+
+def _publish(report: Path, tag: str, fence: int | report_files.Fence | None = None,
+             **kw) -> str:
     """One rebuild of ``report``, fenced when ``fence`` is given (as the
     workbench's runs are) and not otherwise (the journal, the auto track,
     the CLI). Returns its generation id."""
+    if isinstance(fence, int):
+        fence = _fence(report, fence)
     extra = {} if fence is None else {"fence": fence}
     with replacing(report, **extra, **kw) as staged:
         staged.report.write_text(f"# {tag} report\n")
@@ -168,7 +180,7 @@ def test_a_live_ledger_that_is_a_symlink_is_not_followed_for_its_fence(tmp_path)
 
 def test_the_fence_round_trips_through_the_ledger_model(tmp_path):
     report = tmp_path / NAME
-    with replacing(report, fence=12) as staged:
+    with replacing(report, fence=_fence(report, 12)) as staged:
         staged.report.write_text("# r\n")
         staged.ledger.write_text(LedgerDocument(
             ticker="KO", generated_on=date(2026, 10, 9), config_version="0.3.0",
@@ -219,7 +231,7 @@ def _fenced_publisher(args):
     if tag == "A":
         events["asked"].set()
     try:
-        with replacing(report, fence=fence) as staged:
+        with replacing(report, fence=fencing.fence("KO", fence)) as staged:
             staged.report.write_text(f"# {tag} report\n")
             staged.ledger.write_text("{}")
             barrier.wait(30)                # both staged before either publishes
@@ -307,8 +319,10 @@ def test_a_missing_counter_starts_above_every_live_run(reports):
     """A counter lost (the folder copied without its hidden files) must not
     start again at 1 under a live run sealed with 40: every run after it
     would be superseded. It starts above the ticker's live fences."""
-    for day, fence in (("2026-10-08", 40), ("2026-10-09", 7)):
+    for day, fence in (("2026-10-09", 7), ("2026-10-08", 40)):
         _publish(reports / "workbench" / f"KO_{day}.md", day, fence=fence)
+    # The kept runs alone say it: the mark is gone with the counter.
+    (reports / "workbench" / fencing.EPOCHS_DIR / "KO.published").unlink()
     assert fencing.request("KO") == 41
     assert fencing.request("KO") == 42
 
@@ -397,7 +411,7 @@ def _held_build(monkeypatch, *, fail_second: bool = False):
     def build(ticker, with_docs=True, report_day=None, fresh=False, out_dir=None,
               publish_timeout=None, **kw):
         n = len(calls)
-        calls.append(kw.get("fence"))
+        calls.append(kw["fence"].number if kw.get("fence") is not None else None)
         if fail_second and n == 1:
             raise RuntimeError("SEC answered 503")
         out = out_dir / f"{ticker}_{date.today().isoformat()}.md"
@@ -564,7 +578,7 @@ def test_a_done_run_no_longer_live_says_which_run_is(reports, monkeypatch):
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
     assert "is the live run" in client.get("/t/KO/status").text
     other = _publish(reports / "workbench" / f"KO_{date.today().isoformat()}.md", "other",
-                     fence=fencing.request("KO"))
+                     fence=fencing.fence("KO", fencing.request("KO")))
     frag = client.get("/t/KO/status").text
     assert job.generation_id in frag and other in frag
     assert "is the live run" not in frag and "no longer the live run" in frag
@@ -578,3 +592,255 @@ def test_the_poller_reloads_on_a_superseded_run_too(reports):
     js = TestClient(app, base_url="http://127.0.0.1",
                     client=("127.0.0.1", 50000)).get("/static/app.js").text
     assert 'now === "superseded"' in js
+
+
+
+# --- fix round 3 (independent review of 2cbba1c) ---------------------------------------
+# The fence was compared with the live generation of ONE day's report only:
+# a run asked for before midnight that published after it took a new day's
+# file, where nothing was live, and became the card (H1); a restore or an
+# unfenced publish dropped the live fence, so an abandoned older run replaced
+# the operator's restore (M2); an unreadable live ledger read as "no fence"
+# (M1); a counter behind the kept runs was trusted (L1). The ticker's
+# high-water mark of PUBLISHED fences (`.epochs/<T>.published`), read and
+# raised under the ticker's lock around the switch, holds across days and
+# restores.
+
+
+def test_a_run_asked_for_earlier_never_publishes_on_another_day_over_a_later_one(tmp_path):
+    day1, day2 = tmp_path / "KO_2026-10-09.md", tmp_path / "KO_2026-10-10.md"
+    b = _publish(day1, "B", fence=2)
+    with pytest.raises(Superseded) as e:
+        _publish(day2, "A", fence=1)
+    assert e.value.live_fence == 2
+    assert read_live(day1).generation_id == b and read_live(day2) is None
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "2\n"
+    # A later request publishes on either day, and raises the mark.
+    _publish(day2, "C", fence=3)
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "3\n"
+
+
+def test_a_restore_is_not_replaced_by_a_run_asked_for_before_the_newest(tmp_path):
+    report = tmp_path / NAME
+    x = _publish(report, "run1", fence=1)
+    _publish(report, "run3", fence=3)
+    report_files.restore(report, x)
+    with pytest.raises(Superseded):
+        _publish(report, "run2-abandoned", fence=2)
+    assert read_live(report).generation_id == x
+    # A run asked for after the restore publishes as usual.
+    new = _publish(report, "run4", fence=4)
+    assert read_live(report).generation_id == new
+
+
+def test_an_unfenced_publish_does_not_lower_the_mark(tmp_path):
+    report = tmp_path / NAME
+    _publish(report, "run3", fence=3)
+    cli = _publish(report, "cli")
+    with pytest.raises(Superseded):
+        _publish(report, "run2-abandoned", fence=2)
+    assert read_live(report).generation_id == cli
+
+
+def test_a_newer_request_that_failed_never_raised_the_mark(tmp_path):
+    report = tmp_path / NAME
+    _publish(report, "run1", fence=1)
+    with pytest.raises(RuntimeError), replacing(report, fence=_fence(report, 3)):
+        raise RuntimeError("SEC answered 503")
+    gid = _publish(report, "run2", fence=2)
+    assert read_live(report).generation_id == gid
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "2\n"
+
+
+@pytest.mark.parametrize("err", [errno.EMFILE, errno.EIO, errno.EACCES],
+                         ids=["EMFILE", "EIO", "EACCES"])
+def test_a_live_fence_that_cannot_be_read_fails_the_publish_closed(tmp_path, monkeypatch, err):
+    """M1: a failed READ of the live ledger is not "no fence": the fenced
+    publish is refused, set apart, and the live run untouched."""
+    report = tmp_path / NAME
+    newer = _publish(report, "B", fence=2)
+    (tmp_path / fencing.EPOCHS_DIR / "KO.published").unlink()  # only the ledger can say
+    real = Path.read_text
+
+    def flaky(self, *a, **k):
+        if self.name.endswith(".ledger.json") and report_files.STAGING_DIR not in self.parts:
+            raise OSError(err, os.strerror(err))
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    with pytest.raises(report_files.NotPublished) as e:
+        _publish(report, "A", fence=1)
+    monkeypatch.setattr(Path, "read_text", real)
+    assert "live fence unreadable" in str(e.value) and errno.errorcode[err] in str(e.value)
+    assert read_live(report).generation_id == newer
+    assert len(generations(report)) == 1
+    home = tmp_path / report_files.GENERATIONS_DIR / "KO_2026-10-09"
+    assert len([d for d in home.iterdir() if d.name.startswith(".failed-")]) == 1
+
+
+def test_a_high_water_mark_that_cannot_be_read_fails_the_publish_closed(tmp_path):
+    report = tmp_path / NAME
+    newer = _publish(report, "B", fence=2)
+    mark = tmp_path / fencing.EPOCHS_DIR / "KO.published"
+    mark.unlink()
+    mark.mkdir()  # EISDIR on read
+    with pytest.raises(report_files.NotPublished) as e:
+        _publish(report, "A", fence=3)
+    assert "high-water mark unreadable" in str(e.value)
+    assert read_live(report).generation_id == newer
+    mark.rmdir()
+    mark.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(report_files.NotPublished):
+        _publish(report, "A", fence=3)
+    assert not (tmp_path / "elsewhere").exists()
+    mark.unlink()
+    mark.write_text("not a number\n")
+    with pytest.raises(report_files.NotPublished) as e:
+        _publish(report, "A", fence=3)
+    assert "high-water mark unreadable" in str(e.value)
+    assert read_live(report).generation_id == newer
+
+
+def test_a_counter_behind_the_kept_runs_or_the_mark_starts_above_them(reports):
+    """L1: a counter restored from an older backup (or edited) is not
+    trusted below what was kept or published."""
+    report = reports / "workbench" / NAME
+    report.parent.mkdir(parents=True)
+    for _ in range(5):
+        _publish(report, "run", fence=fencing.fence("KO", fencing.request("KO")))
+    counter = reports / "workbench" / fencing.EPOCHS_DIR / "KO"
+    counter.write_text("2\n")
+    assert fencing.request("KO") == 6
+    # The mark alone (its runs gone from the folder) still counts.
+    shutil.rmtree(reports / "workbench" / report_files.GENERATIONS_DIR)
+    counter.write_text("1\n")
+    (reports / "workbench" / fencing.EPOCHS_DIR / "KO.published").write_text("9\n")
+    assert fencing.request("KO") == 10
+
+
+def test_a_superseded_run_is_not_news_that_hides_a_failure(reports):
+    """L2: `published_since` (a failed run's banner is dropped once a run
+    has been published after it) counted a superseded generation, which was
+    never live, and hid the ticker's latest failure."""
+    from app.services.workbench import views
+
+    report = reports / "workbench" / f"KO_{date.today().isoformat()}.md"
+    report.parent.mkdir(parents=True)
+    t0 = datetime(2026, 10, 9, 12, tzinfo=UTC)
+    _publish(report, "C", fence=fencing.fence("KO", 2), now=t0)
+    failed_at = t0 + timedelta(seconds=5)
+    with pytest.raises(Superseded):
+        _publish(report, "A", fence=fencing.fence("KO", 1), now=t0 + timedelta(seconds=9))
+    assert not views.published_since("KO", failed_at)
+    refs = views.runs("KO")
+    assert [r.superseded for r in refs] == [True, False]
+    # A superseded run restored by hand is live: it counts.
+    a = next(r for r in refs if r.superseded)
+    report_files.restore(report, a.name)
+    assert views.published_since("KO", failed_at)
+    report_files.restore(report, next(r for r in refs if not r.superseded).name)
+    assert not views.published_since("KO", failed_at)
+    # A run that was live and then replaced still counts as published.
+    _publish(report, "D", fence=fencing.fence("KO", 3), now=t0 + timedelta(seconds=20))
+    assert views.published_since("KO", failed_at)
+
+
+def test_the_job_carries_its_fence_from_the_start(reports, monkeypatch):
+    gate = threading.Event()
+    monkeypatch.setattr(jobs, "_build", lambda t, fresh, fence: gate.wait(10))
+    reg = jobs.Registry()
+    job = reg.start("KO")
+    assert job.fence == 1 and reg.get(job.id).fence == 1
+    gate.set()
+    reg.wait(job.id, timeout=10)
+
+
+def _hold(lock: Path, held: threading.Event, release: threading.Event) -> None:
+    import fcntl
+
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        held.set()
+        release.wait(30)
+    finally:
+        os.close(fd)
+
+
+def test_a_stuck_holder_of_the_tickers_lock_fails_a_request_readably(reports, monkeypatch):
+    """N4: the request counter's lock is taken under the registry's lock:
+    a holder that never let go froze every page. It is waited for at most
+    `review.PUBLISH_WAIT_S`, then the run fails, said."""
+    from app.services.journal import review
+
+    monkeypatch.setattr(review, "PUBLISH_WAIT_S", 0.3)
+    built: list = []
+    monkeypatch.setattr(jobs, "_build", lambda *a: built.append(a))
+    lock = reports / "workbench" / fencing.EPOCHS_DIR / "KO.lock"
+    held, release = threading.Event(), threading.Event()
+    holder = threading.Thread(target=_hold, args=(lock, held, release), daemon=True)
+    holder.start()
+    assert held.wait(10)
+    try:
+        out: list = []
+        starter = threading.Thread(target=lambda: out.append(jobs.Registry().start("KO")),
+                                   daemon=True)
+        starter.start()
+        starter.join(10)
+        assert not starter.is_alive(), "start() waited on the lock for good"
+    finally:
+        release.set()
+        holder.join(10)
+    (job,) = out
+    assert job.state == jobs.FAILED and "held" in job.error and "no run started" in job.error
+    assert "another workbench process stuck?" in job.error
+    assert built == []
+
+
+def test_a_stuck_holder_of_the_tickers_lock_fails_a_publish_as_busy(tmp_path):
+    report = tmp_path / NAME
+    held, release = threading.Event(), threading.Event()
+    holder = threading.Thread(target=_hold, args=(tmp_path / fencing.EPOCHS_DIR / "KO.lock",
+                                                  held, release), daemon=True)
+    holder.start()
+    assert held.wait(10)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(report_files.PublishBusy):
+            _publish(report, "A", fence=1, timeout=0.3)
+        assert time.monotonic() - t0 < 5
+    finally:
+        release.set()
+        holder.join(10)
+    assert read_live(report) is None
+
+
+
+def test_a_lost_mark_still_leaves_the_live_runs_own_fence(tmp_path):
+    """The live generation's fence still counts when the mark is missing
+    (runs fenced before the mark existed; the folder copied without it)."""
+    report = tmp_path / NAME
+    newer = _publish(report, "B", fence=2)
+    (tmp_path / fencing.EPOCHS_DIR / "KO.published").unlink()
+    with pytest.raises(Superseded):
+        _publish(report, "A", fence=1)
+    assert read_live(report).generation_id == newer
+
+
+def test_a_mark_that_cannot_be_raised_undoes_the_switch(tmp_path, monkeypatch):
+    """A run live with the mark below it could be replaced by an older
+    request on another day: a failed raise puts the earlier run back."""
+    report = tmp_path / NAME
+    older = _publish(report, "A", fence=1)
+
+    def refuse(path, n):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(report_files, "write_count", refuse)
+    with pytest.raises(report_files.NotPublished) as e:
+        _publish(report, "B", fence=2)
+    assert "raising the high-water mark to 2 failed" in str(e.value)
+    assert read_live(report).generation_id == older
+    assert len(generations(report)) == 1
+    assert (tmp_path / fencing.EPOCHS_DIR / "KO.published").read_text() == "1\n"

@@ -21,7 +21,8 @@ its publish, which had already switched the live names when it returned.
 Each run asked for takes the ticker's next request number
 (`fencing.request`, a counter file shared by every process on the reports
 folder) before its thread starts; the publish seals it and never makes a
-run live over one asked for later (`report_files.Superseded`): such a run
+run live once one asked for later has published, on any day's report
+(the ticker's high-water mark; `report_files.Superseded`): such a run
 ends `SUPERSEDED`, its report kept in the history. A counter that cannot be
 read fails the run at once, with nothing built.
 
@@ -141,13 +142,15 @@ def _build(ticker: str, fresh: bool, fence: int | None) -> str | None:
     with documents, dated today, published under ``reports/workbench/``,
     waiting for the publish lock at most `review.PUBLISH_WAIT_S` (the review
     console's wait: a publish holds it for a moment), fenced with the run's
-    request number. Returns the generation THIS run published
+    request number and its ticker's high-water mark (`fencing.fence`; the
+    ticker's lock is waited for as long). Returns the generation THIS run published
     (`report_files.recording`), never one read back from the live name,
     which another run may have taken meanwhile."""
+    fenced = None if fence is None else fencing.fence(ticker, fence)
     with recording() as published:
         reporting.build_report(ticker, with_docs=True, fresh=fresh,
                                out_dir=views.reports_dir(),
-                               publish_timeout=review.PUBLISH_WAIT_S, fence=fence)
+                               publish_timeout=review.PUBLISH_WAIT_S, fence=fenced)
     return published[-1].generation_id if published else None
 
 

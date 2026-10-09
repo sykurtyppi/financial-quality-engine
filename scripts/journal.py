@@ -101,7 +101,9 @@ def _workbench_seen(ticker: str) -> None:
     is theirs to put in ``--contamination``. A workbench folder that cannot
     be read says nothing and stops nothing."""
     try:
-        ref = workbench_views.newest_run(ticker)
+        # The card that was there to read: the live run (review of
+        # 2cbba1c, N2), else the newest kept one (its History page).
+        ref = workbench_views.live_run(ticker) or workbench_views.newest_run(ticker)
     except (OSError, ValueError):
         return
     if ref is None:

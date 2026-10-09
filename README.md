@@ -36,8 +36,10 @@ and has no authentication (`--port`, `--no-browser`; from another machine use
   **price box**: record the price you looked at (in USD, the filing figures'
   currency: nothing is converted) and the next run appends the valuation
   shadow card (unscored, never part of the card or a score). A run asked for
-  later is never replaced by one that finishes after it: the earlier run is
-  kept in the history as superseded.
+  later is never replaced by one that finishes after it, on any day's report
+  and after a `restore`: the earlier run is kept in the history as
+  superseded (`reports/workbench/.epochs/` holds each ticker's request
+  counter and the highest request published).
 - **Journal** (`/journal`) and **Review** (`/review`): the decision-impact
   journal and the shadow-run review console, as before.
 

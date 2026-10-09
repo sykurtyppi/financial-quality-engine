@@ -35,10 +35,13 @@ Each run is one GENERATION, kept whole and never modified once published
   ``restore`` points the live names back at one;
 - a FENCED rebuild (the workbench's: a number taken when its run was asked
   for, `workbench.fencing`) is sealed with its fence and, under the
-  publish lock, compared with the live generation's before the switch: a
-  lower one is kept in the archive and never made live (``Superseded``;
-  Hermes audit of PR #118, finding 1). An unfenced rebuild publishes as
-  before.
+  publish lock and the ticker's lock, compared before the switch with the
+  ticker's high-water mark of published fences (every day's report, and
+  across a restore) and with the live generation's own: a lower one is kept
+  in the archive, marked superseded, and never made live (``Superseded``;
+  Hermes audit of PR #118, finding 1, and the review of 2cbba1c). A fence
+  that cannot be read fails the publish closed. An unfenced rebuild
+  publishes as before.
 
 Readers that must see one run whole resolve the pointer once (``read_live``)
 and read from that generation's own directory, which no publish ever
@@ -119,26 +122,50 @@ PUBLISHED_NOT_STAMPED_RC = 9
 
 
 class Superseded(RuntimeError):
-    """A fenced rebuild whose fence is below the live generation's: a run
-    asked for later is live, and this one, finished after it, must not
-    replace it (Hermes audit of PR #118, finding 1: an abandoned workbench
-    run ended last and took the live names from the run that replaced it).
-    Not a failure, and not `NotPublished`: the generation is whole and kept
-    in the archive (``generation``, ``generation_id``), the live run is
-    unchanged (``live_generation_id``), and nothing is in doubt."""
+    """A fenced rebuild whose fence is below one already published for the
+    ticker (`Fence.mark`) or below the live generation's: a run asked for
+    later has published, and this one, finished after it, must not replace
+    it (Hermes audit of PR #118, finding 1: an abandoned workbench run ended
+    last and took the live names from the run that replaced it). Not a
+    failure, and not `NotPublished`: the generation is whole and kept in the
+    archive, marked superseded (``generation``, ``generation_id``), the live
+    run is unchanged (``live_generation_id``: this report's, None when this
+    day's report has none), and nothing is in doubt."""
 
     def __init__(self, report: Path, generation: Path, generation_id: str, fence: int,
-                 live: Path, live_generation_id: str | None, live_fence: int) -> None:
+                 live_generation_id: str | None, live_fence: int) -> None:
+        live = ("" if live_generation_id is None
+                else f"; generation {live_generation_id} stays live")
         super().__init__(
             f"{report.name}: superseded: this run (request {fence}) finished after a run asked "
-            f"for later (request {live_fence}, generation {live_generation_id}), which stays "
-            f"live; this one is kept as {generation.name}, not live")
+            f"for later (request {live_fence}) had published{live}; this one is kept as "
+            f"{generation.name}, not live")
         self.generation = generation
         self.generation_id = generation_id
         self.fence = fence
-        self.live = live
         self.live_generation_id = live_generation_id
         self.live_fence = live_fence
+
+
+@dataclass(frozen=True)
+class Fence:
+    """A run's place in its ticker's order of requests (`workbench.fencing`
+    takes ``number`` when the run is asked for). ``mark`` is the ticker's
+    high-water mark, the highest fence ever published for it, on any day's
+    report; ``lock`` the ticker's lock, held around the comparison, the
+    switch and the mark's raise. Lock order: a report's `publish_lock`
+    first, then ``lock`` (the request counter takes ``lock`` alone, and
+    nothing that holds ``lock`` waits for a publish lock), so no two holders
+    wait on each other."""
+
+    number: int
+    mark: Path
+    lock: Path
+
+
+# Inside a superseded generation's directory: it was never live. Hidden, and
+# not one of a run's files, so readers of a generation never meet it.
+SUPERSEDED_MARK = ".superseded"
 
 
 class ForeignPointer(OSError):
@@ -328,19 +355,12 @@ class PublishBusy(TimeoutError):
 
 
 @contextmanager
-def publish_lock(report: Path, *, timeout: float | None = None) -> Iterator[None]:
-    """The lock every change to ``report``'s live names holds, across
-    processes: publishes, ``set_aside`` and ``restore`` happen one after the
-    other. Readers take no lock: a generation, once published, never
-    changes. It is a sidecar in the staging directory; ``flock`` is
-    advisory and unreliable over NFS, so the reports directory must be
-    local, as the watchlist's lock already assumes.
-
-    ``timeout`` (seconds): give up with `PublishBusy` if it is not free by
-    then, for a caller that must not wait on a stalled holder (the review
-    console's tick, holding a web worker; review of 68dbc24, L-2). None,
-    the default and what every publisher uses: wait for it."""
-    lock = own_dir(report.parent / STAGING_DIR) / f"{_base(report)}.lock"
+def sidecar_lock(lock: Path, *, timeout: float | None = None,
+                 busy: str = "the lock") -> Iterator[None]:
+    """An exclusive ``flock`` on the sidecar file ``lock`` (created, never
+    followed: ``O_NOFOLLOW``), across processes. ``timeout`` (seconds): give
+    up with `PublishBusy` ("<busy> has been held for over <timeout>s") if it
+    is not free by then; None waits."""
     lock.parent.mkdir(parents=True, exist_ok=True)
     # O_NOFOLLOW: a link planted at the lock's name fails (ELOOP) rather than
     # create its target outside the directory (Hermes audit of 424b0b4,
@@ -358,12 +378,57 @@ def publish_lock(report: Path, *, timeout: float | None = None) -> Iterator[None
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
                         raise PublishBusy(
-                            f"{report.name}: a publish has held its lock for over "
-                            f"{timeout:g}s") from None
+                            f"{busy} has been held for over {timeout:g}s") from None
                     time.sleep(0.05)
         yield
     finally:
         os.close(fd)  # closing releases the lock
+
+
+@contextmanager
+def publish_lock(report: Path, *, timeout: float | None = None) -> Iterator[None]:
+    """The lock every change to ``report``'s live names holds, across
+    processes: publishes, ``set_aside`` and ``restore`` happen one after the
+    other. Readers take no lock: a generation, once published, never
+    changes. It is a sidecar in the staging directory; ``flock`` is
+    advisory and unreliable over NFS, so the reports directory must be
+    local, as the watchlist's lock already assumes.
+
+    ``timeout`` (seconds): give up with `PublishBusy` if it is not free by
+    then, for a caller that must not wait on a stalled holder (the review
+    console's tick, holding a web worker; review of 68dbc24, L-2). None,
+    the default and what every publisher uses: wait for it."""
+    lock = own_dir(report.parent / STAGING_DIR) / f"{_base(report)}.lock"
+    with sidecar_lock(lock, timeout=timeout, busy=f"{report.name}: a publish's lock"):
+        yield
+
+
+# One whole number in ASCII digits, as `write_count` writes it: "07", "٣", a
+# sign or a second line is not a count this engine wrote.
+_COUNT_RE = re.compile(r"(?:0|[1-9][0-9]*)\n?", re.ASCII)
+
+
+def read_count(path: Path) -> int | None:
+    """The whole number in the small file at ``path`` (a request counter, a
+    high-water mark), or None when there is no file. Never followed: a
+    symlink is ELOOP. Any other failure to read raises OSError, and content
+    that is not one whole number ValueError: neither is "no file"."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        raw = fh.read(64)
+    # latin-1 reads any byte; only ASCII digits match the pattern.
+    text = raw.decode("latin-1")
+    if not _COUNT_RE.fullmatch(text):
+        raise ValueError(f"{path} holds {raw[:20]!r}, not one whole number")
+    return int(text)
+
+
+def write_count(path: Path, n: int) -> None:
+    """``n`` at ``path``, written whole (`write_atomic`)."""
+    write_atomic(path, f"{n}\n")
 
 
 @dataclass
@@ -459,7 +524,7 @@ with contextlib.suppress(Exception):
     engine_commit()
 
 
-def _seal(staged: Staged, name: str, fence: int | None = None) -> None:
+def _seal(staged: Staged, name: str, fence: Fence | None = None) -> None:
     """A publish is one whole generation or nothing: both files must exist,
     and each is stamped with the rebuild's id (the report on its last line,
     the ledger in `generation_id`). A file already naming another generation
@@ -487,7 +552,7 @@ def _seal(staged: Staged, name: str, fence: int | None = None) -> None:
                                f"rebuild's {gid}; nothing published")
     doc["generation_id"] = gid
     if fence is not None:
-        doc["fence"] = fence
+        doc["fence"] = fence.number
     try:
         engine = engine_commit()
     except Exception as e:  # noqa: BLE001 - the stamp is metadata; never a reason not to publish
@@ -553,7 +618,7 @@ def _stamp(now: datetime | None) -> str:
 
 @contextmanager
 def replacing(report: Path, *, now: datetime | None = None,
-              timeout: float | None = None, fence: int | None = None) -> Iterator[Staged]:
+              timeout: float | None = None, fence: Fence | None = None) -> Iterator[Staged]:
     """Build a report's replacement off to the side, then publish it.
 
     Inside the block the caller builds into ``staged.report`` and
@@ -576,16 +641,22 @@ def replacing(report: Path, *, now: datetime | None = None,
     "running" for as long as the lock is held; review of 9d00328). Past it,
     `PublishBusy` and nothing published. None, the default: wait.
 
-    ``fence``: the number the workbench took when this run was asked for
-    (`workbench.fencing.request`), sealed into the ledger. Under the publish
-    lock, before the switch, it is compared with the live generation's
-    (`fence_of`): lower, and the generation is kept in the archive but not
-    made live, and `Superseded` is raised; equal or higher, or a live run
-    with none, publishes as usual. None (the journal, the auto track, the
-    CLI): no comparison, the publish as it always was.
+    ``fence``: the run's place in its ticker's requests (`Fence`; the
+    workbench's, `workbench.fencing.fence`), its number sealed into the
+    ledger. Under the publish lock and then the ticker's lock (`Fence`),
+    immediately before the switch, the number is compared with the
+    ticker's high-water mark and with the live generation's fence
+    (`fence_of`): below either, the generation is kept in the archive,
+    marked superseded, never made live, and `Superseded` is raised; equal or
+    higher, or neither stated, it publishes and raises the mark to its
+    number. A mark or live fence that cannot be read refuses the publish
+    (`NotPublished`, the generation set apart). The ticker's lock is waited
+    for at most ``timeout`` too. None (the journal, the auto track, the
+    CLI): no comparison and no mark, the publish as it always was.
     """
-    if fence is not None and fence < 0:
-        raise ValueError(f"{report.name}: fence {fence} is not a request number (0 or more)")
+    if fence is not None and fence.number < 0:
+        raise ValueError(f"{report.name}: fence {fence.number} is not a request number "
+                         "(0 or more)")
     gid = uuid.uuid4().hex
     work = own_dir(report.parent / STAGING_DIR) / gid
     work.mkdir(parents=True)
@@ -595,34 +666,48 @@ def replacing(report: Path, *, now: datetime | None = None,
     try:
         yield staged
         _seal(staged, report.name, fence)
-        with publish_lock(report, timeout=timeout):
+        with publish_lock(report, timeout=timeout), (
+                contextlib.nullcontext() if fence is None else
+                sidecar_lock(fence.lock, timeout=timeout,
+                             busy=f"{report.name}: the ticker's lock")):
             _publish(report, staged, work, now, fence)
     finally:
         shutil.rmtree(work, ignore_errors=True)  # gone already once published
 
 
 def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
-             fence: int | None = None) -> None:
-    """The publish; the caller holds ``publish_lock``. What it reports as
-    archived is read before the switch: nothing that can fail runs after
-    it but the directory's fsync (``_switch``). The live generation's fence
-    is read here, under the lock and immediately before the switch, so no
-    publish can come between the comparison and the switch it decides."""
+             fence: Fence | None = None) -> None:
+    """The publish; the caller holds ``publish_lock`` (and, fenced, the
+    ticker's lock). What it reports as archived is read before the switch:
+    nothing that can fail runs after it but the directory's fsync
+    (``_switch``) and, fenced, the mark's raise, which a failure undoes the
+    switch for. The fences are read here, under the locks and immediately
+    before the switch, so no publish can come between the comparison and
+    the switch it decides."""
     home = _home(report)
     home.mkdir(parents=True, exist_ok=True)
     _adopt(report, now)
     previous = current_generation(report)
     archived = [] if previous is None else [
         p for name in _names(_base(report)).values() if (p := previous / name).exists()]
-    held = fence_of(report, previous) if fence is not None and previous is not None else None
-    superseded = held is not None and fence is not None and fence < held
     gen = home / _name_next(report, _stamp(now), staged.generation_id)
+    try:
+        held = None if fence is None else _held_fence(report, previous, fence)
+    except NotPublished:
+        os.rename(work, gen)
+        _set_apart(gen)  # kept for diagnosis; never a run
+        raise
+    superseded = held is not None and fence is not None and fence.number < held
+    if superseded:
+        (work / SUPERSEDED_MARK).write_text(f"superseded: request {held} had published\n")
     os.rename(work, gen)
     try:
         _fsync(home)
         if not superseded:
             _link_live_names(report)
             _switch(report, gen, previous, f"publishing {gen.name}")
+            if fence is not None:
+                _raise_mark(report, gen, previous, fence)
     except PublishInDoubt:
         raise  # the new generation may be live: it stays where the pointer may name it
     except BaseException:
@@ -631,13 +716,57 @@ def _publish(report: Path, staged: Staged, work: Path, now: datetime | None,
     if superseded:
         # Kept whole in the archive, where `generations` lists it and
         # `restore` can name it; the live run is untouched.
-        assert previous is not None and fence is not None and held is not None
-        raise Superseded(report, gen, staged.generation_id, fence, previous,
-                         generation_of(previous / report.name), held)
+        assert fence is not None and held is not None
+        raise Superseded(report, gen, staged.generation_id, fence.number,
+                         None if previous is None else generation_of(previous / report.name),
+                         held)
     staged.archived.extend(archived)
     made = _RECORDING.get()
     if made is not None:
         made.append(Published(report, gen / report.name, staged.generation_id))
+
+
+def _held_fence(report: Path, previous: Path | None, fence: Fence) -> int | None:
+    """The fence a run must reach to publish: the higher of the ticker's
+    high-water mark and the live generation's own fence (None when neither
+    states one). The mark alone holds across days and restores (review of
+    2cbba1c: a run asked for before midnight published after it on a new
+    day's report, where nothing was live; a restore or an unfenced publish
+    took the live fence away); the live generation's covers a mark that is
+    missing (lost, or runs fenced before the mark existed). Either one that
+    cannot be read refuses the publish: a failed read is not "no fence"."""
+    try:
+        mark = read_count(fence.mark)
+    except (OSError, ValueError) as e:
+        why = errno.errorcode.get(e.errno, str(e.errno)) if isinstance(e, OSError) and e.errno \
+            else str(e)
+        raise NotPublished(f"{report.name}: the ticker's high-water mark unreadable ({why}: "
+                           f"{fence.mark}); nothing published, the live run is unchanged") from e
+    try:
+        live = None if previous is None else fence_of(report, previous)
+    except OSError as e:
+        why = errno.errorcode.get(e.errno, str(e.errno)) if e.errno else str(e)
+        raise NotPublished(f"{report.name}: live fence unreadable ({why}: {e.strerror or e}); "
+                           "nothing published, the live run is unchanged") from e
+    stated = [f for f in (mark, live) if f is not None]
+    return max(stated) if stated else None
+
+
+def _raise_mark(report: Path, gen: Path, previous: Path | None, fence: Fence) -> None:
+    """After the switch: the ticker's high-water mark raised to this run's
+    fence. Written as is: the run published only because its fence is at
+    least the mark (`_held_fence`, read under the same lock), so this never
+    lowers it. One that cannot be raised undoes the switch (`_switch_back`),
+    as a failed fsync does: a live run the mark does not cover could be
+    replaced by an older request on another day."""
+    try:
+        write_count(fence.mark, fence.number)
+    except OSError as e:
+        what = f"raising the high-water mark to {fence.number}"
+        _switch_back(report, gen, previous, what, e)
+        back = "no run is live, as before" if previous is None else f"{previous.name} is live again"
+        raise NotPublished(f"{report.name}: {what} failed ({type(e).__name__}: {e}); the switch "
+                           f"was undone: {back}") from e
 
 
 def fence_of(report: Path, gen: Path) -> int | None:
@@ -645,17 +774,21 @@ def fence_of(report: Path, gen: Path) -> int | None:
     its ledger's ``fence``, when that is a whole number of zero or more.
     None for a generation without one — published unfenced (the journal,
     the auto track, the CLI), from before fences, adopted plain files — and
-    for a ledger that is missing, unreadable, not JSON, a symlink (planted:
+    for a ledger that is missing, not JSON, a symlink (planted:
     never followed, as `read_live` refuses it), or that names anything
     else as its fence. None holds nothing back: a run is superseded only by
     a fence the live run states, never by one guessed at, which would leave
-    the ticker stuck behind an unreadable ledger."""
+    the ticker stuck behind an unreadable ledger.
+
+    A ledger that is there and cannot be READ (EMFILE, EIO, EACCES, ...)
+    raises OSError: that is not "no fence", and a fenced publish is refused
+    on it (review of 2cbba1c, M1)."""
     ledger = gen / _names(_base(report))["ledger"]
+    if ledger.is_symlink():
+        return None
     try:
-        if ledger.is_symlink():
-            return None
         doc = json.loads(ledger.read_text())
-    except (OSError, ValueError):
+    except (FileNotFoundError, ValueError):
         return None
     fence = doc.get("fence") if isinstance(doc, dict) else None
     if isinstance(fence, bool) or not isinstance(fence, int) or fence < 0:

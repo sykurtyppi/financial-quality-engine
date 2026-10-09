@@ -220,6 +220,15 @@ async def _guard(request: Request, call_next):
     return response
 
 
+@app.exception_handler(Exception)
+async def _server_error(request: Request, exc: Exception) -> PlainTextResponse:
+    """An unhandled exception's 500. Starlette answers it from its outermost
+    error middleware, outside `_guard`, so the frame headers are set here
+    (review of 2cbba1c, N1). Nothing of the exception is said; the server
+    log has its traceback (the middleware raises it on after this)."""
+    return PlainTextResponse("Internal Server Error", status_code=500, headers=FRAME_HEADERS)
+
+
 def _admit(request: Request) -> Response | None:
     """Why ``request`` is refused, as the response to send, or None. Every
     request: from this machine (review of 68dbc24, M-1), to a served Host
