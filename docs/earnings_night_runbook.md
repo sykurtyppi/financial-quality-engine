@@ -188,7 +188,10 @@ python scripts/ui.py          # then http://127.0.0.1:8000/review
 ```
 
 `scripts/ui.py` starts uvicorn on 127.0.0.1:8000 (`--port`, `--no-browser`)
-with `--forwarded-allow-ips 127.0.0.1`, the same as starting it by hand:
+with `--forwarded-allow-ips 127.0.0.1`, the same as starting it by hand. Its
+home page (the workbench) builds reports into `reports/workbench/`, never
+over a case's report in `reports/`, so a workbench run never disturbs a case
+in flight; the console reviews the journal's runs only:
 
 ```
 .venv/bin/uvicorn app.web:app --forwarded-allow-ips 127.0.0.1   # then http://127.0.0.1:8000/review

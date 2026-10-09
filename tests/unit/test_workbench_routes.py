@@ -98,9 +98,12 @@ def fake_build(monkeypatch):
     through `replacing`, as the real build publishes. Returns the calls."""
     calls: list[dict] = []
 
-    def build(ticker, with_docs=True, report_day=None, fresh=False, **kw):
+    def build(ticker, with_docs=True, report_day=None, fresh=False, out_dir=None, **kw):
         calls.append({"ticker": ticker, "fresh": fresh})
-        out = reporting.report_path(ticker, report_day)
+        # Where the real build writes: ``out_dir`` when given (a workbench
+        # run's ``reports/workbench/``), else the journal's ``reports/``.
+        day = report_day or date.today().isoformat()
+        out = (out_dir or reporting.REPORTS) / f"{store.safe_ticker(ticker)}_{day}.md"
         out.parent.mkdir(parents=True, exist_ok=True)
         with replacing(out) as staged:
             staged.report.write_text(CARD.format(t=ticker.upper(), day=date.today(), n=len(calls)))
@@ -144,6 +147,11 @@ def _wait(ticker: str) -> jobs.Job:
     done = jobs.wait(job.id, timeout=60)
     assert done is not None and not done.active, done
     return done
+
+
+def _workbench(ticker: str, day: str | None = None) -> Path:
+    """A workbench run's live name: ``reports/workbench/<T>_<day>.md``."""
+    return reporting.REPORTS / "workbench" / f"{ticker}_{day or date.today().isoformat()}.md"
 
 
 def _files(root: Path) -> set[Path]:
@@ -250,8 +258,10 @@ def test_run_then_the_card_appendix_and_history(client, fake_build):
     # Each flag is its own list item, not a run-on paragraph.
     assert "<li>Elevated concern: leverage_change (FY2027Q1)</li>" in card
     assert "- Elevated concern" not in card
-    day = date.today().isoformat()
-    assert f'href="/review/KO?date={day}"' in r.text
+    # Not linked to the review console: it reviews the journal's runs, and
+    # this run is the workbench's (`reports/workbench/`).
+    assert "Open in review console" not in r.text and 'href="/review/KO' not in r.text
+    assert "reports/workbench/" in r.text
     assert done.generation_id in r.text
     history = r.text.split('id="history"', 1)[1]
     assert len(re.findall(r'class="run-row', history)) == 1
@@ -334,7 +344,7 @@ def _price_form(**over) -> dict:
 
 
 def test_a_valid_price_is_written_and_starts_a_run(client, env, fake_build):
-    r = client.post("/t/KO/price", data=_price_form(currency="usd"))
+    r = client.post("/t/KO/price", data=_price_form())
     assert r.status_code == 303 and r.headers["location"] == "/t/KO"
     path = observation_path(env / "journal", "KO")
     doc = json.loads(path.read_text())
@@ -358,7 +368,7 @@ def test_a_price_recorded_during_a_run_gets_a_run_of_its_own(client, env, monkey
         if len(seen) == 1:
             entered.set()
             gate.wait(10)
-        return publish(ticker, with_docs=with_docs, report_day=report_day, fresh=fresh)
+        return publish(ticker, with_docs=with_docs, report_day=report_day, fresh=fresh, **kw)
 
     monkeypatch.setattr(reporting, "build_report", build)
     client.post("/t/KO/run", data={"fresh": "0"})
@@ -611,8 +621,9 @@ def test_the_real_offline_build_end_to_end_with_a_price(client, sec, env):
     assert SECTION_TITLE not in page.split("<details", 1)[0]
     # No observation: the price box says so, and links to no section.
     assert "In the live run: not produced" in page and 'href="#valuation"' not in page
-    live = read_live(reporting.report_path("KO"))
+    live = read_live(_workbench("KO"))
     assert live is not None and live.generation_id == first.generation_id
+    assert not reporting.report_path("KO").exists()  # never at the journal's live name
 
     r = client.post("/t/KO/price", data=_price_form())
     assert r.status_code == 303, r.text
@@ -624,7 +635,7 @@ def test_the_real_offline_build_end_to_end_with_a_price(client, sec, env):
     assert SECTION_TITLE in appendix and SECTION_TITLE not in card
     # The price box links to it, and the heading carries the id it names.
     assert 'href="#valuation"' in appendix and f'<h2 id="valuation">{SECTION_TITLE}</h2>' in appendix
-    doc = LedgerDocument.model_validate_json(ledger_path(reporting.report_path("KO")).read_text())
+    doc = LedgerDocument.model_validate_json(ledger_path(_workbench("KO")).read_text())
     assert doc.valuation is not None and doc.valuation.state == "produced"
     history = page.split('id="history"', 1)[1]
     assert len(re.findall(r'class="run-row', history)) == 2
@@ -636,5 +647,271 @@ def test_the_real_offline_build_end_to_end_with_a_price(client, sec, env):
     client.post("/t/KO/run", data={"fresh": "1"})
     third = _wait("KO")
     assert third.state == jobs.FAILED and third.error.startswith("SEC fetch failed")
-    assert read_live(reporting.report_path("KO")).generation_id == second.generation_id
+    assert read_live(_workbench("KO")).generation_id == second.generation_id
     assert "SEC fetch failed" in client.get("/t/KO").text
+
+
+# --- fix round 1 (independent review of 9d00328) ---------------------------------------
+
+
+def _held_build(monkeypatch, publish):
+    """`build_report` whose first call waits for ``gate``; then publishes."""
+    import threading
+
+    gate, entered = threading.Event(), threading.Event()
+    seen: list[bool] = []
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False, **kw):
+        seen.append(fresh)
+        if len(seen) == 1:
+            entered.set()
+            gate.wait(10)
+        return publish(ticker, with_docs=with_docs, report_day=report_day, fresh=fresh, **kw)
+
+    monkeypatch.setattr(reporting, "build_report", build)
+    return gate, entered, seen
+
+
+def test_refresh_during_a_cached_run_is_queued_and_said(client, monkeypatch, fake_build):
+    """Reviewer's jobsrepro.py #2, through the page: the status said the
+    cached run and the refresh was dropped. It is queued, and said."""
+    gate, entered, seen = _held_build(monkeypatch, reporting.build_report)
+    client.post("/t/KO/run", data={"fresh": "0"})
+    assert entered.wait(10)
+    frag = client.post("/t/KO/run", data={"fresh": "1"}, headers={"HX-Request": "true"})
+    assert frag.status_code == 200 and 'data-state="running"' in frag.text
+    assert "a refresh from SEC follows" in frag.text
+    first = jobs.latest("KO")
+    gate.set()
+    jobs.wait(first.id, timeout=30)
+    second = _wait("KO")
+    assert second.id != first.id and second.fresh and seen == [False, True]
+    assert "Refreshing from SEC" not in client.get("/t/KO/status").text
+
+
+def test_a_fresh_run_in_flight_is_said_as_refreshing(client, monkeypatch, fake_build):
+    gate, entered, _ = _held_build(monkeypatch, reporting.build_report)
+    client.post("/t/KO/run", data={"fresh": "1"})
+    assert entered.wait(10)
+    frag = client.get("/t/KO/status").text
+    assert "Refreshing from SEC" in frag and "follows" not in frag
+    gate.set()
+    _wait("KO")
+
+
+def test_a_stalled_run_is_said_and_run_starts_another(client, monkeypatch, fake_build):
+    gate, entered, seen = _held_build(monkeypatch, reporting.build_report)
+    client.post("/t/KO/run", data={"fresh": "0"})
+    assert entered.wait(10)
+    first = jobs.latest("KO")
+    later = (first.started_at or first.created_at) + timedelta(seconds=jobs.STALL_AFTER_S + 1)
+    monkeypatch.setattr(jobs, "_now", lambda: later)
+    frag = client.get("/t/KO/status").text
+    assert 'data-state="stalled"' in frag and "stalled" in frag.lower()
+    assert "Run it again" in frag
+    page = client.get("/t/KO").text
+    assert re.search(r'<form[^>]*action="/t/KO/run"', page)
+    assert "Running now" not in client.get("/").text   # not a run in flight any more
+    client.post("/t/KO/run", data={"fresh": "0"})
+    second = jobs.latest("KO")
+    assert second.id != first.id
+    jobs.wait(second.id, timeout=30)
+    gate.set()
+    jobs.wait(first.id, timeout=30)
+    assert jobs.REGISTRY.get(first.id).state == jobs.STALLED
+    assert seen == [False, False]
+
+
+def test_a_failed_runs_banner_goes_once_a_newer_run_is_published(client, monkeypatch, env):
+    """The banner said the last run failed for as long as the server held
+    that run, even with a newer run published since (another workbench
+    process; an abandoned run that finished after all)."""
+    def build(ticker, with_docs=True, report_day=None, fresh=False, **kw):
+        raise sec_client.SecClientError("HTTP 503")
+
+    monkeypatch.setattr(reporting, "build_report", build)
+    older = _workbench("KO")
+    older.parent.mkdir(parents=True)
+    with replacing(older, now=datetime.now(UTC) - timedelta(hours=2)) as staged:
+        staged.report.write_text(CARD.format(t="KO", day=date.today(), n=0))
+        staged.ledger.write_text("{}")
+    client.post("/t/KO/run", data={"fresh": "1"})
+    failed = _wait("KO")
+    assert failed.state == jobs.FAILED
+    # A run published before the failed one started: the failure stands.
+    assert "The last run failed" in client.get("/t/KO/status").text
+    newer = _workbench("KO", "2026-01-02")  # any day of the ticker counts
+    # Stamped a second past the failure (a stamp in its own second is not
+    # counted: it may be from before it).
+    with replacing(newer, now=failed.finished_at + timedelta(seconds=1)) as staged:
+        staged.report.write_text(CARD.format(t="KO", day=date.today(), n=9))
+        staged.ledger.write_text("{}")
+    frag = client.get("/t/KO/status").text
+    assert "The last run failed" not in frag and 'data-state="failed"' in frag
+    assert "The last run failed" not in client.get("/t/KO").text
+
+
+def test_the_poller_says_a_restarted_server_instead_of_stopping_silently(client):
+    """A run's status read back as "idle" (the server restarted and forgot
+    it) used to stop the poller with the spinner gone and nothing said."""
+    js = client.get("/static/app.js").text
+    assert 'now === "idle"' in js and "server restarted" in js and "reload" in js.lower()
+    assert '"stalled"' in js
+
+
+@pytest.mark.parametrize("typed", ["61.20", "0", "1700000000", "-1", "1e9"])
+def test_an_epoch_is_not_a_time_the_form_accepts(client, env, fake_build, typed):
+    """Reviewer's pricerepro.py: the model read "1700000000" (and "0", and
+    the price typed into the wrong box) as Unix seconds and recorded
+    1970-01-01 or 2023-11-14. The form's time is parsed by the function
+    `market.py record --at` uses: an ISO-8601 time with its offset."""
+    before = _files(env)
+    r = client.post("/t/KO/price", data=_price_form(observed_at=typed))
+    assert r.status_code == 400 and "Price not recorded" in r.text
+    assert f"observed_at {typed!r}" in r.text.replace("&#39;", "'")
+    assert _files(env) == before and fake_build == []
+
+
+# (An empty box is the form's default, USD, as an omitted --currency is the
+# CLI's: a form cannot tell the two apart.)
+@pytest.mark.parametrize("currency", ["usd", " EUR ", "Usd", "US$", "EURO"])
+def test_the_currency_is_refused_as_the_cli_refuses_it(client, env, fake_build, currency):
+    r = client.post("/t/KO/price", data=_price_form(currency=currency))
+    assert r.status_code == 400 and "currency" in r.text
+    assert not observation_path(env / "journal", "KO").exists()
+
+
+def _cli_record(env, monkeypatch, form: dict) -> int:
+    import contextlib
+    import io
+
+    from scripts import market
+
+    monkeypatch.setattr(market, "_journal", lambda: env / "journal")
+    argv = ["record", "KO", "--price", form["price"], "--at", form["observed_at"],
+            "--source", form["source"], "--currency", form["currency"]]
+    if form.get("note"):
+        argv += ["--note", form["note"]]
+    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+        return market.main(argv)
+
+
+@pytest.mark.parametrize("over", [
+    {}, {"observed_at": "0"}, {"observed_at": "1700000000"}, {"observed_at": "61.20"},
+    {"observed_at": "2026-10-01T10:00"}, {"observed_at": "2026-10-01"},
+    {"observed_at": "2026-10-01T10:00:00Z"}, {"observed_at": "2026-10-01T10:00-04:00"},
+    {"observed_at": (datetime.now(UTC) + timedelta(days=1)).isoformat()},
+    {"currency": "usd"}, {"currency": " EUR "}, {"currency": "EUR"}, {"currency": "US$"},
+    {"source": "a b"}, {"note": "a\u0085b"}, {"source": "x" * 201}, {"price": "nan"},
+])
+def test_the_form_and_the_cli_accept_and_refuse_the_same(client, env, fake_build, monkeypatch,
+                                                         over):
+    form = _price_form(**over)
+    path = observation_path(env / "journal", "KO")
+    r = client.post("/t/KO/price", data=form)
+    web = path.exists()
+    stored = json.loads(path.read_text())["observed_at"] if web else None
+    path.unlink(missing_ok=True)
+    rc = _cli_record(env, monkeypatch, form)
+    cli = json.loads(path.read_text())["observed_at"] if rc == 0 else None
+    assert (r.status_code == 303) == web == (rc == 0), (r.status_code, rc)
+    assert stored == cli
+    if web:
+        _wait("KO")
+
+
+def test_watchlist_add_with_an_odd_sec_payload_is_a_message(client, monkeypatch):
+    """Reviewer's watchrepro.py: `_arm` raises `PollerError` on a payload
+    of an unexpected shape; it was a 500."""
+    for payload in ({"filings": {"recent": {"form": ["8-K"], "items": None}}}, []):
+        monkeypatch.setattr(watching, "_submissions", lambda t, p=payload: p)
+        r = client.post("/watchlist", data={"ticker": "PEP", "action": "add"})
+        assert r.status_code == 303 and "error=" in r.headers["location"]
+        page = client.get(r.headers["location"]).text
+        assert "filing index" in page and "unexpected submissions payload shape" in page
+    assert wl.load() == []
+
+
+def test_watchlist_changes_with_the_lock_in_the_way_are_a_message(client, env, monkeypatch):
+    """A link at the watchlist's lock (O_NOFOLLOW refuses it, ELOOP): a
+    remove, and an add, were 500s."""
+    wl.add_entry({"ticker": "KO", "print_at": "2026-10-21T11:00:00+00:00"})
+    lock = wl.WATCHLIST.with_name(wl.WATCHLIST.name + ".lock")
+    lock.unlink(missing_ok=True)
+    lock.symlink_to(env / "elsewhere")
+    r = client.post("/watchlist", data={"ticker": "KO", "action": "remove", "back": "ticker"})
+    assert r.status_code == 303 and r.headers["location"].startswith("/t/KO?error=")
+    assert "watchlist+could+not+be+changed" in r.headers["location"]
+    monkeypatch.setattr(watching, "_submissions", lambda t: _armable_submissions(date.today()))
+    r = client.post("/watchlist", data={"ticker": "PEP", "action": "add"})
+    assert r.status_code == 303 and "watchlist+could+not+be+changed" in r.headers["location"]
+    assert [w.ticker for w in wl.load()] == ["KO"] and not (env / "elsewhere").exists()
+
+
+def test_a_page_view_creates_no_file(client, env, monkeypatch):
+    """Reviewer's getside.py: the setup check created (and removed) a probe
+    file in the reports directory on every GET of the home page."""
+    import tempfile
+
+    def no_files(*a, **k):
+        raise AssertionError("a GET created a file")
+
+    monkeypatch.setattr(tempfile, "mkstemp", no_files)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", no_files)
+    (env / "reports").mkdir()
+    before = _files(env)
+    for path in ("/", "/t/KO", "/t/KO/status", "/journal"):
+        assert client.get(path).status_code == 200, path
+    assert _files(env) == before
+
+
+def test_a_symlink_inside_a_generation_is_a_problem_line(client, env, fake_build):
+    client.post("/t/KO/run", data={"fresh": "0"})
+    done = _wait("KO")
+    live = read_live(_workbench("KO"))
+    gen = live.report.parent
+    os.chmod(gen, 0o755)
+    outside = env / "outside.md"
+    outside.write_text(f"# Decision Card — KO\nsecret\n- Generation: {done.generation_id}\n")
+    live.report.unlink()
+    live.report.symlink_to(outside)
+    r = client.get("/t/KO")
+    assert r.status_code == 200 and "secret" not in r.text
+    assert "cannot be read" in r.text and "symlink" in r.text
+    assert client.get(f"/t/KO/runs/{done.generation_id}").status_code == 500
+
+
+def test_a_real_build_waits_for_the_publish_lock_only_so_long(client, sec, env, monkeypatch):
+    """The real build, offline: another publisher holds the workbench
+    report's lock past `review.PUBLISH_WAIT_S`, and the run fails as busy
+    (rather than waiting for as long as the lock is held), publishing
+    nothing."""
+    import threading
+
+    from app.services.journal import review
+    from app.services.reporting.report_files import publish_lock
+
+    monkeypatch.setattr(review, "PUBLISH_WAIT_S", 0.5)
+    report = _workbench("KO")
+    report.parent.mkdir(parents=True)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with publish_lock(report):
+            held.set()
+            release.wait(60)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert held.wait(10)
+    try:
+        client.post("/t/KO/run", data={"fresh": "0"})
+        job = jobs.latest("KO")
+        done = jobs.wait(job.id, timeout=45)
+    finally:
+        release.set()
+        holder.join(10)
+    assert done.state == jobs.FAILED, done
+    assert done.error == "another run is publishing this report; try again"
+    assert read_live(report) is None and not reporting.report_path("KO").exists()
+    assert "another run is publishing" in client.get("/t/KO/status").text

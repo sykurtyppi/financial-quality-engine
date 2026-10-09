@@ -16,7 +16,6 @@
       <input type="hidden" name="fresh" value="1">
       <button class="btn js-busy" type="submit" data-loading-text="Starting…" title="Fetch everything from SEC again, bypassing the local cache">Refresh from SEC</button>
     </form>
-    <a class="btn ghost small" href="/review/{{ v.ticker }}?date={{ run.day }}">Open in review console</a>
     {% endif %}
     {% if not v.watch_error %}
     <form method="post" action="/watchlist">
@@ -34,6 +33,7 @@
   </div>
 </div>
 
+{% if v.journal_case %}<p class="note journal-case">A journal case is open for {{ v.ticker }} today ({{ v.journal_case }}): this card is the workbench's, not the case's. The case's own report is built by <code>scripts/journal.py report</code>; if you read this card before writing the thesis, say so in its <code>--contamination</code>.</p>{% endif %}
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 {% if msg %}<div class="ok-msg">{{ msg }}</div>{% endif %}
 {% if v.watch_error %}<div class="err">{{ v.watch_error }}</div>{% endif %}
@@ -47,7 +47,7 @@
     {% else %}
     <section class="panel">
       <h3>No report yet</h3>
-      <p style="margin-top:0">Run builds {{ v.ticker }}'s report from SEC data — fundamentals, the filing index and recent documents — in about 10–20 seconds. It is the same build as <code>scripts/generate_report.py {{ v.ticker }}</code>, published to <code>reports/</code>.</p>
+      <p style="margin-top:0">Run builds {{ v.ticker }}'s report from SEC data — fundamentals, the filing index and recent documents — in about 10–20 seconds. It is the same build as <code>scripts/generate_report.py {{ v.ticker }}</code>, published to the workbench's own folder, <code>reports/workbench/</code>: never over a journal case's report, nor the watch's.</p>
       <form method="post" action="/t/{{ v.ticker }}/run">
         <input type="hidden" name="fresh" value="0">
         <button class="btn js-busy" type="submit" data-loading-text="Starting…">Run</button>
@@ -97,7 +97,7 @@
     {% if (run and run.audit) or v.briefs %}
     <section class="panel">
       <h3>Audit and briefs <span class="note">(read-only)</span></h3>
-      {% if run and run.audit %}<p style="margin:0 0 8px">Audit of this run: <a href="/review/{{ v.ticker }}?date={{ run.day }}">open in the review console</a><br><code>{{ run.audit }}</code></p>{% endif %}
+      {% if run and run.audit %}<p style="margin:0 0 8px">Audit of this run: <code>{{ run.audit }}</code></p>{% endif %}
       {% for b in v.briefs %}<p style="margin:0 0 6px">Brief: <code>{{ b }}</code></p>{% endfor %}
     </section>
     {% endif %}

@@ -72,11 +72,18 @@ def _ledger(ticker: str, day: str, *, valuation: str | None = None) -> str:
     return json.dumps(doc)
 
 
+def _wb() -> Path:
+    """Where the workbench's runs are published, and the only folder its
+    views read."""
+    return reporting.REPORTS / "workbench"
+
+
 def publish(ticker: str, day: str, text: str | None = None, *, ledger: str | None = None,
             now: datetime | None = None) -> report_files.Published:
-    """One run published as `build_report` publishes it: staged, sealed,
-    and swapped live (a generation of its own)."""
-    out = reporting.REPORTS / f"{ticker}_{day}.md"
+    """One workbench run published as `build_report` publishes it (into
+    ``reports/workbench/``): staged, sealed, and swapped live (a generation
+    of its own)."""
+    out = _wb() / f"{ticker}_{day}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     with report_files.recording() as made, replacing(out, now=now) as staged:
         staged.report.write_text(text if text is not None else CARD.format(t=ticker, day=day))
@@ -278,8 +285,8 @@ def test_recent_runs_across_tickers_newest_first(isolated):
     publish("KO", "2026-10-01", now=t0)
     publish("CRM", "2026-10-02", now=t0 + timedelta(days=1))
     publish("KO", "2026-10-03", now=t0 + timedelta(days=2))
-    (reporting.REPORTS / "KO_2026-10-03.replay.md").write_text("a replay is never the latest")
-    (reporting.REPORTS / "notes.md").write_text("not a report")
+    (_wb() / "KO_2026-10-03.replay.md").write_text("a replay is never the latest")
+    (_wb() / "notes.md").write_text("not a report")
     runs = views.recent_runs()
     assert [(r.ref.ticker, r.ref.day) for r in runs] == [
         ("KO", "2026-10-03"), ("CRM", "2026-10-02"), ("KO", "2026-10-01")]
@@ -311,11 +318,38 @@ def test_setup_problems_name_an_unwritable_reports_dir(monkeypatch, isolated):
     reporting.REPORTS.parent.mkdir(parents=True, exist_ok=True)
     reporting.REPORTS.write_text("a file, not a directory")
     (p,) = setup.setup_problems()
-    assert str(reporting.REPORTS) in p and "cannot be written" in p
+    # The folder the workbench publishes to, probed at its nearest existing
+    # ancestor (where the first run creates it).
+    assert str(_wb()) in p and "cannot be written" in p
+    assert f"{reporting.REPORTS} is not a directory" in p
     # Asking writes nothing behind.
     reporting.REPORTS.unlink()
     reporting.REPORTS.mkdir()
     assert setup.setup_problems() == [] and list(reporting.REPORTS.iterdir()) == []
+
+
+def test_setup_asks_the_os_and_writes_nothing(monkeypatch, isolated):
+    """Reviewer's getside.py: the probe was a file created and removed on
+    every GET of the home page. It is `os.access` on the nearest existing
+    ancestor now (which a read-only mount answers too: EROFS)."""
+    import tempfile
+
+    monkeypatch.setenv("EDGAR_IDENTITY", "Jane Doe jane@example.com")
+    monkeypatch.setattr(tempfile, "mkstemp", lambda *a, **k: pytest.fail("a probe file"))
+    reporting.REPORTS.mkdir(parents=True)
+    asked = []
+
+    def access(path, mode, **kw):
+        asked.append((Path(path), mode))
+        return False
+
+    monkeypatch.setattr(setup.os, "access", access)
+    (p,) = setup.setup_problems()
+    assert "cannot be written" in p and "permission" in p.lower()
+    assert asked == [(reporting.REPORTS, os.W_OK | os.X_OK)]
+    monkeypatch.setattr(setup.os, "access", lambda path, mode, **kw: True)
+    assert setup.setup_problems() == []
+    assert list(reporting.REPORTS.iterdir()) == []
 
 
 def test_read_live_is_the_only_reader_of_a_live_run(monkeypatch):
@@ -342,7 +376,7 @@ def test_a_reports_folder_that_cannot_be_listed_is_no_runs(monkeypatch):
     real = Path.iterdir
 
     def iterdir(self):
-        if self == reporting.REPORTS:
+        if self == _wb():
             raise PermissionError(13, "Permission denied")
         return real(self)
 
@@ -389,3 +423,56 @@ def test_stale_boundaries():
     future = now + timedelta(days=30)
     assert views.stale_reason(future, now - timedelta(days=7), now) is None
     assert views.stale_reason(future, now - timedelta(days=7, seconds=1), now)
+
+
+# --- fix round 1: the workbench's own namespace -----------------------------------------
+
+
+def test_the_views_read_only_the_workbench_folder(isolated):
+    """The journal's runs (``reports/``) and the auto track's
+    (``reports/auto/``) are not the workbench's: its pages list, read and
+    count only ``reports/workbench/`` (independent review of 9d00328, H1)."""
+    for folder in (reporting.REPORTS, reporting.REPORTS / "auto"):
+        out = folder / "KO_2026-10-08.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with replacing(out) as staged:
+            staged.report.write_text(CARD.format(t="KO", day="2026-10-08"))
+            staged.ledger.write_text(_ledger("KO", "2026-10-08"))
+    v = views.ticker_view("KO")
+    assert v.latest is None and v.runs == [] and v.problems == []
+    assert views.recent_runs() == [] and views.past_run("KO", "0" * 32) is None
+    made = publish("KO", "2026-10-09")
+    v = views.ticker_view("KO")
+    assert [r.day for r in v.runs] == ["2026-10-09"]
+    assert v.latest.generation_id == made.generation_id
+    assert v.latest.ref.report.is_relative_to(_wb())
+    assert [r.ref.day for r in views.recent_runs()] == ["2026-10-09"]
+    assert views.reports_dir() == _wb()
+
+
+def test_the_newest_workbench_run_of_a_ticker(isolated):
+    assert views.newest_run("KO") is None
+    t0 = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    publish("KO", "2026-10-01", now=t0)
+    newest = publish("KO", "2026-10-02", now=t0 + timedelta(days=1))
+    publish("CRM", "2026-10-03", now=t0 + timedelta(days=2))
+    ref = views.newest_run("KO")
+    assert ref.day == "2026-10-02" and ref.generation_id == newest.generation_id
+    assert views.newest_run("ko").ticker == "KO"
+
+
+def test_published_since_counts_only_a_later_second(isolated):
+    """What hides a failed run's banner. A generation's stamp has whole
+    seconds: one stamped in the second of ``when`` may be from before it,
+    so it is not counted (a failure stays said rather than hidden)."""
+    t0 = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    assert views.published_since("KO", t0) is False
+    publish("KO", "2026-10-09", now=t0)
+    assert views.published_since("KO", t0) is False
+    assert views.published_since("KO", t0.replace(microsecond=999_999)) is False
+    assert views.published_since("KO", t0 - timedelta(microseconds=1)) is True
+    # An older day's later publish counts: any kept run of the ticker.
+    publish("KO", "2026-09-01", now=t0 + timedelta(seconds=5))
+    assert views.published_since("KO", t0 + timedelta(seconds=4, microseconds=1)) is True
+    assert views.published_since("KO", t0 + timedelta(seconds=5)) is False
+    assert views.published_since("CRM", t0 - timedelta(days=9)) is False

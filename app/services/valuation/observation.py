@@ -213,6 +213,26 @@ class MarketObservation(BaseModel):
         return self.age_days(on) > STALE_AFTER_DAYS
 
 
+def parse_observed_at(text: str, *, name: str = "observed_at") -> datetime:
+    """When a price was observed, as the operator typed it: an ISO-8601
+    time with its UTC offset. A naive time is refused, not assumed UTC.
+    ``name`` is what the operator typed it into (``--at`` on the CLI).
+
+    The one parser of a typed time, for `market.py record --at` and the
+    workbench's price form alike (independent review of 9d00328): the form
+    handed the text to the model, whose datetime coercion also reads a
+    bare number as Unix seconds, so "0", "1700000000", or the price typed
+    into the time box, recorded 1970 or 2023 where the CLI refused them."""
+    try:
+        at = datetime.fromisoformat(text)
+    except ValueError as e:
+        raise ValueError(f"{name} {text!r}: {e}") from None
+    if at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError(f"{name} {text!r} has no UTC offset: write the time as observed, with "
+                         "its offset (e.g. 2026-11-18T16:00:00-05:00)")
+    return at
+
+
 def eastern_today(now: datetime | None = None) -> date:
     """The day an age is counted on: `now` (the clock unless given) on
     EDGAR's calendar. A report's `generated_on` is the host's local date —

@@ -46,6 +46,7 @@ from app.services.valuation.observation import (
     MarketObservation,
     eastern_today,
     find_observation,
+    parse_observed_at,
     remove_observation,
     write_observation,
 )
@@ -645,8 +646,11 @@ def review_export(request: Request, ticker: str, date: str | None = None,
 
 # --- the workbench (r36): a ticker in, a decision card out ------------------------------
 # Everything it writes goes through the CLI's own code: a run is
-# `reporting.build_report` (`workbench.jobs`), a price is the valuation
-# module's validated writer, a watchlist add is `scripts/watch.py`'s `_arm`.
+# `reporting.build_report` (`workbench.jobs`) into ``reports/workbench/``,
+# never a journal case's live name; a price is the valuation module's
+# validated writer, parsed as `market.py record` parses it; a watchlist add
+# is `scripts/watch.py`'s `_arm`. Its runs are not the review console's
+# (`/review` reviews the journal's), so a workbench card links to none.
 # Every POST below is refused to another site's page by `_guard`, like the
 # journal's.
 
@@ -756,13 +760,29 @@ def _price_form(**typed: str) -> dict:
     return form
 
 
+def _job_ctx(t: str) -> dict:
+    """The run-status box's context: the ticker's newest run; the run queued
+    to follow it (True when that one is fresh); and whether a run was
+    published since a failed run ended, which makes its failure old news
+    (another process published, or an abandoned run ended after all)."""
+    job = jobs.latest(t)
+    superseded = False
+    if job is not None and job.state == jobs.FAILED:
+        try:
+            superseded = views.published_since(t, job.finished_at or job.created_at)
+        except (OSError, ValueError):
+            superseded = False
+    return {"job": job, "t": t, "follow_up": jobs.follow_up(t), "superseded": superseded,
+            "stall_minutes": jobs.STALL_AFTER_S // 60}
+
+
 def _ticker_page(request: Request, t: str, *, error: str | None = None,
                  msg: str | None = None, status: int = 200,
                  form: dict | None = None) -> HTMLResponse:
     v = views.ticker_view(t)
-    ctx: dict = {"v": v, "t": t, "job": jobs.latest(t), "error": error, "msg": msg,
+    ctx: dict = {"v": v, "error": error, "msg": msg,
                  "form": form or _price_form(), "run": None, "card_html": None,
-                 "appendix_html": None, "obs_age": None, "obs_stale": False}
+                 "appendix_html": None, "obs_age": None, "obs_stale": False, **_job_ctx(t)}
     if v.latest is not None:
         ctx.update(_run_html(v.latest))
     if v.observation is not None:
@@ -783,8 +803,7 @@ def ticker_page(request: Request, ticker: str, error: str | None = None, msg: st
 
 
 def _status(request: Request, t: str) -> HTMLResponse:
-    return templates.TemplateResponse(request, "_job_status.html",
-                                      {"job": jobs.latest(t), "t": t})
+    return templates.TemplateResponse(request, "_job_status.html", _job_ctx(t))
 
 
 @app.post("/t/{ticker}/run")
@@ -793,7 +812,8 @@ def ticker_run(request: Request, ticker: str, fresh: str = Form("0")):
     if t is None:
         return _home(request, error=_not_a_ticker(ticker), status=400)
     # "Refresh from SEC" bypasses the SEC cache (a filing-night fetch);
-    # "Run" uses it, so a repeat view is fast.
+    # "Run" uses it, so a repeat view is fast. A refresh pressed while a
+    # cached run is in flight follows it (`jobs.Registry.start`).
     jobs.start(t, fresh=fresh == "1")
     if request.headers.get("hx-request"):
         return _status(request, t)
@@ -857,19 +877,28 @@ def ticker_price(request: Request, ticker: str, price: str = Form(""),
     except (OSError, ValueError):
         kept = None
     try:
+        # The time is parsed as `market.py record --at` parses it
+        # (`parse_observed_at`): an ISO-8601 time with its offset. Handed
+        # to the model as text, a bare number was read as Unix seconds
+        # (review of 9d00328).
+        at = parse_observed_at(observed_at.strip())
         # Validated by the model `market.py record` builds, from the text as
-        # typed: a non-finite or non-positive price, a time without an
-        # offset or after now, control characters in any text, a currency
-        # that is not three capitals are each refused there, not here.
+        # typed: a non-finite or non-positive price, a time after now,
+        # control characters in any text, a currency that is not three
+        # capitals are each refused there, not here. The currency is the
+        # CLI's too: as typed, never upper-cased or trimmed into one.
         obs = MarketObservation.model_validate({
-            "ticker": t, "price": price.strip(), "currency": currency.strip().upper(),
-            "observed_at": observed_at.strip(), "source": source, "note": note or None,
+            "ticker": t, "price": price.strip(), "currency": currency,
+            "observed_at": at, "source": source, "note": note or None,
             "recorded_at": datetime.now(UTC),
             "assumptions": kept.observation.assumptions if kept else None,
             "scenarios": kept.observation.scenarios if kept else (),
         })
     except ValidationError as e:
         return _ticker_page(request, t, error=f"Price not recorded: {_invalid(e)}",
+                            status=400, form=_price_form(**typed))
+    except ValueError as e:
+        return _ticker_page(request, t, error=f"Price not recorded: {e}",
                             status=400, form=_price_form(**typed))
     try:
         write_observation(journal, obs)

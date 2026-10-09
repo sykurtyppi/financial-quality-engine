@@ -1,7 +1,12 @@
 """What the workbench pages show, read from the files a run publishes.
 
-Read-only. A ticker's runs are its reports' generations
-(``reports/.generations/<T>_<day>/<stamp>_<seq>_<id>/``), listed by
+Read-only, and only the workbench's own runs: they are published under
+``reports/workbench/`` (`reports_dir`), never at the journal's live names in
+``reports/`` nor the auto track's in ``reports/auto/`` (independent review
+of 9d00328, H1+H2: a workbench run published over a journal case pending
+its audit, and replaced an audited case's live run in the review console).
+A ticker's runs are its reports' generations
+(``reports/workbench/.generations/<T>_<day>/<stamp>_<seq>_<id>/``), listed by
 `report_files.generations` and read by `report_files.read_live`, which pins
 one generation for the report, its ledger and its audit together: a page
 never shows one run's card beside another run's ledger. A past run is found
@@ -22,7 +27,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -35,6 +40,12 @@ from app.services.valuation.observation import LoadedObservation, find_observati
 from app.services.watch import watchlist as wl
 
 log = logging.getLogger(__name__)
+
+# The workbench's runs, beside the journal's (``reports/``) and the auto
+# track's (``reports/auto/``): the same layout, its own live names. The
+# journal's and the auto track's readers (`earnings_brief.latest_report`,
+# the watch, the review console) never look in it.
+WORKBENCH_DIR = "workbench"
 
 # `report_builder.build_report`'s assembly: the card and the scope notice,
 # then this, then the appendix.
@@ -118,6 +129,9 @@ class RunView:
 class TickerView:
     ticker: str
     latest: RunView | None = None
+    # The day of the journal case of this ticker open today, if one is: this
+    # page's card is the workbench's, not the case's.
+    journal_case: str | None = None
     runs: list[RunRef] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     briefs: list[Path] = field(default_factory=list)
@@ -168,14 +182,21 @@ def _engine(text: str) -> str | None:
 # --- a ticker's runs --------------------------------------------------------------------
 
 
+def reports_dir() -> Path:
+    """Where the workbench's runs are published (`jobs` passes it to
+    `reporting.build_report` as ``out_dir``) and the only folder its pages
+    read. Looked up at call time, under `reporting.REPORTS`."""
+    return reporting.REPORTS / WORKBENCH_DIR
+
+
 def _report(ticker: str, day: str) -> Path:
-    return reporting.REPORTS / f"{ticker}_{day}.md"
+    return reports_dir() / f"{ticker}_{day}.md"
 
 
 def _days(ticker: str) -> list[str]:
     """Every day with a live name or a generations folder for ``ticker``,
     newest first."""
-    root = reporting.REPORTS
+    root = reports_dir()
     days: set[str] = set()
     for folder in (root, root / report_files.GENERATIONS_DIR):
         try:
@@ -229,6 +250,24 @@ def runs(ticker: str, problems: list[str] | None = None) -> list[RunRef]:
             if problems is not None:
                 problems.append(f"The runs of {t} {day} cannot be listed: {e}")
     return out
+
+
+def newest_run(ticker: str) -> RunRef | None:
+    """The workbench's newest kept run of ``ticker`` (live or not), or
+    None: what `journal.py openv2` names when the card was there to read
+    before the thesis."""
+    refs = runs(ticker)
+    return refs[0] if refs else None
+
+
+def published_since(ticker: str, when: datetime) -> bool:
+    """Whether a run of ``ticker`` (any day, kept) was published after
+    ``when``. A generation's stamp has whole seconds, so only one stamped in
+    a later second than ``when``'s counts: one stamped in the same second
+    may be from before it, and a failure said once too often is better than
+    one hidden by a run that preceded it."""
+    second = when.replace(microsecond=0)
+    return any(r.built is not None and r.built > second for r in runs(ticker))
 
 
 def _ledger(live: report_files.LiveRun) -> tuple[LedgerSummary | None, str | None]:
@@ -292,6 +331,11 @@ def ticker_view(ticker: str, day: str | None = None) -> TickerView:
     v.runs = runs(t, v.problems)
     v.latest = _latest(v.runs, day, v.problems)
     v.briefs = _briefs(t)
+    today = date.today().isoformat()  # the journal's own day (`journal.py openv2`)
+    try:
+        v.journal_case = today if store.find_entry(t, today) is not None else None
+    except (OSError, ValueError):
+        v.journal_case = None
     try:
         v.observation = find_observation(reporting.MARKET.parent, t)
     except (OSError, ValueError) as e:  # ObservationError is a ValueError
@@ -378,9 +422,9 @@ class RecentRun:
 
 
 def recent_runs(limit: int = 20) -> list[RecentRun]:
-    """The live run of every ticker-day in ``reports/``, newest published
-    first."""
-    root = reporting.REPORTS
+    """The live run of every ticker-day in ``reports/workbench/``, newest
+    published first."""
+    root = reports_dir()
     try:
         names = [p.name for p in root.iterdir()] if root.is_dir() else []
     except OSError:

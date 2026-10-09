@@ -91,6 +91,27 @@ from app.services.reporting.report_files import (
     recording,
     write_atomic,
 )
+from app.services.workbench import views as workbench_views
+
+
+def _workbench_seen(ticker: str) -> None:
+    """Say so when the workbench has a run of ``ticker``: its decision card
+    was there to read before this thesis was written (independent review of
+    9d00328). Said, never recorded for the operator: whether they read it
+    is theirs to put in ``--contamination``. A workbench folder that cannot
+    be read says nothing and stops nothing."""
+    try:
+        ref = workbench_views.newest_run(ticker)
+    except (OSError, ValueError):
+        return
+    if ref is None:
+        return
+    built = f", published {ref.built:%Y-%m-%d %H:%M} UTC" if ref.built else ""
+    print(f"warning: the workbench has a run of {ticker} ({ref.day}, generation "
+          f"{ref.generation_id or 'none'}{built}): its decision card could be read before "
+          "this thesis. If you read it first, say so when opening the case: "
+          f'--contamination "saw the workbench card for {ticker} on {ref.day}".',
+          file=sys.stderr)
 
 
 def cmd_open(args: argparse.Namespace) -> int:
@@ -885,6 +906,7 @@ def cmd_openv2(args: argparse.Namespace) -> int:
         print(f"Could not build entry: {e}", file=sys.stderr)
         return 1
 
+    _workbench_seen(ticker)
     try:
         locked = lock_entry(entry)
     except ValueError as e:

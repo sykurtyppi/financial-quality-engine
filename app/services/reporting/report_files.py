@@ -520,7 +520,8 @@ def _stamp(now: datetime | None) -> str:
 
 
 @contextmanager
-def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
+def replacing(report: Path, *, now: datetime | None = None,
+              timeout: float | None = None) -> Iterator[Staged]:
     """Build a report's replacement off to the side, then publish it.
 
     Inside the block the caller builds into ``staged.report`` and
@@ -537,6 +538,11 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
     The staging directory is shared by every rebuild writing to ``<dir>`` and
     is never removed: a rebuild that removed it once it looked empty pulled
     it from under another still building there (round-9 audit F1).
+
+    ``timeout``: `publish_lock`'s, for a caller that must not wait on a
+    stalled holder (the workbench, whose run would otherwise show
+    "running" for as long as the lock is held; review of 9d00328). Past it,
+    `PublishBusy` and nothing published. None, the default: wait.
     """
     gid = uuid.uuid4().hex
     work = own_dir(report.parent / STAGING_DIR) / gid
@@ -547,7 +553,7 @@ def replacing(report: Path, *, now: datetime | None = None) -> Iterator[Staged]:
     try:
         yield staged
         _seal(staged, report.name)
-        with publish_lock(report):
+        with publish_lock(report, timeout=timeout):
             _publish(report, staged, work, now)
     finally:
         shutil.rmtree(work, ignore_errors=True)  # gone already once published
@@ -823,6 +829,21 @@ class LiveRun:
     generation_dir: Path | None = None
 
 
+def _refuse_links(gen: Path, paths: dict[str, Path]) -> None:
+    """A generation's files are written by `_seal` and `publish_audit`,
+    never as links: one that is a link was put there by hand, and reading
+    through it showed a file from anywhere as the run's report, or paired
+    one naming the run's generation as its ledger or audit (independent
+    review of 9d00328). Refused (ELOOP, naming it), never followed. An
+    lstat, then a read: the generation is read-only, and what this stops is
+    a link already in place (`own_dir`'s reasoning)."""
+    for path in paths.values():
+        if path.is_symlink():
+            raise OSError(errno.ELOOP, f"{path.name} in generation {gen.name} is a symlink, "
+                          "not a file this engine wrote; it is never followed. Remove it, "
+                          "or restore another generation")
+
+
 def read_live(report: Path) -> LiveRun | None:
     """The live run of ``report``, pinned to one generation: the pointer is
     resolved once and every file is read from that generation. None when no
@@ -846,6 +867,8 @@ def read_live(report: Path) -> LiveRun | None:
         return None  # the live names exist but name no run (set aside)
     paths = (_companions(report) if gen is None
              else {role: gen / name for role, name in _names(_base(report)).items()})
+    if gen is not None:
+        _refuse_links(gen, paths)
     try:
         text = paths["report"].read_text()
     except FileNotFoundError:

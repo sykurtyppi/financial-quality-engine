@@ -1204,3 +1204,89 @@ def test_a_publish_lock_timeout_of_zero_tries_once_and_never_sleeps(tmp_path, mo
     finally:
         os.close(held)
     assert slept == []
+
+
+@pytest.mark.parametrize("role", ["report", "ledger", "audit"])
+def test_a_symlink_inside_a_generation_is_refused_not_followed(tmp_path, role):
+    """Independent review of 9d00328: `read_live` refused a pointer or a
+    generation that is a link, but read the files inside a real generation
+    through any link planted there: a report linked to a file elsewhere was
+    shown as the run's, and a ledger or audit linked to one naming the
+    run's generation was paired as its own. A generation's files are
+    written, sealed and never links; one that is a link is refused (ELOOP,
+    naming it), never read."""
+    report, staged = _publish(tmp_path, "first")
+    gen = current_generation(report)
+    gid = staged.generation_id
+    os.chmod(gen, 0o755)
+    names = {"report": NAME, "ledger": "AAPL_2026-09-26.ledger.json",
+             "audit": "AAPL_2026-09-26_audit.md"}
+    bodies = {"report": f"# planted\n{GENERATION_LINE}{gid}\n",
+              "ledger": json.dumps({"generation_id": gid, "planted": True}),
+              "audit": f"<!-- generation: {gid} -->\n# planted audit\n"}
+    outside = tmp_path / "elsewhere" / names[role]
+    outside.parent.mkdir()
+    outside.write_text(bodies[role])
+    target = gen / names[role]
+    if target.exists():
+        os.chmod(target, 0o644)
+        target.unlink()
+    target.symlink_to(outside)
+    with pytest.raises(OSError) as e:
+        read_live(report)
+    assert e.value.errno == errno.ELOOP
+    assert names[role] in str(e.value) and "symlink" in str(e.value)
+    # Named by the generation's own path, the same.
+    with pytest.raises(OSError):
+        read_live(gen / NAME)
+
+
+def test_plain_files_from_before_generations_are_read_as_they_were(tmp_path):
+    report = _plain_run(tmp_path)
+    live = read_live(report)
+    assert live is not None and live.text == "# first report" and live.generation_dir is None
+
+
+def test_a_rebuild_can_wait_for_the_publish_lock_only_so_long(tmp_path):
+    """`replacing(timeout=)`: the workbench's builds give up on a held lock
+    (`PublishBusy`) rather than wait as long as it is held; nothing is
+    published and the staged build is removed."""
+    from app.services.reporting.report_files import PublishBusy
+
+    report, _ = _publish(tmp_path, "first")
+    before = _live(tmp_path)
+    holder = _holder(tmp_path / STAGING_DIR / "AAPL_2026-09-26.lock")
+    try:
+        with pytest.raises(PublishBusy):
+            with replacing(report, timeout=0.3) as staged:
+                _stage(staged, "second")
+    finally:
+        holder.communicate("")
+    assert _live(tmp_path) == before and _leftovers(tmp_path) == []
+    assert len(generations(report)) == 1
+    with replacing(report, timeout=0.3) as staged:  # free: published at once
+        _stage(staged, "third")
+    assert len(generations(report)) == 2
+
+
+def test_a_path_through_the_pointer_reads_the_live_run(tmp_path):
+    """What `readlink` of a live name gives (``.generations/<base>/current/
+    <base>.md``) is the live run, resolved once; its files are checked for
+    links like any generation's (the r36 fix round's mutation run found this
+    path unpinned in this file)."""
+    report, first = _publish(tmp_path, "first")
+    _, second = _publish(tmp_path, "second", now=NOW.replace(second=9))
+    through = tmp_path / os.readlink(report)
+    assert through.parent.name == report_files.CURRENT
+    live = read_live(through)
+    assert live is not None and live.generation_id == second.generation_id
+    assert live.generation_dir == current_generation(report)
+    assert live.text == read_live(report).text
+    gen = current_generation(report)
+    os.chmod(gen, 0o755)
+    ledger = gen / "AAPL_2026-09-26.ledger.json"
+    os.chmod(ledger, 0o644)
+    ledger.unlink()
+    ledger.symlink_to(tmp_path / "elsewhere.json")
+    with pytest.raises(OSError, match="symlink"):
+        read_live(through)

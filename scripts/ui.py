@@ -7,8 +7,9 @@
 
 Type a ticker, and ~10-20 s later its decision card; the watchlist, each
 ticker's report history, and a price box that adds the valuation shadow card
-are one click away. Reports are published to reports/ exactly as
-`scripts/generate_report.py` publishes them.
+are one click away. Reports are built exactly as
+`scripts/generate_report.py` builds them, and published to their own
+folder, reports/workbench/, never over a journal case's or the watch's.
 
 It serves this machine only: it listens on a loopback address (anything
 else is refused here, and `app.web`'s guard refuses any other client), and
@@ -18,7 +19,8 @@ to use it from another machine, forward the port: `ssh -L 8000:127.0.0.1:8000`.
 
 Runs from the checkout's root, so the SEC cache is `data/cache` there, as
 for every other command. Exit codes: 0 stopped normally · 2 a bad argument,
-or the `[web]` extra is not installed.
+a Python older than pyproject.toml's requires-python, or the `[web]` extra
+not installed.
 """
 
 from __future__ import annotations
@@ -34,6 +36,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# pyproject.toml's requires-python: checked first, since on an older
+# interpreter the `[web]` extra cannot be installed and `app` cannot be
+# imported, and either failure would name the wrong cause.
+MIN_PYTHON = (3, 12)
 # The `[web]` extra (pyproject.toml): checked before app.web is imported,
 # which would fail on the first of them with a bare ImportError.
 WEB_MODULES = ("fastapi", "jinja2", "multipart", "markdown", "uvicorn")
@@ -88,6 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--host {args.host!r} is not a loopback address: the workbench has no "
                      "authentication and serves this machine only (reach it from elsewhere "
                      "with `ssh -L 8000:127.0.0.1:8000`)")
+    if tuple(sys.version_info[:2]) < MIN_PYTHON:
+        have = ".".join(str(n) for n in sys.version_info[:3])
+        need = ".".join(str(n) for n in MIN_PYTHON)
+        print(f"The workbench needs Python {need} or newer (pyproject.toml requires-python); "
+              f"this is Python {have} ({sys.executable}). Run it with the checkout's "
+              f"virtualenv: .venv/bin/python scripts/ui.py", file=sys.stderr)
+        return 2
     missing = missing_web_modules()
     if missing:
         print(f"The web UI needs the [web] extra; missing: {', '.join(missing)}.\n"
