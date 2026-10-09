@@ -126,3 +126,29 @@ def test_the_script_is_executable_and_documented():
     assert os.access(ROOT / "scripts" / "ui.py", os.X_OK)
     readme = (ROOT / "README.md").read_text()
     assert "python scripts/ui.py" in readme
+
+
+def test_the_minimum_python_is_pyprojects():
+    import tomllib
+
+    spec = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["requires-python"]
+    assert spec == ">=" + ".".join(str(n) for n in ui.MIN_PYTHON)
+
+
+@pytest.mark.parametrize("version", [(3, 11, 9), (3, 8, 0), (2, 7, 18)])
+def test_a_python_too_old_is_said_before_anything_else(started, monkeypatch, capsys, version):
+    """An older interpreter was told the `[web]` extra was missing (it is
+    not installable there), or failed on an import further in."""
+    monkeypatch.setattr(ui.sys, "version_info", version)
+    monkeypatch.setattr(ui, "missing_web_modules",
+                        lambda: pytest.fail("the [web] check ran on a Python too old"))
+    assert ui.main(["--no-browser"]) == 2
+    err = capsys.readouterr().err
+    want = ".".join(str(n) for n in ui.MIN_PYTHON)
+    assert f"Python {want} or newer" in err and ".".join(map(str, version[:3])) in err
+    assert started["run"] == []
+
+
+def test_the_minimum_python_itself_is_accepted(started, monkeypatch):
+    monkeypatch.setattr(ui.sys, "version_info", (*ui.MIN_PYTHON, 0))
+    assert ui.main(["--no-browser"]) == 0 and len(started["run"]) == 1

@@ -12,11 +12,13 @@ server that runs for weeks.
 from __future__ import annotations
 
 import threading
+import time
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from app.services.ingestion.sec_client import SecClientError
-from app.services.journal import reporting
+from app.services.journal import reporting, review
 from app.services.reporting.report_files import (
     NotPublished,
     PublishBusy,
@@ -91,7 +93,7 @@ def test_a_second_start_while_running_is_the_same_job():
     reg = _registry(build=build)
     first = reg.start("KO")
     assert entered.wait(10)
-    again = reg.start("KO", fresh=True)  # a double click, or the other button
+    again = reg.start("KO")  # a double click
     assert again.id == first.id and again.state == jobs.RUNNING
     assert reg.latest("KO").id == first.id
     other = reg.start("CRM")  # another ticker is its own run
@@ -332,3 +334,231 @@ def test_a_follow_up_in_a_full_registry_still_wakes_the_waiter():
     assert follow is not None and follow.id != first.id
     assert reg.wait(follow.id, timeout=10).state == jobs.DONE
     assert len(reg) == 1 and calls == ["KO", "KO"]
+
+
+# --- fix round 1 (independent review of 9d00328) ---------------------------------------
+
+
+def _gated(n_hold: int = 1):
+    """A build whose first ``n_hold`` calls wait for their own gate; the
+    calls' ``fresh`` in order, and an event set as each held call enters."""
+    gates = [threading.Event() for _ in range(n_hold)]
+    entered = [threading.Event() for _ in range(n_hold)]
+    seen: list[bool] = []
+
+    def build(ticker, fresh):
+        i = len(seen)
+        seen.append(fresh)
+        if i < n_hold:
+            entered[i].set()
+            gates[i].wait(10)
+        return f"{i:032x}"
+
+    return build, gates, entered, seen
+
+
+def test_refresh_while_a_cached_run_is_in_flight_follows_it_fresh(caplog):
+    """Reviewer's jobsrepro.py #2: "Refresh from SEC" pressed while a cached
+    run (say, the one a price POST started) is in flight was the cached run
+    and nothing more, so the fresh fetch never happened. A fresh start now
+    queues a fresh run after it; a second click is the same queued run."""
+    build, gates, entered, seen = _gated()
+    reg = _registry(build=build)
+    first = reg.start("KO")
+    assert entered[0].wait(10)
+    assert reg.start("KO", fresh=True).id == first.id
+    assert reg.start("KO", fresh=True).id == first.id
+    gates[0].set()
+    _finish(reg, first)
+    follow = reg.latest("KO")
+    assert follow.id != first.id and follow.fresh
+    _finish(reg, follow)
+    assert seen == [False, True]
+    assert not [r for r in caplog.records if "abandoned" in r.getMessage()]
+
+
+def test_the_queued_follow_up_is_readable_for_the_status():
+    build, gates, entered, _ = _gated()
+    reg = _registry(build=build)
+    assert reg.follow_up("KO") is None
+    first = reg.start("KO")
+    assert entered[0].wait(10)
+    assert reg.follow_up("KO") is None
+    reg.start("KO", again=True)
+    assert reg.follow_up("KO") is False   # one more run, from the cache
+    reg.start("KO", fresh=True)
+    assert reg.follow_up("KO") is True    # ...made fresh by a refresh
+    reg.start("KO", again=True)
+    assert reg.follow_up("KO") is True    # a later cached ask never unmakes it
+    gates[0].set()
+    _finish(reg, first)
+    _finish(reg, reg.latest("KO"))
+    assert reg.follow_up("KO") is None
+    assert jobs.follow_up("CRM") is None  # the module function reads the default registry
+
+
+def test_a_fresh_start_while_a_fresh_run_is_in_flight_adds_nothing():
+    build, gates, entered, seen = _gated()
+    reg = _registry(build=build)
+    first = reg.start("KO", fresh=True)
+    assert entered[0].wait(10)
+    assert reg.start("KO", fresh=True).id == first.id
+    assert reg.follow_up("KO") is None
+    gates[0].set()
+    _finish(reg, first)
+    assert seen == [True] and len(reg) == 1
+
+
+def _clock(monkeypatch, start: datetime) -> list[datetime]:
+    now = [start]
+    monkeypatch.setattr(jobs, "_now", lambda: now[0])
+    return now
+
+
+def test_a_run_past_the_stall_limit_is_stalled_and_a_new_run_starts(monkeypatch, caplog):
+    """Reviewer's jobsrepro.py #1: a build that never returns (a hung read,
+    a stalled lock holder) kept its ticker "running" for the life of the
+    server. Past ``STALL_AFTER_S`` it is shown as stalled and a start is a
+    new run; the old thread is abandoned, and what it ends with is ignored."""
+    assert jobs.STALL_AFTER_S == 600  # ten minutes: a build is 10-20 s, documents and all
+    now = _clock(monkeypatch, datetime(2026, 10, 9, 12, tzinfo=UTC))
+    build, gates, entered, seen = _gated(2)
+    reg = _registry(build=build)
+    first = reg.start("KO")
+    assert entered[0].wait(10)
+    now[0] += timedelta(seconds=jobs.STALL_AFTER_S)
+    assert not reg.latest("KO").stalled and reg.latest("KO").active
+    assert reg.start("KO").id == first.id          # at the limit: still the run in flight
+    now[0] += timedelta(seconds=1)
+    held = reg.latest("KO")
+    assert held.stalled and not held.active and held.state == jobs.RUNNING
+    assert reg.active() == []
+    second = reg.start("KO")
+    assert second.id != first.id
+    assert entered[1].wait(10)
+    old = reg.get(first.id)
+    assert old.state == jobs.STALLED and old.stalled and not old.active
+    assert old.finished_at == now[0] and "stalled" in old.error
+    assert str(jobs.STALL_AFTER_S // 60) in old.error
+    # The abandoned thread ends: its result is not recorded, and the new
+    # run is untouched by it.
+    gates[0].set()
+    assert reg.wait(first.id, timeout=10).state == jobs.STALLED
+    assert reg.get(first.id).generation_id is None
+    assert reg.latest("KO").id == second.id and reg.latest("KO").state == jobs.RUNNING
+    gates[1].set()
+    done = _finish(reg, second)
+    assert done.state == jobs.DONE and done.generation_id == f"{1:032x}"
+    assert seen == [False, False]
+    # The server log says the abandoned run ended, once; the new run's end
+    # is an ordinary one.
+    said = [r.getMessage() for r in caplog.records if "abandoned as stalled" in r.getMessage()]
+    assert said == ["workbench run of KO ended after it was abandoned as stalled; its result "
+                    "(done) is ignored"]
+
+
+def test_an_abandoned_run_never_takes_the_new_runs_follow_up(monkeypatch):
+    now = _clock(monkeypatch, datetime(2026, 10, 9, 12, tzinfo=UTC))
+    build, gates, entered, seen = _gated(2)
+    reg = _registry(build=build)
+    first = reg.start("KO")
+    assert entered[0].wait(10)
+    now[0] += timedelta(seconds=jobs.STALL_AFTER_S + 1)
+    second = reg.start("KO")
+    assert entered[1].wait(10)
+    reg.start("KO", again=True)          # a price recorded during the new run
+    gates[0].set()                       # the abandoned thread ends first
+    reg.wait(first.id, timeout=10)
+    assert reg.follow_up("KO") is False and reg.latest("KO").id == second.id
+    gates[1].set()
+    _finish(reg, second)
+    follow = reg.latest("KO")
+    assert follow.id not in (first.id, second.id)
+    _finish(reg, follow)
+    assert seen == [False, False, False]
+
+
+def test_a_refresh_asked_of_a_stalled_run_is_the_new_runs(monkeypatch):
+    now = _clock(monkeypatch, datetime(2026, 10, 9, 12, tzinfo=UTC))
+    build, gates, entered, seen = _gated(1)
+    reg = _registry(build=build)
+    first = reg.start("KO")
+    assert entered[0].wait(10)
+    reg.start("KO", fresh=True)          # queued behind the run that then stalls
+    now[0] += timedelta(seconds=jobs.STALL_AFTER_S + 1)
+    second = reg.start("KO")             # the operator's Run, once it shows stalled
+    assert second.fresh and reg.follow_up("KO") is None
+    _finish(reg, second)
+    gates[0].set()
+    reg.wait(first.id, timeout=10)
+    assert seen == [False, True] and reg.latest("KO").id == second.id
+
+
+def test_a_stalled_run_is_pruned_like_a_finished_one(monkeypatch):
+    now = _clock(monkeypatch, datetime(2026, 10, 9, 12, tzinfo=UTC))
+    errors: list = []
+    monkeypatch.setattr(threading, "excepthook", errors.append)
+    build, gates, entered, _ = _gated(1)
+    reg = _registry(build=build, max_jobs=1)
+    first = reg.start("KO")
+    assert entered[0].wait(10)
+    now[0] += timedelta(seconds=jobs.STALL_AFTER_S + 1)
+    other = reg.start("CRM")
+    _finish(reg, other)
+    assert reg.get(first.id) is None and len(reg) == 1
+    gates[0].set()                       # its thread ends with nothing to record into
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and any(
+            t.name == "workbench-KO" for t in threading.enumerate()):
+        time.sleep(0.01)
+    assert reg.get(first.id) is None and reg.latest("CRM").id == other.id
+    assert errors == []
+
+
+def test_a_publish_held_past_the_wait_fails_the_run_as_busy(tmp_path, monkeypatch):
+    """Reviewer's jobsrepro.py #3: the build waited on the publish lock for
+    as long as any holder held it, so `PublishBusy` could never reach a
+    run. A workbench run publishes under ``reports/workbench/`` and waits
+    for the lock at most `review.PUBLISH_WAIT_S` (the review console's
+    wait), then fails as busy with nothing published."""
+    from app.services.reporting.report_files import publish_lock
+
+    monkeypatch.setattr(reporting, "REPORTS", tmp_path / "reports")
+    monkeypatch.setattr(review, "PUBLISH_WAIT_S", 0.3)
+    seen: dict = {}
+
+    def build(ticker, with_docs=True, report_day=None, fresh=False, out_dir=None,
+              publish_timeout=None, **kw):
+        seen.update(out_dir=out_dir, publish_timeout=publish_timeout)
+        out = out_dir / f"{ticker}_{date.today().isoformat()}.md"
+        with replacing(out, timeout=publish_timeout) as staged:
+            staged.report.write_text("# card\n")
+            staged.ledger.write_text("{}")
+        return out, "no acute signals"
+
+    monkeypatch.setattr(reporting, "build_report", build)
+    report = tmp_path / "reports" / "workbench" / f"KO_{date.today().isoformat()}.md"
+    report.parent.mkdir(parents=True)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with publish_lock(report):
+            held.set()
+            release.wait(20)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert held.wait(10)
+    try:
+        reg = jobs.Registry()
+        t0 = time.monotonic()
+        done = reg.wait(reg.start("KO").id, timeout=10)
+        waited = time.monotonic() - t0
+    finally:
+        release.set()
+        holder.join(10)
+    assert done.state == jobs.FAILED, done
+    assert done.error == "another run is publishing this report; try again"
+    assert waited < 5
+    assert seen == {"out_dir": tmp_path / "reports" / "workbench", "publish_timeout": 0.3}
+    assert read_live(report) is None

@@ -1,23 +1,24 @@
 """What stops a first run, said on the home page before the operator types a
 ticker rather than as a failed run after it.
 
-Two things, both checked by asking rather than by guessing: the SEC
-identity (`sec_client` refuses to fetch without one, and SEC's fair-access
-rule wants a name and an email in it), and whether the reports directory
-can be written (probed with a file created and removed at once: permission
-bits say yes to root and nothing about a read-only mount). A missing `[web]`
-extra is not listed: the page could not render without it, and
-`scripts/ui.py` says what to install.
+Two things: the SEC identity (`sec_client` refuses to fetch without one,
+and SEC's fair-access rule wants a name and an email in it), and whether
+the folder a run publishes to (``reports/workbench/``) can be written,
+asked of the OS with `os.access` — which answers for this process's user
+and for a read-only mount (EROFS) alike — and never by creating a file: a
+page view writes nothing (review of 9d00328; the probe file it made on
+every GET was a write behind a read). A missing `[web]` extra is not
+listed: the page could not render without it, and `scripts/ui.py` says
+what to install.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import tempfile
 from pathlib import Path
 
-from app.services.journal import reporting
+from app.services.workbench import views
 
 IDENTITY_ENV = "EDGAR_IDENTITY"
 # "Name email": one or more words, then an address. Loose on purpose: SEC
@@ -38,20 +39,16 @@ def _identity_problem() -> str | None:
 
 
 def _writable(directory: Path) -> str | None:
-    """Why ``directory`` cannot be written, or None: probed with a file
-    created and removed at once. A directory not there yet is probed at
-    its nearest existing parent, which is where the first run creates it."""
+    """Why ``directory`` cannot be written, or None. A directory not there
+    yet is asked about at its nearest existing parent, which is where the
+    first run creates it. Write and search: a file is created inside it."""
     probe_dir = directory
     while not probe_dir.exists() and probe_dir.parent != probe_dir:
         probe_dir = probe_dir.parent
     if not probe_dir.is_dir():
         return f"{probe_dir} is not a directory"
-    try:
-        fd, name = tempfile.mkstemp(prefix=".fqe-write-probe-", dir=probe_dir)
-    except OSError as e:
-        return e.strerror or type(e).__name__
-    os.close(fd)
-    os.unlink(name)
+    if not os.access(probe_dir, os.W_OK | os.X_OK):
+        return f"no write permission on {probe_dir}, or a read-only file system"
     return None
 
 
@@ -62,7 +59,7 @@ def setup_problems() -> list[str]:
     identity = _identity_problem()
     if identity is not None:
         problems.append(identity)
-    reports = reporting.REPORTS
+    reports = views.reports_dir()
     why = _writable(reports)
     if why is not None:
         problems.append(f"The reports directory {reports} cannot be written ({why}): a run "

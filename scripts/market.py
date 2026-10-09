@@ -43,6 +43,7 @@ from app.services.valuation.observation import (
     Scenario,
     eastern_today,
     find_observation,
+    parse_observed_at,
     remove_observation,
     write_observation,
 )
@@ -73,15 +74,9 @@ def parse_scenario(text: str) -> Scenario:
 
 
 def parse_at(text: str) -> datetime:
-    """An ISO-8601 time with an offset; naive is refused, not assumed UTC."""
-    try:
-        at = datetime.fromisoformat(text)
-    except ValueError as e:
-        raise ValueError(f"--at {text!r}: {e}") from None
-    if at.tzinfo is None or at.utcoffset() is None:
-        raise ValueError(f"--at {text!r} has no UTC offset: write the time as observed, with "
-                         "its offset (e.g. 2026-11-18T16:00:00-05:00)")
-    return at
+    """An ISO-8601 time with an offset; naive is refused, not assumed UTC.
+    The library's parser (the workbench's price form uses it too)."""
+    return parse_observed_at(text, name="--at")
 
 
 def build_parser() -> argparse.ArgumentParser:

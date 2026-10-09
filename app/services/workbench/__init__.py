@@ -8,7 +8,9 @@ the decision card; the watchlist; a ticker's report history; record a price
 for the valuation shadow card — and nothing more. It changes no score and no
 report text: a run is `reporting.build_report`, the CLI's publish path, and
 every page reads the files that path writes (`report_files.read_live`, one
-generation at a time).
+generation at a time). Its runs are its own, in ``reports/workbench/``
+(`views.reports_dir`): never at a journal case's live names, which the
+review console, the audit sweep and the briefs read (review of 9d00328).
 
 No FastAPI here: `jobs` runs builds, `views` reads runs, `setup` says what
 blocks a first run, `watching` reuses the watch script's add path. The routes

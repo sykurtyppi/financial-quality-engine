@@ -19,8 +19,11 @@ python scripts/ui.py                                 # opens http://127.0.0.1:80
 ```
 
 Type a ticker (`KO`) and, 10–20 seconds later, its **decision card** — the
-same report `scripts/generate_report.py` publishes to `reports/`, card first,
-full appendix folded below. Single-user and local: it listens on loopback only
+same report `scripts/generate_report.py` builds, card first, full appendix
+folded below. The workbench publishes to its own folder, `reports/workbench/`,
+never over a journal case's report (`reports/`) or the watch's
+(`reports/auto/`); `journal.py openv2` warns when a workbench card of the
+ticker was there to read before the thesis. Single-user and local: it listens on loopback only
 and has no authentication (`--port`, `--no-browser`; from another machine use
 `ssh -L 8000:127.0.0.1:8000`).
 

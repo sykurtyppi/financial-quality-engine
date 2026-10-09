@@ -80,6 +80,7 @@ def build_report(
     vintage: bool = True,
     replay: bool = False,
     market: bool = True,
+    publish_timeout: float | None = None,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -91,9 +92,11 @@ def build_report(
     <24h cached answer can silently predate the filing being waited on.
     ``out_dir``/``banner`` exist for the automatic (non-journal) track: the
     banner is prepended verbatim so an auto-generated artifact can never be
-    mistaken for a blind journal case. ``vintage`` archives the scored
-    companyfacts payload to the vintage store (the silent-revision baseline);
-    a failure there is a data-quality line, never an aborted report.
+    mistaken for a blind journal case. The workbench passes ``out_dir`` too
+    (``reports/workbench/``): its runs never take a journal case's live
+    name. ``vintage`` archives the scored companyfacts payload to the
+    vintage store (the silent-revision baseline); a failure there is a
+    data-quality line, never an aborted report.
 
     ``report_day`` also pins the silent-revision baseline: on the journal track
     it IS the locked entry's day (watch.py hands it to ``journal.py report
@@ -117,6 +120,12 @@ def build_report(
     does: a report must not go live while its one market datum is in
     doubt. A replay never carries one: the price is of today, the report of
     its day.
+
+    ``publish_timeout`` bounds the wait for the report's publish lock
+    (`report_files.replacing`): past it the build raises `PublishBusy` and
+    publishes nothing. The workbench passes it, so a run behind a stalled
+    publisher fails as busy instead of showing "running" for as long as
+    the lock is held (review of 9d00328); every other caller waits.
     """
     ticker = ticker.upper()
     as_of: date | None = None
@@ -172,7 +181,7 @@ def build_report(
     # day goes live only once its report and ledger exist, the earlier run is
     # kept whole as the previous generation, and a build that fails leaves the
     # live report as it was.
-    with replacing(out) as staged:
+    with replacing(out, timeout=publish_timeout) as staged:
         report, thermometer = build_full_report(
             result, dataset,
             generated_on=generated_on,

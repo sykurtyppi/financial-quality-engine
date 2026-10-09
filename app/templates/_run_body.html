@@ -9,6 +9,7 @@
 {% endif %}
 <dl class="kv note">
   <dt>Generation</dt><dd><code>{{ run.generation_id or "none (from before generations)" }}</code></dd>
+  <dt>Published to</dt><dd><code>reports/workbench/</code> (the workbench's own runs; the journal's and the watch's are in <code>reports/</code> and <code>reports/auto/</code>)</dd>
   <dt>Engine</dt><dd>{{ run.engine or "not stated" }}</dd>
   {% if run.ledger %}
   <dt>Ledger</dt><dd>{{ run.ledger.items }} evidence rows · coverage {{ "%.0f%%"|format(run.ledger.coverage * 100) if run.ledger.coverage is not none else "n/a" }}{{ " · fetched fresh" if run.ledger.fresh }}</dd>

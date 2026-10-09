@@ -11,6 +11,11 @@ its file (scripts/ is not a package); only the SEC fetch around it is here.
 Removing refuses a row with a pinned thesis — an event in flight, which
 `watch.py sync --prune` keeps for the same reason; that one is removed by
 hand, on purpose.
+
+Whatever stops an add or a remove is one line on the page, never a 500
+(review of 9d00328): a filing index of an unexpected shape (`PollerError`
+from ``_arm``), a watchlist that cannot be written or locked (`OSError`: a
+link at its lock is refused, ELOOP).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from typing import Any
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal import store
 from app.services.watch import watchlist as wl
+from app.services.watch.poller import PollerError
 
 ROOT = Path(__file__).resolve().parents[3]
 WATCH_SCRIPT = ROOT / "scripts" / "watch.py"
@@ -62,7 +68,15 @@ def add(ticker: str) -> wl.Watch:
         watch: wl.Watch = _watch_script()._arm(t, submissions)
     except wl.WatchlistError as e:
         raise WatchRefused(str(e)) from e
+    except PollerError as e:
+        raise WatchRefused(f"SEC's filing index for {t} cannot be read: {e}") from e
+    except OSError as e:
+        raise WatchRefused(_unchanged(e)) from e
     return watch
+
+
+def _unchanged(e: OSError) -> str:
+    return f"The watchlist could not be changed: {e}"
 
 
 def remove(ticker: str) -> None:
@@ -73,6 +87,8 @@ def remove(ticker: str) -> None:
         watch = next((w for w in wl.load() if w.ticker == t), None)
     except wl.WatchlistError as e:
         raise WatchRefused(str(e)) from e
+    except OSError as e:
+        raise WatchRefused(f"The watchlist cannot be read: {e}") from e
     if watch is None:
         raise WatchRefused(f"{t} is not on the watchlist")
     if watch.thesis_entry:
@@ -83,3 +99,5 @@ def remove(ticker: str) -> None:
         wl.remove_entry(t)
     except wl.WatchlistError as e:
         raise WatchRefused(str(e)) from e
+    except OSError as e:
+        raise WatchRefused(_unchanged(e)) from e

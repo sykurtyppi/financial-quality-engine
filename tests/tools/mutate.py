@@ -142,9 +142,11 @@ TARGETS: tuple[Target, ...] = (
     # The workbench (r36): its runs, its reads, its setup check, its watchlist add.
     Target("app/services/workbench/jobs.py", (
         "tests/unit/test_workbench_jobs.py", "tests/unit/test_workbench_routes.py",
+        "tests/unit/test_workbench_tracks.py",
     )),
     Target("app/services/workbench/views.py", (
         "tests/unit/test_workbench_views.py", "tests/unit/test_workbench_routes.py",
+        "tests/unit/test_workbench_tracks.py",
     )),
     Target("app/services/workbench/setup.py", (
         "tests/unit/test_workbench_views.py", "tests/unit/test_workbench_routes.py",

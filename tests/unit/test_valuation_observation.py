@@ -284,3 +284,24 @@ def test_a_future_recorded_at_alone_is_refused_too(tmp_path):
     with pytest.raises(ObservationError, match="recorded_at"):
         read_observation(path, now=NOW)
     assert read_observation(path, now=NOW + timedelta(days=1)) == obs
+
+
+def test_a_typed_time_is_iso_8601_with_its_offset_and_nothing_else():
+    """`parse_observed_at`: the one parser of a typed time, for `market.py
+    record --at` and the workbench's price form (independent review of
+    9d00328: the form let the model read a bare number as Unix seconds)."""
+    import re
+
+    from app.services.valuation.observation import parse_observed_at
+
+    assert parse_observed_at("2026-10-02T17:00:00-04:00") == datetime(2026, 10, 2, 21, tzinfo=UTC)
+    assert parse_observed_at("2026-10-02T21:00Z") == datetime(2026, 10, 2, 21, tzinfo=UTC)
+    for bad in ("0", "1700000000", "61.20", "-1", "yesterday", ""):
+        with pytest.raises(ValueError, match=f"^observed_at {re.escape(repr(bad))}: "):
+            parse_observed_at(bad)
+    for naive in ("2026-10-02T17:00", "2026-10-02"):
+        with pytest.raises(ValueError, match="has no UTC offset"):
+            parse_observed_at(naive)
+    # The CLI names its flag, as it always has.
+    with pytest.raises(ValueError, match=r"^--at '0': "):
+        parse_observed_at("0", name="--at")

@@ -4,8 +4,10 @@
   "use strict";
 
   // A run in flight: fetch its status fragment every 2 s and swap it in.
-  // When the run is done the page reloads to show the new card; a failure
-  // is swapped in and polling stops.
+  // When the run is done the page reloads to show the new card; a failure,
+  // or a run gone "stalled" (it ran past the server's limit), is swapped in
+  // and polling stops. "idle" while a run was in flight means the server no
+  // longer knows the run (it restarted): said, not left as a blank box.
   var POLL_MS = 2000;
   function watch(box) {
     var state = box.getAttribute("data-state");
@@ -21,6 +23,13 @@
           if (!next) throw new Error("no status in the response");
           var now = next.getAttribute("data-state");
           if (now === "done") { window.location.reload(); return; }
+          if (now === "idle") {
+            var said = document.createElement("div");
+            said.className = "err";
+            said.textContent = "The server restarted while this run was in flight, so it no " +
+              "longer knows how the run ended. Reload the page to see the latest run.";
+            next.appendChild(said);
+          }
           box.replaceWith(next);
           box = next;
           if (now === "queued" || now === "running") setTimeout(poll, POLL_MS);
