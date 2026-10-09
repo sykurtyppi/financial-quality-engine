@@ -18,6 +18,8 @@ import json
 import os
 import re
 from datetime import UTC, date, datetime, timedelta
+from html import escape as html_escape
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -95,17 +97,19 @@ def client(env):
 @pytest.fixture
 def fake_build(monkeypatch):
     """A publishing stand-in for `build_report`: one generation per call,
-    through `replacing`, as the real build publishes. Returns the calls."""
+    through `replacing`, fenced with the run's request number, as the real
+    build publishes. Returns the calls."""
     calls: list[dict] = []
 
-    def build(ticker, with_docs=True, report_day=None, fresh=False, out_dir=None, **kw):
+    def build(ticker, with_docs=True, report_day=None, fresh=False, out_dir=None, fence=None,
+              **kw):
         calls.append({"ticker": ticker, "fresh": fresh})
         # Where the real build writes: ``out_dir`` when given (a workbench
         # run's ``reports/workbench/``), else the journal's ``reports/``.
         day = report_day or date.today().isoformat()
         out = (out_dir or reporting.REPORTS) / f"{store.safe_ticker(ticker)}_{day}.md"
         out.parent.mkdir(parents=True, exist_ok=True)
-        with replacing(out) as staged:
+        with replacing(out, fence=fence) as staged:
             staged.report.write_text(CARD.format(t=ticker.upper(), day=date.today(), n=len(calls)))
             staged.ledger.write_text(json.dumps({
                 "ticker": ticker.upper(), "generated_on": date.today().isoformat(),
@@ -715,10 +719,13 @@ def test_a_stalled_run_is_said_and_run_starts_another(client, monkeypatch, fake_
     client.post("/t/KO/run", data={"fresh": "0"})
     second = jobs.latest("KO")
     assert second.id != first.id
-    jobs.wait(second.id, timeout=30)
+    second = jobs.wait(second.id, timeout=30)
     gate.set()
     jobs.wait(first.id, timeout=30)
-    assert jobs.REGISTRY.get(first.id).state == jobs.STALLED
+    # The abandoned run ended after the run that replaced it published: it
+    # is superseded, never live (Hermes audit of PR #118, finding 1).
+    assert jobs.REGISTRY.get(first.id).state == jobs.SUPERSEDED
+    assert read_live(_workbench("KO")).generation_id == second.generation_id
     assert seen == [False, False]
 
 
@@ -772,8 +779,8 @@ def test_an_epoch_is_not_a_time_the_form_accepts(client, env, fake_build, typed)
     assert _files(env) == before and fake_build == []
 
 
-# (An empty box is the form's default, USD, as an omitted --currency is the
-# CLI's: a form cannot tell the two apart.)
+# (Left out, the currency is the form's own, USD, as an omitted --currency is
+# the CLI's. The box records USD only: test_the_price_box_records_usd_only.)
 @pytest.mark.parametrize("currency", ["usd", " EUR ", "Usd", "US$", "EURO"])
 def test_the_currency_is_refused_as_the_cli_refuses_it(client, env, fake_build, currency):
     r = client.post("/t/KO/price", data=_price_form(currency=currency))
@@ -801,7 +808,9 @@ def _cli_record(env, monkeypatch, form: dict) -> int:
     {"observed_at": "2026-10-01T10:00"}, {"observed_at": "2026-10-01"},
     {"observed_at": "2026-10-01T10:00:00Z"}, {"observed_at": "2026-10-01T10:00-04:00"},
     {"observed_at": (datetime.now(UTC) + timedelta(days=1)).isoformat()},
-    {"currency": "usd"}, {"currency": " EUR "}, {"currency": "EUR"}, {"currency": "US$"},
+    # Not {"currency": "EUR"}: the CLI records it, the box records USD only
+    # (Hermes audit of PR #118, finding 2; test_the_price_box_records_usd_only).
+    {"currency": "usd"}, {"currency": " EUR "}, {"currency": "US$"},
     {"source": "a b"}, {"note": "a\u0085b"}, {"source": "x" * 201}, {"price": "nan"},
 ])
 def test_the_form_and_the_cli_accept_and_refuse_the_same(client, env, fake_build, monkeypatch,
@@ -915,3 +924,210 @@ def test_a_real_build_waits_for_the_publish_lock_only_so_long(client, sec, env, 
     assert done.error == "another run is publishing this report; try again"
     assert read_live(report) is None and not reporting.report_path("KO").exists()
     assert "another run is publishing" in client.get("/t/KO/status").text
+
+
+# --- fix round 2 (Hermes audit of PR #118 @ 3983f8a) -----------------------------------
+
+
+class _Ids(HTMLParser):
+    """Every ``id`` attribute of a page, and every label's ``for``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: list[str] = []
+        self.label_for: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if a.get("id") is not None:
+            self.ids.append(a["id"])
+        if tag == "label" and a.get("for"):
+            self.label_for.append(a["for"])
+
+    handle_startendtag = handle_starttag
+
+
+def _ids(html: str) -> _Ids:
+    parser = _Ids()
+    parser.feed(html)
+    return parser
+
+
+def _duplicates(html: str) -> list[str]:
+    seen = _ids(html).ids
+    return sorted({i for i in seen if seen.count(i) > 1})
+
+
+def test_every_page_has_unique_ids(client, env, fake_build, monkeypatch):
+    """Finding 3: the price panel and the price input were both
+    ``id="price"`` on the ticker page (a label, the ``#price`` anchor and
+    the browser's form handling each took the first). Every page, in each
+    of its states."""
+    pages = {}
+    monkeypatch.delenv("EDGAR_IDENTITY")
+    pages["home, setup state"] = client.get("/")
+    monkeypatch.setenv("EDGAR_IDENTITY", IDENTITY)
+    pages["home"] = client.get("/")
+    pages["ticker, no run"] = client.get("/t/KO")
+    pages["status, idle"] = client.get("/t/KO/status")
+    client.post("/t/KO/price", data=_price_form(note="after the call"))
+    job = _wait("KO")
+    wl.add_entry({"ticker": "KO", "print_at": "2026-10-21T11:00:00+00:00"})
+    pages["ticker, with a run and a price"] = client.get("/t/KO")
+    pages["status, done"] = client.get("/t/KO/status")
+    pages["past run"] = client.get(f"/t/KO/runs/{job.generation_id}")
+    pages["home, with runs"] = client.get("/")
+    pages["price refused"] = client.post("/t/KO/price", data=_price_form(price="-1"))
+    store.open_entry("PEP", "a thesis", 3, "hold")
+    pages["journal"] = client.get("/journal")
+    pages["open"] = client.get("/open")
+    pages["impact"] = client.get("/impact/PEP")
+    pages["report"] = client.get("/report/PEP")
+    pages["review board"] = client.get("/review")
+    for name, r in pages.items():
+        assert r.status_code in (200, 400), (name, r.status_code)
+        assert _duplicates(r.text) == [], name
+    page = pages["ticker, with a run and a price"].text
+    assert 'id="price-panel"' in page and 'id="price"' in page
+    assert re.search(r'<input id="price" name="price"', page)
+
+
+def test_every_response_refuses_to_be_framed(client, fake_build, monkeypatch):
+    """Finding 4: no page said it may not be framed, so another site could
+    load the workbench in a frame and steer a click onto "Record price" or
+    "Remove from watchlist" (clickjacking): the Origin check passes a click
+    made on the page itself. Every response says so, the guard's own
+    refusals and errors included."""
+    responses = {
+        "home": client.get("/"),
+        "ticker": client.get("/t/KO"),
+        "status": client.get("/t/KO/status"),
+        "journal": client.get("/journal"),
+        "review": client.get("/review"),
+        "static css": client.get("/static/app.css"),
+        "static js": client.get("/static/app.js"),
+        "404": client.get("/no/such/page"),
+        "redirect": client.post("/t", data={"ticker": "ko"}),
+        "400 bad ticker": client.post("/t", data={"ticker": "../x"}),
+        "403 foreign origin": client.post("/t/KO/run", data={"fresh": "0"},
+                                          headers={"origin": "https://evil.example"}),
+        "400 foreign host": client.get("/", headers={"host": "evil.example"}),
+        "403 another machine": TestClient(app, base_url="http://127.0.0.1",
+                                          client=("192.168.1.20", 50000)).get("/"),
+    }
+    monkeypatch.setenv("FQE_WEB_ALLOWED_HOSTS", "*")
+    responses["500 misconfigured"] = client.get("/")
+    monkeypatch.delenv("FQE_WEB_ALLOWED_HOSTS")
+    statuses = {name: r.status_code for name, r in responses.items()}
+    assert statuses["404"] == 404 and statuses["redirect"] == 303
+    assert statuses["403 foreign origin"] == 403 and statuses["400 foreign host"] == 400
+    assert statuses["403 another machine"] == 403 and statuses["500 misconfigured"] == 500
+    for name, r in responses.items():
+        assert r.headers.get("x-frame-options") == "DENY", name
+        assert r.headers.get("content-security-policy") == "frame-ancestors 'none'", name
+    assert fake_build == []
+
+
+def test_the_price_box_records_usd_only(client, env, fake_build):
+    """Finding 2: the box took any three capitals, and the bridge multiplied
+    a EUR price by the share count and added USD debt to it. The filing
+    figures are USD (`fields.FILING_CURRENCY`); the box says so and is not
+    a text box, and a posted currency other than it is refused."""
+    page = client.get("/t/KO").text
+    box = re.search(r'<input[^>]*name="currency"[^>]*>', page)
+    assert box is not None and 'type="hidden"' in box.group(0) and 'value="USD"' in box.group(0)
+    assert '<input id="currency"' not in page and "USD" in page.split('id="price-panel"')[1]
+    for currency in ("EUR", "GBP", "JPY"):
+        r = client.post("/t/KO/price", data=_price_form(currency=currency))
+        assert r.status_code == 400 and "Price not recorded" in r.text
+        assert "USD only" in r.text and "no FX conversion" in r.text
+        assert not observation_path(env / "journal", "KO").exists()
+    assert fake_build == [] and len(jobs.REGISTRY) == 0
+    # Left out, it is USD: the box's own value.
+    form = _price_form()
+    del form["currency"]
+    assert client.post("/t/KO/price", data=form).status_code == 303
+    assert json.loads(observation_path(env / "journal", "KO").read_text())["currency"] == "USD"
+    _wait("KO")
+
+
+def test_a_eur_price_recorded_on_the_cli_shows_the_refusal_on_the_card(client, sec, env):
+    """The CLI still records a well-formed currency; the plane then refuses
+    it as the box would: the run's appendix and ledger say no EV, and the
+    card above it is the run without a price's."""
+    from app.services.valuation.observation import MarketObservation, write_observation
+
+    client.post("/t/KO/run", data={"fresh": "0"})
+    plain = _wait("KO")
+    assert plain.state == jobs.DONE, plain.error
+    card = read_live(_workbench("KO")).text.split("# Full report (appendix)")[0]
+    now = datetime.now(UTC)
+    write_observation(env / "journal", MarketObservation(
+        ticker="KO", price=61.0, currency="EUR", observed_at=now - timedelta(hours=1),
+        source="Xetra close", recorded_at=now))
+    client.post("/t/KO/run", data={"fresh": "0"})
+    run = _wait("KO")
+    assert run.state == jobs.DONE, run.error
+    live = read_live(_workbench("KO"))
+    assert live.generation_id == run.generation_id
+    assert live.text.split("# Full report (appendix)")[0].replace(
+        plain.generation_id, run.generation_id) == card.replace(
+        plain.generation_id, run.generation_id)
+    reason = "price in EUR, filing figures in USD — no FX conversion"
+    assert f"EV not asserted: {reason}" in live.text
+    doc = LedgerDocument.model_validate_json(live.ledger.read_text())
+    assert doc.valuation.ev is None and reason in doc.valuation.ev_reason
+    page = client.get("/t/KO").text
+    assert "61.00 EUR" in page and reason in page
+    panel = page.split('id="price-panel"', 1)[1].split("</section>", 1)[0]
+    assert "This price is in EUR and the filing figures are in USD" in panel
+    assert "This price is in" not in client.get("/t/CRM").text
+
+
+def test_the_real_build_seals_each_runs_request_number(client, sec, env):
+    """Finding 1, through the real build: each run asked for is given the
+    next number of the ticker's counter and its ledger carries it."""
+    fences = []
+    for _ in range(2):
+        client.post("/t/KO/run", data={"fresh": "0"})
+        job = _wait("KO")
+        assert job.state == jobs.DONE, job.error
+        fences.append(LedgerDocument.model_validate_json(
+            read_live(_workbench("KO")).ledger.read_text()).fence)
+    assert fences == [1, 2]
+
+
+def test_a_refused_price_keeps_everything_typed(client, env, fake_build):
+    form = _price_form(price="-3", source="my broker statement & co", note="after the call",
+                       observed_at="2026-10-08T16:00-04:00")
+    r = client.post("/t/KO/price", data=form)
+    assert r.status_code == 400 and "Price not recorded" in r.text
+    for name in ("price", "observed_at", "source", "note"):
+        typed = html_escape(form[name])
+        assert re.search(rf'<input id="{name}" name="{name}"[^>]*value="{re.escape(typed)}"',
+                         r.text), name
+    assert 'data-kept="1"' in r.text
+
+
+def test_the_poller_says_when_it_loses_the_server_and_can_retry(client):
+    """Finding 6: a status poll that failed (the server stopped, a 500) was
+    retried silently, the spinner turning forever; it is said on the page,
+    with a way to try again and a way to reload."""
+    js = client.get("/static/app.js").text
+    assert "Lost contact with the local server" in js
+    assert "data-poll-retry" in js and "data-poll-reload" in js
+    assert "Retry" in js and "Reload" in js
+    # A failed poll says so (and stops), never only retries in silence; the
+    # behaviour itself was exercised in headless Chromium (r36 fix round 2).
+    assert re.search(r"\.catch\(function \(e\) \{ lost\(", js)
+    assert "POLL_MS * 3" not in js
+    assert re.search(r"retry\.addEventListener\(\"click\", function \(\) \{ said\.remove\(\); poll\(\); \}\)", js)
+    css = client.get("/static/app.css").text
+    assert ".poll-lost" in css
+
+
+def test_the_status_box_names_the_live_run_after_a_done_run(client, fake_build):
+    client.post("/t/KO/run", data={"fresh": "0"})
+    job = _wait("KO")
+    frag = client.get("/t/KO/status").text
+    assert job.generation_id in frag and "is the live run" in frag

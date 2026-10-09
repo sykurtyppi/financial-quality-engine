@@ -358,12 +358,13 @@ def test_share_count_falls_back_to_the_weighted_average_then_to_nothing():
     assert b.shares.value == period.shares_diluted
     assert b.shares.label == f"weighted-average diluted, {period.fiscal_label}"
     assert b.shares.sources == (period.sources["shares_diluted"],)
-    assert b.ev is not None
+    assert b.ev is not None and b.market_cap.note is None
     for p in periods:
         p.shares_diluted = None
     b = enterprise_value_bridge(ds, _obs("KO", 60.0))
     assert b.ev is None and b.market_cap.value is None
     assert "share count" in b.ev_reason and period.fiscal_label in b.ev_reason
+    assert b.market_cap.note == f"share count missing for {period.fiscal_label}"
 
 
 def test_optional_components_are_read_when_reported():

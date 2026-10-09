@@ -28,7 +28,11 @@ lessee comparability across filers is the caveat on the line. Equity (book)
 is shown for the same reason — context, not a bridge component.
 
 A bridge is never guessed: a missing share count, debt or cash means no EV,
-with the field and the period named.
+with the field and the period named. Nor is a currency converted: the
+filing figures are in `fields.FILING_CURRENCY`, and a price recorded in any
+other currency asserts no market cap and no EV (`currency_mismatch`; Hermes
+audit of PR #118, finding 2: a EUR price was multiplied by the share count
+and added to USD debt). The filing lines are still shown: they are facts.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 
 from app.schemas.financials import CompanyDataset, PeriodFinancials, SourcedValue
+from app.services.ingestion.fields import FILING_CURRENCY
 from app.services.valuation.observation import EASTERN, MarketObservation
 
 Basis = Literal["filing", "observation", "derived", "assumption"]
@@ -101,6 +106,16 @@ def available_through(observed_at: datetime) -> date:
     not read that 10-Q into that price (F5). The mapper's cut is inclusive
     (`filed <= as_of`), so this is the day before."""
     return observed_at.astimezone(EASTERN).date() - timedelta(days=1)
+
+
+def currency_mismatch(obs: MarketObservation) -> str | None:
+    """Why the price cannot be set against the filing figures, or None: a
+    price in another currency than theirs, which nothing here converts.
+    Every line that would mix the two (market cap, EV, the multiples, the
+    implied growth, the scenarios) carries this instead of a number."""
+    if obs.currency == FILING_CURRENCY:
+        return None
+    return f"price in {obs.currency}, filing figures in {FILING_CURRENCY} — no FX conversion"
 
 
 def _missing_input(period: PeriodFinancials) -> str | None:
@@ -210,10 +225,11 @@ def enterprise_value_bridge(
     + minority interest + preferred stock, over the latest period of
     `dataset` that carries the bridge inputs; `ev` is None, with the reason
     naming the field and period, when the share count, debt or cash is
-    missing. `as_filed_by` is the point-in-time cut the dataset was mapped
-    through (the plane's; None for a dataset alone, whose availability is
-    then said to be unchecked); `dataset` is None when that cut mapped no
-    period at all."""
+    missing, or when the price is not in the filing currency
+    (`currency_mismatch`: no market cap either). `as_filed_by` is the
+    point-in-time cut the dataset was mapped through (the plane's; None for
+    a dataset alone, whose availability is then said to be unchecked);
+    `dataset` is None when that cut mapped no period at all."""
     period, skipped = select_period(dataset) if dataset is not None else (None, [])
     availability = _availability(dataset, period, skipped, obs, as_filed_by)
     price = BridgeComponent(
@@ -239,11 +255,15 @@ def enterprise_value_bridge(
             None, f"EV not asserted: {availability}",
         )
     shares = _share_count(period)
-    market_cap = None if shares.value is None else obs.price * shares.value
-    mcap = BridgeComponent(
-        "market_cap", mcap_label, market_cap, "derived", 1,
-        note=None if market_cap is not None else f"share count missing for {period.fiscal_label}",
-    )
+    mismatch = currency_mismatch(obs)
+    market_cap = None if shares.value is None or mismatch else obs.price * shares.value
+    if mismatch:
+        mcap_note: str | None = f"market cap not asserted: {mismatch}"
+    elif market_cap is None:
+        mcap_note = f"share count missing for {period.fiscal_label}"
+    else:
+        mcap_note = None
+    mcap = BridgeComponent("market_cap", mcap_label, market_cap, "derived", 1, note=mcap_note)
     debt = _filing(period, "total_debt", "total debt (incl. finance leases)", 1)
     cash = _filing(period, "cash_and_equivalents", "cash and equivalents", -1)
     sti = _filing(period, "short_term_investments", "short-term investments", -1, assumed_zero=True)
@@ -254,7 +274,9 @@ def enterprise_value_bridge(
 
     ev: float | None = None
     reason: str | None = None
-    if market_cap is None:
+    if mismatch:
+        reason = f"EV not asserted: {mismatch}"
+    elif market_cap is None:
         reason = f"EV not asserted: share count missing for {period.fiscal_label}"
     elif debt.value is None:
         reason = f"EV not asserted: total_debt missing for {period.fiscal_label}"

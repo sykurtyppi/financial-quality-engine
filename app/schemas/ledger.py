@@ -185,6 +185,12 @@ class LedgerDocument(BaseModel):
     # The engine commit that built the run (`report_files.engine_commit`),
     # stamped at the same time; the report states it on the line above.
     engine_commit: str | None = None
+    # The workbench's request number for the run (`workbench.fencing`),
+    # sealed by a fenced publish only (`report_files.replacing(fence=)`): a
+    # run finished after one asked for later is never made live over it
+    # (Hermes audit of PR #118, finding 1). None for every other run and in
+    # every ledger written before it existed. Strict: the publish compares it.
+    fence: Annotated[int, Field(strict=True, ge=0)] | None = None
     ticker: str
     # The company's CIK, which a filing's folder on EDGAR is filed under
     # (`/Archives/edgar/data/<cik>/<accession without dashes>/`), so a

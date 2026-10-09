@@ -40,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
+from app.services.ingestion.fields import FILING_CURRENCY
 from app.services.journal import reporting, review, store
 from app.services.reporting.report_files import PublishInDoubt, recording
 from app.services.valuation.observation import (
@@ -198,13 +199,35 @@ def _refuse_foreign(foreign: str) -> PlainTextResponse:
                              status_code=403)
 
 
+# Said on every response (Hermes audit of PR #118, finding 4): no page of
+# this UI may be framed. Framed by another site, a page could have a click
+# steered onto "Record price" or "Remove from watchlist" (clickjacking): the
+# Origin check passes a click made on the page itself. `frame-ancestors` is
+# the CSP way to say it; X-Frame-Options, for a browser that predates it.
+# Nothing broader: a fuller policy would have to be checked against every
+# page's inline styles first.
+FRAME_HEADERS = {"Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-Options": "DENY"}
+
+
 @app.middleware("http")
 async def _guard(request: Request, call_next):
-    """Every request: from this machine (review of 68dbc24, M-1), to a
-    served Host (DNS rebinding); and every request that changes something
-    (anything but GET/HEAD/OPTIONS) from this UI's own pages only (reviews
-    of 2f26846, finding 1, and efb8500, N2). A report's first view, a GET
-    that builds and stamps, is checked by its page (`report_view`)."""
+    """Every request goes through `_admit`; every response, its refusals
+    included, says it may not be framed (`FRAME_HEADERS`)."""
+    refused = _admit(request)
+    response = refused if refused is not None else await call_next(request)
+    for name, value in FRAME_HEADERS.items():
+        response.headers[name] = value
+    return response
+
+
+def _admit(request: Request) -> Response | None:
+    """Why ``request`` is refused, as the response to send, or None. Every
+    request: from this machine (review of 68dbc24, M-1), to a served Host
+    (DNS rebinding); and every request that changes something (anything
+    but GET/HEAD/OPTIONS) from this UI's own pages only (reviews of
+    2f26846, finding 1, and efb8500, N2), building a journal case's report
+    included (`report_build`: a POST since Hermes's audit of PR #118,
+    finding 5)."""
     if not _local_client(request):
         return PlainTextResponse(
             "This UI serves only this machine: it has no authentication. Reach it from "
@@ -234,7 +257,7 @@ async def _guard(request: Request, call_next):
         foreign = _foreign(request)
         if foreign is not None:
             return _refuse_foreign(foreign)
-    return await call_next(request)
+    return None
 
 
 OPENV2_HINT = 'scripts/journal.py openv2 <TICKER> --thesis "..." --conviction 3'
@@ -285,6 +308,11 @@ def _v2_rows() -> list[dict]:
             "reported": e.reported is not None,
             "assumptions": len(e.before.assumptions),
             "open_assumptions": len(open_assumption_indices(e)),
+            # What the operator declared reading before the thesis
+            # (`openv2 --contamination`): the AFTER block measures the
+            # engine net of it, so a reader of the row must see it (Hermes
+            # audit of PR #118, finding 6).
+            "contamination": e.before.contamination,
             "unreadable": None,
         })
     rows.sort(key=lambda r: (r["day"], r["ticker"]), reverse=True)
@@ -323,9 +351,10 @@ def open_submit(
     )
 
 
-@app.get("/report/{ticker}", response_class=HTMLResponse)
-def report_view(request: Request, ticker: str, date: str | None = None,
-                error: str | None = None):
+def _report_case(ticker: str, date: str | None) -> tuple[Path, dict] | RedirectResponse:
+    """The v1 journal case whose report the page shows or builds, with its
+    parsed entry; or where to send the browser instead (no such case, a v2
+    case, a case without a thesis)."""
     try:
         path = store.find_entry(ticker, date)
     except ValueError:
@@ -343,28 +372,12 @@ def report_view(request: Request, ticker: str, date: str | None = None,
     entry = store.parse_entry(path)
     if not entry["has_thesis"]:
         return RedirectResponse("/open?error=Write+a+thesis+before+generating+a+report.", status_code=303)
+    return path, entry
 
-    report_file = reporting.report_path(ticker, entry["day"])
-    status = 200
-    if not entry["is_reported"]:
-        # A GET that builds, publishes and stamps: refused to another site's
-        # page like a POST (an <img> could make it). Only here, where it
-        # acts: a stamped report's view is a view (review of 68dbc24, L-1;
-        # a path match in the middleware also missed a --root-path prefix).
-        foreign = _foreign(request)
-        if foreign is not None:
-            return _refuse_foreign(foreign)
-        # First view: generate the networked report, then lock the thesis. Serialize
-        # per entry and re-check under the lock so a double-request generates once.
-        # The entry's report lock, the one `journal.py report` holds (Hermes
-        # audit of 424b0b4, finding 3b): an in-process lock let this route and
-        # the CLI each build and publish one entry's report. It also serves the
-        # double-click it was for: each holder opens its own descriptor, so
-        # two request threads exclude each other as two processes do.
-        with store.report_lock(path):
-            if not store.is_reported(path.read_text(encoding="utf-8")):
-                problem, status = _generate_and_stamp(path, ticker, entry["day"])
-                error = problem or error
+
+def _report_page(request: Request, path: Path, ticker: str, day: str, error: str | None,
+                 status: int = 200) -> HTMLResponse:
+    report_file = reporting.report_path(ticker, day)
     html = _render_report(report_file.read_text()) if report_file.exists() else None
     return templates.TemplateResponse(
         request, "report.html",
@@ -373,10 +386,50 @@ def report_view(request: Request, ticker: str, date: str | None = None,
     )
 
 
+@app.get("/report/{ticker}", response_class=HTMLResponse)
+def report_view(request: Request, ticker: str, date: str | None = None,
+                error: str | None = None):
+    """A case's report, as it is: the live report, or, before one is
+    built, the page with its "Build report" form. Nothing else: a GET that
+    built, published and stamped on first view did so for a prefetch, a
+    link preview or another site's <img> (Hermes audit of PR #118, finding
+    5; the page's own cross-site check stood in for the guard's)."""
+    found = _report_case(ticker, date)
+    if isinstance(found, RedirectResponse):
+        return found
+    path, entry = found
+    return _report_page(request, path, ticker, entry["day"], error)
+
+
+@app.post("/report/{ticker}")
+def report_build(request: Request, ticker: str, date: str | None = Form(None)):
+    """Build the case's report and lock its thesis, then back to the view
+    (303). Refused to another site's page by `_guard`, as every POST is. A
+    refusal or a failure is said on the page with its status, as the first
+    view said it. Serialized per entry and re-checked under the lock, so a
+    double click builds once: the entry's report lock, the one `journal.py
+    report` holds (Hermes audit of 424b0b4, finding 3b: an in-process lock
+    let this route and the CLI each build and publish one entry's report).
+    Each holder opens its own descriptor, so two request threads exclude
+    each other as two processes do."""
+    found = _report_case(ticker, date)
+    if isinstance(found, RedirectResponse):
+        return found
+    path, entry = found
+    problem, status = None, 200
+    with store.report_lock(path):
+        if not store.is_reported(path.read_text(encoding="utf-8")):
+            problem, status = _generate_and_stamp(path, ticker, entry["day"])
+    if problem is None:
+        return RedirectResponse(f"/report/{store.safe_ticker(ticker)}?date={entry['day']}",
+                                status_code=303)
+    return _report_page(request, path, ticker, entry["day"], problem, status)
+
+
 def _generate_and_stamp(path: Path, ticker: str, day: str) -> tuple[str | None, int]:
-    """The first view's report of an unstamped v1 entry: built, then the
-    thesis stamped. The caller holds the entry's report lock. Returns the
-    page's error (None) and status."""
+    """The report of an unstamped v1 entry (`report_build`): built, then
+    the thesis stamped. The caller holds the entry's report lock. Returns
+    the page's error (None) and status."""
     def cli(command: str) -> str:
         return f"scripts/journal.py {command} {store.safe_ticker(ticker)} --date {day}"
 
@@ -752,7 +805,7 @@ def _price_form(**typed: str) -> dict:
     """The price box's fields: what was typed (after a refusal, kept as it
     was), else the defaults. The time defaults to now on this machine's
     clock with its offset; app.js replaces it with the browser's own."""
-    form = {"price": "", "currency": "USD", "source": "", "note": "",
+    form = {"price": "", "source": "", "note": "",
             "observed_at": datetime.now().astimezone().isoformat(timespec="minutes"),
             "kept": False}
     if typed:
@@ -762,25 +815,34 @@ def _price_form(**typed: str) -> dict:
 
 def _job_ctx(t: str) -> dict:
     """The run-status box's context: the ticker's newest run; the run queued
-    to follow it (True when that one is fresh); and whether a run was
-    published since a failed run ended, which makes its failure old news
-    (another process published, or an abandoned run ended after all)."""
+    to follow it (True when that one is fresh); whether a run was published
+    since a failed run ended, which makes its failure old news (another
+    process published, or an abandoned run ended after all); and the live
+    run's generation, which a finished run is said against: "done" is not
+    "live" once another run has published (Hermes audit of PR #118,
+    finding 1)."""
     job = jobs.latest(t)
-    superseded = False
+    failure_old = False
     if job is not None and job.state == jobs.FAILED:
         try:
-            superseded = views.published_since(t, job.finished_at or job.created_at)
+            failure_old = views.published_since(t, job.finished_at or job.created_at)
         except (OSError, ValueError):
-            superseded = False
-    return {"job": job, "t": t, "follow_up": jobs.follow_up(t), "superseded": superseded,
-            "stall_minutes": jobs.STALL_AFTER_S // 60}
+            failure_old = False
+    live = None
+    if job is not None and job.state in (jobs.DONE, jobs.SUPERSEDED):
+        try:
+            live = views.live_generation(t)
+        except (OSError, ValueError):
+            live = None
+    return {"job": job, "t": t, "follow_up": jobs.follow_up(t), "failure_old": failure_old,
+            "live_generation": live, "stall_minutes": jobs.STALL_AFTER_S // 60}
 
 
 def _ticker_page(request: Request, t: str, *, error: str | None = None,
                  msg: str | None = None, status: int = 200,
                  form: dict | None = None) -> HTMLResponse:
     v = views.ticker_view(t)
-    ctx: dict = {"v": v, "error": error, "msg": msg,
+    ctx: dict = {"v": v, "error": error, "msg": msg, "filing_currency": FILING_CURRENCY,
                  "form": form or _price_form(), "run": None, "card_html": None,
                  "appendix_html": None, "obs_age": None, "obs_stale": False, **_job_ctx(t)}
     if v.latest is not None:
@@ -860,13 +922,24 @@ def _invalid(e: ValidationError) -> str:
 
 @app.post("/t/{ticker}/price")
 def ticker_price(request: Request, ticker: str, price: str = Form(""),
-                 currency: str = Form("USD"), observed_at: str = Form(""),
+                 currency: str = Form(FILING_CURRENCY), observed_at: str = Form(""),
                  source: str = Form(""), note: str = Form("")):
     t = _ticker(ticker)
     if t is None:
         return _home(request, error=_not_a_ticker(ticker), status=400)
-    typed = {"price": price, "currency": currency, "observed_at": observed_at,
-             "source": source, "note": note}
+    typed = {"price": price, "observed_at": observed_at, "source": source, "note": note}
+    if currency != FILING_CURRENCY:
+        # The box records the filing figures' currency only (Hermes audit
+        # of PR #118, finding 2): it is a fixed field, so this is a forged
+        # or stale form. The CLI still records another currency, and the
+        # plane then derives nothing from it (`bridge.currency_mismatch`).
+        return _ticker_page(
+            request, t, status=400, form=_price_form(**typed),
+            error=(f"Price not recorded: currency {currency!r}: the workbench records prices "
+                   f"in {FILING_CURRENCY} only, the currency of the filing figures the card "
+                   "sets a price against (no FX conversion). A price in another currency can "
+                   "be recorded with `scripts/market.py record --currency`; the card then "
+                   "shows no market cap, EV or multiple."))
     journal = reporting.MARKET.parent
     try:
         # Model assumptions and scenarios are recorded on the CLI only;
@@ -884,9 +957,7 @@ def ticker_price(request: Request, ticker: str, price: str = Form(""),
         at = parse_observed_at(observed_at.strip())
         # Validated by the model `market.py record` builds, from the text as
         # typed: a non-finite or non-positive price, a time after now,
-        # control characters in any text, a currency that is not three
-        # capitals are each refused there, not here. The currency is the
-        # CLI's too: as typed, never upper-cased or trimmed into one.
+        # control characters in any text are each refused there, not here.
         obs = MarketObservation.model_validate({
             "ticker": t, "price": price.strip(), "currency": currency,
             "observed_at": at, "source": source, "note": note or None,

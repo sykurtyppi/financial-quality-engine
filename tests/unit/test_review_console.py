@@ -713,7 +713,10 @@ def test_the_board_shows_each_cases_state(client):
     (current_generation(reporting.report_path("KO", day)) / f"KO_{day}_audit.md").write_text(
         f"<!-- generation: {live} -->\n# audit\n")
     row = _board_row(client.get("/review").text, "KO")
-    assert f"1 / {total}" in row and "audit matches" in row
+    # Said as what it is (Hermes audit of PR #118, finding 6): the audit
+    # names this run's generation; "matches" read as "the audit agrees".
+    assert f"1 / {total}" in row and "audit refers to this generation" in row
+    assert "audit matches" not in row
 
 
 def test_the_board_survives_a_broken_watchlist(client):
@@ -1245,8 +1248,10 @@ def test_a_cross_site_form_cannot_write_an_entry(client):
 
 
 def test_a_cross_site_page_cannot_make_the_report_page_build(client, monkeypatch):
-    """N2: GET /report builds, publishes and stamps on first view; an <img>
-    on another site could trigger it."""
+    """N2: GET /report built, published and stamped on first view; an <img>
+    on another site could trigger it. Since Hermes's audit of PR #118
+    (finding 5) a GET only shows; the build is a POST, refused to another
+    site's page by `_guard`."""
     built = []
 
     def build(ticker, with_docs=True, report_day=None, fresh=False):
@@ -1258,12 +1263,14 @@ def test_a_cross_site_page_cannot_make_the_report_page_build(client, monkeypatch
     monkeypatch.setattr(reporting, "build_report", build)
     path, _ = _entry()
     for site in ("cross-site", "same-site"):
-        r = client.get("/report/KO", headers={"sec-fetch-site": site})
+        assert client.get("/report/KO", headers={"sec-fetch-site": site}).status_code == 200
+        r = client.post("/report/KO", headers={"sec-fetch-site": site})
         assert r.status_code == 403
     assert built == [] and not store.parse_entry(path)["is_reported"]
-    assert client.get("/report/KO", headers={"sec-fetch-site": "same-origin"}).status_code == 200
+    assert client.post("/report/KO", headers={"sec-fetch-site": "same-origin"}).status_code == 303
     assert built == ["KO"]
-    assert client.get("/report/KO", headers={"sec-fetch-site": "none"}).status_code == 200
+    assert client.post("/report/KO", headers={"sec-fetch-site": "none"}).status_code == 303
+    assert built == ["KO"]  # stamped: nothing more is built
 
 
 
@@ -1342,7 +1349,9 @@ def test_a_cross_site_first_view_is_refused_behind_a_root_path(home, monkeypatch
     path, _ = _entry()
     c = TestClient(app, base_url="http://127.0.0.1", root_path="/journal",
                    client=("127.0.0.1", 50000), follow_redirects=False)
-    r = c.get("/journal/report/KO", headers={"sec-fetch-site": "cross-site"})
+    assert c.get("/journal/report/KO",
+                 headers={"sec-fetch-site": "cross-site"}).status_code == 200
+    r = c.post("/journal/report/KO", headers={"sec-fetch-site": "cross-site"})
     assert r.status_code == 403
     assert built == [] and not store.parse_entry(path)["is_reported"]
 

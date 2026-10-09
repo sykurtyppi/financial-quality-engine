@@ -29,12 +29,15 @@ from app.services.reporting.report_files import (
 from app.services.workbench import jobs
 
 
-def _instant(ticker: str, fresh: bool) -> str | None:
+def _instant(ticker: str, fresh: bool, fence: int | None = None) -> str | None:
     return None
 
 
 def _registry(build=_instant, **kw) -> jobs.Registry:
-    return jobs.Registry(build=build, **kw)
+    """A registry over a stand-in build, unfenced unless a test says so: a
+    fence is a counter file under the reports folder, and these stand-ins
+    publish nothing (test_workbench_fencing.py fences the real path)."""
+    return jobs.Registry(build=build, **{"fence": None, **kw})
 
 
 def _finish(reg: jobs.Registry, job: jobs.Job) -> jobs.Job:
@@ -75,7 +78,7 @@ def test_a_run_ends_done_and_records_the_generation_it_published(tmp_path, monke
 
 def test_fresh_is_passed_through(monkeypatch):
     seen = []
-    reg = _registry(build=lambda t, fresh: seen.append(fresh))
+    reg = _registry(build=lambda t, fresh, fence=None: seen.append(fresh))
     _finish(reg, reg.start("KO", fresh=True))
     _finish(reg, reg.start("KO"))
     assert seen == [True, False]
@@ -85,7 +88,7 @@ def test_a_second_start_while_running_is_the_same_job():
     gate, entered = threading.Event(), threading.Event()
     calls = []
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         calls.append(ticker)
         entered.set()
         gate.wait(10)
@@ -110,7 +113,7 @@ def test_a_second_start_while_running_is_the_same_job():
 
 def test_an_invalid_ticker_is_refused_before_anything_starts():
     calls = []
-    reg = _registry(build=lambda t, f: calls.append(t))
+    reg = _registry(build=lambda t, f, fence=None: calls.append(t))
     for bad in ("../x", "ko;rm", "", "A" * 13):
         with pytest.raises(ValueError):
             reg.start(bad)
@@ -128,7 +131,7 @@ def test_an_invalid_ticker_is_refused_before_anything_starts():
 def test_failures_are_said_in_one_line(monkeypatch, exc, expected):
     monkeypatch.setenv("EDGAR_IDENTITY", "Jane Doe jane@example.com")
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         raise exc
 
     reg = _registry(build=build)
@@ -140,7 +143,7 @@ def test_failures_are_said_in_one_line(monkeypatch, exc, expected):
 def test_a_missing_identity_is_a_setup_message_not_a_fetch_failure(monkeypatch):
     monkeypatch.delenv("EDGAR_IDENTITY", raising=False)
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         raise SecClientError("SEC fair-access rules require identifying yourself. Set "
                              "EDGAR_IDENTITY to e.g. ...")
 
@@ -156,7 +159,7 @@ def test_a_publish_in_doubt_is_said_as_such_with_its_whole_message():
                "the NEW generation x may be live. Check which run is live with `readlink p`; "
                "report_files.restore('p', 'g') makes g live again.")
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         raise PublishInDoubt(message)
 
     reg = _registry(build=build)
@@ -176,7 +179,7 @@ def test_an_error_at_the_limit_is_kept_whole_and_one_past_it_is_cut():
 
 
 def test_an_unexpected_error_is_shortened(monkeypatch):
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         raise RuntimeError("x" * 5000)
 
     reg = _registry(build=build)
@@ -185,7 +188,7 @@ def test_an_unexpected_error_is_shortened(monkeypatch):
 
 
 def test_an_interrupt_like_exit_still_finishes_the_job():
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         raise SystemExit(3)  # a script-style exit inside the build
 
     reg = _registry(build=build)
@@ -196,7 +199,7 @@ def test_an_interrupt_like_exit_still_finishes_the_job():
 def test_the_registry_is_bounded_and_never_drops_a_running_job():
     gate, entered = threading.Event(), threading.Event()
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         if ticker == "HOLD":
             entered.set()
             gate.wait(10)
@@ -225,7 +228,7 @@ def test_the_default_registry_is_bounded_at_fifty():
 def test_active_lists_only_runs_in_flight():
     gate, entered = threading.Event(), threading.Event()
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         if ticker == "KO":
             entered.set()
             gate.wait(10)
@@ -259,7 +262,7 @@ def test_again_while_running_starts_one_more_run_after_it():
     gate, entered = threading.Event(), threading.Event()
     calls = []
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         calls.append(fresh)
         if len(calls) == 1:
             entered.set()
@@ -283,7 +286,7 @@ def test_without_again_a_start_while_running_adds_nothing():
     gate, entered = threading.Event(), threading.Event()
     calls = []
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         calls.append(ticker)
         entered.set()
         gate.wait(10)
@@ -299,7 +302,7 @@ def test_without_again_a_start_while_running_adds_nothing():
 
 def test_again_with_nothing_running_is_an_ordinary_start():
     calls = []
-    reg = _registry(build=lambda t, f: calls.append(f))
+    reg = _registry(build=lambda t, f, fence=None: calls.append(f))
     _finish(reg, reg.start("KO", fresh=True, again=True))
     assert calls == [True] and len(reg) == 1
 
@@ -310,7 +313,7 @@ def test_a_follow_up_in_a_full_registry_still_wakes_the_waiter():
     gate, entered = threading.Event(), threading.Event()
     calls = []
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         calls.append(ticker)
         if len(calls) == 1:
             entered.set()
@@ -346,7 +349,7 @@ def _gated(n_hold: int = 1):
     entered = [threading.Event() for _ in range(n_hold)]
     seen: list[bool] = []
 
-    def build(ticker, fresh):
+    def build(ticker, fresh, fence=None):
         i = len(seen)
         seen.append(fresh)
         if i < n_hold:
@@ -440,11 +443,14 @@ def test_a_run_past_the_stall_limit_is_stalled_and_a_new_run_starts(monkeypatch,
     assert old.state == jobs.STALLED and old.stalled and not old.active
     assert old.finished_at == now[0] and "stalled" in old.error
     assert str(jobs.STALL_AFTER_S // 60) in old.error
-    # The abandoned thread ends: its result is not recorded, and the new
-    # run is untouched by it.
+    # The abandoned thread ends: how it ended is recorded on its own run
+    # (Hermes audit of PR #118, finding 1: whether it became live is the
+    # publish's to decide, by its fence, not this registry's), and the new
+    # run is untouched by it: still the ticker's, still running.
     gates[0].set()
-    assert reg.wait(first.id, timeout=10).state == jobs.STALLED
-    assert reg.get(first.id).generation_id is None
+    ended = reg.wait(first.id, timeout=10)
+    assert ended.state == jobs.DONE and ended.generation_id == f"{0:032x}"
+    assert ended.error is None
     assert reg.latest("KO").id == second.id and reg.latest("KO").state == jobs.RUNNING
     gates[1].set()
     done = _finish(reg, second)
@@ -453,8 +459,8 @@ def test_a_run_past_the_stall_limit_is_stalled_and_a_new_run_starts(monkeypatch,
     # The server log says the abandoned run ended, once; the new run's end
     # is an ordinary one.
     said = [r.getMessage() for r in caplog.records if "abandoned as stalled" in r.getMessage()]
-    assert said == ["workbench run of KO ended after it was abandoned as stalled; its result "
-                    "(done) is ignored"]
+    assert said == ["workbench run of KO ended after it was abandoned as stalled: done; it no "
+                    "longer leads the ticker"]
 
 
 def test_an_abandoned_run_never_takes_the_new_runs_follow_up(monkeypatch):

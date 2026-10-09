@@ -370,6 +370,51 @@ def test_the_case_page_lists_valuation_rows_apart(client):
     assert _tick(client, day, gid, shares.id).status_code == 303
 
 
+def test_every_tick_control_is_labelled_and_every_id_is_unique(client):
+    """Hermes audit of PR #118 (findings 3 and 6): the review console's
+    selects, note boxes and Save buttons had no accessible name (a screen
+    reader read "combo box", "edit text", "Save" for every row of the
+    table), and a page's ids must be unique. Each control names its row."""
+    from html.parser import HTMLParser
+
+    day = _entry()
+    doc = _ledger(_plane(), requested=True)
+    _publish(day, doc)
+    page = client.get(f"/review/KO?date={day}").text
+
+    class Controls(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.ids, self.controls, self.labels = [], [], set()
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if a.get("id"):
+                self.ids.append(a["id"])
+            if tag == "label" and a.get("for"):
+                self.labels.add(a["for"])
+            if (tag in ("select", "textarea", "button")
+                    or (tag == "input" and a.get("type") != "hidden")):
+                self.controls.append((tag, a))
+
+    parsed = Controls()
+    parsed.feed(page)
+    assert sorted({i for i in parsed.ids if parsed.ids.count(i) > 1}) == []
+    forms = page.count('class="tick-form"')
+    assert forms >= 2 and "Valuation (shadow)" in page
+    tick = [(t, a) for t, a in parsed.controls if a.get("name") in ("state", "note")
+            or (t == "button" and a.get("type") == "submit")]
+    assert len(tick) == 3 * forms
+    for tag, a in tick:
+        named = a.get("aria-label") or (a.get("id") in parsed.labels)
+        assert named, (tag, a)
+    names = {a.get("aria-label") for _, a in tick}
+    shares = next(i for i in doc.items if i.kind == "bridge_component"
+                  and i.subject == "shares_outstanding")
+    assert f"State of {shares.id}" in names and f"Note on {shares.id}" in names
+    assert f"Save the tick of {shares.id}" in names
+
+
 def test_the_export_includes_the_valuation_rows(client):
     day = _entry()
     doc = _ledger(_plane(), requested=True)

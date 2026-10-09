@@ -260,6 +260,14 @@ def newest_run(ticker: str) -> RunRef | None:
     return refs[0] if refs else None
 
 
+def live_generation(ticker: str) -> str | None:
+    """The generation id of the run the ticker page shows: its newest live
+    run (None when none is, or it is from before generations). What a
+    finished job is compared with: a run that published is not the live
+    one once a later run has (Hermes audit of PR #118, finding 1)."""
+    return next((r.generation_id for r in runs(ticker) if r.live), None)
+
+
 def published_since(ticker: str, when: datetime) -> bool:
     """Whether a run of ``ticker`` (any day, kept) was published after
     ``when``. A generation's stamp has whole seconds, so only one stamped in

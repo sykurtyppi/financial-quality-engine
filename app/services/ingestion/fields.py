@@ -32,6 +32,14 @@ from typing import Any
 
 Tag = tuple[str, str]  # (taxonomy, concept), e.g. ("us-gaap", "Assets")
 
+# The currency every monetary field is read in: the companyfacts unit the
+# mapper collects (a fact reported only in another currency is not read).
+# The valuation plane bridges a price to these figures only when the price
+# is in it too: there is no FX conversion anywhere in the engine (Hermes
+# audit of PR #118, finding 2: a price in EUR was multiplied by the share
+# count and added to USD debt).
+FILING_CURRENCY = "USD"
+
 
 class Kind(str, Enum):
     INSTANT = "instant"
@@ -81,7 +89,7 @@ class FieldSpec:
     name: str
     kind: Kind
     strategies: tuple[SeriesStrategy, ...]
-    unit: str = "USD"
+    unit: str = FILING_CURRENCY
     split_adjusted: bool = False  # a stock split rewrites history: not a revision
     additive: bool = True  # False: no Q4 derivation, no TTM sum
     cover_date_tolerance_days: int = 0
@@ -374,9 +382,9 @@ def field(name: str) -> FieldSpec:
 
 
 def unit_for(name: str) -> str:
-    """A field's unit; names outside the registry are USD."""
+    """A field's unit; names outside the registry are in `FILING_CURRENCY`."""
     spec = _BY_NAME.get(name)
-    return spec.unit if spec is not None else "USD"
+    return spec.unit if spec is not None else FILING_CURRENCY
 
 
 def is_scored(name: str) -> bool:

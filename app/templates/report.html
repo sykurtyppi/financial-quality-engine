@@ -19,13 +19,17 @@
   {% if entry.is_reported %}
   <p class="note">Reported {{ entry.reported }}</p>
   {% else %}
-  <p class="note">Report generation has not completed for this case.</p>
+  <p class="note">Report generation has not completed for this case. Building it fetches from SEC, publishes the report and locks this thesis against it.</p>
+  <form method="post" action="/report/{{ entry.ticker }}">
+    <input type="hidden" name="date" value="{{ entry.day }}">
+    <div class="actions" style="margin-top:10px"><button class="btn js-busy" type="submit" data-loading-text="Building…">Build report</button></div>
+  </form>
   {% endif %}
 </div>
 
 {% if report_html %}
 <div class="panel report">{{ report_html | safe }}</div>
 {% else %}
-<div class="panel"><p class="empty">No report file found. Set <code>EDGAR_IDENTITY</code> and generate this case again from the dashboard.</p></div>
+<div class="panel"><p class="empty">No report file found.{% if not entry.is_reported %} Set <code>EDGAR_IDENTITY</code> and build it above.{% endif %}</p></div>
 {% endif %}
 {% endblock %}
