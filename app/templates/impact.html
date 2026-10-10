@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block title %}{{ entry.ticker }} impact · FQE Workbench{% endblock %}
 {% block body %}
 <div class="toolbar">
   <div>
@@ -7,9 +8,12 @@
   </div>
   <div class="actions" style="margin:0">
     <a class="btn ghost" href="/report/{{ entry.ticker }}?date={{ entry.day }}">Report</a>
-    <a class="btn ghost" href="/">Dashboard</a>
+    <a class="btn ghost" href="/journal">Dashboard</a>
   </div>
 </div>
+
+{% if error %}<div class="err" role="alert" id="impact-error">{{ error }}</div>{% endif %}
+{% set described = ' aria-describedby="impact-error"' if error else '' %}
 
 <div class="panel">
   <h3>Prior View</h3>
@@ -23,7 +27,7 @@
   <div class="row">
     <div>
       <label for="impact">Impact</label>
-      <select id="impact" name="impact">
+      <select id="impact" name="impact"{{ described|safe }}>
         <option value="">— select —</option>
         {% for code in impact_codes %}
         <option value="{{ code }}" {% if entry.impact == code %}selected{% endif %}>{{ code }}</option>
@@ -32,7 +36,7 @@
     </div>
     <div>
       <label for="conviction_after">Conviction after (1–5)</label>
-      <select id="conviction_after" name="conviction_after">
+      <select id="conviction_after" name="conviction_after"{{ described|safe }}>
         <option value="">— unchanged / select —</option>
         {% for n in conviction_choices %}
         <option value="{{ n }}" {% if entry.conviction_after == n %}selected{% endif %}>{{ n }}{% if entry.conviction == n %} (prior){% endif %}</option>
@@ -49,11 +53,11 @@
   <div class="row">
     <div>
       <label for="outcome_date">Outcome date</label>
-      <input id="outcome_date" name="outcome_date" value="{{ entry.outcome_date or '' }}" placeholder="2026-08-15">
+      <input id="outcome_date" name="outcome_date" value="{{ entry.outcome_date or '' }}" placeholder="2026-08-15"{{ described|safe }}>
     </div>
     <div>
       <label for="verdict">Verdict</label>
-      <select id="verdict" name="verdict">
+      <select id="verdict" name="verdict"{{ described|safe }}>
         <option value="">— select —</option>
         {% for v in verdicts %}
         <option value="{{ v }}" {% if entry.verdict == v %}selected{% endif %}>{{ v }}</option>
@@ -66,7 +70,7 @@
 
   <div class="actions">
     <button class="btn" type="submit">Save</button>
-    <a class="btn ghost" href="/">Cancel</a>
+    <a class="btn ghost" href="/journal">Cancel</a>
   </div>
 </form>
 {% endblock %}

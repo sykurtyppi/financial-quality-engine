@@ -102,6 +102,9 @@ def render_decision_card(
     integrity_notes: list[str] | None = None,
     restatement_scan: str | None = None,
     restatement_gaps: int = 0,
+    restatement_derived_gap: bool = False,
+    change_notes: dict[str, str] | None = None,
+    flag_notes: dict[tuple[str, str], str] | None = None,
 ) -> str:
     """Render the 90-second card.
 
@@ -120,8 +123,24 @@ def render_decision_card(
     `restatement_gaps` the number of fields it could NOT inspect: the
     checked-and-clean header is qualified `(incomplete: ...)` whenever that is
     non-zero, because "clean" over a partial inspection is the false clean
-    bill the scan exists to prevent.
+    bill the scan exists to prevent. `restatement_derived_gap` qualifies it
+    the same way when the derived-quarter check was not inspected (the scan's
+    rebuild drifted from what the report scored).
+
+    `change_notes` (by change-line label) and `flag_notes` (by flag title and
+    fiscal label) mark a line whose metric read a revised figure
+    (`revised_inputs.card_notes`): the metric is not wrong, but it is not
+    independent of the restatement either, and "clean" resting on a restated
+    input must say so.
     """
+    change_notes = change_notes or {}
+    flag_notes = flag_notes or {}
+
+    def _flagged(f: Flag) -> str:
+        line = f"{f.title} ({f.fiscal_label})"
+        mark = flag_notes.get((f.title, f.fiscal_label))
+        return f"{line} — ⚠ {mark}" if mark else line
+
     ticker = result.profile.ticker
     out: list[str] = [
         f"# Decision Card — {ticker}",
@@ -135,7 +154,9 @@ def render_decision_card(
     # 1. Changes since last period
     out += ["## Changes since last period", ""]
     if result.changes:
-        out += [f"- {c}" for c in result.changes]
+        for c in result.changes:
+            mark = change_notes.get(c.split(":", 1)[0])
+            out.append(f"- {c} — ⚠ {mark}" if mark else f"- {c}")
     else:
         out.append("- No material period-over-period changes surfaced.")
     out.append("")
@@ -157,7 +178,7 @@ def render_decision_card(
         if getattr(finding, "kind", "") == "high_severity_disclosure":
             tier_items[1].append(f"High-severity disclosure emergence ({finding.fiscal_label})")
     for f in result.red_flags:
-        tier_items[_tier(f)].append(f"{f.title} ({f.fiscal_label})")
+        tier_items[_tier(f)].append(_flagged(f))
     tier_titles = {
         1: "Tier 1 — validated (low false-positive)",
         2: "Tier 2 — directional (review in context)",
@@ -182,14 +203,16 @@ def render_decision_card(
 
     # 5. Checked and clean — qualified whenever the revision check had holes.
     header = "## Checked and clean"
+    holes = []
     if restatement_gaps:
-        header += (
-            f" (incomplete: {restatement_gaps} field(s) not inspectable for "
-            "revisions — see data quality)"
-        )
+        holes.append(f"{restatement_gaps} field(s) not inspectable for revisions")
+    if restatement_derived_gap:
+        holes.append("derived quarters not checked for revisions")
+    if holes:
+        header += f" (incomplete: {'; '.join(holes)} — see data quality)"
     out += [header, ""]
     if result.green_flags:
-        out += [f"- {f.title} ({f.fiscal_label})" for f in result.green_flags]
+        out += [f"- {_flagged(f)}" for f in result.green_flags]
     else:
         out.append("- No supportive signals surfaced.")
     out.append("")

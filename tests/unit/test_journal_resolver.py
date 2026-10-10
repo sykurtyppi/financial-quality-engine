@@ -212,6 +212,83 @@ class TestFabricationSafety:
         assert r.assumption_index == 3
 
 
+_NON_FINITE = pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+
+
+def _skipped_validation(value: float) -> MetricsBundle:
+    """An OK `cfo_to_net_income` of `value`, built the ways that skip the
+    MetricResult contract (`model_copy(update=...)`, `model_construct`)."""
+    m = _bundle("cfo_to_net_income", 1.0).latest[0].model_copy(update={"value": value})
+    return MetricsBundle.model_construct(latest=[m], history={m.name: [m]})
+
+
+class TestNonFiniteValues:
+    """Hermes audit of 424b0b4, finding 7: only a MISSING value was checked.
+    NaN compares False against everything, so an OK metric of NaN resolved
+    `violated` with `observed=nan` (and +/-inf gave whichever verdict its
+    sign happened to), and `resolve --commit` wrote that verdict into the
+    journal for good. A number that is not a number is no evidence either
+    way: never met or violated. An engine metric's is terminal
+    (`unresolvable`: deterministic for the inputs as filed); a raw XBRL
+    field's is `pending`, like a missing one — comparative revisions do
+    arrive, and the field is not a computation that can only go one way."""
+
+    @_NON_FINITE
+    @pytest.mark.parametrize("comparator", [">", "<", "=="])
+    def test_an_ok_engine_metric_is_no_verdict(self, value, comparator):
+        a = _a(metric="cfo_to_net_income", comparator=comparator, threshold=0.8)
+        r = propose_resolution(a, _ds(_p(cfo=100.0, net_income=100.0)),
+                               bundle=_bundle("cfo_to_net_income", value))
+        assert r.state == "unresolvable"
+        assert r.observed is None
+
+    @_NON_FINITE
+    def test_a_metric_that_skipped_validation_is_refused_here_too(self, value):
+        """`model_copy(update=...)` and `model_construct` do not validate (the
+        registry uses the first), so the resolver cannot rely on the
+        MetricResult contract alone."""
+        bundle = _skipped_validation(value)
+        assert bundle.history["cfo_to_net_income"][0].status is MetricStatus.OK
+        a = _a(metric="cfo_to_net_income", comparator=">", threshold=0.8)
+        r = propose_resolution(a, _ds(_p()), bundle=bundle)
+        assert (r.state, r.observed) == ("unresolvable", None)
+        assert r.note == (f"engine metric 'cfo_to_net_income' (FY2026Q2) is not a "
+                          f"finite number ({value!r})")
+        assert r.at == date(2026, 6, 30)
+        assert r.assumption_index == 0
+
+    @_NON_FINITE
+    @pytest.mark.parametrize("comparator", [">", "<", ">=", "<=", "=="])
+    def test_a_raw_field_waits_like_a_missing_one(self, value, comparator):
+        r = propose_resolution(_a(comparator=comparator, threshold=100.0),
+                               _ds(_p(revenue=value)), assumption_index=2)
+        assert (r.state, r.observed) == ("pending", None)
+        assert r.note == f"field 'revenue' in FY2026Q2 is not a finite number ({value!r})"
+        assert r.at == date(2026, 6, 30)
+        assert r.assumption_index == 2
+
+    @_NON_FINITE
+    @pytest.mark.parametrize(("comparator", "keyword"), [
+        (">", "positive"), ("<", "negative"), (">=", "non_negative"),
+        ("<=", "non_positive"), ("==", "zero"),
+    ])
+    def test_a_symbolic_threshold_is_no_verdict(self, value, comparator, keyword):
+        a = _a(metric="cfo", comparator=comparator, threshold=keyword)
+        r = propose_resolution(a, _ds(_p(cfo=value)))
+        assert (r.state, r.observed) == ("pending", None)
+        a = _a(metric="cfo_to_net_income", comparator=comparator, threshold=keyword)
+        r = propose_resolution(a, _ds(_p()), bundle=_skipped_validation(value))
+        assert (r.state, r.observed) == ("unresolvable", None)
+
+    def test_a_preregistered_source_does_not_park_it_with_a_nan_observed(self):
+        """The source check returns `pending` carrying the observed value;
+        a non-finite one is refused before it, with its own note."""
+        r = propose_resolution(_a(source="10-Q"), _ds(_p(revenue=float("nan"))))
+        assert (r.state, r.observed) == ("pending", None)
+        assert r.note == "field 'revenue' in FY2026Q2 is not a finite number (nan)"
+
+
 class TestSourceProvenance:
     """Round-11 finding 2: the {10-K, 10-Q} whitelist was NOT provenance — the
     same value resolved met under either form with no accession, so every
@@ -417,3 +494,74 @@ def test_the_resolve_command_prints_the_filing_behind_each_proposal(monkeypatch,
     out = capsys.readouterr().out
     accession = period.sources["revenue"].inputs[0].accession
     assert "MET" in out and f"source: {accession}" in out
+
+
+# --- Hermes finding 4: one fiscal label naming two periods ---------------------------
+# The mapper labels a quarter by its effective period, so instants on
+# 2026-03-31 and 2026-04-01 can both be FY2026Q1. The resolver used to take
+# the first INPUT-order match, so reordering the dataset flipped a committed
+# outcome (violated at 1.0 -> met at 100.0). An ambiguous label names no
+# period, as `provenance._index` already treats it.
+
+
+def _twins(reverse: bool = False) -> CompanyDataset:
+    a = _p(period_end=date(2026, 3, 31), fiscal_label="FY2026Q1", revenue=1.0)
+    b = _p(period_end=date(2026, 4, 1), fiscal_label="FY2026Q1", revenue=100.0)
+    return _ds(*((b, a) if reverse else (a, b)))
+
+
+class TestAmbiguousWindow:
+    AMBIGUOUS = "FY2026Q1 names 2 periods (2026-03-31, 2026-04-01); refusing to pick one"
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_either_input_order_is_pending_with_the_reason(self, reverse):
+        """Pending, never met/violated, and not unresolvable either: that is
+        terminal, and would close a sound assumption on a data artifact."""
+        a = _a(metric="revenue", comparator=">", threshold=50.0, window="FY2026Q1")
+        r = propose_resolution(a, _twins(reverse))
+        assert r.state == "pending"
+        assert r.note == self.AMBIGUOUS
+        assert r.observed is None and r.at is None and r.source_accession is None
+
+    def test_both_orders_propose_the_identical_resolution(self):
+        a = _a(metric="revenue", comparator=">", threshold=50.0, window="fy2026q1")
+        assert propose_resolution(a, _twins()) == propose_resolution(a, _twins(reverse=True))
+
+    def test_an_engine_metric_at_the_label_is_refused_too(self):
+        from app.services.formulas.registry import compute_metrics
+
+        ds = _twins()
+        ds.periods = [_p(period_end=date(2025, 12, 31), fiscal_label="FY2025Q4",
+                         revenue=10.0, capex=1.0), *(
+            p.model_copy(update={"capex": 1.0}) for p in ds.periods)]
+        bundle = compute_metrics(ds)
+        assert [m.fiscal_label for m in bundle.history["capex_to_revenue"]] == ["FY2026Q1"] * 2
+        a = _a(metric="capex_to_revenue", comparator=">", threshold=0.5, window="FY2026Q1")
+        r = propose_resolution(a, ds, bundle)
+        assert (r.state, r.note) == ("pending", self.AMBIGUOUS)
+
+    def test_a_unique_label_beside_the_twins_resolves_as_before(self):
+        ds = _twins()
+        ds.periods.append(_p(revenue=172_000_000))  # FY2026Q2, 2026-06-30
+        r = propose_resolution(_a(), ds)
+        assert (r.state, r.observed, r.at) == ("met", 172_000_000, date(2026, 6, 30))
+        assert r.note == "XBRL field 'revenue' (FY2026Q2)"
+
+    def test_the_bundle_lookup_refuses_two_entries_under_the_period_label(self):
+        """`_lookup_metric_value` / `_engine_metric` apply the same rule to
+        the bundle's history: two results under one label name no result."""
+        from app.services.journal.resolver import _engine_metric, _lookup_metric_value
+
+        period = _p(fiscal_label="FY2026Q1")
+        one, two = (MetricResult(name="dso", formula="t", fiscal_label=label, value=v,
+                                 status=MetricStatus.OK)
+                    for label, v in (("FY2026Q1", 1.0), ("TTM FY2026Q1", 100.0)))
+        bundle = MetricsBundle(history={"dso": [one, two]})
+        value, note, structural = _lookup_metric_value("dso", period, bundle)
+        assert (value, structural) == (None, False)  # retryable, not terminal
+        assert note == "metric 'dso' has 2 results for FY2026Q1; refusing to pick one"
+        assert _engine_metric("dso", period, bundle) is None
+        single = MetricsBundle(history={"dso": [two]})
+        assert _lookup_metric_value("dso", period, single) == (
+            100.0, "engine metric 'dso' (TTM ending FY2026Q1)", False)
+        assert _engine_metric("dso", period, single) is two

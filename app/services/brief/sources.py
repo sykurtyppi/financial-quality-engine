@@ -20,6 +20,8 @@ can be checked against the exact text it was given.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -40,6 +42,7 @@ from app.services.ingestion.edgar_documents import (
 )
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
+from app.services.reporting.report_files import own_dir, write_atomic
 from app.services.watch.poller import Filing, recent_filings
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +54,50 @@ _NON_NARRATIVE_RE = re.compile(r"table|supplement|slide|presentation|infographic
 _LABEL_CHARS_RE = re.compile(r"[^\w.\-]+")
 _NAME_CHARS_RE = re.compile(r"[^\w .,&'\-]+")
 LABEL_MAX = 60
+
+
+def brief_workdir(ticker: str, event_day: str, root: Path | None = None) -> Path:
+    """``<briefs>/<T>/<day>/``: a brief's sources, its assessment and its
+    build record. Both levels are the engine's own directories, refused
+    when a link (`own_dir`): one planted at either had every source file,
+    ``assessment.json`` and ``built.json`` written wherever it pointed
+    (Hermes audit of 424b0b4, finding 5). ``<briefs>`` is the operator's."""
+    return own_dir(own_dir((root or BRIEFS) / ticker) / event_day)
+
+
+def brief_sha256(brief: Path) -> str | None:
+    """The sha256 of a brief file's bytes, or None when it cannot be read."""
+    try:
+        return hashlib.sha256(brief.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def read_build_record(record: Path, brief: Path) -> dict | None:
+    """A brief's build record (``built.json``: how the brief was built), or
+    None when there is none that vouches for ``brief`` as it is on disk.
+
+    The brief and its record are two files, and the record is written
+    last: a process killed between the two leaves a NEW brief beside the
+    OLD record, which, read as it stands, said "print-night" beside a brief
+    that carries the engine findings, and a later print-night build
+    overwrote them (round-24 audit). So the record names the sha256 of the
+    brief it describes, and one that does not match — or names none: a
+    record from before the hash, or a hand edit — is no record. No record
+    is the safe direction at both readers: each treats the brief as full
+    and never rebuilds it without the engine findings. One reader of this
+    file for both (``earnings_brief.py`` and the sweep), so the rule cannot
+    drift between them."""
+    try:
+        meta = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    digest = meta.get("brief_sha256")
+    if not isinstance(digest, str) or digest != brief_sha256(brief):
+        return None
+    return meta
 
 
 def _safe_label(s: str, limit: int = LABEL_MAX) -> str:
@@ -196,7 +243,7 @@ def collect_sources(
     submissions = client.submissions_by_cik(cik)
     filing = latest_earnings_8k(submissions, accession)
     company = _safe_name(str(submissions.get("name") or ticker)) or ticker
-    workdir = (out_root or BRIEFS) / ticker / filing.filing_date.isoformat()
+    workdir = brief_workdir(ticker, filing.filing_date.isoformat(), out_root)
     workdir.mkdir(parents=True, exist_ok=True)
     src = BriefSources(ticker=ticker, filing=filing, company=company, workdir=workdir)
 
@@ -224,7 +271,10 @@ def collect_sources(
         role = "release" if not release_done else "exhibit"
         out = workdir / (f"release_{dtype.replace('.', '_')}.txt" if role == "release"
                          else f"exhibit_{dtype.replace('.', '_')}.txt")
-        out.write_text(text)
+        # Every source file is written whole (`write_atomic`): a symlink
+        # planted at one of these names is replaced, never written through
+        # (Hermes audit of 424b0b4, finding 5).
+        write_atomic(out, text)
         src.files.append(SourceFile(role, out, f"{dtype} {dname} ({words} words)"))
         release_done = True
     if not release_done:
@@ -250,7 +300,7 @@ def collect_sources(
         else:
             label, text = got
             out = workdir / "prior_release.txt"
-            out.write_text(text)
+            write_atomic(out, text)
             src.files.append(SourceFile(
                 "prior_release", out,
                 f"PRIOR quarter's release, 8-K {prior.accession} filed {prior.filing_date} — "
@@ -265,7 +315,7 @@ def collect_sources(
         if not transcript.is_file():
             raise BriefSourceError(f"transcript not found: {transcript}")
         out = workdir / "transcript.txt"
-        out.write_text(transcript.read_text(errors="replace"))
+        write_atomic(out, transcript.read_text(errors="replace"))
         src.files.append(SourceFile(
             "transcript", out, f"call transcript ({_safe_label(transcript.name)})"))
     else:
@@ -301,7 +351,7 @@ def collect_sources(
             src.assumptions_origin = DERIVED
     if items:
         out = workdir / "assumptions.txt"
-        out.write_text(render_for_brief(ticker, items, origin=origin, details=details))
+        write_atomic(out, render_for_brief(ticker, items, origin=origin, details=details))
         whose = ("holder-authored" if origin == HOLDER
                  else "ENGINE-DERIVED from filed history, not holder-authored")
         src.files.append(SourceFile(

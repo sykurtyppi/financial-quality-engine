@@ -355,6 +355,118 @@ Mid-window changes (0.4.0 window):
     concept changes. The controls record the same values. Existing sweep
     CSVs under `data/` keep the old header until they are regenerated.
 
+15. **2026-09-24 — the 0–100 numbers leave the report (operator decision 1,
+    option A).** The composite and its block scores measured
+    non-discriminating on the live season, and the card had already dropped
+    the composite. The appendix still showed a Score column per block, the
+    "0–100 concern scores" scale sentence, a concern number beside each
+    driver, "concern NN/100" in every flag, and "(NN/100)" in the Capital
+    Integrity caveat. All of these are gone from the rendered text:
+    - drivers stay ranked by weight × concern, as names only;
+    - an unscored block says "not scored (insufficient coverage)";
+    - a flag says which side of its threshold the metric fell on.
+
+    **Rendering only.** `OverallScore` and `BlockScore.score` are still
+    computed and still decide which flags exist. No anchor, weight or flag
+    threshold is touched. `calibration_snapshot.json`, which pins
+    `overall.score`, is byte-identical. The golden report was regenerated,
+    and its diff is wording only: every metric value and every flag is
+    unchanged. Proof: `tests/unit/test_scorecard_drivers.py::TestNoZeroToHundredNumberRemains`
+    finds no 0–100 number in the golden report or in full reports on the
+    three real fixtures, and confirms the scores are still computed.
+    Option C (stop computing them) stays a window-close decision.
+
+16. **2026-09-28 — a tag switch no longer empties the newest quarter
+    (checked per-quarter fallback).** A single-concept field took every
+    quarter from the one candidate covering the most reported quarters and
+    never read another. When a filer moved a figure to a new concept, the
+    old concept kept winning on history and the quarter reported only under
+    the new one went missing: CRM FY2027Q1 `interest_expense` was None
+    (reported only as `InterestExpenseNonoperating`, 317m; the two concepts
+    agree at 68m on FY2026Q1), and KO FY2024Q1 was None at a 2025-03-31 cut
+    (`InterestExpense` 382m, filed 2024-05-02; equal to the selected
+    `InterestExpenseNonoperating` on the three quarters both report). Now
+    (`companyfacts_mapper._fill_gaps`) a reported quarter the selected
+    concept has no value for is filled from the first other candidate, in
+    registry order, that agrees with it within 0.5% on every quarter both
+    report (buffer included), at least one of them a reported-window
+    quarter where the selected value is not zero. Where the selected concept has a value it
+    is never replaced. The candidate is read through the same point-in-time
+    view and derivation rules; the quarter's provenance, a field note and
+    `SeriesSelection.fallbacks` name the concept; a candidate not proven
+    equal is named with its value and not used; `tag_used` is unchanged. The
+    restatement scan reads a fallback concept on its own, over the quarters
+    it supplied (never summed with the selected one); the scored vintage
+    diff follows per-quarter provenance; the raw `--splits` diff names the
+    quarters it does not follow. Single-concept fields only (SG&A and D&A
+    resolve per quarter from their strategies). **A correction of mapped
+    input values, not a scoring change: no anchor, weight or band moves.**
+    Calibration snapshot: **CRM only** — `interest_coverage` FY2027Q1 now
+    computes (7.40; it was missing data), Balance Sheet Stress 58.7 → 52.0,
+    overall 26.5 → 25.3, direction unchanged (positive); AAPL and KO
+    byte-identical. `selection_snapshot.json`: `real/CRM` FY2027Q1 and
+    `pit/KO@2025-03-31` FY2024Q1 interest filled (value, method count,
+    periods filled, missing periods, period source, note); every other
+    existing cell unchanged; one synthetic case added
+    (`tag_switch_fallback`: a fill and both rejection notes). Golden report
+    byte-identical. `tests/corpus_drafts/crm_january_fye/REVIEW.md` updated
+    by hand. The ledger's `selections` and the corpus observation record
+    `SeriesSelection.label` — `tag_used`, then `|<period end>:<concept>` per
+    filled quarter — so CRM's reads
+    `us-gaap:InterestExpenseDebt|2026-04-30:us-gaap:InterestExpenseNonoperating`
+    and the draft's `case.json` records that (still unreviewed); every other
+    field, pinned case and draft reads as before. Independent review of the
+    first cut (7a65130) found two proofs that proved nothing — agreement
+    only on zeros, and agreement only in the derivation buffer — both now
+    rejected with a note; the CRM and KO fills stand, snapshots unchanged.
+    Proof:
+    `tests/unit/test_tag_switch_fallback.py`,
+    `test_companyfacts_mapper.py::test_tags_are_mixed_only_into_gaps_and_only_when_proven_equal`,
+    `test_selection_snapshot.py`. Operator note: one shared quarter is thin
+    proof of equality (CRM); the note says which quarters it rests on. The
+    0.3.0 wide sweep that set the anchors ran on the old mapping; anchors
+    are not re-fit mid-window — a window-close item.
+
+17. **2026-10-03 — valuation shadow card: a non-scoring appendix section and
+    ledger plane, plus five additive ingestion fields.** Rendering and
+    ledger only (`app/services/valuation/`, `report_builder.build_report`
+    kwargs `market_observation` / `valuation_requested`,
+    `Plane.VALUATION`, `Provenance.kind="observation"`,
+    `LedgerDocument.valuation`), fed by one operator-recorded price
+    (`scripts/market.py`, `journal/market/<T>.json`). It reads the dataset
+    and the observation and never the result: the decision card, the
+    thermometer, every score, flag and change line and every non-valuation
+    ledger item are byte-identical with and without the observation. The
+    five new balance-sheet fields (`short_term_investments`,
+    `operating_lease_liabilities`, `minority_interest`, `preferred_stock`,
+    `stockholders_equity`) are mapped like any other but registered
+    `scored=False`: no metric reads them, the field-coverage figure, the
+    restatement scan and the silent-revision diff are over the scored
+    fields only, and `pit.py` trims to the scored set exactly. **No anchor,
+    weight, band or score moved.** Calibration snapshot unchanged; golden
+    report unchanged; `data/example_company.json` unchanged;
+    `selection_snapshot.json`: additive entries for the five new fields in
+    every case (none maps on the committed fixtures, which were trimmed to
+    the registry before these existed; every pre-existing entry
+    byte-identical). Spec: `docs/valuation_spec.md`. Proof:
+    `tests/unit/test_valuation_report.py::test_card_scores_and_every_other_ledger_item_are_byte_identical`,
+    `tests/unit/test_valuation_fields.py`, `tests/unit/test_valuation_ledger.py`,
+    `tests/unit/test_valuation_bridge.py`, `tests/unit/test_valuation_multiples.py`,
+    `tests/unit/test_valuation_expectations.py`, `tests/unit/test_valuation_observation.py`,
+    `tests/integration/test_selection_snapshot.py`, drill step 13.
+    *Fix round 1 (review of 48b1f04):* the plane now reads the filing facts
+    **as filed by the observation** through the mapper's point-in-time cut
+    (`pit.build_pit_dataset`, imported, not changed; the cut is the day
+    before the observation's US/Eastern day), the implied-growth solves and
+    scenarios are equity-side (against the market cap, not EV), the
+    observation reader refuses the future and control characters, and the
+    ledger's provenance validator is two-directional. Still rendering and
+    ledger only: no anchor, weight, band or score moved; calibration
+    snapshot, golden report, `data/example_company.json` and the selection
+    snapshot all unchanged. Proof: `tests/unit/test_valuation_bridge.py`
+    (as-filed cases on the three fixtures, a restatement, the Eastern-day
+    boundary), the F2–F10 tests named in each test file's docstring.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.

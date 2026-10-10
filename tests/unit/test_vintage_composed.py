@@ -102,7 +102,9 @@ def _first_component(facts: dict, field_name: str) -> str:
     return selected.split("+")[0].split(":")[-1]
 
 
-SCORED = [f.name for f in FIELDS if f.name not in SPLIT_ADJUSTED_FIELDS]
+# The scored fields: the valuation plane's inputs (`scored=False`) are
+# mapped but never diffed as scored (tests/unit/test_valuation_fields.py).
+SCORED = [f.name for f in FIELDS if f.scored and f.name not in SPLIT_ADJUSTED_FIELDS]
 
 
 @pytest.mark.parametrize(
@@ -199,7 +201,7 @@ def test_an_unmappable_snapshot_says_composed_fields_were_not_compared():
     result = diff_scored(older, _every_field(composites=False))
     assert result.canonical_unavailable == (
         "scored values not compared as the engine builds them: the older snapshot "
-        "could not be mapped (raw facts only)"
+        "could not be mapped (raw fact rows only, not scored changes)"
     )
 
 

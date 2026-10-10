@@ -30,6 +30,7 @@ from app.services.ingestion.vintages import (
 )
 from app.services.reporting.report_builder import _collect_streams, build_report
 from tests.fixtures.companies import stretch_dataset
+from tests.fixtures.staged import write_ledger
 
 CIK = 1045810
 D19, D20, D21 = (datetime(2026, 9, d, 12, 0, tzinfo=UTC) for d in (19, 20, 21))
@@ -37,10 +38,19 @@ AS_OF = date(2026, 9, 22)
 FLOOR = date(2024, 9, 22)
 
 
+# An earlier balance-sheet quarter every snapshot carries unchanged. The
+# mapper needs two quarter ends to build a snapshot; one it cannot build
+# yields raw fact rows only (`scope="raw"`), which are never promoted — so
+# without this the Tier-1 tests below would test the fallback, not the rule
+# (Hermes audit of 424b0b4, finding 2).
+ANCHOR = ("2025-12-31", "2026-02-01", 900.0, "10-K", "q0")
+
+
 def _facts(rows, tag="Assets"):
-    """rows: (end, filed, val, form, accn)"""
+    """rows: (end, filed, val, form, accn), after the ANCHOR quarter."""
     return {"cik": CIK, "facts": {"us-gaap": {tag: {"units": {"USD": [
-        {"end": r[0], "filed": r[1], "val": r[2], "form": r[3], "accn": r[4]} for r in rows
+        {"end": r[0], "filed": r[1], "val": r[2], "form": r[3], "accn": r[4]}
+        for r in [ANCHOR, *rows]
     ]}}}}}
 
 
@@ -143,13 +153,10 @@ def test_a_baseline_older_than_previous_gets_its_own_block(tmp_path):
     _store(tmp_path, _assets(1100.0, accn="c"), D21)
     rep = report_diff(CIK, as_of=AS_OF, baseline_day=date(2026, 9, 20), root=tmp_path)
     assert rep.changes_since_previous == []
-    assert [c.new_value for c in rep.changes_since_baseline] == [1100.0]
-    # (These one-fact snapshots cannot be mapped, so the line says the
-    # scored values were not compared rather than letting silence read as clean.)
+    assert [(c.new_value, c.scope) for c in rep.changes_since_baseline] == [(1100.0, "scored")]
+    # Mappable snapshots: both windows are compared as the engine scores them.
     assert rep.status_line() == (
         "compared 2026-09-20 → 2026-09-21: 0 change(s); since pinned thesis 2026-09-19: 1 change(s)"
-        "; scored values not compared as the engine builds them: the older snapshot "
-        "could not be mapped (raw facts only)"
     )
     from app.services.reporting.report_builder import _silent_revisions_section
 
@@ -158,7 +165,7 @@ def test_a_baseline_older_than_previous_gets_its_own_block(tmp_path):
     assert "**Since the pinned thesis was locked** (2026-09-19):" in md
     # Through the stream: the promoted line names the lock window, not previous->newest.
     _s, _e, tier1, errors, _t, _scan, diff = _collect_streams(
-        _Client(_assets(1100.0)), "AAPL", AS_OF, company_facts=_assets(1100.0),
+        _Client(_assets(1100.0, accn="c")), "AAPL", AS_OF, company_facts=_assets(1100.0, accn="c"),
         baseline_day=date(2026, 9, 20), vintage_root=tmp_path,
     )
     assert errors["vintage"] is None
@@ -194,9 +201,11 @@ def test_no_baseline_wording(tmp_path, snapshots):
     )
     assert rep.no_baseline_reason == expected and rep.status_line() == expected
     ds = stretch_dataset()
+    # The payload the report scored is the one stored snapshot, when there is one.
     report, _ = build_report(
         analyze(ds), ds, generated_on=AS_OF.isoformat(), coverage=1.0, fetched_at="x",
-        client=_Client(), ticker="AAPL", company_facts={"facts": {}}, field_tags={},
+        client=_Client(), ticker="AAPL",
+        company_facts=_assets(1000.0) if snapshots else {"facts": {}}, field_tags={},
         vintage_root=tmp_path,
     )
     assert f"## Silent Revisions Between Snapshots (evidence — not scored)\n\nNot checked: {expected}." in report
@@ -214,9 +223,10 @@ def test_an_unreadable_snapshot_is_a_stream_failure_not_a_report_abort(tmp_path)
     with pytest.raises(v.UNREADABLE):
         report_diff(CIK, as_of=AS_OF, root=tmp_path)
     ds = stretch_dataset()
+    # The report scored the payload whose stored copy is now unreadable.
     report, _ = build_report(
         analyze(ds), ds, generated_on=AS_OF.isoformat(), coverage=1.0, fetched_at="x",
-        client=_Client(), ticker="AAPL", company_facts={"facts": {}}, field_tags={},
+        client=_Client(), ticker="AAPL", company_facts=_assets(1100.0), field_tags={},
         vintage_root=tmp_path,
     )
     assert "**Silent-revision appendix UNAVAILABLE**" in report
@@ -356,6 +366,7 @@ def test_journal_threads_the_entry_day_and_the_cli_passes_nothing(monkeypatch, t
         company_facts = {"facts": {}}
 
     def fake_build(result, dataset, **kw):
+        write_ledger(kw)
         seen[kw["ticker"]] = kw.get("baseline_day", "absent")
         from app.services.scoring.thermometer import compute_thermometer
         return "report", compute_thermometer(result.block_scores, dataset.periods)
@@ -385,9 +396,10 @@ def test_journal_threads_the_entry_day_and_the_cli_passes_nothing(monkeypatch, t
 
 # --- audit regressions (2026-09-22) ----------------------------------------------
 
-def _tier1(root, lock):
+def _tier1(root, lock, facts):
+    # `facts` is the payload the report scored: the newest state compared.
     _s, _e, tier1, errors, _t, _scan, diff = _collect_streams(
-        _Client(_assets(1.0)), "AAPL", AS_OF, company_facts=_assets(1.0),
+        _Client(facts), "AAPL", AS_OF, company_facts=facts,
         baseline_day=lock, vintage_root=root,
     )
     assert errors["vintage"] is None
@@ -403,9 +415,9 @@ def test_a_post_lock_revision_to_a_period_added_after_the_lock_is_promoted(tmp_p
     _store(tmp_path, _facts([q1]), datetime(2026, 9, 10, 12, tzinfo=UTC))
     _store(tmp_path, _facts([q1, ("2026-06-30", "2026-08-01", 1000.0, "10-Q", "b")]),
            datetime(2026, 9, 15, 12, tzinfo=UTC))
-    _store(tmp_path, _facts([q1, ("2026-06-30", "2026-08-01", 800.0, "10-Q", "c")]),
-           datetime(2026, 9, 20, 12, tzinfo=UTC))
-    lines, _diff = _tier1(tmp_path, date(2026, 9, 12))
+    newest = _facts([q1, ("2026-06-30", "2026-08-01", 800.0, "10-Q", "c")])
+    _store(tmp_path, newest, datetime(2026, 9, 20, 12, tzinfo=UTC))
+    lines, _diff = _tier1(tmp_path, date(2026, 9, 12), newest)
     assert lines == [
         "Silent revision: total_assets for 2026-06-30 1,000 → 800 (-20.0%) between snapshots "
         "2026-09-15 and 2026-09-20 (detail in appendix; threshold hand-set, uncalibrated)"
@@ -416,7 +428,7 @@ def test_a_revision_in_both_windows_is_promoted_once(tmp_path):
     _store(tmp_path, _assets(1000.0), D19)
     _store(tmp_path, _assets(1050.0, accn="b"), D20)
     _store(tmp_path, _assets(1200.0, accn="c"), D21)
-    lines, diff = _tier1(tmp_path, date(2026, 9, 20))  # baseline 9/19, previous 9/20
+    lines, diff = _tier1(tmp_path, date(2026, 9, 20), _assets(1200.0, accn="c"))  # baseline 9/19, previous 9/20
     assert diff.changes_since_baseline and diff.changes_since_previous
     assert len(lines) == 1 and "between snapshots 2026-09-19 and 2026-09-21" in lines[0]
 
@@ -461,3 +473,44 @@ def test_a_revert_is_named_not_called_unchanged(tmp_path):
     assert back.describe().startswith("reverted back to an earlier snapshot")
     same = store(CIK, _assets(1000.0), now=D21, root=tmp_path)
     assert same.reason == "unchanged"
+
+
+def test_an_amendment_between_snapshots_is_not_on_the_card_as_silent(tmp_path):
+    """The earnings-night drill's finding: a 10-Q/A beside its original was
+    promoted as a `Silent revision` under "nothing here has an amended filing
+    behind it". It is listed apart, counted apart, and never promoted."""
+    import json
+
+    orig = ("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")
+    _store(tmp_path, _facts([orig]), D19)
+    facts = _facts([orig, ("2026-06-30", "2026-09-15", 1100.0, "10-Q/A", "b")])
+    _store(tmp_path, facts, D20)
+    ds = stretch_dataset()
+    ledger = tmp_path / "r.ledger.json"
+    report, _ = build_report(
+        analyze(ds), ds, generated_on=AS_OF.isoformat(), coverage=1.0, fetched_at="x",
+        client=_Client(facts), ticker="AAPL", company_facts=facts, field_tags={},
+        vintage_root=tmp_path, ledger_out=ledger,
+    )
+    assert "Silent revision:" not in report
+    assert ("- Silent-revision check: compared 2026-09-19 → 2026-09-20: 0 change(s) "
+            "(+1 moved with a later filing, not silent)") in report
+    assert "**Moved with a later filing (not silent).**" in report
+    assert "| total_assets | 2026-06-30 | 1,000 | 1,100 | 10.0% | 2026-08-01 10-Q a | " \
+           "2026-09-15 10-Q/A b |" in report
+    items = [i for i in json.loads(ledger.read_text())["items"] if i["kind"] == "silent_revision"]
+    assert len(items) == 1
+    assert items[0]["validation_status"] != "validated"
+    assert "moved with 10-Q/A b" in items[0]["note"] and "not silent" in items[0]["note"]
+
+
+def test_the_stream_floor_is_the_report_day_two_years_back(tmp_path):
+    """The card's floor is the report day two years back, its day capped at
+    28 (a Feb 29 two years back need not exist): 2024-09-22 for a report of
+    2026-09-22, so a revision to a period ending 2024-09-25 is promoted."""
+    _store(tmp_path, _assets(1000.0, end="2024-09-25", filed="2024-11-01"), D19)
+    newest = _assets(1100.0, end="2024-09-25", filed="2024-11-01", accn="b")
+    _store(tmp_path, newest, D20)
+    lines, diff = _tier1(tmp_path, None, newest)
+    assert diff.canonical_unavailable is None
+    assert len(lines) == 1 and "total_assets for 2024-09-25 1,000 → 1,100" in lines[0]

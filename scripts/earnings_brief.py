@@ -51,13 +51,22 @@ from app.services.brief.sources import (
     BriefSourceError,
     BriefSources,
     SourceFile,
+    brief_sha256,
+    brief_workdir,
     collect_sources,
+    read_build_record,
 )
 from app.services.brief.validation import validate_brief
 from app.services.delivery import notify, publish
 from app.services.headless import claude_command
 from app.services.ingestion.sec_client import SecClient, SecClientError
 from app.services.journal.store import safe_ticker
+from app.services.reporting.report_files import (
+    LiveRun,
+    is_live_report,
+    read_live,
+    write_atomic,
+)
 
 REPORT_DIRS = (ROOT / "reports" / "auto", ROOT / "reports")
 DEFAULT_TIMEOUT_S = 1800.0
@@ -75,17 +84,35 @@ _HEADING_RE = re.compile(r"^## (.+)$", re.M)
 
 
 def latest_report(ticker: str) -> Path | None:
-    """Newest engine report for the ticker across both tracks (by mtime)."""
+    """Newest engine report for the ticker across both tracks (by mtime) —
+    never an audit, and never a historical replay (`.replay.md`), which is
+    today's code rebuilding an old day, not the current view."""
     matches = [p for d in REPORT_DIRS for p in d.glob(f"{ticker}_*.md")
-               if not p.stem.endswith("_audit")]
+               if is_live_report(p) and p.exists()]  # a set-aside run's names resolve to nothing
     return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
 
 def audit_for(report: Path | None) -> Path | None:
+    """The report's own audit: one that names another generation (it
+    finished after a rebuild replaced the report it read) is not this
+    report's, and is left out with a warning rather than paired."""
+    live = _pinned(report)
+    return live.audit if live is not None else None
+
+
+def _pinned(report: Path | None) -> LiveRun | None:
+    """The live run of ``report``, read once: its report and audit paths are
+    its generation's own, which no rebuild changes afterwards."""
     if report is None:
         return None
-    a = report.with_name(f"{report.stem}_audit.md")
-    return a if a.is_file() else None
+    live = read_live(report)
+    if live is None:
+        return None
+    for path in live.stale:
+        if path.name.endswith("_audit.md"):
+            print(f"warning: {path.name} audited an earlier generation of {report.name}; "
+                  "not used", file=sys.stderr)
+    return live
 
 
 def prior_brief(ticker: str, before: date, root: Path | None = None) -> Path | None:
@@ -109,25 +136,32 @@ def built_meta_path(ticker: str, event_day: str, root: Path | None = None) -> Pa
 
 
 def read_built_meta(ticker: str, event_day: str, root: Path | None = None) -> dict | None:
-    """{"kind": "full"|"print-night", "accession": ..., "report": ..., "at": ...}
-    for the brief on disk, or None when there is no record (a brief from
-    before the sidecar existed, or none at all)."""
-    p = built_meta_path(ticker, event_day, root)
-    try:
-        meta = json.loads(p.read_text())
-    except (OSError, ValueError):
-        return None
-    return meta if isinstance(meta, dict) else None
+    """{"kind": "full"|"print-night", "accession": ..., "report": ..., "at": ...,
+    "brief_sha256": ...} for the brief on disk, or None when there is no
+    record that matches it: none at all, one from before the sidecar or its
+    hash existed, or one left beside a brief it does not describe (a build
+    killed between the two writes). `read_build_record` says why None is
+    the safe direction."""
+    return read_build_record(built_meta_path(ticker, event_day, root),
+                             brief_path(ticker, event_day, root))
 
 
 def write_built_meta(ticker: str, event_day: str, *, kind: str, accession: str,
                      report: Path | None, root: Path | None = None) -> None:
-    p = built_meta_path(ticker, event_day, root)
+    """Record how the brief now on disk was built, with the sha256 of its
+    bytes as read back here: the record vouches for that brief only. Written
+    atomically and LAST, after the brief and its assessment, so a kill at
+    any point leaves either this build's record beside this build's brief,
+    or an older record whose hash no longer matches, which reads as none.
+    Into the brief's own work directory, never through a link planted
+    there (`brief_workdir`)."""
+    p = brief_workdir(ticker, event_day, root) / BUILT_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({
+    write_atomic(p, json.dumps({
         "kind": kind, "accession": accession,
         "report": str(report) if report else None,
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "brief_sha256": brief_sha256(brief_path(ticker, event_day, root)),
     }, indent=2) + "\n")
 
 
@@ -203,13 +237,19 @@ def cmd_build(args: argparse.Namespace) -> int:
         # brief with no engine findings in it.
         print(f"{ticker}: --report {report} does not exist.", file=sys.stderr)
         return 1
+    # One run, pinned: the brief's model reads these files later, by path, and
+    # a rebuild meanwhile must not swap the report or its audit under it.
+    live = _pinned(report)
+    audit = live.audit if live is not None else None
+    if live is not None:
+        report = live.report
     try:
         # prior brief needs the print date, which the 8-K establishes: collect
         # once without it, then attach.
         src = collect_sources(
             client, ticker, accession=args.accession,
             transcript=Path(args.transcript) if args.transcript else None,
-            report=report, audit=audit_for(report),
+            report=report, audit=audit,
         )
         if no_report:
             src.diagnostics.append(
@@ -233,9 +273,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         # A print-night build must never downgrade a brief that already
         # carries the engine findings (a queued retry racing a hand-built
         # full brief, or a stray --no-report by hand). No record at all is
-        # treated the same way — a brief from before the sidecar existed, or
-        # one whose record failed to write, is assumed full. Nothing to do:
-        # exit 0 so a queue entry for it is cleared.
+        # treated the same way — a brief from before the sidecar existed, one
+        # whose record failed to write, or one beside a record whose hash does
+        # not match it (a build killed after the brief but before the record)
+        # is assumed full. Nothing to do: exit 0 so a queue entry for it is
+        # cleared.
         built = f"built {existing.get('at')}" if existing else "no build record"
         print(f"{ticker}: {out.name} already exists ({built}) — a print-night rebuild "
               "could downgrade it; nothing to do (the 10-Q rebuild still refreshes it).")
@@ -269,14 +311,21 @@ def cmd_build(args: argparse.Namespace) -> int:
               f"{src.workdir}", file=sys.stderr)
         return 2
     keep = useful_value(out.read_text()) if out.exists() else "unset"
-    out.write_text(finalize(stdout, keep))
+    # Three files, each written whole (temporary file, fsync, rename) and in
+    # this order: the brief, its assessment, then the build record LAST. A
+    # plain write killed part way left a torn file; and a kill after the
+    # brief but before the record left a new full brief beside the old
+    # print-night record, which let a later --no-report run overwrite the
+    # engine findings (round-24 audit). The record names the brief's hash,
+    # so any record a kill leaves behind either matches this brief or reads
+    # as none (`read_built_meta`).
+    write_atomic(out, finalize(stdout, keep))
     # Stable machine-readable contract for a later web/API surface. The human
     # brief remains the primary artifact; this sidecar avoids reparsing model
     # prose when a client only needs the five-dimensional print assessment.
     try:
-        (src.workdir / "assessment.json").write_text(
-            assessment.model_dump_json(indent=2) + "\n"
-        )
+        write_atomic(src.workdir / "assessment.json",
+                     assessment.model_dump_json(indent=2) + "\n")
     except OSError as e:
         # Best-effort, like the build record below: the brief is written and
         # valid; a missing sidecar must not fail the build or skip the record.
@@ -376,7 +425,15 @@ def cmd_digest(args: argparse.Namespace) -> int:
     text = build_digest(paths, since, today)
     out = Path(args.out) if args.out else BRIEFS / f"DIGEST_{today.isoformat()}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text)
+    if args.out:
+        # The operator's own path, written through as it stands: a link they
+        # keep there (to a synced file) stays a link, a FIFO or a device a
+        # stream. Replacing a file whole is for the engine's own name.
+        out.write_text(text)
+    else:
+        # The engine's own name, replaced whole: a symlink planted there is
+        # replaced, never written through (Hermes audit of 424b0b4, finding 5).
+        write_atomic(out, text)
     print(text)
     print(f"digest -> {out}")
     return 0

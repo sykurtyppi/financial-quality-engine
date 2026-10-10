@@ -185,6 +185,15 @@ def test_a_stale_trend_could_suppress_a_genuinely_elevated_current_reading():
 _NON_FINITE = [float("nan"), float("inf"), float("-inf")]
 
 
+def _ok_unchecked(label: str, value: float) -> MetricResult:
+    """An OK result holding `value` as given. `MetricResult` itself now turns
+    an OK non-finite value into NOT_MEANINGFUL (Hermes audit of 424b0b4,
+    finding 7), so this input is built past validation: the trend's own
+    guard, a second line behind that contract, is what is under test."""
+    return MetricResult.model_construct(name="m", formula="f", fiscal_label=label,
+                                        status=MetricStatus.OK, value=value)
+
+
 @pytest.mark.parametrize("bad_value", _NON_FINITE)
 @pytest.mark.parametrize("fn", [
     pytest.param(lambda s: accrual_trend(s), id="accrual_trend"),
@@ -192,7 +201,7 @@ _NON_FINITE = [float("nan"), float("inf"), float("-inf")]
 ])
 def test_a_non_finite_result_is_not_meaningful(fn, bad_value):
     result = fn([_ok("FY2026Q1", 1.0), _ok("FY2026Q2", 2.0),
-                 _ok("FY2026Q3", 3.0), _ok("FY2026Q4", bad_value)])
+                 _ok("FY2026Q3", 3.0), _ok_unchecked("FY2026Q4", bad_value)])
     assert result.status is MetricStatus.NOT_MEANINGFUL
     assert result.note == "Non-finite result"
 

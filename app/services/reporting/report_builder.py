@@ -21,7 +21,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,12 +31,14 @@ from app.services.ingestion.payloads import ExternalPayloadError
 from app.services.ingestion.sec_client import SecClientError
 from app.services.reporting.decision_card import render_decision_card
 from app.services.reporting.markdown_report import render
+from app.services.reporting.report_files import NotPublished
 from app.services.scoring.thermometer import DistressThermometer, compute_thermometer
 
 if TYPE_CHECKING:
     # Imported lazily at run time (the restatement module is loaded only
     # when a report runs the scan).
     from app.services.ingestion.restatements import Selected
+    from app.services.valuation.observation import LoadedObservation
 
 SNAPSHOT_UNAVAILABLE = (
     "filing index could not be read once for this run; each evidence stream "
@@ -139,13 +141,22 @@ def _archive_summary(client) -> str | None:
     return summary() if callable(summary) else None
 
 
-def _derived_tier1_lines(derived) -> list[str]:
+def _derived_tier1_lines(derived, footprints=()) -> list[str]:
     """A derived quarter that an AMENDED filing moved beyond materiality:
     the same rule as filed figures (amendments only), for the quarters the
-    engine derives rather than reads (Hermes audit round 4, finding 2)."""
+    engine derives rather than reads (Hermes audit round 4, finding 2).
+
+    Not repeated when an amended footprint of the same field already names
+    that period (`_restatement_tier1_lines`): a derived Q4 moved by the
+    amendment that revised the year is that restatement, whose detail is in
+    the appendix. Keyed on the field and period, not the accession: the
+    footprint names its latest material /A, the derived row the filing made
+    on the day it last moved, and a later /A that re-files the amended value
+    unchanged makes those differ for one restatement."""
+    amended = {(f.field_name, f.period_end) for f in footprints if f.is_amendment}
     lines = []
     for d in derived:
-        if not d.is_amendment:
+        if not d.is_amendment or (d.field_name, d.period_end) in amended:
             continue
         forms = ", ".join(dict.fromkeys(form for form, _accn in d.moved_by if form.endswith("/A")))
         lines.append(
@@ -270,6 +281,8 @@ def _collect_streams(
     vintage_root: Path | None = None,
     n_quarters: int = 8,
     evidence: dict | None = None,
+    uncut_fundamentals: bool = False,
+    scored_quarters: tuple[date, ...] | None = None,
 ):
     """Fetch offerings, restatements, 8-K 4.02 events and the silent-revision
     diff. Returns (body_sections, event_lines, tier1_events, errors,
@@ -286,7 +299,9 @@ def _collect_streams(
     and `vintage_root` overrides the store location (tests). `n_quarters` is
     the window the report scored, over which derived quarters are rebuilt.
     `evidence`, when given, receives the raw stream objects (the evidence
-    ledger's input)."""
+    ledger's input). `uncut_fundamentals` says the score was mapped from the
+    whole payload (no as-of), and `scored_quarters` names the quarter ends it
+    scored; both are the restatement scan's (see `build_report`)."""
     evidence = evidence if evidence is not None else {}
     evidence["ran"] = True
     body_sections: list[str] = []
@@ -342,21 +357,37 @@ def _collect_streams(
 
     def restatements() -> _Staged:
         from app.services.ingestion.restatements import (
+            newest_filed,
             render_restatements_section,
             scan_restatements,
         )
 
         cutoff = date(report_date.year - 3, 1, 1)
         facts = company_facts if company_facts is not None else client.company_facts(ticker)
+        # The scan must read the facts the SCORE read. A replay (and the
+        # corpus) maps as of the report's own day, so `report_date` is that
+        # cut exactly. The live report maps the whole payload, and EDGAR dates
+        # a filing accepted after 5:30pm ET the NEXT business day: a report
+        # written the evening a 10-Q lands, dated today, scored that 10-Q
+        # while a scan as of today dropped it — the newest quarter's revisions
+        # unread, and the derived check rebuilt on a different series. So the
+        # live scan runs through the payload's newest filing, which admits
+        # every dated fact and so never less than the score. Only that: a
+        # replay handed today's payload must never see past its day.
+        scan_as_of = report_date
+        if uncut_fundamentals:
+            newest = newest_filed(facts)
+            if newest is not None and newest > report_date:
+                scan_as_of = newest
         scan = scan_restatements(
-            facts, period_since=cutoff, as_of=report_date, selected_tags=field_tags,
-            n_quarters=n_quarters,
+            facts, period_since=cutoff, as_of=scan_as_of, selected_tags=field_tags,
+            n_quarters=n_quarters, scored_quarters=scored_quarters,
         )
         out = _Staged(result=scan)
         out.evidence["restatements"] = scan
         out.sections.append(render_restatements_section(scan))
         out.tier1 += _restatement_tier1_lines(scan.footprints)
-        out.tier1 += _derived_tier1_lines(scan.derived)
+        out.tier1 += _derived_tier1_lines(scan.derived, scan.footprints)
         return out
 
     def events() -> _Staged:
@@ -400,8 +431,9 @@ def _collect_streams(
 
     def vintage() -> _Staged:
         from app.services.ingestion.vintages import (
+            digest_of,
             report_diff,
-            silent_revision_tier1_lines,
+            tier1_promotions,
         )
 
         cik = client.resolve_cik(ticker)
@@ -410,31 +442,19 @@ def _collect_streams(
         # only revisions to periods a reader still holds in mind.
         since = date(report_date.year - 3, 1, 1)
         floor = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
+        # The payload this report scored, by digest: it is the newest state
+        # compared, whatever wrote it to the store, or the section says it
+        # is not stored (review of 224b896, finding 1).
         vintage_diff = report_diff(
-            cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root
+            cik, as_of=report_date, baseline_day=baseline_day, since=since, root=vintage_root,
+            scored_sha=digest_of(company_facts) if company_facts is not None else None,
         )
         out = _Staged(result=vintage_diff)
         out.evidence["vintage"] = vintage_diff
         out.sections.append(_silent_revisions_section(vintage_diff))
-        # Promote from BOTH windows, each fact once. The lock-to-now window
-        # catches a revision that landed in an intermediate state (invisible
-        # to previous -> newest); previous -> newest catches a revision to a
-        # period the lock snapshot did not yet contain (a quarter added after
-        # the lock, then quietly revised), which the lock-to-now diff cannot
-        # see because it only walks facts present in the older snapshot.
-        # `compared` (and a lock window) imply both snapshots exist; the
-        # explicit None checks only let the type checker see it.
-        newest, previous, baseline = vintage_diff.newest, vintage_diff.previous, vintage_diff.baseline
-        windows = []
-        if vintage_diff.changes_since_baseline is not None and baseline is not None and newest is not None:
-            windows.append((vintage_diff.changes_since_baseline, baseline.captured, newest.captured))
-        if vintage_diff.compared and previous is not None and newest is not None:
-            windows.append((vintage_diff.changes_since_previous, previous.captured, newest.captured))
-        promoted: set[tuple] = set()
-        for changes, older, newer in windows:
-            fresh = [c for c in changes if (c.field_name, c.key.start, c.key.end) not in promoted]
-            out.tier1 += silent_revision_tier1_lines(fresh, older, newer, period_since=floor)
-            promoted |= {(c.field_name, c.key.start, c.key.end) for c in changes}
+        # Both windows, each fact once — the same list the ledger validates
+        # from, so the card and the ledger agree (review of c131583, finding 4).
+        out.tier1 += [line for *_, line in tier1_promotions(vintage_diff, period_since=floor)]
         return out
 
     takedowns = run("offerings", offerings) or []
@@ -450,28 +470,58 @@ def _silent_revisions_section(rep) -> str:
     """Markdown for the Tier-2 (between-snapshot) revision check. Evidence
     framing only — no scoring. Says what was compared before saying what
     moved, and says plainly when nothing could be compared."""
-    from app.services.ingestion.vintages import render_changes
+    from app.services.ingestion.vintages import SWEEP_BASELINE, render_changes
 
     lines = ["## Silent Revisions Between Snapshots (evidence — not scored)", ""]
     if not rep.compared:
         lines.append(
             f"Not checked: {rep.no_baseline_reason}. Two distinct companyfacts "
-            f"snapshots taken at or before {rep.as_of} are needed to diff; the store "
-            "fills as reports and the watch sweep run, and nothing can be back-filled."
+            f"snapshots a report scored, taken at or before {rep.as_of}, are needed to "
+            "diff (a raw watch-sweep capture never stands in for either; one is compared "
+            "only as the thesis-lock baseline, when it is the nearest state before the "
+            "thesis day and holds every figure the scored comparison reads); the store "
+            "fills as reports run, and nothing can be back-filled."
         )
         return "\n".join(lines)
     lines.append(
         "_Prior-period figures that changed or disappeared between the two most "
-        f"recent distinct companyfacts snapshots taken at or before {rep.as_of}. "
-        "Facts added for new periods are not listed. Nothing here has an amended "
-        "filing behind it — read the filing before calling any of it a restatement._"
+        "recent distinct companyfacts snapshots a report scored, taken at or before "
+        f"{rep.as_of} (a raw watch-sweep capture is compared only as the thesis-lock "
+        "baseline, when it is the nearest state before the thesis day and holds every "
+        "figure the scored comparison reads). "
+        "Facts added for new periods are not listed. A figure that moved with a later "
+        "filing still carried beside the original is listed apart (the restatement "
+        "scan reads those from filing history); the rest has no such filing behind "
+        "it — read the filing before calling any of it a restatement._"
     )
     lines.append("")
-    lines.append(render_changes(rep.changes_since_previous, rep.previous.captured, rep.newest.captured))
-    if rep.changes_since_baseline is not None and rep.baseline is not None:
-        lines.append(f"**Since the pinned thesis was locked** ({rep.baseline.captured}):")
+    if rep.raw_note:
+        lines.append(f"_{rep.raw_note}._")
         lines.append("")
-        lines.append(render_changes(rep.changes_since_baseline, rep.baseline.captured, rep.newest.captured))
+    # A window not compared as scored says so in its body, never "no
+    # prior-period figure changed" (review of c131583, finding 2).
+    lines.append(render_changes(rep.changes_since_previous, rep.previous.captured,
+                                rep.newest.captured, unavailable=rep.canonical_unavailable))
+    if rep.changes_since_baseline is not None and rep.baseline is not None:
+        source = f", {rep.baseline_source}" if rep.baseline_source else ""
+        lines.append(f"**Since the pinned thesis was locked** ({rep.baseline.captured}{source}):")
+        lines.append("")
+        if rep.baseline_source:
+            # A state of unrecorded kind is held to the capture rule and named
+            # as what it is (cross-branch review of e0525c4).
+            what = ("a watch-sweep capture" if rep.baseline_source == SWEEP_BASELINE
+                    else "a stored snapshot of unrecorded kind (nothing says a report scored it)")
+            lines.append(
+                f"_The lock baseline is {what}: the nearest state before the "
+                "thesis day, and it holds every field and quarter the scored comparison "
+                "reads, built from the same concepts as the scored snapshot; compared as "
+                "the engine scores it._")
+            lines.append("")
+        lines.append(render_changes(rep.changes_since_baseline, rep.baseline.captured,
+                                    rep.newest.captured, unavailable=rep.baseline_unavailable))
+    elif rep.baseline_unavailable:
+        lines.append("**Since the pinned thesis was locked:** Not compared as scored: "
+                     f"{rep.baseline_unavailable}.")
     elif rep.baseline_note:
         lines.append(f"_{rep.baseline_note}._")
     return "\n".join(lines)
@@ -519,7 +569,7 @@ def _capital_integrity_offerings_caveat(
     if ci is None or ci.score is None or ci.score >= cfg.DIRECTION_POSITIVE_BELOW:
         return None
     return (
-        f"CAVEAT — Capital Integrity reads low-concern ({ci.score:.0f}/100) but is "
+        "CAVEAT — Capital Integrity reads low-concern but is "
         f"blind to the {len(secondary)} selling-stockholder takedown(s) above "
         "(secondary/mixed offerings per the parsed prospectuses): the block scores "
         "issuer-side dilution only (measured miss, 2026Q2). Read Capital Markets "
@@ -548,6 +598,10 @@ def build_report(
     baseline_day: date | None = None,
     vintage_root: Path | None = None,
     ledger_out: Path | None = None,
+    uncut_fundamentals: bool = False,
+    market_observation: LoadedObservation | None = None,
+    valuation_requested: bool = False,
+    now: datetime | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -559,8 +613,32 @@ def build_report(
     `baseline_day` is the pinned thesis day (journal track): the silent-revision
     check also diffs the newest snapshot against the one at or before it.
     `ledger_out`: where to write the run's evidence ledger (JSON), the same
-    claims as data with the filings behind each. The report never depends on
-    it: a ledger that cannot be built is logged and not written.
+    claims as data with the filings behind each. A ledger that cannot be built
+    fails the build (`NotPublished`): a report published without its evidence
+    is not a complete run (Hermes deep audit, finding 2).
+    `uncut_fundamentals`: the caller mapped `dataset` from the whole payload,
+    with no as-of (the live report). The restatement scan then reads every
+    dated fact rather than stopping at `generated_on` — an evening filing is
+    dated by EDGAR the next business day, and the scan must not see less than
+    the score. It defaults to False, the cut: a caller that forgets it scans
+    less than it scored — the derived check then names the drift on the
+    coverage line, the raw-fact check cannot know what it missed — but a
+    replay can never read past its day by omission.
+    `market_observation`: the operator's recorded price, when the run has
+    one; the valuation shadow card is then computed over the facts as filed
+    by the observation (`company_facts` through the point-in-time cut;
+    over `dataset` itself, saying the check was not made, when the run has
+    no raw payload) and appended to the appendix as its own section and to
+    the ledger as its own plane (Hermes review of 02c2aac). It reads the
+    data and never the result: the card, the thermometer, the scores, the
+    flags and every other ledger item are byte-identical with and without
+    it (tests/unit/test_valuation_report.py). `valuation_requested` says the
+    caller looked for one: without an observation the appendix then says the
+    card was not produced; a caller that did not ask (the API, a replay)
+    gets no line at all. `now` is the build's clock (the clock unless
+    given): the observation's age on the card is counted on its US/Eastern
+    day, not on `generated_on`, the host-local date that anchors the
+    streams (review of f73b059, R2) — the only thing it dates.
     """
     try:
         report_date = date.fromisoformat(generated_on)
@@ -596,6 +674,10 @@ def build_report(
                 # series the report scored, never a wider window's choice.
                 n_quarters=len(dataset.periods),
                 evidence=stream_objects,
+                uncut_fundamentals=uncut_fundamentals,
+                # What the score covered, so the derived check can refuse a
+                # rebuild that covered something else.
+                scored_quarters=tuple(p.period_end for p in dataset.periods),
             )
         )
         for section in sections:
@@ -625,6 +707,21 @@ def build_report(
             vintage_diff=vintage_diff.status_line() if vintage_diff is not None else None,
         ) + "\n"
 
+    # The valuation shadow card, last in the appendix: over the dataset and
+    # the observation only, after everything scored has been rendered.
+    plane = None
+    if market_observation is not None:
+        from app.services.valuation.plane import compute_plane
+        from app.services.valuation.render import render_valuation_section
+
+        plane = compute_plane(dataset, market_observation, report_date,
+                              company_facts=company_facts, now=now)
+        body += "\n\n" + render_valuation_section(plane) + "\n"
+    elif valuation_requested:
+        from app.services.valuation.render import not_produced_line
+
+        body += "\n\n" + not_produced_line(ticker or dataset.profile.ticker) + "\n"
+
     # Tier-1 sources that could NOT be checked this run — restatement footprints
     # and 8-K 4.02 events (offerings is Tier-2 context, not Tier-1). Round-2
     # finding: a not-checked source must not render as checked-and-clean. With no
@@ -648,9 +745,11 @@ def build_report(
             tier1_unavailable.append("8-K 4.01 and NT filing events" + _why("filing_events"))
         if errors["vintage"] is not None:
             tier1_unavailable.append("silent revisions (vintage diff)" + _why("vintage"))
-        elif vintage_diff is not None and not vintage_diff.compared:
-            # Two snapshots did not exist yet: not a failure, still not checked.
-            tier1_unavailable.append("silent revisions (no vintage baseline yet)")
+        elif vintage_diff is not None and vintage_diff.tier1_gap is not None:
+            # Not a failure, still not checked: two snapshots did not exist
+            # yet, the report's payload is not stored, or a window fell back
+            # to raw rows that nothing promotes (review of 224b896, finding 2).
+            tier1_unavailable.append(f"silent revisions ({vintage_diff.tier1_gap})")
 
     # Capital-markets was actually checked iff a client ran offerings without error.
     capital_markets_checked = (
@@ -658,6 +757,17 @@ def build_report(
     )
 
     thermometer = compute_thermometer(result.block_scores, dataset.periods)
+    # Lines whose metric read a figure a revision touched say so (the scan's
+    # footprints and derived moves, and silent changes between snapshots).
+    from app.services.formulas.registry import compute_metrics
+    from app.services.reporting.revised_inputs import card_notes, revision_index
+
+    revised = revision_index(
+        scan if errors["restatements"] is None else None,
+        vintage_diff if errors["vintage"] is None else None,
+    )
+    marks = card_notes(dataset, compute_metrics(dataset), [*result.red_flags, *result.green_flags],
+                       revised) if revised else None
     card = render_decision_card(
         result,
         thermometer,
@@ -672,6 +782,9 @@ def build_report(
         # and clean" over a partial inspection is the false clean bill.
         restatement_scan=scan.coverage_line() if scan is not None else None,
         restatement_gaps=len(scan.uninspected) if scan is not None else 0,
+        restatement_derived_gap=scan is not None and scan.derived_gap is not None,
+        change_notes=marks.changes if marks else None,
+        flag_notes=marks.flags if marks else None,
     )
     report = (
         card
@@ -686,6 +799,14 @@ def build_report(
             ticker=ticker or dataset.profile.ticker, report_date=report_date,
             fetched_at=fetched_at, fresh=fresh, coverage=coverage, field_tags=field_tags,
             streams=stream_objects, errors=errors,
+            # The CIK each payload this run read names (a replay's
+            # fundamentals are its stored snapshot's): read from what the
+            # build holds, never fetched for the ledger.
+            cik_sources={
+                "the companyfacts payload": (company_facts or {}).get("cik"),
+                "the filing index": (submissions or {}).get("cik"),
+            },
+            valuation=plane, valuation_requested=valuation_requested,
         )
     return report, thermometer
 
@@ -696,10 +817,11 @@ def ledger_path(report_path: Path) -> Path:
     return report_path.with_suffix(".ledger.json")
 
 
-def write_ledger(path: Path, **kw) -> Path | None:
-    """Build and atomically write the evidence ledger. Returns the path, or
-    None when it could not be built — logged, and re-raised in strict mode
-    (tests), exactly as an evidence stream's defect is."""
+def write_ledger(path: Path, **kw) -> Path:
+    """Build and atomically write the evidence ledger. A ledger that cannot
+    be built or written raises `NotPublished` (logged first): the run it
+    belongs to must not go live without it, and `replacing` then leaves the
+    earlier run live."""
     import tempfile
 
     from app.services.reporting.ledger import build_ledger
@@ -710,20 +832,24 @@ def write_ledger(path: Path, **kw) -> Path | None:
         fd, tmp = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
         try:
             with os.fdopen(fd, "w") as fh:
-                fh.write(doc.model_dump_json(indent=1) + "\n")
+                # `fence` is the publish's to seal (`report_files.replacing`),
+                # and only a fenced one's: left out here, a ledger is as it
+                # was before the field existed.
+                fh.write(doc.model_dump_json(indent=1, exclude={"fence"}) + "\n")
             os.replace(tmp, path)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
-    except Exception:
-        if _strict():
-            raise
-        logger.exception("evidence ledger for %s not written", path.name)
-        # An earlier run's ledger must not sit beside this run's report.
+    except Exception as e:
+        # The live name, not a staging token: say which report lost its ledger.
+        logger.exception("evidence ledger for %s %s not written (%s)",
+                         kw.get("ticker"), kw.get("report_date"), path.name)
         with contextlib.suppress(OSError):
             path.unlink()
-        return None
+        raise NotPublished(
+            f"the evidence ledger for {kw.get('ticker')} {kw.get('report_date')} could not "
+            f"be built ({type(e).__name__}: {e}); nothing published") from e
     return path
 
 

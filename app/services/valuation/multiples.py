@@ -1,0 +1,130 @@
+"""Multiples over the bridge and the engine's own TTM figures — shown where
+they mean something, with the reason on the line where they do not.
+
+docs/thesis_monitor_architecture.md is right that earnings multiples are
+undefined on exactly the distressed names the engine is validated on. This
+module does not contradict it: a denominator that is missing, zero or
+negative, a TTM window short of four quarters, or an EV the bridge did not
+assert each leaves the multiple empty with that reason, and nothing here
+reaches a score. The trailing figures come from `formulas/ttm.annualize`,
+so the plane's TTM revenue, net income, EBIT, EBITDA and FCF are the ones
+the engine's ratios read.
+
+Own-history and peer ranges are not available in v1 (one observation, no
+price history, no reference class) and are said to be unavailable rather
+than approximated.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+from app.schemas.financials import CompanyDataset
+from app.services.formulas.ttm import annualize
+from app.services.ingestion.fields import FILING_CURRENCY
+from app.services.valuation.bridge import Bridge
+
+HISTORY_LINE = ("own-history range: not available (one price observation; no price history "
+                "recorded)")
+PEER_LINE = "peer range: no reference class (none defined)"
+
+
+@dataclass(frozen=True)
+class TrailingFigures:
+    """The TTM window ending at the bridge's period: its label (None with
+    `reason` when it could not be built) and the five figures the multiples
+    and the expectations read."""
+
+    label: str | None
+    reason: str | None
+    revenue: float | None = None
+    net_income: float | None = None
+    ebit: float | None = None
+    ebitda: float | None = None
+    fcf: float | None = None
+
+
+@dataclass(frozen=True)
+class Multiple:
+    name: str
+    value: float | None
+    reason: str | None
+    numerator_name: str
+    numerator: float | None
+    denominator_name: str
+    denominator: float | None
+    ttm_window: str | None
+
+
+def trailing(dataset: CompanyDataset | None, bridge: Bridge) -> TrailingFigures:
+    """`annualize` over the four quarters ending at the bridge's period, of
+    the dataset the bridge read (None when it had none: no period then)."""
+    if bridge.fiscal_label is None or dataset is None:
+        return TrailingFigures(None, "TTM window not built: no period available at the observation")
+    periods = dataset.sorted_periods()
+    idx = next(i for i, p in enumerate(periods) if p.fiscal_label == bridge.fiscal_label)
+    ttm = annualize(periods, idx)
+    if ttm is None:
+        return TrailingFigures(
+            None, f"TTM window incomplete: fewer than 4 consecutive quarters ending "
+                  f"{bridge.fiscal_label}")
+    # Four finite quarters can sum past a double (review of 6bf9f9e, L2: an
+    # inf TTM revenue made P/S 0.0, a finite-looking multiple): refused.
+    figures = {"revenue": ttm.revenue, "net income": ttm.net_income, "EBIT": ttm.ebit,
+               "EBITDA": ttm.ebitda, "FCF": ttm.fcf}
+    for name, value in figures.items():
+        if value is not None and not math.isfinite(value):
+            return TrailingFigures(None, f"not computable: overflow (TTM {name})")
+    return TrailingFigures(ttm.fiscal_label, None, ttm.revenue, ttm.net_income, ttm.ebit,
+                           ttm.ebitda, ttm.fcf)
+
+
+def _not_positive(name: str, value: float, multiple: str) -> str:
+    how = "negative" if value < 0 else "zero"
+    return f"TTM {name} is {how} ({value:,.0f} {FILING_CURRENCY}): {multiple} undefined"
+
+
+def compute_multiples(bridge: Bridge, ttm: TrailingFigures) -> tuple[Multiple, ...]:
+    """P/E, EV/EBIT, EV/EBITDA, EV/Sales, P/S, P/FCF, FCF yield and earnings
+    yield. A ratio's denominator must be a positive TTM figure; a yield's
+    denominator is the market cap and its numerator may be negative (a
+    negative yield is a number, a negative P/E is not)."""
+    mcap = bridge.market_cap.value
+    ev = bridge.ev
+    specs: list[tuple[str, str, float | None, str, float | None, bool]] = [
+        # name, numerator name, numerator, denominator name, denominator, is_yield
+        ("P/E", "market cap", mcap, "net income", ttm.net_income, False),
+        ("EV/EBIT", "EV", ev, "EBIT", ttm.ebit, False),
+        ("EV/EBITDA", "EV", ev, "EBITDA", ttm.ebitda, False),
+        ("EV/Sales", "EV", ev, "revenue", ttm.revenue, False),
+        ("P/S", "market cap", mcap, "revenue", ttm.revenue, False),
+        ("P/FCF", "market cap", mcap, "FCF", ttm.fcf, False),
+        ("FCF yield", "FCF", ttm.fcf, "market cap", mcap, True),
+        ("earnings yield", "net income", ttm.net_income, "market cap", mcap, True),
+    ]
+    out: list[Multiple] = []
+    for name, num_name, num, den_name, den, is_yield in specs:
+        reason: str | None = None
+        if mcap is None or ((num_name == "EV" or den_name == "EV") and ev is None):
+            reason = bridge.ev_reason
+        elif ttm.reason is not None:
+            reason = ttm.reason
+        elif any(v is not None and not math.isfinite(v) for v in (num, den)):
+            # Only from a caller's own figures: `trailing` refuses them.
+            reason = f"not computable: a non-finite figure ({name})"
+        elif is_yield:
+            if num is None:
+                reason = f"TTM {num_name} missing"
+        elif den is None:
+            reason = f"TTM {den_name} missing"
+        elif den <= 0:
+            reason = _not_positive(den_name, den, name)
+        value = None
+        if reason is None and num is not None and den is not None:
+            value = num / den
+            if not math.isfinite(value):  # past a double: no number, said why
+                value, reason = None, f"not computable: overflow ({name})"
+        out.append(Multiple(name, value, reason, num_name, num, den_name, den,
+                            ttm.label if reason is None else None))
+    return tuple(out)

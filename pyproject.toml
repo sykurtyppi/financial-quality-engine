@@ -38,6 +38,8 @@ include = ["app*"]
 # `include-package-data = true` because it names what actually needs to ship.
 [tool.setuptools.package-data]
 "app.templates" = ["*.html"]
+# The workbench's stylesheet and status poller (r36), served at /static.
+"app.static" = ["*.css", "*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -97,6 +99,7 @@ module = [
     "app.services.reporting.ledger",
     "app.services.corpus",
     "app.services.ingestion.filing_events",
+    "app.services.valuation.*",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

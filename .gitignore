@@ -8,6 +8,8 @@ data/cache/
 data/vintages/
 .DS_Store
 reports/
+# scripts/drill.py output (docs/earnings_night_drill.md)
+drills/
 data/kpi_pairs.json
 data/kpi_judgments.json
 

@@ -102,15 +102,23 @@ class TestRegimeShift:
         assert m.fiscal_label == "P6"  # the period asked about, with no value
 
 
+def dated(i: int, **kw) -> PeriodFinancials:
+    """Quarter i of five consecutive calendar quarters ending 2025-12-31: the
+    window's ends a year apart, as the metric requires."""
+    ends = [date(2024, 12, 31), date(2025, 3, 31), date(2025, 6, 30), date(2025, 9, 30),
+            date(2025, 12, 31)]
+    return q(f"P{i}", **kw).model_copy(update={"period_end": ends[i]})
+
+
 class TestIncrementalRevenuePerCapex:
     def test_computes(self):
-        series = [q(f"P{i}", revenue=1000.0 + 50.0 * i, capex_v=100.0) for i in range(5)]
+        series = [dated(i, revenue=1000.0 + 50.0 * i, capex_v=100.0) for i in range(5)]
         m = capex.incremental_revenue_per_capex(series)
         # (1200 - 1000) / 400 = 0.5
         assert m.value == pytest.approx(0.5)
 
     def test_missing_capex_reported(self):
-        series = [q(f"P{i}", revenue=1000.0 + 50.0 * i, capex_v=None) for i in range(5)]
+        series = [dated(i, revenue=1000.0 + 50.0 * i, capex_v=None) for i in range(5)]
         m = capex.incremental_revenue_per_capex(series)
         assert m.status is MetricStatus.MISSING_DATA
         assert "capex" in m.missing_fields

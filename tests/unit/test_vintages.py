@@ -529,6 +529,29 @@ class TestObservedVintageOrder:
         states = v.observed_vintages(1045810, tmp_path)
         assert [state.path for state in states] == [first.path, second.path]
 
+    def test_already_checked_today_names_the_latest_state_not_the_last_hash(self, tmp_path):
+        """Two snapshots on one day sort by hash in the manifest. The capture
+        that finds the day already checked reports the document as it last
+        stood: the later one, whatever its hash."""
+        earlier = _facts([("2026-06-30", "2026-08-01", 1200.0, "10-Q", "a")])
+        later = _facts([("2026-06-30", "2026-09-19", 1000.0, "10-Q", "b")])
+        client = _Client(earlier, later)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        second = v.capture(client, "NVDA", now=AT.replace(hour=17), root=tmp_path, force=True)
+        assert v.read_manifest(1045810, tmp_path)["snapshots"][-1]["sha256"] == first.sha256
+        again = v.capture(client, "NVDA", now=AT.replace(hour=18), root=tmp_path)
+        assert again.reason == "already checked today" and again.sha256 == second.sha256
+
+    def test_a_store_without_observations_falls_back_to_the_last_snapshot(self, tmp_path):
+        payload = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
+        client = _Client(payload)
+        first = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        man = v.read_manifest(1045810, tmp_path)
+        man.pop("observations")
+        v._write_json_atomic(v._manifest_path(1045810, tmp_path), man)
+        again = v.capture(client, "NVDA", now=AT, root=tmp_path)
+        assert again.reason == "already checked today" and again.sha256 == first.sha256
+
     def test_a_revert_remains_a_later_state(self, tmp_path):
         a = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "a")])
         b = _facts([("2026-06-30", "2026-09-19", 1200.0, "10-K", "b")])
@@ -699,14 +722,16 @@ class TestMutationBacklog:
         # or records a duplicate.
         man: dict = {}
         d1, d2 = date(2026, 9, 19), date(2026, 9, 20)
-        v._observe(man, d1, "a")
-        v._observe(man, d1, "a")  # same day, same content: once
-        v._observe(man, d1, "b")  # same day, new content: a transition
-        v._observe(man, d2, "b")  # next day, same content: observed again
+        v._observe(man, d1, "a", v.RAW)
+        v._observe(man, d1, "a", v.RAW)  # same day, same content: once
+        v._observe(man, d1, "b", v.SCORED)  # same day, new content: a transition
+        v._observe(man, d2, "b", v.RAW)  # next day, same content: observed again
+        v._observe(man, d2, "b", v.SCORED)  # ... then scored: upgraded, not repeated
+        v._observe(man, d2, "b", v.RAW)  # ... and never downgraded
         assert man["observations"] == [
-            {"date": "2026-09-19", "sha256": "a"},
-            {"date": "2026-09-19", "sha256": "b"},
-            {"date": "2026-09-20", "sha256": "b"},
+            {"date": "2026-09-19", "sha256": "a", "kind": "raw"},
+            {"date": "2026-09-19", "sha256": "b", "kind": "scored"},
+            {"date": "2026-09-20", "sha256": "b", "kind": "scored"},
         ]
 
     def test_a_full_tie_keeps_the_first_row_as_the_mapper_does(self):
@@ -846,3 +871,23 @@ class TestCensusBacklog:
         ]}}}}}
         assert v._filing(facts, "us-gaap:Assets", "USD", date(2026, 6, 30)) == (
             date(2026, 8, 1), "b", "10-Q/A", None)
+
+
+class TestNonFiniteValues:
+    """Review of deb6364, finding 1: the mapper drops a fact whose value is
+    not a finite number (not reported). The vintage diff compares the
+    figure a report would show, so it must drop it too: it reported a
+    revision of 1000 to nan (pct nan) that no report would ever show."""
+
+    @pytest.mark.parametrize("bad", [float("nan"), "NaN", float("inf")], ids=["nan", "NaN-str", "inf"])
+    def test_a_later_non_finite_filing_is_not_a_revision(self, bad):
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1")])
+        after = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1"),
+                        ("2026-06-30", "2026-11-01", bad, "10-K", "acc-2")])
+        assert v.diff_vintages(before, after) == []
+
+    @pytest.mark.parametrize("bad", [float("nan"), "NaN", float("inf")], ids=["nan", "NaN-str", "inf"])
+    def test_a_figure_left_only_as_a_non_number_is_withdrawn(self, bad):
+        before = _facts([("2026-06-30", "2026-08-01", 1000.0, "10-Q", "acc-1")])
+        after = _facts([("2026-06-30", "2026-11-01", bad, "10-K", "acc-2")])
+        assert [c.kind for c in v.diff_vintages(before, after)] == ["withdrawn"]

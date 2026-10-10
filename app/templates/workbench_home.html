@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}FQE Workbench{% endblock %}
+{% block body %}
+{% if setup %}
+<section class="panel setup">
+  <h3>Before the first run</h3>
+  <ul>{% for p in setup %}<li>{{ p }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="hero">
+  <h2>Look up a company</h2>
+  <p class="sub">Type a ticker to see its decision card: a 90-second triage of what the latest SEC filings show, every claim traceable to its filing. Screening prompts for analyst review — not predictions, and not a calibrated score.</p>
+  {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
+  {% if msg %}<div class="ok-msg">{{ msg }}</div>{% endif %}
+  <form class="search" method="post" action="/t">
+    <input name="ticker" value="{{ typed }}" placeholder="KO" aria-label="Ticker" autocomplete="off"
+           autocapitalize="characters" spellcheck="false" maxlength="12" required autofocus>
+    <button class="btn" type="submit">Open</button>
+  </form>
+</section>
+
+{% if active %}
+<section class="panel">
+  <h3>Running now</h3>
+  {% for j in active %}
+  <div class="run-row"><a href="/t/{{ j.ticker }}"><b>{{ j.ticker }}</b></a><span class="note" style="margin:0">{{ "refreshing from SEC" if j.fresh else "building" }} · started {{ (j.started_at or j.created_at)|utc }}</span></div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="panel" id="watchlist">
+  <div class="case-title"><h3>Watchlist</h3><span class="note" style="margin:0 0 12px">the earnings calendar <code>scripts/watch.py</code> polls</span></div>
+  {% if watchlist_problem %}<div class="err" role="alert">{{ watchlist_problem }}</div>{% endif %}
+  {% if rows %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Ticker</th><th>Next print (hint)</th><th>Latest run</th><th class="num">Tier 1</th><th class="num">Tier 2</th><th class="num">Tier 3</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><a href="/t/{{ r.ticker }}"><b>{{ r.ticker }}</b></a>{% if r.label %}<br><span class="note">{{ r.label }}</span>{% endif %}</td>
+        <td>{{ r.print_at|utc }}</td>
+        <td>{% if r.latest %}{{ r.latest.day }}<br><span class="note">{{ r.latest.built|utc }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
+        {% if r.tiers %}
+        <td class="num">{% if r.tiers.tier1 %}<span class="pill t1">{{ r.tiers.tier1 }}</span>{% else %}0{% endif %}</td>
+        <td class="num">{% if r.tiers.tier2 %}<span class="pill t2">{{ r.tiers.tier2 }}</span>{% else %}0{% endif %}</td>
+        <td class="num">{{ r.tiers.tier3 }}</td>
+        {% else %}<td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>{% endif %}
+        <td>
+          {% if r.problem %}<span class="pill bad">unreadable</span> <span class="note">{{ r.problem }}</span>
+          {% elif not r.latest %}<span class="pill wait">no run</span>
+          {% elif r.stale %}<span class="pill need">stale</span> <span class="note">{{ r.stale }}</span>
+          {% else %}<span class="pill ok">current</span>{% endif %}
+          {% if r.tiers and r.tiers.not_checked %}<br><span class="pill need">Tier-1 source not checked</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Flags are the decision card's, counted per tier. "Stale": the latest run was built before the print hint, or more than {{ stale_days }} days ago.</p>
+  {% elif not watchlist_problem %}
+  <p class="empty">The watchlist is empty. Add a name with “Add to watchlist” on its page, or <code>scripts/watch.py add TICKER</code>.</p>
+  {% endif %}
+</section>
+
+<section class="panel" id="recent">
+  <h3>Recent runs</h3>
+  {% if recent %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Ticker</th><th>Report day</th><th>Published</th><th class="num">Tier 1</th><th class="num">Tier 2</th><th class="num">Tier 3</th></tr></thead>
+    <tbody>
+      {% for r in recent %}
+      <tr>
+        <td><a href="/t/{{ r.ref.ticker }}"><b>{{ r.ref.ticker }}</b></a></td>
+        <td>{{ r.ref.day }}</td>
+        <td>{{ r.ref.built|utc }}</td>
+        {% if r.tiers %}
+        <td class="num">{{ r.tiers.tier1 }}{% if r.tiers.not_checked %} <span class="pill need" title="a Tier-1 source was not checked this run">+⚠</span>{% endif %}</td>
+        <td class="num">{{ r.tiers.tier2 }}</td>
+        <td class="num">{{ r.tiers.tier3 }}</td>
+        {% else %}<td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty">No runs yet. Type a ticker above, then press Run on its page.</p>
+  {% endif %}
+</section>
+{% endblock %}

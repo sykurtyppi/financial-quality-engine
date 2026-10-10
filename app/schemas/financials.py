@@ -118,6 +118,16 @@ class PeriodFinancials(BaseModel):
     accounts_payable: float | None = None
     deferred_revenue: float | None = None
 
+    # Balance sheet, valuation-plane inputs: read by the EV bridge
+    # (`app/services/valuation`) and by no metric (registry `scored=False`).
+    short_term_investments: float | None = None
+    operating_lease_liabilities: float | None = Field(
+        default=None, description="Aggregate lessee operating-lease liability; never in EV"
+    )
+    minority_interest: float | None = None
+    preferred_stock: float | None = None
+    stockholders_equity: float | None = None
+
     # Shares
     shares_diluted: float | None = None
     shares_outstanding: float | None = None

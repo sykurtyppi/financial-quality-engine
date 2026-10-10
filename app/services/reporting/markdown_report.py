@@ -62,9 +62,12 @@ def _top_drivers(bs) -> str:
 
     Ranked by weight x concern, so a heavily weighted middling metric can
     outrank a lightly weighted extreme one — the block score is a weighted
-    mean, so that is the order in which they actually moved it. A block with
-    no usable metric says so rather than rendering an empty cell, because a
-    blank here and a genuinely clean block must not look alike.
+    mean, so that is the order in which they actually moved it. Names only:
+    the 0-100 concern numbers are retired from every surface (the composite
+    and its parts measured non-discriminating), the ranking is what a
+    screening prompt needs. A block with no usable metric says so rather
+    than rendering an empty cell, because a blank here and a genuinely clean
+    block must not look alike.
     """
     scored = [
         c for c in bs.components
@@ -73,7 +76,7 @@ def _top_drivers(bs) -> str:
     if not scored:
         return "— insufficient coverage"
     ranked = sorted(scored, key=lambda c: c.weight * c.concern_score, reverse=True)
-    return ", ".join(f"{c.metric_name} ({c.concern_score:.0f})" for c in ranked[:_MAX_DRIVERS])
+    return ", ".join(c.metric_name for c in ranked[:_MAX_DRIVERS])
 
 
 def render(result: AnalysisResult, generated_on: str) -> str:
@@ -122,8 +125,6 @@ def render(result: AnalysisResult, generated_on: str) -> str:
     # 2. Scorecard
     add("## 2. Scorecard")
     add("")
-    add("All scores are 0–100 concern scores: 0 = no concern, 100 = maximum concern.")
-    add("")
     add(
         "No Direction word is shown per block. Its bands are percentiles of the "
         "COMPOSITE distribution, and the blocks' anchor tables were never "
@@ -135,13 +136,20 @@ def render(result: AnalysisResult, generated_on: str) -> str:
         "what a screening prompt is for. See docs/scoring_methodology.md."
     )
     add("")
-    add("| Block | Score | Top drivers | Confidence | Coverage | Weight |")
-    add("|---|---|---|---|---|---|")
+    add(
+        "Blocks carry no 0–100 number: the composite and its block scores "
+        "measured non-discriminating on the live season. Each row names the "
+        "metrics carrying its concern, heaviest first; red flags (§3) say which "
+        "crossed the elevated-concern threshold."
+    )
+    add("")
+    add("| Block | Top drivers | Confidence | Coverage | Weight |")
+    add("|---|---|---|---|---|")
     for bs in result.block_scores:
         weight = overall.block_weights.get(bs.name, 0.0) if overall else 0.0
-        score_txt = f"{bs.score:.0f}" if bs.score is not None else "not scored"
+        drivers = _top_drivers(bs) if bs.score is not None else "not scored (insufficient coverage)"
         add(
-            f"| {bs.name} | {score_txt} | {_top_drivers(bs)} | "
+            f"| {bs.name} | {drivers} | "
             f"{bs.confidence.value} | {bs.data_coverage:.0%} | {weight:.0%} |"
         )
     add("")

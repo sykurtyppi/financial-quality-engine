@@ -25,11 +25,15 @@ from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
 from app.services.reporting.report_builder import build_report as build_full_report
-from app.services.reporting.report_builder import ledger_path
+from app.services.reporting.report_files import Fence, NotPublished, replacing
 from app.services.scoring.thermometer import describe
+from app.services.valuation.observation import LoadedObservation, find_observation
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
+# The operator's market observations (`scripts/market.py`), one file per
+# ticker, read by the valuation shadow card.
+MARKET = ROOT / "journal" / "market"
 
 
 def replay_banner(as_of: date, source: str, rebuilt_on: date) -> str:
@@ -41,6 +45,24 @@ def replay_banner(as_of: date, source: str, rebuilt_on: date) -> str:
         "documents, offerings and 8-K events can only see filings that today's "
         "filing index (SEC's recent-filings block) still lists."
     )
+
+
+class UnmappablePayload(ValueError):
+    """The fundamentals were acquired but cannot be mapped into quarters to
+    score (too little history, an unrecognised structure). Raised only from
+    the snapshot stage, so a caller can name that condition without also
+    catching a ValueError from a defect elsewhere in the build (round-9
+    audit F3)."""
+
+
+def load_market_observation(ticker: str) -> LoadedObservation | None:
+    """The ticker's observation under `MARKET`, or None when none is
+    recorded. Present but unreadable is `NotPublished`: the build that
+    asked for it must not publish."""
+    try:
+        return find_observation(MARKET.parent, ticker)
+    except (ValueError, OSError) as e:  # ObservationError is a ValueError; so is a bad ticker
+        raise NotPublished(f"market observation for {ticker}: {e}; nothing published") from e
 
 
 def report_path(ticker: str, day: str | None = None) -> Path:
@@ -57,6 +79,10 @@ def build_report(
     banner: str | None = None,
     vintage: bool = True,
     replay: bool = False,
+    market: bool = True,
+    publish_timeout: float | None = None,
+    fence: Fence | None = None,
+    day: str | None = None,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -68,9 +94,11 @@ def build_report(
     <24h cached answer can silently predate the filing being waited on.
     ``out_dir``/``banner`` exist for the automatic (non-journal) track: the
     banner is prepended verbatim so an auto-generated artifact can never be
-    mistaken for a blind journal case. ``vintage`` archives the scored
-    companyfacts payload to the vintage store (the silent-revision baseline);
-    a failure there is a data-quality line, never an aborted report.
+    mistaken for a blind journal case. The workbench passes ``out_dir`` too
+    (``reports/workbench/``): its runs never take a journal case's live
+    name. ``vintage`` archives the scored companyfacts payload to the
+    vintage store (the silent-revision baseline); a failure there is a
+    data-quality line, never an aborted report.
 
     ``report_day`` also pins the silent-revision baseline: on the journal track
     it IS the locked entry's day (watch.py hands it to ``journal.py report
@@ -78,11 +106,44 @@ def build_report(
     at or before the lock. It still never sets ``generated_on`` (below).
 
     ``replay`` rebuilds the report AS OF ``report_day`` instead (historical
-    replay): fundamentals from the newest vintage snapshot captured by then,
+    replay): fundamentals from the newest vintage snapshot a report scored by
+    then (a mappable raw capture only when none maps — `replay_snapshot`),
     else today's payload cut there; documents filed by then; every evidence
     stream cut there (they all anchor on ``generated_on``, which a replay sets
-    to that day). Nothing is archived, the report opens with a replay banner
-    and is written to ``<TICKER>_<day>.replay.md``, never over a real report.
+    to that day). The report opens with a replay banner and is written to
+    ``<TICKER>_<day>.replay.md``, never over a real report; a replay rerun
+    keeps the earlier replay as any rebuild does.
+
+    ``market`` looks for the ticker's market observation under
+    ``journal/market/`` and, when one is recorded, appends the valuation
+    shadow card to the appendix (never to the card or a score). A file that
+    is there but cannot be read as an observation fails the build closed
+    (`NotPublished`, naming the file), as a ledger that cannot be built
+    does: a report must not go live while its one market datum is in
+    doubt. A replay never carries one: the price is of today, the report of
+    its day.
+
+    ``publish_timeout`` bounds the wait for the report's publish lock
+    (`report_files.replacing`): past it the build raises `PublishBusy` and
+    publishes nothing. The workbench passes it, so a run behind a stalled
+    publisher fails as busy instead of showing "running" for as long as
+    the lock is held (review of 9d00328); every other caller waits.
+
+    ``fence`` is the workbench's request number for this run, with its
+    ticker's high-water mark (`workbench.fencing.fence`): the publish seals
+    it and, should a run asked for later already have published (on any
+    day's report), keeps this one in the archive instead of making it live
+    (`report_files.Superseded`; Hermes audit of PR #118, finding 1). The
+    day of the file is taken after the fetch, so the mark, not the day's
+    live run, is what decides. Every other caller passes none, and
+    publishes as before.
+
+    ``day`` names the report's file (YYYY-MM-DD) when the caller fixed it
+    beforehand: the workbench fixes it when the run is asked for, under the
+    ticker's lock, so day order follows request order (review of 6bf9f9e,
+    M1). It is not ``report_day``, which also pins a journal thesis's
+    silent-revision baseline: the workbench has no thesis. None: today,
+    read after the fetch, as before.
     """
     ticker = ticker.upper()
     as_of: date | None = None
@@ -91,12 +152,21 @@ def build_report(
         if not report_day:
             raise ValueError("a historical replay needs the day to replay (report_day)")
         as_of = date.fromisoformat(report_day)
+    valuation_requested = market and as_of is None
+    observation = load_market_observation(ticker) if valuation_requested else None
     client = SecClient(fresh=fresh)
+    try:
+        if as_of is not None:
+            snapshot, replay_source = replay_snapshot(client, ticker, as_of, n_quarters=quarters)
+        else:
+            snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
+    except UnmappablePayload:
+        raise
+    except ValueError as e:
+        raise UnmappablePayload(str(e)) from e
     if as_of is not None:
-        snapshot, replay_source = replay_snapshot(client, ticker, as_of, n_quarters=quarters)
         vintage_note: str | None = "not captured (historical replay)"
     else:
-        snapshot = fetch_dataset_snapshot(ticker, n_quarters=quarters, client=client)
         vintage_note = store_vintage_snapshot(
             client, ticker, snapshot.company_facts, enabled=vintage
         )
@@ -121,35 +191,49 @@ def build_report(
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     target_dir = out_dir if out_dir is not None else REPORTS
     suffix = ".replay.md" if replay else ".md"
-    out = target_dir / f"{safe_ticker(ticker)}_{report_day or date.today().isoformat()}{suffix}"
+    if day is not None and report_day is not None:
+        raise ValueError("build_report: day and report_day both name the file; give one")
+    file_day = report_day or day or date.today().isoformat()
+    out = target_dir / f"{safe_ticker(ticker)}_{file_day}{suffix}"
     warnings = list(diag.warnings)
     if as_of is not None:
         warnings.append(f"HISTORICAL REPLAY as of {as_of}: fundamentals from {replay_source}.")
-    report, thermometer = build_full_report(
-        result, dataset,
-        generated_on=generated_on,
-        coverage=diag.coverage(),
-        # The evidence must name the same series the score came from.
-        field_tags=diag.selected_series(),
-        client=client,
-        ticker=ticker,
-        fetched_at=fetched_at,
-        warnings=warnings,
-        field_notes=diag.field_notes(),
-        doc_diagnostics=doc_diagnostics,
-        company_facts=snapshot.company_facts,
-        submissions=submissions,
-        index_degraded=submissions is None,
-        fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
-        vintage_note=vintage_note,
-        baseline_day=date.fromisoformat(report_day) if report_day else None,
-        # The same claims as data, each with the filings behind it.
-        ledger_out=ledger_path(out),
-    )
-    if as_of is not None:
-        report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"
-    if banner:
-        report = f"{banner}\n\n{report}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    out.write_text(report)
+    # Built off to the side, then published in one step: a rerun on the same
+    # day goes live only once its report and ledger exist, the earlier run is
+    # kept whole as the previous generation, and a build that fails leaves the
+    # live report as it was.
+    with replacing(out, timeout=publish_timeout, fence=fence) as staged:
+        report, thermometer = build_full_report(
+            result, dataset,
+            generated_on=generated_on,
+            coverage=diag.coverage(),
+            # The evidence must name the same series the score came from.
+            field_tags=diag.selected_series(),
+            # ...and read the same facts. A report of today mapped the whole
+            # payload, so its scan runs through the newest filing (an evening
+            # 10-Q is dated tomorrow by EDGAR); a replay mapped as of its
+            # day, and its scan stops there.
+            uncut_fundamentals=as_of is None,
+            client=client,
+            ticker=ticker,
+            fetched_at=fetched_at,
+            warnings=warnings,
+            field_notes=diag.field_notes(),
+            doc_diagnostics=doc_diagnostics,
+            company_facts=snapshot.company_facts,
+            submissions=submissions,
+            index_degraded=submissions is None,
+            fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
+            vintage_note=vintage_note,
+            baseline_day=date.fromisoformat(report_day) if report_day else None,
+            # The same claims as data, each with the filings behind it.
+            ledger_out=staged.ledger,
+            market_observation=observation,
+            valuation_requested=valuation_requested,
+        )
+        if as_of is not None:
+            report = f"{replay_banner(as_of, replay_source, date.today())}\n\n{report}"
+        if banner:
+            report = f"{banner}\n\n{report}"
+        staged.report.write_text(report)
     return out, describe(thermometer)

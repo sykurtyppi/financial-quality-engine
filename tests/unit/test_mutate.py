@@ -157,7 +157,18 @@ def test_the_floor_decides_the_exit_code(monkeypatch, tmp_path):
     assert mutate.main(["--floor", "0.8", "--summary", str(summary)]) == 1
     assert mutate.main(["--floor", "0.5", "--summary", str(summary)]) == 0
     assert mutate.main(["--summary", str(summary)]) == 0  # informational
-    assert "kill rate **50%**" in summary.read_text()
+    assert "kill rate **50.0%**" in summary.read_text()
+
+
+def test_a_survivor_never_reads_as_a_perfect_kill_rate():
+    """The complete run of ace7cd8 killed 761 of 763 and printed "kill rate
+    **100%**" beside its two survivors: a rate is shown to one decimal and
+    never rounded up to 100% while a mutant survived."""
+    m = Mutant(T, 0, "cmp", 1, "x")
+    assert "kill rate **99.7%**" in Report(killed=[m] * 761, survived=[m] * 2).markdown(1)
+    assert "kill rate **>99.9%**" in Report(killed=[m] * 9999, survived=[m]).markdown(1)
+    assert "kill rate **100.0%**" in Report(killed=[m] * 5).markdown(1)
+    assert mutate.shown_rate(0.8) == "80.0%"
 
 
 def test_every_configured_target_and_test_file_exists():
@@ -333,9 +344,11 @@ def test_the_committed_exclusions_are_valid_and_honestly_classified():
     exclusions = mutate.load_exclusions()
     assert mutate.invalid_exclusions(exclusions) == []
     # The display cap changes what renders (21 rows show instead of 20 plus
-    # "+1 more"): it is accepted policy, never called equivalent (round 6).
-    (cap,) = [e for e in exclusions if e.source.startswith("_MAX_ROWS")]
-    assert cap.kind == "accepted"
+    # "+1 more"), so it is never called equivalent (round 6). It was accepted
+    # policy until Hermes audit item 8 pinned its value with a test
+    # (test_long_tables_show_exactly_20_rows_and_count_the_rest): no
+    # exclusion covers it now.
+    assert not [e for e in exclusions if e.source.startswith("_MAX_ROWS")]
     for e in exclusions:
         if e.kind == "equivalent":
             assert "NOT" not in e.reason, e.source
