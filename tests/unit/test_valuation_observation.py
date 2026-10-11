@@ -310,13 +310,18 @@ def test_a_typed_time_is_iso_8601_with_its_offset_and_nothing_else():
 def test_a_recorded_observation_is_durable_with_its_folder(tmp_path, monkeypatch):
     """The folder is fsynced after the rename (Hermes re-audit of #118 @
     34836cf): a rename alone can be lost on power loss."""
+    import fcntl
     import os
 
     seen: list[str] = []
     real = os.fsync
 
     def fsync(fd):
-        seen.append(os.readlink(f"/proc/self/fd/{fd}"))
+        if hasattr(fcntl, "F_GETPATH"):
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+            seen.append(raw.split(b"\0", 1)[0].decode())
+        else:
+            seen.append(os.readlink(f"/proc/self/fd/{fd}"))
         return real(fd)
 
     monkeypatch.setattr(os, "fsync", fsync)

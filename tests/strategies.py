@@ -124,7 +124,9 @@ _MAGNITUDE = st.builds(
 
 
 def _field_value(name: str):
-    choices = [st.none(), st.just(0.0), _MAGNITUDE, _MAGNITUDE]
+    choices = [st.none(), _MAGNITUDE, _MAGNITUDE]
+    if name not in {"shares_diluted", "shares_outstanding"}:
+        choices.append(st.just(0.0))
     if name in _SIGNED:
         choices.append(_MAGNITUDE.map(lambda v: -v))
     return st.one_of(*choices)

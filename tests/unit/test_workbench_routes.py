@@ -34,7 +34,7 @@ from app.services.reporting.report_files import read_live, replacing
 from app.services.valuation.observation import observation_path
 from app.services.valuation.render import SECTION_TITLE as _SECTION_MD
 from app.services.watch import watchlist as wl
-from app.services.workbench import jobs, watching
+from app.services.workbench import fencing, jobs, watching
 from app.web import app
 from scripts import drill
 
@@ -1139,9 +1139,8 @@ def test_the_status_box_names_the_live_run_after_a_done_run(client, fake_build):
 def test_a_run_asked_for_before_midnight_never_becomes_the_card_after_it(client, sec, env,
                                                                           monkeypatch):
     """H1, through the real offline build: run A hangs on its SEC read, B
-    is asked for and publishes on day 1, midnight passes, A ends and names
-    its report for day 2 (the build dates its file after the fetch), where
-    nothing is live. The ticker's high-water mark refuses it there too."""
+    is asked for and publishes on day 1, midnight passes, and the ticker's
+    high-water mark refuses A. Both names stay on their request day."""
     import threading
 
     from app.services.workbench import views
@@ -1154,7 +1153,7 @@ def test_a_run_asked_for_before_midnight_never_becomes_the_card_after_it(client,
         def today(cls):
             return today[0]
 
-    monkeypatch.setattr(reporting, "date", Day)
+    monkeypatch.setattr(fencing, "date", Day)
     gate, entered, calls = threading.Event(), threading.Event(), []
     real_fetch = reporting.fetch_dataset_snapshot
 

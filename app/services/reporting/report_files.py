@@ -72,6 +72,7 @@ from pathlib import Path
 STAGING_DIR = ".staging"
 GENERATIONS_DIR = ".generations"
 CURRENT = "current"
+LEGACY_ARCHIVE_DIR = "archive"
 REPLAY_SUFFIX = ".replay.md"
 # How a report and its audit state their generation (the ledger carries it as
 # the `generation_id` field): one line, so a reader never needs to parse more.
@@ -1080,6 +1081,62 @@ def _copy_adopted(report: Path, plain: dict[str, Path]) -> Path:
     return gen
 
 
+def _legacy_archive_runs(report: Path, selector: str) -> list[tuple[Path, str]]:
+    """Return matching runs from the archive format used before generations."""
+    archive = report.parent / LEGACY_ARCHIVE_DIR
+    if archive.is_symlink():
+        raise OSError(errno.ELOOP, f"{archive} is a symlink, not the legacy archive directory")
+    if not archive.is_dir():
+        return []
+    pattern = re.compile(rf"^{re.escape(_base(report))}\.(\d{{6}}(?:-\d+)?)\.md$")
+    matches: list[tuple[Path, str]] = []
+    for path in archive.iterdir():
+        match = pattern.fullmatch(path.name)
+        if match is None or not (path.name == selector or selector in path.name):
+            continue
+        if path.is_symlink():
+            raise OSError(errno.ELOOP, f"{path} is a symlink, not a report this engine archived")
+        if path.is_file():
+            matches.append((path, match.group(1)))
+    return matches
+
+
+def _copy_legacy_archive(report: Path, archived: Path, tag: str) -> Path:
+    """Copy one legacy archive run whole into an immutable generation."""
+    source = {role: path for role, path in _companions(archived).items()
+              if os.path.lexists(path)}
+    for path in source.values():
+        if path.is_symlink():
+            raise OSError(errno.ELOOP, f"{path} is a symlink, not a file this engine archived")
+        if not path.is_file():
+            raise OSError(errno.EINVAL, f"{path} is not a regular archived file")
+    canonical = _names(_base(report))
+    same = [d for d in generations(report) if d.name.endswith(f"_legacy-{tag}") and all(
+        (d / canonical[role]).is_file()
+        and (d / canonical[role]).read_bytes() == path.read_bytes()
+        for role, path in source.items())]
+    if same:
+        return same[-1]
+    written = max(path.stat().st_mtime for path in source.values())
+    stamp = datetime.fromtimestamp(written, UTC).strftime("%Y%m%dT%H%M%SZ")
+    gen = _home(report) / _name_next(report, stamp, f"legacy-{tag}")
+    tmp = gen.with_name(f".{gen.name}.{uuid.uuid4().hex[:8]}")
+    tmp.mkdir()
+    try:
+        for role, path in source.items():
+            target = tmp / canonical[role]
+            shutil.copy2(path, target)
+            os.chmod(target, READ_ONLY)
+            _fsync(target)
+        _fsync(tmp)
+        os.rename(tmp, gen)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    _fsync(gen.parent)
+    return gen
+
+
 def set_aside(report: Path, *, now: datetime | None = None) -> list[Path]:
     """Take the live run off the live names (they then resolve to nothing)
     and return its files, which stay in their generation. For setting a run
@@ -1115,11 +1172,19 @@ def restore(report: Path, generation: str) -> Path:
             _pointer(report).unlink()
             _adopt(report, None)
         kept = generations(report)
-        matches = ([d for d in kept if d.name == generation]
-                   or [d for d in kept if generation in d.name])
-        if len(matches) != 1:
-            raise ValueError(f"{report.name}: {len(matches)} generations match {generation!r}")
-        (gen,) = matches
+        exact_kept = [d for d in kept if d.name == generation]
+        legacy = _legacy_archive_runs(report, generation)
+        exact_legacy = [item for item in legacy if item[0].name == generation]
+        if exact_kept or exact_legacy:
+            candidates: list[Path | tuple[Path, str]] = [*exact_kept, *exact_legacy]
+        else:
+            candidates = [*[d for d in kept if generation in d.name], *legacy]
+        if len(candidates) != 1:
+            noun = "generations" if not legacy else "restore candidates"
+            raise ValueError(f"{report.name}: {len(candidates)} {noun} match {generation!r}")
+        (candidate,) = candidates
+        gen = (_copy_legacy_archive(report, *candidate)
+               if isinstance(candidate, tuple) else candidate)
         try:
             previous = current_generation(report)
         except ForeignPointer:
