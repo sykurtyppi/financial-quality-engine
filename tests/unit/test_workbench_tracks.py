@@ -32,14 +32,16 @@ from app.services.journal import reporting, review, store
 from app.services.reporting import report_files
 from app.services.reporting.report_files import read_live, replacing
 from app.services.watch import watchlist as wl
-from app.services.workbench import jobs
+from app.services.workbench import fencing, jobs, views
 from app.web import app
 from scripts import earnings_brief, run_audit
 from scripts import journal as J
 
-TODAY = date.today().isoformat()
+_DAY = date(2026, 10, 11)
+TODAY = _DAY.isoformat()
 IDENTITY = "Workbench Test test@example.com"
-OPEN = ["openv2", "KO", "--thesis", "margins hold", "--conviction", "3", "--action", "hold",
+OPEN = ["openv2", "KO", "--date", TODAY, "--thesis", "margins hold", "--conviction", "3",
+        "--action", "hold",
         "--assumption", "revenue,>,1000,FY2026Q3,,2026-12-31"]
 
 
@@ -50,6 +52,18 @@ def _report_text(ticker: str, tag: str) -> str:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return _DAY
+
+    # Keep every independently imported clock on one explicit test day.  A
+    # module-level ``date.today()`` used to disagree with calls made after UTC
+    # midnight when this file straddled the rollover in CI.
+    monkeypatch.setattr(reporting, "date", FixedDate)
+    monkeypatch.setattr(fencing, "date", FixedDate)
+    monkeypatch.setattr(views, "date", FixedDate)
+    monkeypatch.setattr(store, "today", lambda: TODAY)
     monkeypatch.setattr(reporting, "REPORTS", tmp_path / "reports")
     monkeypatch.setattr(reporting, "MARKET", tmp_path / "journal" / "market")
     monkeypatch.setattr(store, "ENTRIES", tmp_path / "journal" / "entries")

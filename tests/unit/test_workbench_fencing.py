@@ -1004,11 +1004,17 @@ def test_an_interrupt_right_after_the_switch_switches_back_never_leaving_a_dangl
 
 
 def _fsynced(monkeypatch) -> list[str]:
+    import fcntl
+
     seen: list[str] = []
     real = os.fsync
 
     def fsync(fd):
-        seen.append(os.readlink(f"/proc/self/fd/{fd}"))
+        if hasattr(fcntl, "F_GETPATH"):
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+            seen.append(raw.split(b"\0", 1)[0].decode())
+        else:
+            seen.append(os.readlink(f"/proc/self/fd/{fd}"))
         return real(fd)
 
     monkeypatch.setattr(os, "fsync", fsync)

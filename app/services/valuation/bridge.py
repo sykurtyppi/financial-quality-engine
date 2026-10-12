@@ -50,6 +50,7 @@ from app.services.ingestion.fields import FILING_CURRENCY
 from app.services.valuation.observation import EASTERN, MarketObservation
 
 Basis = Literal["filing", "observation", "derived", "assumption"]
+INVALID_SHARE_COUNT = "share count invalid: must be finite and greater than zero"
 
 
 @dataclass(frozen=True)
@@ -188,10 +189,18 @@ def _share_count(period: PeriodFinancials) -> BridgeComponent:
             label = f"{kind} dated {ref.end}"
         else:
             label = "cover-page count (cover date not recorded)"
+        if not math.isfinite(period.shares_outstanding) or period.shares_outstanding <= 0:
+            return BridgeComponent("shares_outstanding", label, None, "filing", 0,
+                                   (sv,) if sv is not None else (), INVALID_SHARE_COUNT)
         return BridgeComponent("shares_outstanding", label, period.shares_outstanding, "filing",
                                0, (sv,) if sv is not None else ())
     if period.shares_diluted is not None:
         sv = period.sources.get("shares_diluted")
+        if not math.isfinite(period.shares_diluted) or period.shares_diluted <= 0:
+            return BridgeComponent("shares_diluted",
+                                   f"weighted-average diluted, {period.fiscal_label}",
+                                   None, "filing", 0, (sv,) if sv is not None else (),
+                                   INVALID_SHARE_COUNT)
         return BridgeComponent("shares_diluted",
                                f"weighted-average diluted, {period.fiscal_label}",
                                period.shares_diluted, "filing", 0, (sv,) if sv is not None else ())
@@ -201,6 +210,12 @@ def _share_count(period: PeriodFinancials) -> BridgeComponent:
 
 def _empty(name: str, label: str, sign: int, note: str) -> BridgeComponent:
     return BridgeComponent(name, label, None, "filing", sign, note=note)
+
+
+def _share_problem(period: PeriodFinancials, shares: BridgeComponent) -> str:
+    if shares.note == INVALID_SHARE_COUNT:
+        return INVALID_SHARE_COUNT
+    return f"share count missing for {period.fiscal_label}"
 
 
 def _availability(dataset: CompanyDataset | None, period: PeriodFinancials | None,
@@ -273,7 +288,7 @@ def enterprise_value_bridge(
     elif overflow:
         mcap_note = MCAP_OVERFLOW
     elif market_cap is None:
-        mcap_note = f"share count missing for {period.fiscal_label}"
+        mcap_note = _share_problem(period, shares)
     else:
         mcap_note = None
     mcap = BridgeComponent("market_cap", mcap_label, market_cap, "derived", 1, note=mcap_note)
@@ -292,7 +307,7 @@ def enterprise_value_bridge(
     elif overflow:
         reason = f"EV not asserted: {MCAP_OVERFLOW}"
     elif market_cap is None:
-        reason = f"EV not asserted: share count missing for {period.fiscal_label}"
+        reason = f"EV not asserted: {_share_problem(period, shares)}"
     elif debt.value is None:
         reason = f"EV not asserted: total_debt missing for {period.fiscal_label}"
     elif cash.value is None:

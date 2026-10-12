@@ -19,15 +19,22 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
-from app.schemas.financials import CompanyDataset
+from app.schemas.financials import CompanyDataset, PeriodFinancials, PeriodType
 from app.services.ingestion.companyfacts_mapper import build_dataset
 from app.services.valuation.bridge import (
     available_through,
     enterprise_value_bridge,
     select_period,
 )
-from app.services.valuation.observation import LoadedObservation, MarketObservation
+from app.services.valuation.expectations import compute_expectations
+from app.services.valuation.multiples import TrailingFigures, compute_multiples
+from app.services.valuation.observation import (
+    LoadedObservation,
+    MarketObservation,
+    Scenario,
+)
 from app.services.valuation.plane import compute_plane
 from tests.fixtures.companies import stretch_dataset
 
@@ -73,6 +80,45 @@ def _plane(ticker: str, observed_at: datetime, facts: dict | None = None, price:
     ds, _ = build_dataset(facts, ticker)
     return compute_plane(ds, LoadedObservation.of(_obs(ticker, price, observed_at)), DAY,
                          company_facts=facts)
+
+
+@pytest.mark.parametrize("field", ["shares_outstanding", "shares_diluted"])
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+def test_share_counts_must_be_finite_and_strictly_positive_at_the_schema_boundary(field, value):
+    with pytest.raises(ValidationError):
+        PeriodFinancials(
+            period_end=DAY,
+            period_type=PeriodType.QUARTER,
+            fiscal_label="FY2026Q3",
+            **{field: value},
+        )
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+def test_the_valuation_plane_refuses_an_invalid_share_count_if_validation_was_bypassed(value):
+    """The arithmetic boundary remains fail-closed for corrupted/legacy data,
+    even though canonical PeriodFinancials validation rejects these values."""
+    ds = _dataset("KO")
+    period = ds.sorted_periods()[-1]
+    period.shares_outstanding = value
+    period.shares_diluted = None
+
+    obs = _obs("KO", 61.0).model_copy(update={
+        "scenarios": (Scenario(name="base", fcf_growth=0.05, years=5),),
+    })
+    bridge = enterprise_value_bridge(ds, obs)
+    ttm = TrailingFigures("TTM FY2026Q1", None, 10.0, 2.0, 3.0, 4.0, 1.0)
+    multiples = compute_multiples(bridge, ttm)
+    expectations = compute_expectations(bridge, ttm, obs)
+
+    assert bridge.shares.value is None
+    assert bridge.market_cap.value is None
+    assert bridge.ev is None
+    assert bridge.ev_reason is not None
+    assert "share count invalid: must be finite and greater than zero" in bridge.ev_reason
+    assert all(m.value is None for m in multiples)
+    assert all(s.value_per_share is None and s.upside is None
+               for s in expectations.scenarios)
 
 
 @pytest.mark.parametrize("ticker", ["AAPL", "KO", "CRM"])

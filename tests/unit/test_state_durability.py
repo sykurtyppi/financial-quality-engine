@@ -5,6 +5,7 @@ paid audit runs. A rename alone can be lost on power loss."""
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import os
 from pathlib import Path
@@ -19,7 +20,11 @@ def _fsynced(monkeypatch) -> list[str]:
     real = os.fsync
 
     def fsync(fd):
-        seen.append(os.readlink(f"/proc/self/fd/{fd}"))
+        if hasattr(fcntl, "F_GETPATH"):
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+            seen.append(raw.split(b"\0", 1)[0].decode())
+        else:
+            seen.append(os.readlink(f"/proc/self/fd/{fd}"))
         return real(fd)
 
     monkeypatch.setattr(os, "fsync", fsync)

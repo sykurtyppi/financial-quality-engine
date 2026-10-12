@@ -713,6 +713,124 @@ class TestSetAsideAndRestore:
         assert restore(report, first.generation_id).parent == current_generation(report)
         assert report.read_text().startswith("# first report") and _one_generation(report)
 
+    def test_restore_imports_a_report_kept_by_the_pre_generation_archive(self, tmp_path):
+        report, _ = _publish(tmp_path, "current")
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        old = archive / "AAPL_2026-09-26.210507.md"
+        old.write_text("# archived report")
+        old.with_name("AAPL_2026-09-26.210507.ledger.json").write_text(
+            '{"run": "archived"}')
+        old.with_name("AAPL_2026-09-26.210507_audit.md").write_text("# archived audit")
+        before = {p.name: p.read_bytes() for p in archive.iterdir()}
+
+        restored = restore(report, old.name)
+
+        assert restored.parent == current_generation(report)
+        assert report.read_text() == "# archived report"
+        assert ledger_path(report).read_text() == '{"run": "archived"}'
+        assert report.with_name(AUDIT).read_text() == "# archived audit"
+        assert {p.name: p.read_bytes() for p in archive.iterdir()} == before
+        assert all((restored.parent / name).stat().st_mode & 0o222 == 0
+                   for name in (NAME, "AAPL_2026-09-26.ledger.json", AUDIT))
+
+    def test_restore_refuses_an_ambiguous_pre_generation_archive(self, tmp_path):
+        report, _ = _publish(tmp_path, "current")
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        (archive / "AAPL_2026-09-26.210507.md").write_text("# first archive")
+        (archive / "AAPL_2026-09-26.210507-1.md").write_text("# second archive")
+        live = current_generation(report)
+
+        with pytest.raises(ValueError, match="restore candidates match"):
+            restore(report, "210507")
+
+        assert current_generation(report) == live
+
+    def test_restore_never_follows_a_link_in_the_pre_generation_archive(self, tmp_path):
+        report, _ = _publish(tmp_path, "current")
+        outside = tmp_path / "outside.md"
+        outside.write_text("# outside")
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        (archive / "AAPL_2026-09-26.210507.md").symlink_to(outside)
+
+        with pytest.raises(OSError, match="symlink"):
+            restore(report, "AAPL_2026-09-26.210507.md")
+
+        assert report.read_text().startswith("# current report")
+
+    @pytest.mark.parametrize("companion", [
+        "AAPL_2026-09-26.210507.ledger.json",
+        "AAPL_2026-09-26.210507_audit.md",
+    ])
+    def test_restore_never_follows_a_linked_legacy_companion(self, tmp_path, companion):
+        report, _ = _publish(tmp_path, "current")
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        old = archive / "AAPL_2026-09-26.210507.md"
+        old.write_text("# archived report")
+        outside = tmp_path / "outside"
+        outside.write_text("untrusted companion")
+        (archive / companion).symlink_to(outside)
+        live = current_generation(report)
+
+        with pytest.raises(OSError, match="symlink"):
+            restore(report, old.name)
+
+        assert current_generation(report) == live
+        assert report.read_text().startswith("# current report")
+
+    def test_restored_legacy_companions_with_another_generation_id_are_stale(self, tmp_path):
+        report, _ = _publish(tmp_path, "current")
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        old = archive / "AAPL_2026-09-26.210507.md"
+        report_id = "1" * 32
+        other_id = "2" * 32
+        old.write_text(f"# archived report\n{GENERATION_LINE}{report_id}\n")
+        old.with_name("AAPL_2026-09-26.210507.ledger.json").write_text(
+            json.dumps({"generation_id": other_id}))
+        old.with_name("AAPL_2026-09-26.210507_audit.md").write_text(
+            f"# archived audit\n{GENERATION_LINE}{other_id}\n")
+
+        restore(report, old.name)
+        run = read_live(report)
+
+        assert run is not None and run.generation_id == report_id
+        assert run.ledger is None and run.audit is None
+        assert {path.name for path in run.stale} == {
+            "AAPL_2026-09-26.ledger.json", AUDIT,
+        }
+
+    def test_interrupted_legacy_import_changes_nothing_live(self, tmp_path, monkeypatch):
+        report, _ = _publish(tmp_path, "current")
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        old = archive / "AAPL_2026-09-26.210507.md"
+        old.write_text("# archived report")
+        old.with_name("AAPL_2026-09-26.210507.ledger.json").write_text("{}")
+        live = current_generation(report)
+        before = set(generations(report))
+        real_copy = report_files.shutil.copy2
+        copied = 0
+
+        def interrupt_on_second_file(source, target):
+            nonlocal copied
+            copied += 1
+            if copied == 2:
+                raise KeyboardInterrupt
+            return real_copy(source, target)
+
+        monkeypatch.setattr(report_files.shutil, "copy2", interrupt_on_second_file)
+        with pytest.raises(KeyboardInterrupt):
+            restore(report, old.name)
+
+        assert current_generation(report) == live
+        assert set(generations(report)) == before
+        assert not [p for p in (tmp_path / GENERATIONS_DIR / report.stem).iterdir()
+                    if p.name.startswith(".")]
+
     @pytest.mark.parametrize("which", ["nope", "20260926T210507Z"])
     def test_restore_refuses_an_unknown_or_ambiguous_generation(self, tmp_path, which):
         report, _ = _publish(tmp_path, "first")

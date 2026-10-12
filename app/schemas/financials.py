@@ -129,8 +129,8 @@ class PeriodFinancials(BaseModel):
     stockholders_equity: float | None = None
 
     # Shares
-    shares_diluted: float | None = None
-    shares_outstanding: float | None = None
+    shares_diluted: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    shares_outstanding: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Field name -> where that value came from, when the period was built
     # from filed facts (the companyfacts mapper). Parallel to the float

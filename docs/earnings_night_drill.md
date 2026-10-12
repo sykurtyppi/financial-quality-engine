@@ -156,7 +156,12 @@ import restore; print(restore(Path('reports/NVDA_2026-11-18.md'), '20261118T2105
 `restore` takes the generation's directory name or any unique part of it
 (its stamp, its sequence number or its id), and makes it live in one step: the report, ledger and
 audit (if it had one) all switch together, and the run it replaces stays
-kept. `set_aside` takes the live run off the live names without putting
+kept. For reports archived before generations were introduced, pass the
+exact legacy report filename from `reports/archive/` instead, for example
+`AAPL_2026-09-26.210507.md`. It is copied whole into a read-only generation,
+the legacy archive is left unchanged, and that imported generation is made
+live by the same atomic pointer swap. Ambiguous partial names are refused.
+`set_aside` takes the live run off the live names without putting
 another in its place. Step 10 restores step 1's generation and checks the
 report and ledger byte for byte. The vintage store is never rolled back: it
 is the record of what SEC served, and a rollback of the report does not

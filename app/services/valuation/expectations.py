@@ -37,7 +37,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from app.services.valuation.bridge import MCAP_OVERFLOW, Bridge, currency_mismatch
+from app.services.valuation.bridge import (
+    INVALID_SHARE_COUNT,
+    MCAP_OVERFLOW,
+    Bridge,
+    currency_mismatch,
+)
 from app.services.valuation.multiples import TrailingFigures
 from app.services.valuation.observation import (
     GROWTH_HIGH,
@@ -245,7 +250,9 @@ def _scenario(s: Scenario, a: Assumptions, fcf: float | None, bridge: Bridge,
     elif fcf <= 0:
         reason = "not computable: TTM FCF ≤ 0"
     elif bridge.shares.value is None:
-        reason = "not computable: share count missing"
+        detail = (INVALID_SHARE_COUNT
+                  if bridge.shares.note == INVALID_SHARE_COUNT else "share count missing")
+        reason = f"not computable: {detail}"
     if reason is not None:
         return ScenarioValue(s.name, terms, None, None, reason)
     assert fcf is not None and bridge.shares.value is not None and bridge.price.value is not None
