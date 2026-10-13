@@ -97,6 +97,13 @@ TARGETS: tuple[Target, ...] = (
         "tests/unit/test_series_selection.py", "tests/unit/test_debt_composition.py",
         "tests/unit/test_tag_switch_fallback.py",
     )),
+    # The share-change guards (r38): a non-positive count on either side.
+    Target("app/services/formulas/capital_structure.py", (
+        "tests/unit/test_capital_structure.py", "tests/unit/test_bad_share_count.py",
+    ), function="diluted_share_growth"),
+    Target("app/services/formulas/capital_structure.py", (
+        "tests/unit/test_capital_structure.py", "tests/unit/test_bad_share_count.py",
+    ), function="net_share_count_change"),
     Target("app/core/pipeline.py", (
         "tests/unit/test_distress_flags.py", "tests/integration/test_pipeline.py",
         "tests/integration/test_golden_report.py",
