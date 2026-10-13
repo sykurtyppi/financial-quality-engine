@@ -128,9 +128,12 @@ class PeriodFinancials(BaseModel):
     preferred_stock: float | None = None
     stockholders_equity: float | None = None
 
-    # Shares
-    shares_diluted: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    shares_outstanding: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    # Shares. No gt=0 here (r17; review of #119): one filed count of 0 or
+    # below made the mapper raise and every caller catching ValueError skip
+    # the firm. Refused where used: the share-change formulas' prior-count
+    # guard, and the valuation bridge's INVALID_SHARE_COUNT.
+    shares_diluted: float | None = None
+    shares_outstanding: float | None = None
 
     # Field name -> where that value came from, when the period was built
     # from filed facts (the companyfacts mapper). Parallel to the float

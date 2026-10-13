@@ -19,9 +19,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import ValidationError
 
-from app.schemas.financials import CompanyDataset, PeriodFinancials, PeriodType
+from app.schemas.financials import CompanyDataset, PeriodFinancials
 from app.services.ingestion.companyfacts_mapper import build_dataset
 from app.services.valuation.bridge import (
     available_through,
@@ -84,24 +83,16 @@ def _plane(ticker: str, observed_at: datetime, facts: dict | None = None, price:
 
 @pytest.mark.parametrize("field", ["shares_outstanding", "shares_diluted"])
 @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
-def test_share_counts_must_be_finite_and_strictly_positive_at_the_schema_boundary(field, value):
-    with pytest.raises(ValidationError):
-        PeriodFinancials(
-            period_end=DAY,
-            period_type=PeriodType.QUARTER,
-            fiscal_label="FY2026Q3",
-            **{field: value},
-        )
-
-
-@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
-def test_the_valuation_plane_refuses_an_invalid_share_count_if_validation_was_bypassed(value):
-    """The arithmetic boundary remains fail-closed for corrupted/legacy data,
-    even though canonical PeriodFinancials validation rejects these values."""
+def test_the_valuation_plane_refuses_an_invalid_share_count(field, value):
+    """The schema carries the value (r17; review of #119: refused there, one
+    bad filed count made the mapper raise and every caller skip the firm);
+    the bridge is where it is refused, and nothing downstream prices it."""
     ds = _dataset("KO")
     period = ds.sorted_periods()[-1]
-    period.shares_outstanding = value
-    period.shares_diluted = None
+    other = "shares_diluted" if field == "shares_outstanding" else "shares_outstanding"
+    bad = PeriodFinancials.model_validate(
+        {**period.model_dump(), field: value, other: None, "sources": period.sources})
+    ds = ds.model_copy(update={"periods": [*ds.sorted_periods()[:-1], bad]})
 
     obs = _obs("KO", 61.0).model_copy(update={
         "scenarios": (Scenario(name="base", fcf_growth=0.05, years=5),),
@@ -111,7 +102,7 @@ def test_the_valuation_plane_refuses_an_invalid_share_count_if_validation_was_by
     multiples = compute_multiples(bridge, ttm)
     expectations = compute_expectations(bridge, ttm, obs)
 
-    assert bridge.shares.value is None
+    assert bridge.shares.name == field and bridge.shares.value is None
     assert bridge.market_cap.value is None
     assert bridge.ev is None
     assert bridge.ev_reason is not None
