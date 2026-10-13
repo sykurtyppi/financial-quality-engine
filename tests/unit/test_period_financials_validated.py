@@ -86,10 +86,13 @@ def test_no_model_construct_in_app_or_scripts():
 @pytest.fixture
 def bypasses(monkeypatch) -> list[tuple[str, object]]:
     """Every `model_construct` and `model_copy` on a `PeriodFinancials`, with
-    the copy's `update`. Both still do their job: only the record is new."""
+    the copy's `update`, and every attribute assignment on one (the model
+    does not set `validate_assignment`, so `p.field = x` skips validation
+    too). Each still does its job: only the record is new."""
     calls: list[tuple[str, object]] = []
     construct = PeriodFinancials.model_construct.__func__  # type: ignore[attr-defined]
     copy = PeriodFinancials.model_copy
+    assign = PeriodFinancials.__setattr__
 
     def recording_construct(cls, *args, **kwargs):
         calls.append(("model_construct", kwargs))
@@ -99,19 +102,28 @@ def bypasses(monkeypatch) -> list[tuple[str, object]]:
         calls.append(("model_copy", update))
         return copy(self, update=update, deep=deep)
 
+    def recording_assign(self, name, value):
+        calls.append(("setattr", name))
+        assign(self, name, value)
+
     monkeypatch.setattr(PeriodFinancials, "model_construct", classmethod(recording_construct))
     monkeypatch.setattr(PeriodFinancials, "model_copy", recording_copy)
+    monkeypatch.setattr(PeriodFinancials, "__setattr__", recording_assign)
     return calls
 
 
 def test_the_recorder_sees_both_bypasses(bypasses):
-    """The runtime test below is not vacuous: the patch takes, and both
-    calls still return a period."""
+    """The runtime test below is not vacuous: the patch takes, and each
+    bypass still does what it did."""
     p = PeriodFinancials.model_construct(shares_diluted="x")
     assert p.shares_diluted == "x"
     assert _period().model_copy(update={"shares_diluted": "x"}).shares_diluted == "x"
+    q = _period()
+    q.shares_diluted = "x"  # type: ignore[assignment]
+    assert q.shares_diluted == "x"
     assert bypasses == [("model_construct", {"shares_diluted": "x"}),
-                        ("model_copy", {"shares_diluted": "x"})]
+                        ("model_copy", {"shares_diluted": "x"}),
+                        ("setattr", "shares_diluted")]
 
 
 @pytest.mark.parametrize("ticker", TICKERS)
@@ -147,6 +159,7 @@ def test_the_offline_pipeline_builds_every_period_validated(ticker, bypasses, mo
 
     assert [c for c in bypasses if c[0] == "model_construct"] == []
     assert [c for c in bypasses if c[0] == "model_copy" and c[1]] == []
+    assert [c for c in bypasses if c[0] == "setattr"] == []
 
 
 # --- 3. the boundary: validation is what makes the guards type-safe -------------
