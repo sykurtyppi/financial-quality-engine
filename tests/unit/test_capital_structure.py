@@ -81,3 +81,42 @@ class TestDilution:
 
     def test_issuance_pressure(self):
         assert cs.issuance_pressure(q(share_issuance_proceeds=50.0, cfo=200.0)).value == pytest.approx(0.25)
+
+
+# Both share-change metrics, by the field each reads. A filed share count of
+# 0 or below reaches the formulas (r17: refused where used; the schema is a
+# carrier), and until r38 only the prior count was guarded: a bad CURRENT
+# count read as an OK change of -100% or beyond, which interpolates to
+# diluted_share_growth's lowest concern anchor, i.e. "no dilution concern".
+SHARE_CHANGES = [
+    pytest.param(cs.diluted_share_growth, "shares_diluted", id="diluted_share_growth"),
+    pytest.param(cs.net_share_count_change, "shares_outstanding", id="net_share_count_change"),
+]
+
+
+@pytest.mark.parametrize(("metric", "field"), SHARE_CHANGES)
+class TestShareCountGuards:
+    @pytest.mark.parametrize("current", [0.0, -1.0])
+    def test_a_non_positive_current_count_is_not_meaningful(self, metric, field, current):
+        m = metric(q("Q4", **{field: current}), q("Q3", **{field: 100.0}))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert m.value is None and m.distress_signal is False
+        assert m.note == "Non-positive current share count"
+
+    @pytest.mark.parametrize("current", [103.0, 0.0, -1.0])
+    @pytest.mark.parametrize("prior", [0.0, -1.0])
+    def test_a_non_positive_prior_count_keeps_its_message(self, metric, field, prior, current):
+        """The prior's message is checked first and is unchanged, whatever
+        the current count."""
+        m = metric(q("Q4", **{field: current}), q("Q3", **{field: prior}))
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert m.value is None and m.distress_signal is False
+        assert m.note == "Non-positive prior share count"
+
+    @pytest.mark.parametrize(("current", "prior", "change"), [
+        (103.0, 100.0, 0.03), (98.0, 100.0, -0.02), (100.0, 100.0, 0.0), (1e-9, 100.0, -1.0 + 1e-11),
+    ])
+    def test_two_positive_counts_compute_the_change(self, metric, field, current, prior, change):
+        m = metric(q("Q4", **{field: current}), q("Q3", **{field: prior}))
+        assert m.status is MetricStatus.OK and m.note is None
+        assert m.value == pytest.approx(change, rel=1e-12, abs=1e-15)

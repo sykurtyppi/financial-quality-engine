@@ -9,23 +9,25 @@ outright, and the restatement scan, the vintage diff and the valuation
 plane's as-filed rebuild, which catch ValueError, silently took the firm
 as unmappable. r17 decided to refuse a bad value where it is used for
 exactly this reason; the schema is a carrier. The users refuse it: the
-share-change formulas' "Non-positive prior share count" guard and the
-valuation bridge's INVALID_SHARE_COUNT (with the expectations' reason).
+share-change formulas' "Non-positive prior share count" and (r38)
+"Non-positive current share count" guards, and the valuation bridge's
+INVALID_SHARE_COUNT (with the expectations' reason).
 
 Each test here maps a real fixture payload with one share fact set to 0 or
-to a negative value.
+to a negative value (one control maps it unmodified).
 """
 
 from __future__ import annotations
 
 import copy
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from hypothesis import find, settings
 
+from app.core.pipeline import analyze
 from app.schemas.ledger import LedgerDocument
 from app.schemas.metrics import MetricStatus
 from app.services.formulas.registry import compute_metrics
@@ -54,6 +56,10 @@ BAD = [0.0, -1.0]
 MID = ("WeightedAverageNumberOfDilutedSharesOutstanding", "2025-03-29", "2025-06-27")
 # FY2025Q2's cover-page count (dated after the quarter, on the 10-Q's cover).
 MID_COVER = "2025-07-22"
+# The day FY2025Q2's 10-Q (both facts above) was filed: cut there, FY2025Q2 is
+# the newest quarter, the one scored. KO's newest quarter in the fixture has no
+# diluted prior (FY2025Q4 carries no quarter-length fact), so it cannot be used.
+MID_FILED = date(2025, 7, 24)
 # KO's newest quarter, FY2026Q1: its diluted fact and its cover-page count.
 # The bridge reads the cover-page count first and the diluted one without it.
 NEWEST_DILUTED = ("WeightedAverageNumberOfDilutedSharesOutstanding", "2026-01-01", "2026-04-03")
@@ -124,13 +130,9 @@ def test_one_bad_diluted_share_fact_maps_and_the_share_change_after_it_is_not_me
     after = history["FY2025Q3"]
     assert after.status is MetricStatus.NOT_MEANINGFUL and after.value is None
     assert after.note is not None and "Non-positive prior share count" in after.note
-    # What the engine does with the bad quarter as the CURRENT count: the
-    # formula guards only the prior, so the change reads as a -100% (or
-    # beyond) OK value. Pinned as found, not endorsed: the formula is
-    # flag-only (AGENTS.md §4), and the finding is reported for review.
     own = history["FY2025Q2"]
-    assert own.status is MetricStatus.OK
-    assert own.value == pytest.approx((value - 4_313_000_000) / 4_313_000_000)
+    assert own.status is MetricStatus.NOT_MEANINGFUL and own.value is None
+    assert own.note == "Non-positive current share count"
 
 
 @pytest.mark.parametrize("value", BAD)
@@ -144,11 +146,57 @@ def test_one_bad_cover_page_count_maps_and_the_net_share_change_after_it_is_not_
     after = history["FY2025Q3"]
     assert after.status is MetricStatus.NOT_MEANINGFUL and after.value is None
     assert after.note is not None and "Non-positive prior share count" in after.note
-    # As for the diluted count: the bad quarter as the current count reads
-    # as an OK change of -100% or beyond (pinned as found, not endorsed).
     own = history["FY2025Q2"]
-    assert own.status is MetricStatus.OK
-    assert own.value == pytest.approx((value - 4_304_266_738) / 4_304_266_738)
+    assert own.status is MetricStatus.NOT_MEANINGFUL and own.value is None
+    assert own.note == "Non-positive current share count"
+
+
+# --- the scored quarter: a bad current count carries no concern (r38) -----------
+
+
+@pytest.mark.parametrize("value", BAD)
+def test_a_bad_current_diluted_count_contributes_no_concern(value):
+    """Failed on 7c4b138: the change read as an OK -100% or beyond, the
+    lowest concern anchor (20), and the card gained a supportive "Stable or
+    shrinking share count" flag on a corrupt count. The component is now
+    dropped like any other not-meaningful metric."""
+    ds, _ = build_dataset(_set_diluted(_ko(), MID, value), "KO", as_of=MID_FILED)
+    assert ds.sorted_periods()[-1].fiscal_label == "FY2025Q2"
+    result = analyze(ds)
+    (metric,) = [m for m in result.metrics if m.name == "diluted_share_growth"]
+    assert metric.fiscal_label == "FY2025Q2"
+    assert metric.status is MetricStatus.NOT_MEANINGFUL and metric.value is None
+    (component,) = [c for b in result.block_scores for c in b.components
+                    if c.metric_name == "diluted_share_growth"]
+    assert component.status == MetricStatus.NOT_MEANINGFUL.value
+    assert component.metric_value is None and component.concern_score is None
+    assert not any("diluted_share_growth" in f.evidence_metrics
+                   for f in result.red_flags + result.green_flags)
+
+
+def test_the_unmodified_quarter_scores_its_diluted_change():
+    """The control for the test above: the same cut, unmodified, scores the
+    component, so its absence there is the guard's doing."""
+    result = analyze(build_dataset(_ko(), "KO", as_of=MID_FILED)[0])
+    (component,) = [c for b in result.block_scores for c in b.components
+                    if c.metric_name == "diluted_share_growth"]
+    assert component.status == MetricStatus.OK.value
+    assert component.metric_value == pytest.approx((4_315_000_000 - 4_313_000_000) / 4_313_000_000)
+    assert component.concern_score is not None
+
+
+@pytest.mark.parametrize("value", BAD)
+def test_a_bad_current_cover_count_is_not_an_ok_mismatch_input(value):
+    """`net_share_count_change` is the buyback-narrative mismatch's raw-value
+    input (the metrics `analyze` hands the narrative layer). Failed on
+    7c4b138: it was an OK -100% or beyond. That never fired the mismatch (it
+    is not a rise), but it was an OK reading of a corrupt count."""
+    ds, _ = build_dataset(_set_cover(_ko(), value, MID_COVER), "KO", as_of=MID_FILED)
+    result = analyze(ds)
+    (metric,) = [m for m in result.metrics if m.name == "net_share_count_change"]
+    assert metric.fiscal_label == "FY2025Q2"
+    assert metric.status is MetricStatus.NOT_MEANINGFUL and metric.value is None
+    assert metric.note == "Non-positive current share count"
 
 
 # --- the valuation bridge refuses it ---------------------------------------------
