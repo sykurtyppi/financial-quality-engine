@@ -467,6 +467,26 @@ Mid-window changes (0.4.0 window):
     (as-filed cases on the three fixtures, a restatement, the Eastern-day
     boundary), the F2–F10 tests named in each test file's docstring.
 
+18. **2026-10-13 — a non-positive current share count is refused by the
+    share-change metrics.** `diluted_share_growth` (scored) and
+    `net_share_count_change` guarded only the prior count, so a filed
+    current-quarter count of 0 or below read as an OK change of −100% or
+    beyond: the lowest concern anchor and a green "Stable or shrinking
+    share count" flag on a corrupt count (reproduced on KO cut at
+    FY2025Q2's filing day with that quarter's diluted count set to 0).
+    Reachable since the schema stopped rejecting such facts (review of
+    #119). Now either count ≤ 0 is NOT_MEANINGFUL; the prior check runs
+    first and keeps its message, the current one reads "Non-positive
+    current share count" (`formulas/capital_structure.py`, a flag-only file
+    changed with the operator's explicit authorization). **A correction of
+    computation on corrupt input, not a scoring change: no anchor, weight
+    or band moves.** Calibration snapshot, golden report,
+    `data/example_company.json` and the selection snapshot unchanged (no
+    real or synthetic case has a non-positive share count). Spec:
+    `docs/formula_spec.md`. Proof:
+    `tests/unit/test_capital_structure.py::TestShareCountGuards`,
+    `tests/unit/test_bad_share_count.py`.
+
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —
 see closure note above.
