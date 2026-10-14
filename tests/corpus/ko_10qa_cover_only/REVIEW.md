@@ -1,10 +1,19 @@
-# Review: `ko_10qa_cover_only` (DRAFT — `reviewed: null`)
+# Review: `ko_10qa_cover_only` (reviewed 2026-10-14)
 
 **KO**, CIK 21344, as of 2024-06-30, restatement window from 2023-01-01.
 
 **Why this case exists.** A real 10-Q/A (0000021344-24-000019, filed 2024-05-30) that re-files only the cover share count: an amendment with no scored impact must not reach Tier 1.
 
-This draft was built offline from the committed trimmed fixture `tests/fixtures/real/companyfacts_KO_trimmed.json` (`scripts/make_corpus_case.py --from-facts`). Its `expected` block is a COPY of what the engine observed; nothing in it has been checked against a filing. The fixture carries no filing index, so the 8-K 4.02 check did not run (`non_reliance` is empty by construction, not by observation).
+This case was built offline from the committed trimmed fixture `tests/fixtures/real/companyfacts_KO_trimmed.json` (`scripts/make_corpus_case.py --from-facts`). Its expectations were reviewed against the SEC EDGAR filings listed below on 2026-10-14. The fixture carries no filing index, so the 8-K 4.02 check does not run; `non_reliance` remains empty because this case is scoped to the cover-only 10-Q/A behavior, not as evidence that no Item 4.02 filing exists.
+
+## Review result
+
+1. The 2024-05-30 10-Q/A says it was filed solely to add omitted iXBRL tagging to Part II, Item 5. It expressly says no other disclosure was modified or updated. It contains no amended income statement, balance sheet, or cash-flow statement.
+2. Both the original 2024-05-02 10-Q and the 10-Q/A report 4,307,955,307 shares outstanding as of 2024-04-30. The amendment therefore creates no amended share-count footprint.
+3. The 2023 10-K reports full-year net operating revenue of $45,754m and interest expense of $1,527m. The Q3 2023 10-Q reports nine-month values of $34,905m and $1,114m. Their differences are $10,849m and $413m, matching the case's FY2023Q4 derivations. The 10-K does not separately disclose those two fourth-quarter figures in a fourth-quarter note.
+4. The SEC companyfacts payload contains neither `ContractWithCustomerLiabilityCurrent` nor `DeferredRevenueCurrent`; leaving `deferred_revenue` uninspected is correct for this case.
+
+No `expected` value required correction. The expected outcome remains `tier1: false` with no restatement footprint.
 
 ## What to check, and against which filing
 
