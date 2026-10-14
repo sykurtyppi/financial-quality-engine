@@ -17,6 +17,7 @@ reported quarter's value was built (strategy, components, method, partial).
         instead of writing (exit 1 on any difference).
 
     python scripts/selection_snapshot.py vintages --out F [--as-of D] [--root DIR]
+        [--require-nonempty]
         Dump every filer in the vintage store from its newest snapshot taken
         on or before D (default: today). The input is pinned by the store,
         so two runs with the same --as-of differ only by code. This is the
@@ -213,6 +214,10 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--out", type=Path, required=True)
     v.add_argument("--as-of", type=date.fromisoformat, default=None)
     v.add_argument("--root", type=Path, default=None)
+    v.add_argument(
+        "--require-nonempty", action="store_true",
+        help="fail instead of writing an empty dump (required for a release archive gate)",
+    )
     d = sub.add_parser("diff", help="compare two dumps")
     d.add_argument("a", type=Path)
     d.add_argument("b", type=Path)
@@ -236,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "vintages":
         as_of = args.as_of or date.today()
         cases = vintage_cases(as_of, args.root)
+        if args.require_nonempty and not cases:
+            print(f"no vintage snapshots at or before {as_of}", file=sys.stderr)
+            return 1
         args.out.write_text(render(cases))
         print(f"Wrote {args.out}: {len(cases)} filer(s) as of {as_of}")
         return 0

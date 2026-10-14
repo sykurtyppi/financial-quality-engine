@@ -349,6 +349,19 @@ def test_vintages_dumps_the_newest_snapshot_at_or_before_as_of(tmp_path):
     assert run(d1 - timedelta(days=1)) == {}
 
 
+def test_vintages_release_gate_refuses_an_empty_store(tmp_path, capsys):
+    out = tmp_path / "empty.json"
+    assert snap.main([
+        "vintages",
+        "--out", str(out),
+        "--as-of", "2026-10-30",
+        "--root", str(tmp_path / "empty-store"),
+        "--require-nonempty",
+    ]) == 1
+    assert not out.exists()
+    assert "no vintage snapshots" in capsys.readouterr().err
+
+
 def test_vintages_on_a_missing_store_is_empty(tmp_path):
     out = tmp_path / "dump.json"
     assert snap.main(
