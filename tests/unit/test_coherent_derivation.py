@@ -52,10 +52,11 @@ class TestAnnualLessThreeQuarters:
             _q(Q1, 150.0, date(2025, 3, 10), "10-Q/A"),  # after the 10-K
         ]
         s = _FlowSeries(facts)
-        values, methods = s.quarterly(ENDS)
+        r = s.quarterly(ENDS)
+        values, methods = r.values, r.methods
         assert values[Q1] == 150.0  # Q1 itself stands at its amended value
         assert (values[Q4], methods[Q4]) == (100.0, "fy_minus_3q")
-        assert s.mixed == set()
+        assert r.mixed == set()
 
     def test_an_amendment_the_10k_already_reflects_changes_nothing(self):
         facts = [
@@ -65,7 +66,8 @@ class TestAnnualLessThreeQuarters:
             _q(Q3, 100.0, date(2024, 11, 1)),
             _fact(Y0, Q4, 450.0, date(2025, 2, 20), "10-K"),
         ]
-        values, _ = _FlowSeries(facts).quarterly(ENDS)
+        r = _FlowSeries(facts).quarterly(ENDS)
+        values = r.values
         assert values[Q4] == 100.0
 
 
@@ -80,8 +82,9 @@ class TestAnnualLessThreeQuarters:
             _q(Q3, 100.0, date(2025, 3, 1)),
         ]
         s = _FlowSeries(facts)
-        values, _ = s.quarterly(ENDS)
-        assert values[Q4] == 100.0 and s.mixed == {Q4}
+        r = s.quarterly(ENDS)
+        values = r.values
+        assert values[Q4] == 100.0 and r.mixed == {Q4}
 
 
 class TestYearToDate:
@@ -91,7 +94,8 @@ class TestYearToDate:
             _fact(Y0, Q2, 101.0, date(2024, 8, 1)),  # H1
             _q(Q1, 100.5, date(2024, 9, 1), "10-Q/A"),  # Q1 amended after H1
         ]
-        values, methods = _FlowSeries(facts).quarterly(ENDS[:2])
+        r = _FlowSeries(facts).quarterly(ENDS[:2])
+        values, methods = r.values, r.methods
         assert (values[Q2], methods[Q2]) == (1.0, "ytd_diff")  # not 0.5
 
     def test_a_chain_of_year_to_date_figures(self):
@@ -101,7 +105,8 @@ class TestYearToDate:
             _fact(Y0, Q3, 330.0, date(2024, 11, 1)),
             _fact(Y0, Q2, 260.0, date(2024, 12, 1), "10-Q/A"),  # H1 amended after 9M
         ]
-        values, _ = _FlowSeries(facts).quarterly(ENDS[:3])
+        r = _FlowSeries(facts).quarterly(ENDS[:3])
+        values = r.values
         assert values[Q2] == 160.0  # H1 as it stands (260) less Q1 (100)
         assert values[Q3] == 120.0  # 9M less H1 as the 9M filing saw it (210), not 70
 
@@ -111,11 +116,11 @@ class TestYearToDate:
             _q(Q1, 60.0, date(2024, 9, 1)),  # Q1 only filed later
         ]
         s = _FlowSeries(facts)
-        values, _ = s.quarterly(ENDS[:2])
-        assert values[Q2] == 70.0 and s.mixed == {Q2}
+        r = s.quarterly(ENDS[:2])
+        values = r.values
+        assert values[Q2] == 70.0 and r.mixed == {Q2}
         # Each run reports its own quarters only.
-        s.quarterly(ENDS[:1])
-        assert s.mixed == set()
+        assert s.quarterly(ENDS[:1]).mixed == set()
 
 
 def test_the_mapper_notes_the_quarter_it_could_not_rebuild():
@@ -170,12 +175,13 @@ def _chronological_series(draw):
 @given(facts=_chronological_series())
 def test_nothing_revised_later_means_nothing_changes(facts):
     s = _FlowSeries(facts)
-    values, _ = s.quarterly(ENDS)
-    assert s.mixed == set()
+    r = s.quarterly(ENDS)
+    values = r.values
+    assert r.mixed == set()
     # The same series with no cut at all: identical values, bit for bit.
     uncut = _FlowSeries(facts)
     uncut._as_of = lambda cutoff: uncut  # type: ignore[method-assign]
-    assert uncut.quarterly(ENDS)[0] == values
+    assert uncut.quarterly(ENDS).values == values
 
 
 # Found by the mutation harness (Hermes audit round 5): the year-to-date

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Review board · FQE Workbench{% endblock %}
+{% block body %}
+<div class="toolbar">
+  <div>
+    <h2>Review board</h2>
+    <p class="sub" style="margin:0">Supervised shadow runs: reconcile every surfaced fact to its accession before relying on it. Read-only; open a case to record ticks.</p>
+  </div>
+  <a class="btn ghost" href="/journal">Dashboard</a>
+</div>
+
+{% for p in problems %}<div class="err" role="alert">{{ p }}</div>{% endfor %}
+
+<section class="panel">
+  {% if rows %}
+  <table class="board">
+    <thead><tr><th>Case</th><th>Watch</th><th>Report</th><th>Journal</th><th>Audit</th><th>Reconciled</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr data-case="{{ r.ticker }}_{{ r.day or '' }}">
+        <td>
+          {% if r.report == "live" %}<a href="/review/{{ r.ticker }}?date={{ r.day }}"><b>{{ r.ticker }}</b></a>{% else %}<b>{{ r.ticker }}</b>{% endif %}
+          <br><span class="note">{{ r.day or "—" }}</span>
+        </td>
+        <td>
+          {% if r.watch %}
+          <span class="note">prints {{ r.watch.print_at.strftime("%Y-%m-%d %H:%MZ") }}</span>
+          {% if r.watch.label %}<br><span class="pill wait">{{ r.watch.label }}</span>{% endif %}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if r.day is none %}<span class="pill wait">no journal entry pinned</span>
+          <div class="note">a print takes the auto track (reports/auto/), not reviewed here</div>
+          {% elif r.report == "live" %}<span class="pill ok">report live</span>
+          <div class="note">generation <code>{{ r.generation_id or "none (before generations)" }}</code><br>built {{ r.built }}</div>
+          {% elif r.report == "unreadable" %}<span class="pill bad">report unreadable</span>
+          {% else %}<span class="pill wait">no report yet</span>{% endif %}
+          {% if r.problem %}<div class="note" style="color:var(--bad)">{{ r.problem }}</div>{% endif %}
+        </td>
+        <td>
+          {% if r.day is not none %}
+          {% if r.entry == "missing" %}<span class="pill bad">entry missing</span><br>{% endif %}
+          {% if r.pending and r.pending.not_stamped %}<span class="pill bad">published, not stamped</span>
+          <div class="note">{{ r.pending.text }}</div>
+          {% elif r.pending %}<span class="pill need">pending its audit</span>
+          <div class="note">sweep-owned: {{ r.pending.text }}</div>
+          {% endif %}
+          {% if r.stamped %}<span class="pill ok">stamped reported</span> <span class="note">{{ r.stamped }}</span>
+          {% elif r.entry != "missing" %}<span class="note">entry not stamped</span>{% endif %}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if r.report != "live" %}<span class="muted">—</span>
+          {% elif r.audit == "matches" %}<span class="pill ok">audit refers to this generation</span>
+          {% elif r.audit == "stale" %}<span class="pill bad">stale audit</span>
+          <div class="note">names run {{ r.stale_audit }}</div>
+          {% else %}<span class="pill wait">no audit yet</span>{% endif %}
+        </td>
+        <td>
+          {% if r.report != "live" %}<span class="muted">—</span>
+          {% elif not r.ledger_ok %}<span class="pill bad">no ledger of this run</span>
+          {% else %}
+          <b>{{ r.reconciled }} / {{ r.total }}</b> <span class="note">rows reconciled</span>
+          {% if r.disputed %}<br><span class="pill bad">{{ r.disputed }} disputed</span>{% endif %}
+          {% if r.earlier %}<br><span class="note">{{ r.earlier }} tick{{ "s" if r.earlier != 1 }} on earlier runs</span>{% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Nothing on the watchlist and no journal entry with a report yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

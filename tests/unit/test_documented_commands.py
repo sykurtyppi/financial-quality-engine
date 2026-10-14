@@ -29,6 +29,10 @@ DOCS = [ROOT / "docs" / "earnings_night_runbook.md", ROOT / "journal" / "JOURNAL
 
 # A fenced invocation, joined across backslash continuations.
 _INVOCATION = re.compile(r"^\s*scripts/journal\.py\s+(.+?)(?=\n\s*(?:scripts/|#|```|$))", re.M | re.S)
+# The same for the market-observation command (the valuation shadow card's
+# one input), which the runbook documents beside the journal commands.
+_MARKET_INVOCATION = re.compile(
+    r"^\s*scripts/market\.py\s+(.+?)(?=\n\s*(?:scripts/|#|```|$))", re.M | re.S)
 
 
 def _documented_invocations() -> list[tuple[str, str]]:
@@ -53,6 +57,32 @@ def test_documented_command_parses(doc, cmd):
         journal.build_parser().parse_args(argv)
     except SystemExit as e:  # argparse exits 2 on a bad invocation
         pytest.fail(f"{doc}: documented command does not parse: journal.py {cmd}\n(argparse exit {e.code})")
+
+
+def _documented_market_invocations() -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for doc in DOCS:
+        text = doc.read_text().replace("\\\n", " ")
+        for m in _MARKET_INVOCATION.finditer(text):
+            found.append((doc.name, " ".join(m.group(1).split())))
+    return found
+
+
+def test_docs_contain_market_invocations_to_check():
+    assert len(_documented_market_invocations()) >= 1
+
+
+@pytest.mark.parametrize("doc,cmd", _documented_market_invocations())
+def test_documented_market_command_parses(doc, cmd):
+    # Parsed, not run: `record` writes under journal/market, which no test
+    # touches in the checkout.
+    import market
+
+    argv = _strip_comment(shlex.split(cmd))
+    try:
+        market.build_parser().parse_args(argv)
+    except SystemExit as e:
+        pytest.fail(f"{doc}: documented command does not parse: market.py {cmd}\n(argparse exit {e.code})")
 
 
 def test_documented_assumption_rows_are_lockable():

@@ -1,0 +1,832 @@
+"""Build the evidence ledger of one report run.
+
+Every claim the report makes becomes an `EvidenceItem` naming the filings
+behind it. The builder reads what the run already produced — the analysis
+result, the mapped dataset (whose `PeriodFinancials.sources` carry each
+value's filed facts), and the evidence streams — and adds nothing to the
+report itself. A claim it cannot source is listed in `unsourced` with the
+reason; it is never dropped and never given a guessed source.
+
+Item ids are content-derived (`EV-` + a digest of what the item is about),
+so the same claim keeps its id across runs and a journal entry can cite it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from collections import Counter
+from collections.abc import Iterable
+from datetime import date
+from typing import Any
+
+from app.config import scoring_config as cfg
+from app.schemas.financials import CompanyDataset, DocumentRecord, SourcedValue
+from app.schemas.ledger import (
+    EvidenceItem,
+    LedgerDocument,
+    Plane,
+    Provenance,
+    Unsourced,
+    ValidationStatus,
+    ValuationSummary,
+)
+from app.schemas.metrics import MetricResult
+from app.schemas.report import AnalysisResult, EvidenceEntry, NarrativeEvidence
+from app.services.formulas import ttm
+from app.services.formulas.registry import MetricsBundle, compute_metrics
+from app.services.ingestion.fields import FILING_CURRENCY, unit_for
+from app.services.metrics_registry import (
+    BASIS,
+    FINANCIAL_METRICS,
+    NARRATIVE_METRICS,
+    Basis,
+)
+from app.services.provenance import sources_for
+from app.services.reporting.decision_card import tier_of
+from app.services.reporting.revised_inputs import (
+    RevisionIndex,
+    revised_inputs,
+    revision_index,
+)
+from app.services.reporting.revised_inputs import note as revised_note
+
+_STATUS = {
+    1: ValidationStatus.VALIDATED,
+    2: ValidationStatus.DIRECTIONAL,
+    3: ValidationStatus.UNVALIDATED,
+}
+# "derived from FY2025Q1 documents: " / "compared with FY2024Q1 documents: "
+_DERIVED_PREFIX = re.compile(r"^(?:derived from |compared with )?\S+ documents(?:: | \(.*\))?")
+# A part of a row's source that names no document: `evidence.NO_SOURCE_RECORDED`,
+# `NOT_LOCATED`, or a derived row's period "(no source recorded)".
+_UNNAMED = re.compile(r"^(?:derived from |compared with )?\S+ documents \((?:no source recorded"
+                      r"|excerpt not located[^)]*)\)$")
+
+
+def _status(names: Iterable[str]) -> ValidationStatus:
+    return _STATUS[tier_of(names)]
+
+
+def _id(*parts: object) -> str:
+    key = "\x1f".join("" if p is None else str(p) for p in parts)
+    return "EV-" + hashlib.sha256(key.encode()).hexdigest()[:10]
+
+
+def _filing(
+    accession: str | None,
+    form: str | None,
+    filed: date | None,
+    **kw: Any,
+) -> Provenance | None:
+    """A filing source, or None when the filing is not fully identified —
+    an incomplete source is reported as such, never padded out."""
+    if not (accession and form and filed):
+        return None
+    return Provenance(kind="filing", accession=accession, form=form, filed=filed, **kw)
+
+
+def _document(doc: DocumentRecord, **kw: Any) -> Provenance | None:
+    return _filing(doc.accession, doc.form, doc.filed, **kw)
+
+
+def _edgar_url(cik: int | None, accession: str, document: str = "") -> str | None:
+    if not cik:
+        return None
+    return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{document}"
+
+
+# SEC's CIK: at most ten ASCII digits. The filing index writes it as a
+# string (at times zero-padded), companyfacts as an int. Matched whole
+# (`fullmatch`) and over [0-9] only: `\d` takes fullwidth and Arabic-Indic
+# digits and `$` a trailing newline (review of e37827a, finding L2).
+_CIK_TEXT = re.compile(r"[0-9]{1,10}")
+_CIK_QUOTED = 40  # characters of a source's value quoted in the note
+
+
+def _as_cik(value: object) -> int | None:
+    """`value` as a CIK, or None when it is not one (a bool, a float, a
+    string of anything but ASCII digits, zero). Never coerced into one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        n = value
+    elif isinstance(value, str) and _CIK_TEXT.fullmatch(value):
+        n = int(value)
+    else:
+        return None
+    return n if 0 < n < 10**10 else None
+
+
+def _quoted(value: object) -> str:
+    r = repr(value)
+    return r if len(r) <= _CIK_QUOTED else r[: _CIK_QUOTED - 1] + "…"
+
+
+def ledger_cik(sources: dict[str, object]) -> tuple[int | None, str | None]:
+    """The run's resolved CIK, as the payloads it read carry it (name -> the
+    value a source gives; None = that source says nothing), or None and why.
+
+    The sources are not independent: the companyfacts payload and the filing
+    index were fetched by the CIK the ticker resolved to, and the offering
+    list holds that CIK. Their agreement is a consistency check, not
+    corroboration, so one source suffices. The CIK is withheld when any
+    source names a different one or gives something that is not a CIK — a
+    folder link under the wrong CIK sends the reviewer to another company's
+    filings — and the note then says what each source gave (each value cut
+    to `_CIK_QUOTED` characters). None with no note when no source says
+    anything (the API, tests)."""
+    given = {name: v for name, v in sources.items() if v is not None}
+    ciks = {_as_cik(v) for v in given.values()}
+    if len(ciks) == 1 and None not in ciks:
+        return ciks.pop(), None
+    if not given:
+        return None, None
+    said = ", ".join(f"{name} says {_quoted(v)}" for name, v in given.items())
+    return None, f"its sources disagree or one is not a CIK ({said})"
+
+
+class _Builder:
+    def __init__(self) -> None:
+        self.items: list[EvidenceItem] = []
+        self.unsourced: list[Unsourced] = []
+        self._ids: set[str] = set()
+
+    def add(self, item_id: str, **kw: Any) -> str | None:
+        """Add an item, or record why it could not be sourced. Returns its id
+        when added."""
+        if item_id in self._ids:
+            return item_id
+        if not kw.get("provenance") and not kw.get("derived_from"):
+            self.unsourced.append(Unsourced(
+                plane=kw["plane"], kind=kw["kind"], subject=kw["subject"], claim=kw["claim"],
+                reason=kw.pop("why_unsourced", "no source identified"),
+            ))
+            return None
+        kw.pop("why_unsourced", None)
+        self.items.append(EvidenceItem(id=item_id, **kw))
+        self._ids.add(item_id)
+        return item_id
+
+
+# --- accounting metrics -----------------------------------------------------
+
+
+def _fact_sources(found: dict[str, list[SourcedValue]]) -> tuple[list[Provenance], int]:
+    """(provenance, facts that name no filing) for a metric's resolved inputs."""
+    out: list[Provenance] = []
+    incomplete = 0
+    for role, values in found.items():
+        for sv in values:
+            for ref in sv.inputs:
+                p = _filing(
+                    ref.accession, ref.form, ref.filed, concept=ref.concept,
+                    period_start=ref.start, period_end=ref.end, value=ref.value,
+                    sign=ref.sign, method=sv.method, role=role,
+                )
+                if p is None:
+                    incomplete += 1
+                else:
+                    out.append(p)
+    return out, incomplete
+
+
+def _history(bundle: MetricsBundle, name: str, label: str) -> MetricResult | None:
+    return next((m for m in bundle.history.get(name, []) if m.fiscal_label == label), None)
+
+
+def _metric_items(
+    b: _Builder, entries: list[EvidenceEntry], dataset: CompanyDataset,
+    revised: RevisionIndex | None = None,
+) -> dict[str, str]:
+    """One item per metric the report evidences. Returns name -> item id.
+    A metric that read a figure a revision touched says which
+    (`change_state="reads_revised_input"`): its sources still cite the
+    current filing, and the note names the input's earlier value."""
+    bundle = compute_metrics(dataset)
+    period_labels = {p.period_end: p.fiscal_label for p in dataset.periods}
+    ids: dict[str, str] = {}
+    labels = Counter(p.fiscal_label for p in dataset.periods)
+    for e in entries:
+        common: dict[str, Any] = dict(
+            kind="metric", subject=e.metric_name, claim=e.claim, fiscal_label=e.fiscal_label,
+            value=e.value, formula=e.formula, inputs=e.inputs,
+            validation_status=_status({e.metric_name}),
+        )
+        item_id = _id("metric", e.metric_name, e.fiscal_label)
+        if e.metric_name in NARRATIVE_METRICS:
+            docs = [d for d in dataset.documents if d.fiscal_label == e.fiscal_label]
+            prov = [p for d in docs if (p := _document(d, role="period document")) is not None]
+            added = b.add(
+                item_id, plane=Plane.NARRATIVE, provenance=tuple(prov), **common,
+                why_unsourced=f"no {e.fiscal_label} document names its filing",
+            )
+        elif e.metric_name in FINANCIAL_METRICS:
+            metric = _history(bundle, e.metric_name, e.fiscal_label)
+            found = sources_for(dataset, metric, bundle=bundle) if metric is not None else {}
+            prov, incomplete = _fact_sources(found)
+            note = None
+            if incomplete:
+                note = f"{incomplete} input fact(s) name no filing and are not listed"
+            series_note = {
+                Basis.SERIES: "a statistic over its base metric's history: sources are "
+                              "that metric's in exactly the periods it read",
+                Basis.FIELDS: "read from period fields: sources are exactly the "
+                              "values it read, by period",
+            }.get(BASIS[e.metric_name])
+            if found and series_note:
+                note = (note + "; " if note else "") + series_note
+            revisions = revised_inputs(dataset, bundle, metric, revised) if revised else []
+            if revisions:
+                note = (note + "; " if note else "") + revised_note(revisions, period_labels)
+            label = e.fiscal_label.removeprefix(ttm.TTM_LABEL_PREFIX)
+            why = (
+                f"fiscal label {label} names more than one period in this dataset, so its "
+                "inputs cannot be attributed to filings"
+                if labels[label] > 1 else
+                "its inputs carry no per-value provenance "
+                "(dataset not mapped from companyfacts in this run)"
+            )
+            added = b.add(
+                item_id, plane=Plane.ACCOUNTING, provenance=tuple(prov), note=note, **common,
+                why_unsourced=why,
+                **({"change_state": "reads_revised_input"} if revisions else {}),
+            )
+        else:
+            added = b.add(
+                item_id, plane=Plane.ACCOUNTING, **common,
+                why_unsourced="not a registered metric",
+            )
+        if added is not None:
+            ids[e.metric_name] = added
+    return ids
+
+
+# --- narrative --------------------------------------------------------------
+
+
+def _cited(source: str, documents: list[DocumentRecord]) -> list[DocumentRecord]:
+    """The documents a narrative row's `source` names, in document order."""
+    pieces = set()
+    for part in source.split("; "):
+        part = _DERIVED_PREFIX.sub("", part).strip()
+        if part:
+            pieces.add(part)
+    seen: set[str] = set()
+    out = []
+    for d in documents:
+        if d.source and d.source in pieces and d.source not in seen:
+            seen.add(d.source)
+            out.append(d)
+    return out
+
+
+def _narrative_items(
+    b: _Builder, rows: list[NarrativeEvidence], documents: list[DocumentRecord]
+) -> dict[str, str]:
+    """One item per narrative evidence row. Returns NE id -> item id."""
+    ids: dict[str, str] = {}
+    for row in rows:
+        cited = _cited(row.source, documents)
+        quoted = not row.source.startswith("derived from")
+        prov = [
+            p for d in cited
+            if (p := _document(d, role=d.doc_type.value, excerpt=row.excerpt if quoted else None))
+            is not None
+        ]
+        unnamed = [re.sub(r"^(?:derived from |compared with )", "", part)
+                   for part in row.source.split("; ") if _UNNAMED.match(part)]
+        if cited and unnamed:
+            # A derived row whose own period (or a compared one) recorded no
+            # source: the filings it does name are part of its evidence, and
+            # citing them alone would read as the whole of it.
+            prov = []
+            why = (f"source recorded as {row.source!r}; {unnamed[0]!r} names no document, "
+                   "so the documents it does name are part of its source, not all")
+        elif cited:
+            why = f"source recorded as {row.source!r} and no document names its filing"
+        else:
+            # Not located in one document, or no source recorded: the
+            # period's documents are candidates, not its source — named in
+            # the reason only, never cited.
+            period = [d.accession for d in documents
+                      if d.fiscal_label == row.fiscal_label and d.accession]
+            why = (f"source recorded as {row.source!r}; no single document identified "
+                   f"(period documents: {', '.join(period) or 'none'})")
+        item_id = _id("narrative_evidence", row.detector, row.fiscal_label, row.comparison,
+                      row.excerpt)
+        added = b.add(
+            item_id, plane=Plane.NARRATIVE, kind="narrative_evidence", subject=row.detector,
+            claim=row.detail, fiscal_label=row.fiscal_label, provenance=tuple(prov),
+            validation_status=_status({row.detector}), why_unsourced=why,
+        )
+        if added is not None:
+            ids[row.evidence_id] = added
+    return ids
+
+
+def _mismatch_items(
+    b: _Builder, result: AnalysisResult, ne_ids: dict[str, str], metric_ids: dict[str, str]
+) -> None:
+    """One item per mismatch, derived from the ledger items of its narrative
+    row and its metrics. A row that is not in the ledger (listed as
+    unsourced) is not derived from — the item says so, and with nothing
+    left to rest on it is itself unsourced."""
+    for m in result.mismatches:
+        row = ne_ids.get(m.narrative_evidence_id)
+        derived = [row] if row else []
+        derived += [metric_ids[n] for n in m.metric_names if n in metric_ids]
+        note = None
+        if row is None:
+            note = (f"its narrative row {m.narrative_evidence_id} is not in the ledger: "
+                    "it derives from its metrics only")
+        metrics = ", ".join(m.metric_names) or "none named"
+        why = (f"its narrative row {m.narrative_evidence_id} is not in the ledger, "
+               f"nor are its metrics ({metrics})")
+        b.add(
+            _id("mismatch", m.kind, m.fiscal_label, m.narrative_evidence_id),
+            plane=Plane.CONSISTENCY, kind="mismatch", subject=m.kind, claim=m.detail,
+            fiscal_label=m.fiscal_label, inputs=dict(m.metric_values),
+            derived_from=tuple(dict.fromkeys(derived)), note=note,
+            validation_status=_status(m.metric_names), why_unsourced=why,
+        )
+
+
+# --- evidence streams ---------------------------------------------------------
+
+
+def _offering_items(b: _Builder, timeline: Any) -> None:
+    """Document links under the timeline's own CIK: the one its filing index
+    was asserted against (`fetch_offerings`), so a companyfacts payload
+    naming another CIK withholds the ledger's `cik`, not these links (review
+    of e37827a, finding L3). The console refuses every link when a link and
+    the ledger's `cik` name different CIKs."""
+    cik = getattr(timeline, "cik", None)
+    for f in timeline.filings:
+        detail = f.kind + (f", {f.security_type}" if f.kind == "takedown" else "")
+        p = _filing(
+            f.accession, f.form, f.filing_date, role=f.kind,
+            url=_edgar_url(cik, f.accession, f.primary_doc), excerpt=f.excerpt or None,
+        )
+        b.add(
+            _id("offering", f.accession, f.form),
+            plane=Plane.CAPITAL_MARKETS, kind="offering", subject=f.form,
+            claim=f"{f.form} filed {f.filing_date} ({detail})",
+            provenance=(p,) if p else (), validation_status=ValidationStatus.DIRECTIONAL,
+            why_unsourced="the filing is not fully identified",
+        )
+
+
+def _footprint_items(b: _Builder, footprints: list[Any]) -> None:
+    for fp in footprints:
+        common = dict(concept=fp.tag, period_start=fp.period_start, period_end=fp.period_end)
+        roles = [
+            ("original", fp.original_accession, fp.original_form, fp.original_filed,
+             fp.original_value),
+            ("current", fp.current_accession, fp.current_form, fp.current_filed,
+             fp.current_value),
+            ("amendment", fp.amendment_accession, fp.amendment_form, fp.amendment_filed,
+             fp.amendment_value),
+        ]
+        prov = [
+            p for role, accession, form, filed, value in roles
+            if (p := _filing(accession, form, filed, role=role, value=value, **common))
+            is not None
+        ]
+        period = f"{fp.period_start} → {fp.period_end}" if fp.period_start else str(fp.period_end)
+        b.add(
+            _id("restatement_footprint", fp.field_name, fp.tag, fp.period_start, fp.period_end),
+            plane=Plane.ACCOUNTING, kind="restatement_footprint", subject=fp.field_name,
+            claim=(
+                f"{fp.field_name} for {period} as originally reported "
+                f"{fp.original_value:,.0f} ({fp.original_form} filed {fp.original_filed}), "
+                f"now {fp.current_value:,.0f} ({fp.current_form} filed {fp.current_filed})"
+            ),
+            value=fp.current_value, provenance=tuple(prov),
+            change_state="amended" if fp.is_amendment else "revised",
+            validation_status=(
+                ValidationStatus.VALIDATED if fp.is_amendment else ValidationStatus.DIRECTIONAL
+            ),
+            why_unsourced="none of its filings is fully identified",
+        )
+
+
+def _derived_items(b: _Builder, derived: Iterable[Any]) -> None:
+    """A derived quarter that moved between the filings behind it
+    (`restatements.derived_revisions`). Its sources are the filings made on
+    the day it last moved; the original figure is named in the claim by its
+    filing date — it was rebuilt from everything filed by then, not read
+    from one filing."""
+    for dr in derived:
+        common = dict(period_start=dr.period_start, period_end=dr.period_end,
+                      value=dr.current_value, method=dr.method, role="moved the derived value")
+        prov = [
+            p for form, accession in dr.moved_by
+            if (p := _filing(accession, form, dr.current_filed, **common)) is not None
+        ]
+        period = f"{dr.period_start} → {dr.period_end}" if dr.period_start else str(dr.period_end)
+        b.add(
+            _id("derived_revision", dr.field_name, dr.period_start, dr.period_end),
+            plane=Plane.ACCOUNTING, kind="derived_revision", subject=dr.field_name,
+            claim=(
+                f"derived {dr.field_name} for {period} ({dr.method}) rebuilt from filings "
+                f"through {dr.original_filed}: {dr.original_value:,.0f}; from filings through "
+                f"{dr.current_filed}: {dr.current_value:,.0f}"
+            ),
+            value=dr.current_value, provenance=tuple(prov),
+            change_state="amended" if dr.is_amendment else "revised",
+            validation_status=(
+                ValidationStatus.VALIDATED if dr.is_amendment else ValidationStatus.DIRECTIONAL
+            ),
+            why_unsourced="no filing made on the day it moved is fully identified",
+        )
+
+
+def _non_reliance_items(b: _Builder, events: Any, since: date, report_date: date) -> None:
+    for filed, accession, form in events.non_reliance_8k_filings:
+        if not since <= filed <= report_date:
+            continue
+        p = _filing(accession, form, filed, role="8-K Item 4.02")
+        b.add(
+            _id("non_reliance_8k_402", accession),
+            plane=Plane.FILING_BEHAVIOR, kind="non_reliance_8k_402", subject=form,
+            claim=f"8-K Item 4.02 non-reliance (restatement announced) filed {filed}",
+            provenance=(p,) if p else (), change_state="announced",
+            validation_status=_status({"non_reliance_8k_402"}),
+            why_unsourced="the 8-K is not fully identified",
+        )
+
+
+# Ledger kinds for filing events: the card's signal name where the event has
+# one (so a 4.02 keeps the id it had before this stream existed).
+_EVENT_KINDS = {
+    "non_reliance": "non_reliance_8k_402",
+    "auditor_change": "auditor_change_8k_401",
+    "late_filing_notice": "missed_deadline_nt",
+    "impairment": "impairment_8k_206",
+    "amendment": "periodic_report_amendment",
+    "filing_lag": "filing_lag_drift",
+}
+
+
+def _filing_event_items(b: _Builder, fe: Any) -> None:
+    """Every dated filing event, each resting on the filing itself."""
+    for e in fe.events:
+        kind = _EVENT_KINDS[e.kind]
+        p = _filing(e.accession, e.form, e.filed, role=e.kind)
+        b.add(
+            _id(kind, e.accession),
+            plane=Plane.FILING_BEHAVIOR, kind=kind, subject=e.form, claim=e.detail,
+            provenance=(p,) if p else (),
+            change_state="announced" if e.signal else None,
+            validation_status=(
+                _status({e.signal}) if e.signal else ValidationStatus.DIRECTIONAL
+            ),
+            why_unsourced="the filing is not fully identified",
+        )
+
+
+def _snapshot(obs: Any, role: str) -> Provenance:
+    return Provenance(
+        kind="snapshot", snapshot_sha256=obs.sha256,
+        captured=date.fromisoformat(obs.captured), role=role,
+    )
+
+
+def _vintage_items(b: _Builder, rep: Any, floor: date) -> None:
+    from app.services.ingestion.vintages import tier1_promotions
+
+    # VALIDATED is exactly what the card promoted: one item per card line.
+    # A fact both windows promote is one line on the card (each fact once),
+    # but was validated from each window; the other window's item is now
+    # DIRECTIONAL and names the window that promoted it — kept, not
+    # dropped, so its snapshots stay in the trail (review of c131583,
+    # finding 4).
+    promoted = {(c.field_name, c.key.start, c.key.end): (c, older, newer)
+                for c, older, newer, _line in tier1_promotions(rep, period_since=floor)}
+    windows = []
+    if rep.compared and rep.previous is not None and rep.newest is not None:
+        windows.append((rep.changes_since_previous, rep.previous, rep.newest))
+    if rep.changes_since_baseline is not None and rep.baseline is not None:
+        windows.append((rep.changes_since_baseline, rep.baseline, rep.newest))
+    for changes, older, newer in windows:
+        for c in changes:
+            prov = [_snapshot(older, "older snapshot"), _snapshot(newer, "newer snapshot")]
+            concept = f"{c.key.taxonomy}:{c.key.tag}"
+            for role, accession, form, filed, value in (
+                ("as before", c.old_accession, c.old_form, c.old_filed, c.old_value),
+                ("as now", c.new_accession, c.new_form, c.new_filed, c.new_value),
+            ):
+                p = _filing(accession, form, filed, role=role, value=value, concept=concept,
+                            period_start=c.key.start, period_end=c.key.end)
+                if p is not None:
+                    prov.append(p)
+            by = promoted.get((c.field_name, c.key.start, c.key.end))
+            here = by is not None and by[0] is c
+            if c.kind == "withdrawn":
+                what = f"withdrawn (was {c.old_value:,.0f})"
+            else:
+                what = f"{c.old_value:,.0f} → {c.new_value:,.0f}"
+            b.add(
+                _id("silent_revision", older.sha256, newer.sha256, c.field_name, concept,
+                    c.key.start, c.key.end),
+                plane=Plane.ACCOUNTING, kind="silent_revision", subject=c.field_name,
+                claim=(f"{c.field_name} for {c.key.period}: {what} between snapshots "
+                       f"{older.captured} and {newer.captured}"),
+                value=c.new_value, provenance=tuple(prov),
+                change_state="recomposed" if c.moved_tag else c.kind,
+                validation_status=(
+                    ValidationStatus.VALIDATED if here else ValidationStatus.DIRECTIONAL
+                ),
+                note="; ".join(n for n in (
+                    f"also promoted via snapshots {by[1].captured} → {by[2].captured} (the card "
+                    "lists each fact once)" if by is not None and not here else "",
+                    "before the scored window (context)" if c.scope == "context" else "",
+                    "raw fact (a snapshot could not be mapped): not a scored change"
+                    if c.scope == "raw" else "",
+                    f"moved with {c.new_form} {c.new_accession}, which the newer snapshot "
+                    "carries beside the original: not silent (the restatement scan reports it)"
+                    if c.explained_by_filing else "",
+                ) if n) or None,
+            )
+
+
+# --- the valuation shadow card ------------------------------------------------------
+
+_NO_VALUE_PROVENANCE = ("its value carries no per-value provenance (dataset not mapped from "
+                        "companyfacts in this run)")
+# TTM figure -> the period fields summed over the window, as `ttm.annualize`
+# and `PeriodFinancials` build them.
+_TTM_FIELDS: dict[str, tuple[str, ...]] = {
+    "revenue": ("revenue",), "net_income": ("net_income",), "ebit": ("ebit",),
+    "ebitda": ("ebit", "depreciation_amortization"), "fcf": ("cfo", "capex"),
+}
+
+
+def _valuation_items(b: _Builder, plane: Any) -> ValuationSummary:
+    """The shadow card's rows (Hermes review of 02c2aac, valuation plane).
+    Every one is UNVALIDATED: the plane is unscored, so no tier of the card
+    ranks it and nothing here was ever measured against an outcome — the
+    tier mapping's third tier is exactly that. The price rests on the
+    observation; each bridge line on the filings behind the period's value;
+    market cap, EV, the multiples, the implied growth and the scenarios on
+    those rows. The filings are those of the dataset the plane read — the
+    one mapped as filed by the observation when the raw facts were in hand
+    (review of 48b1f04, F1) — never the report's. A line that dataset
+    cannot source (no per-value provenance) is listed as unsourced, as a
+    metric would be.
+
+    Units are stated (Hermes re-audit of #118 @ 34836cf): each monetary
+    row's `currency` (the price's own; the filing figures' and what is
+    derived from them `fields.FILING_CURRENCY`; none for a count, a ratio
+    or a rate) and each filed fact's `unit`, the companyfacts unit its field
+    is read in (`fields.unit_for`)."""
+    obs = plane.observation
+    bridge = plane.bridge
+    sha = plane.loaded.sha256
+    status = ValidationStatus.UNVALIDATED
+    observed = Provenance(kind="observation", observed_at=obs.observed_at, source=obs.source,
+                          recorded_at=obs.recorded_at, observation_sha256=sha)
+    price_id = b.add(
+        _id("market_observation", obs.ticker, obs.observed_at.isoformat(), obs.price, sha),
+        plane=Plane.VALUATION, kind="market_observation", subject="price",
+        claim=f"price {obs.price:,.2f} {obs.currency} observed {obs.observed_at.isoformat()} "
+              f"({obs.source})",
+        value=obs.price, provenance=(observed.model_copy(update={"role": "price"}),),
+        validation_status=status, currency=obs.currency,
+    )
+    label = bridge.fiscal_label
+    components: dict[str, str] = {}
+    for c in bridge.filing_components():
+        prov = [
+            p for sv in c.sources for ref in sv.inputs
+            if (p := _filing(ref.accession, ref.form, ref.filed, concept=ref.concept,
+                             period_start=ref.start, period_end=ref.end, value=ref.value,
+                             sign=ref.sign, method=sv.method, role=c.name,
+                             unit=unit_for(c.name))) is not None
+        ]
+        added = b.add(
+            _id("bridge_component", c.name, bridge.period_end),
+            plane=Plane.VALUATION, kind="bridge_component", subject=c.name,
+            claim=f"{c.label}: {c.value:,.0f} for {label}", fiscal_label=label, value=c.value,
+            provenance=tuple(prov), validation_status=status, why_unsourced=_NO_VALUE_PROVENANCE,
+            currency=FILING_CURRENCY if unit_for(c.name) == FILING_CURRENCY else None,
+        )
+        if added is not None:
+            components[c.name] = added
+
+    def derived(key: str, kind: str, subject: str, claim: str, value: float | None,
+                rests_on: list[str | None], **kw: Any) -> str | None:
+        on = tuple(dict.fromkeys(r for r in rests_on if r))
+        return b.add(
+            _id(kind, key, sha, bridge.period_end), plane=Plane.VALUATION, kind=kind,
+            subject=subject, claim=claim, fiscal_label=label, value=value, derived_from=on,
+            validation_status=status, why_unsourced="the rows it rests on are not in the ledger",
+            **kw,
+        )
+
+    mcap = bridge.market_cap
+    mcap_id = derived(
+        "market_cap", "market_cap", "market_cap",
+        f"{mcap.label}: {mcap.value:,.0f}" if mcap.value is not None else f"{mcap.label}: {mcap.note}",
+        mcap.value, [price_id, components.get(bridge.shares.name)],
+        formula="price × share count", currency=FILING_CURRENCY,
+    )
+    assumed = [c.name for c in (bridge.short_term_investments, bridge.minority_interest,
+                                bridge.preferred_stock) if c.basis == "assumption"]
+    ev_id = derived(
+        "enterprise_value", "enterprise_value", "enterprise_value",
+        f"EV {bridge.ev:,.0f} for {label}" if bridge.ev is not None else str(bridge.ev_reason),
+        bridge.ev,
+        [mcap_id, *(components.get(n) for n in ("total_debt", "cash_and_equivalents",
+                                                 "short_term_investments", "minority_interest",
+                                                 "preferred_stock"))],
+        formula="market cap + total debt − cash − short-term investments + minority interest "
+                "+ preferred stock",
+        note=(f"{', '.join(assumed)} not reported (assumed 0): model assumption" if assumed
+              else None),
+        currency=FILING_CURRENCY,
+    )
+
+    # The TTM figures the multiples read: each summed over the window's four
+    # quarters from the same filed facts the engine's ratios read.
+    ttm_ids: dict[str, str] = {}
+    if plane.ttm.label is not None:
+        assert plane.dataset is not None  # a TTM window was built from it
+        periods = plane.dataset.sorted_periods()
+        idx = next(i for i, x in enumerate(periods) if x.fiscal_label == label)
+        window = periods[idx - 3: idx + 1]
+        for name, fields in _TTM_FIELDS.items():
+            value = getattr(plane.ttm, name)
+            if value is None:
+                continue
+            prov = [
+                p for x in window for f in fields if (sv := x.sources.get(f)) is not None
+                for ref in sv.inputs
+                if (p := _filing(ref.accession, ref.form, ref.filed, concept=ref.concept,
+                                 period_start=ref.start, period_end=ref.end, value=ref.value,
+                                 sign=ref.sign, method=sv.method, role=f,
+                                 unit=unit_for(f))) is not None
+            ]
+            added = b.add(
+                _id("ttm_figure", name, bridge.period_end), plane=Plane.VALUATION,
+                kind="ttm_figure", subject=name, claim=f"{plane.ttm.label} {name}: {value:,.0f}",
+                fiscal_label=plane.ttm.label, value=value, provenance=tuple(prov),
+                validation_status=status, why_unsourced=_NO_VALUE_PROVENANCE,
+                currency=FILING_CURRENCY,
+            )
+            if added is not None:
+                ttm_ids[name] = added
+    by_figure = {"net income": "net_income", "EBIT": "ebit", "EBITDA": "ebitda",
+                 "revenue": "revenue", "FCF": "fcf"}
+    for m in plane.multiples:
+        base = ev_id if "EV" in (m.numerator_name, m.denominator_name) else mcap_id
+        figure = by_figure.get(m.numerator_name) or by_figure.get(m.denominator_name)
+        claim = (f"{m.name} {m.value:.4g} = {m.numerator_name} / {m.denominator_name} "
+                 f"({m.ttm_window})" if m.value is not None else f"{m.name}: {m.reason}")
+        derived(m.name, "multiple", m.name, claim, m.value, [base, ttm_ids.get(figure or "")],
+                formula=f"{m.numerator_name} / {m.denominator_name}",
+                inputs={m.numerator_name: m.numerator, m.denominator_name: m.denominator})
+
+    e = plane.expectations
+    tag = "default assumptions (not operator-supplied)" if e.defaulted else "operator-supplied"
+    for key, what, g in (("gordon", "Gordon implied perpetual FCF growth", e.gordon),
+                         ("reverse_dcf", "reverse two-stage DCF implied FCF growth", e.reverse)):
+        note = f"{tag}: r={e.assumptions.required_return:.1%}"
+        if key == "reverse_dcf":
+            note += (f", terminal {e.assumptions.terminal_growth:.1%}, "
+                     f"{e.assumptions.horizon_years} years")
+            if e.main_assumption is not None:
+                note += f"; main assumption: {e.main_assumption}"
+        # The solves equate PV(FCF to equity) to the market cap (F7): they
+        # rest on it, not on EV.
+        derived(key, "implied_growth", key,
+                f"{what}: {g.value:+.2%}/yr" if g.value is not None else f"{what}: {g.reason}",
+                g.value, [mcap_id, ttm_ids.get("fcf")], formula=g.formula, note=note)
+    for sc in e.scenarios:
+        derived(sc.name, "scenario", sc.name,
+                (f"{sc.label}: value per share {sc.value_per_share:,.2f} vs price "
+                 f"{obs.price:,.2f} ({sc.upside:+.1%})") if sc.value_per_share is not None
+                else f"{sc.label}: {sc.reason}",
+                sc.value_per_share, [price_id, components.get(bridge.shares.name),
+                                     ttm_ids.get("fcf")], currency=FILING_CURRENCY)
+
+    return ValuationSummary(state="produced", observation=observed, fiscal_label=label,
+                            availability=bridge.availability, ev=bridge.ev,
+                            ev_reason=bridge.ev_reason,
+                            currency=FILING_CURRENCY, observation_currency=obs.currency)
+
+
+# --- the document -------------------------------------------------------------
+
+
+def _stream_state(name: str, ran: bool, errors: dict[str, Any], rep: Any = None,
+                  scan: Any = None) -> str:
+    if not ran:
+        return "not run"
+    failure = errors.get(name)
+    if failure is not None:
+        kind = "internal error" if getattr(failure, "internal", False) else "data failure"
+        return f"{kind}: {failure}"
+    if name == "vintage" and rep is not None and not rep.compared:
+        return f"not compared: {rep.no_baseline_reason}"
+    if name == "vintage" and rep is not None and rep.tier1_gap is not None:
+        # Compared, but a window only as raw fact rows nothing promotes: a
+        # bare "checked" read as a clean check (review of 224b896, finding 2).
+        return f"checked (incomplete: {rep.tier1_gap})"
+    if name == "restatements" and scan is not None and scan.incomplete:
+        # The report says the scan was incomplete (a field it could not
+        # inspect, or a derived-quarter check withheld); a bare "checked"
+        # here told a ledger reader the opposite.
+        return f"checked (incomplete: {scan.coverage_line()})"
+    return "checked"
+
+
+def build_ledger(
+    *,
+    result: AnalysisResult,
+    dataset: CompanyDataset,
+    ticker: str,
+    report_date: date,
+    fetched_at: str | None = None,
+    fresh: bool = False,
+    coverage: float | None = None,
+    field_tags: Any = None,
+    streams: dict[str, Any] | None = None,
+    errors: dict[str, Any] | None = None,
+    cik_sources: dict[str, object] | None = None,
+    valuation: Any = None,
+    valuation_requested: bool = False,
+) -> LedgerDocument:
+    """The ledger of one run. `streams` holds the raw stream objects
+    (`offerings`, `restatements`, `events`, `filing_events`, `vintage`) when a client ran
+    them; `errors` the per-stream failures, as the report renders them.
+    `cik_sources` names the CIK each payload the run read gives (source ->
+    value, `ledger_cik`); the CIK the offerings stream resolved the ticker
+    to is added here: all are the run's one resolution of the ticker.
+    `valuation` is the computed shadow card (`valuation.plane.ValuationPlane`)
+    when the run had a market observation; `valuation_requested` says the
+    caller asked for the plane, so a run without one records that it was
+    not produced rather than nothing."""
+    b = _Builder()
+    streams = streams or {}
+    errors = errors or {}
+    sources = dict(cik_sources or {})
+    if (timeline := streams.get("offerings")) is not None:
+        sources["the CIK the ticker resolved to"] = getattr(timeline, "cik", None)
+    cik, cik_note = ledger_cik(sources)
+    revised = revision_index(
+        streams.get("restatements") if errors.get("restatements") is None else None,
+        streams.get("vintage") if errors.get("vintage") is None else None,
+    )
+    metric_ids = _metric_items(b, result.evidence, dataset, revised)
+    ne_ids = _narrative_items(b, result.narrative_evidence, dataset.documents)
+    _mismatch_items(b, result, ne_ids, metric_ids)
+
+    ran = bool(streams.get("ran"))
+    if (timeline := streams.get("offerings")) is not None and errors.get("offerings") is None:
+        _offering_items(b, timeline)
+    if (scan := streams.get("restatements")) is not None:
+        _footprint_items(b, scan.footprints)
+        _derived_items(b, scan.derived)
+    floor = date(report_date.year - 2, report_date.month, min(report_date.day, 28))
+    if (behaviour := streams.get("filing_events")) is not None:
+        _filing_event_items(b, behaviour)
+    elif (events := streams.get("events")) is not None:
+        _non_reliance_items(b, events, floor, report_date)
+    rep = streams.get("vintage")
+    if rep is not None:
+        _vintage_items(b, rep, floor)
+    summary: ValuationSummary | None = None
+    if valuation is not None:
+        summary = _valuation_items(b, valuation)
+    elif valuation_requested:
+        summary = ValuationSummary(state="not produced: no market observation")
+
+    selections: dict[str, str] = {}
+    for name, sel in (field_tags or {}).items():
+        # `SeriesSelection.label`: the selected concept, plus each quarter a
+        # tag switch filled from another concept — `tag_used` alone named
+        # the selected concept for quarters it did not supply.
+        tag = getattr(sel, "label", None) or getattr(sel, "tag_used", sel)
+        if tag:
+            selections[name] = str(tag)
+
+    return LedgerDocument(
+        ticker=ticker.upper(),
+        cik=cik,
+        cik_note=cik_note,
+        generated_on=report_date,
+        fetched_at=fetched_at,
+        fresh=fresh,
+        config_version=cfg.CONFIG_VERSION,
+        coverage=coverage,
+        selections=selections,
+        streams={
+            name: _stream_state(name, ran, errors, rep, streams.get("restatements"))
+            for name in ("offerings", "restatements", "events", "filing_events", "vintage")
+        },
+        items=b.items,
+        unsourced=b.unsourced,
+        valuation=summary,
+    )

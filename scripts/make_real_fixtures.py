@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.ingestion.fields import all_tags
+from app.services.ingestion.fields import every_tag
 from app.services.ingestion.sec_client import SecClient
 
 FIXTURE_TICKERS = ["AAPL", "KO", "CRM"]  # Sep-FYE + calendar-FYE + Jan-FYE (52/53-week)
@@ -31,10 +31,12 @@ OUT_DIR = ROOT / "tests" / "fixtures" / "real"
 
 
 def wanted_tags() -> set[tuple[str, str]]:
-    # The field registry's full tag set — the same one PIT trims to. This used
-    # to be a hand-kept copy that never learned the finance-lease tags, so the
+    # The field registry's full tag set: the scored concepts PIT trims to,
+    # plus the valuation plane's unscored balance-sheet concepts (the
+    # committed fixtures predate those and carry none). This used to be a
+    # hand-kept copy that never learned the finance-lease tags, so the
     # committed fixtures cannot exercise that total_debt branch.
-    return set(all_tags())
+    return set(every_tag())
 
 
 def trim(facts_json: dict) -> dict:

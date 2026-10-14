@@ -42,7 +42,16 @@ def diluted_share_growth(cur: PeriodFinancials, prev: PeriodFinancials) -> Metri
         "(DilutedShares_t - DilutedShares_t-1) / DilutedShares_t-1",
         cur.fiscal_label,
         inputs,
-        guard=lambda: "Non-positive prior share count" if prev.shares_diluted <= 0 else None,  # type: ignore[operator]
+        # Either count at or below zero is refused, the prior checked first
+        # (its message unchanged). The current-count half is r38: a filed
+        # count of 0 or below read as an OK change of -100% or beyond, the
+        # lowest concern anchor, i.e. "no dilution concern" on a corrupt count.
+        # The mapper already drops non-finite share facts, so no isfinite guard.
+        guard=lambda: (
+            "Non-positive prior share count" if prev.shares_diluted <= 0  # type: ignore[operator]
+            else "Non-positive current share count" if cur.shares_diluted <= 0  # type: ignore[operator]
+            else None
+        ),
         value_fn=lambda: (cur.shares_diluted - prev.shares_diluted) / prev.shares_diluted,  # type: ignore[operator]
     )
 
@@ -57,7 +66,13 @@ def net_share_count_change(cur: PeriodFinancials, prev: PeriodFinancials) -> Met
         "(SharesOut_t - SharesOut_t-1) / SharesOut_t-1",
         cur.fiscal_label,
         inputs,
-        guard=lambda: "Non-positive prior share count" if prev.shares_outstanding <= 0 else None,  # type: ignore[operator]
+        # As `diluted_share_growth` (r38). This is also the buyback-narrative
+        # mismatch's raw-value input, which reads only an OK value.
+        guard=lambda: (
+            "Non-positive prior share count" if prev.shares_outstanding <= 0  # type: ignore[operator]
+            else "Non-positive current share count" if cur.shares_outstanding <= 0  # type: ignore[operator]
+            else None
+        ),
         value_fn=lambda: (cur.shares_outstanding - prev.shares_outstanding)  # type: ignore[operator]
         / prev.shares_outstanding,  # type: ignore[operator]
     )

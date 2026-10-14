@@ -31,6 +31,9 @@ class EntityEvents:
     sic: int | None
     sic_description: str | None
     non_reliance_8k_dates: list[date]
+    # (filed, accession, form) of each of those 8-Ks, in filing order — the
+    # evidence ledger names the filing, not just its date.
+    non_reliance_8k_filings: tuple[tuple[date, str, str], ...] = ()
 
     @property
     def is_financial_institution(self) -> bool:
@@ -74,15 +77,21 @@ def fetch_entity_events(
         if cik is None:
             cik = client.resolve_cik(ticker)
         data = client.submissions_by_cik(cik)
-    rows = recent_filings(data, form=str, items=(str, type(None)), filingDate=str)
+    rows = recent_filings(
+        data, form=str, items=(str, type(None)), filingDate=str, accessionNumber=str
+    )
     dates: list[date] = []
-    for form, items, filed in rows:
+    filings: list[tuple[date, str, str]] = []
+    for form, items, filed, accession in rows:
         if form.startswith("8-K") and "4.02" in (items or ""):
-            dates.append(sec_date(filed, f"{form} filingDate"))
+            day = sec_date(filed, f"{form} filingDate")
+            dates.append(day)
+            filings.append((day, accession, form))
     sic_raw = data.get("sic")
     return EntityEvents(
         ticker=ticker.upper(),
         sic=_sic(sic_raw),
         sic_description=data.get("sicDescription"),
         non_reliance_8k_dates=sorted(dates),
+        non_reliance_8k_filings=tuple(sorted(filings)),
     )

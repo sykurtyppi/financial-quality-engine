@@ -289,12 +289,19 @@ def test_strategies_are_well_formed():
 
 
 def test_every_field_is_reachable_by_the_mapper():
-    """A spec the mapper never builds would be silently dropped."""
+    """A spec the mapper never builds would be silently dropped. The candidate
+    tables hold the scored fields (what the scans iterate); the valuation
+    plane's unscored fields are built by the same loop over `FIELDS` and
+    are single-concept."""
     in_tables = set(m.INSTANT_FIELDS) | set(m.FLOW_FIELDS)
     composed = {f.name for f in F.FIELDS
                 if all(s.composition is F.Composition.DEBT_BREAKDOWN for s in f.strategies)}
-    assert in_tables | composed == {f.name for f in F.FIELDS}
+    unscored = {f.name for f in F.FIELDS if not f.scored}
+    assert in_tables | composed | unscored == {f.name for f in F.FIELDS}
     assert composed == {"total_debt"}
+    assert in_tables == {f.name for f in F.FIELDS if f.scored} - composed
+    for name in unscored:
+        assert all(s.composition is F.Composition.SINGLE for s in F.field(name).strategies), name
 
 
 def test_share_fields_and_critical_fields():
@@ -356,11 +363,16 @@ def test_registry_lookups_refuse_unknowns():
 def test_fixture_script_keeps_the_same_tags_as_pit():
     """The fixture script once trimmed without the finance-lease tags, so the
     committed fixtures could not exercise that branch. Both trimmers now read
-    the registry."""
+    the registry: PIT the scored set exactly (it is flag-only), the fixture
+    script that set plus the valuation plane's unscored concepts, so a
+    fixture keeps every concept PIT keeps and the EV bridge's lines too."""
     spec = importlib.util.spec_from_file_location(
         "make_real_fixtures", ROOT / "scripts" / "make_real_fixtures.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert mod.wanted_tags() == mapped_tags()
+    assert mapped_tags() <= mod.wanted_tags()
+    assert mod.wanted_tags() == set(F.every_tag())
+    assert mod.wanted_tags() - mapped_tags() == {
+        t for f in F.FIELDS if not f.scored for s in f.strategies for t in s.all_tags()}
     assert ("us-gaap", "FinanceLeaseLiabilityCurrent") in mod.wanted_tags()

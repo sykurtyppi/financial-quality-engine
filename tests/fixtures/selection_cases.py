@@ -188,6 +188,22 @@ def flows() -> dict:
     return p.data
 
 
+def ytd_vintage_mix() -> dict:
+    """CFO reported year to date. 2024 Q1 is restated by a 10-Q/A filed
+    after the H1 figure. H1 still embeds the original Q1, so Q2 = H1 − Q1
+    subtracts Q1 as it stood when H1 was filed (600 − 300), and its
+    provenance names that original fact, not the restatement. The 2023 H1
+    re-reported unchanged as a comparative changes nothing."""
+    p = _base("YTD Vintage Mix Co")
+    q = QUARTER_ENDS
+    rows = [ytd(e, 300.0 * (i % 4 + 1)) for i, e in enumerate(q)]
+    # The following year's 10-Q repeats 2023 H1 unchanged as a comparative.
+    rows.append(ytd(q[5], 600.0, filed=date(2024, 8, 9)))
+    rows.append(ytd(q[8], 340.0, filed=date(2024, 9, 16), form="10-Q/A"))
+    p.add("NetCashProvidedByUsedInOperatingActivities", rows)
+    return p.data
+
+
 # ---------------------------------------------------------------------------
 # Tag choice: coverage, candidate order, cover-page dates, composites
 
@@ -504,9 +520,29 @@ def mixed_vintages() -> dict:
     return p.data
 
 
+def tag_switch_fallback() -> dict:
+    """A filer switched concepts (CRM's FY2027Q1 interest, KO's FY2024Q1).
+
+    Interest: `InterestExpenseDebt` covers eleven quarters and is selected;
+    the newest quarter is reported only as `InterestExpenseNonoperating`,
+    which agrees on the two quarters both report — the gap is filled from it
+    and noted. Receivables: the selected tag misses the newest quarter; one
+    candidate reports it but shares no quarter with the selected tag,
+    another shares a quarter and disagrees — both named, neither used."""
+    p = _base("Tag Switch Co")
+    q = QUARTER_ENDS
+    p.add("InterestExpenseDebt", [quarter(e, 50.0 + i) for i, e in enumerate(q[:11])])
+    p.add("InterestExpenseNonoperating", [quarter(e, 50.0 + i) for i, e in enumerate(q) if i >= 9])
+    p.add("AccountsReceivableNetCurrent", [instant(e, 300.0 + i) for i, e in enumerate(q[:11])])
+    p.add("ReceivablesNetCurrent", [instant(q[11], 411.0)])
+    p.add("AccountsAndOtherReceivablesNetCurrent", [instant(q[10], 999.0), instant(q[11], 412.0)])
+    return p.data
+
+
 CASES: dict[str, Callable[[], dict]] = {
     "flows": flows,
     "mixed_vintages": mixed_vintages,
+    "ytd_vintage_mix": ytd_vintage_mix,
     "tag_choice": tag_choice,
     "composites_lose": composites_lose,
     "da_split_equal_coverage": da_split_equal_coverage,
@@ -527,4 +563,5 @@ CASES: dict[str, Callable[[], dict]] = {
     "quarter_ends_from_revenue": quarter_ends_from_revenue,
     "unknown_fiscal_year_end": unknown_fiscal_year_end,
     "fifty_two_week": fifty_two_week,
+    "tag_switch_fallback": tag_switch_fallback,
 }

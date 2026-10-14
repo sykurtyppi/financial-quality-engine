@@ -79,6 +79,8 @@ class TimingResult:
     direct_filed: str | None = None
     direct_lead_days: int | None = None
     error: str | None = None
+    coverage: float | None = None  # what the mapper built the dataset from
+    selections_digest: str = ""
 
 
 def evaluate(client: SecClient, case: RestatementCase) -> TimingResult:
@@ -91,7 +93,7 @@ def evaluate(client: SecClient, case: RestatementCase) -> TimingResult:
     facts = client.company_facts_by_cik(case.cik)
     trimmed = trim_to_mapped_tags(facts)
     try:
-        ds, _ = build_pit_dataset(trimmed, case.name, event, n_quarters=8)
+        ds, diag = build_pit_dataset(trimmed, case.name, event, n_quarters=8)
     except ValueError as e:
         return TimingResult(case, event, error=f"pit: {e}")
     docs = fetch_documents(client, case.name, facts, n_filings=12, cik=case.cik, before=event)
@@ -122,7 +124,8 @@ def evaluate(client: SecClient, case: RestatementCase) -> TimingResult:
             if re.search(re.escape(term), d.text, re.IGNORECASE):
                 if direct is None or fd < direct[1]:
                     direct = (term, fd)
-    res = TimingResult(case, event, detector_hits=hits)
+    res = TimingResult(case, event, detector_hits=hits, coverage=round(diag.coverage(), 2),
+                       selections_digest=diag.selections_digest())
     if direct:
         res.direct_term, res.direct_filed = direct
         res.direct_lead_days = _lead_days(event, direct[1])

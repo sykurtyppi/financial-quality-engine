@@ -1,0 +1,102 @@
+# Mutation runs (tests/tools/mutate.py): does the suite notice when the
+# evidence code is wrong? A seeded sample of mutants of the restatement,
+# vintage, point-in-time, same-day precedence, composition, selection, flag
+# and resolver code is run against each module's own tests; survivors are
+# listed in the job summary. Weekly over every target; on each pull request
+# over the targets it changed (floor 0.8, skipped when it changed none).
+# A target whose tests are red before mutation fails either run: its
+# mutants were not measured, and "nothing measured" is never a pass.
+#
+# The weekly run is informational for its first two weeks: no floor unless one is passed.
+# From 2026-10-08 the scheduled run enforces a floor of 0.8 (set FLOOR below),
+# after the first two summaries have been triaged into test gaps and
+# reviewed exclusions. A mutant that times out counts as NOT killed.
+name: mutation
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      floor:
+        description: "Minimum kill rate (0-1); empty = informational"
+        required: false
+        default: ""
+      budget:
+        description: "Mutants to run"
+        required: false
+        default: "60"
+
+jobs:
+  # A pull request's own run: only the targets whose module it changed,
+  # against its base, with a kill-rate floor of 0.8 once reviewed equivalent
+  # and accepted mutants (tests/tools/mutation_exclusions.toml) are excluded.
+  # `detect` lists the changed targets; when there are none the run is
+  # SKIPPED, never shown as a pass it did not earn (Hermes audit round 5).
+  detect:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.changed.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Changed mutation targets
+        id: changed
+        run: |
+          targets=$(python tests/tools/mutate.py --changed "origin/${{ github.base_ref }}" \
+            --targets-only | tr '\n' ' ' | sed 's/ *$//')
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "Changed mutation targets: ${targets:-none}"
+
+  mutate-changed:
+    needs: detect
+    if: needs.detect.outputs.targets != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PR_FLOOR: "0.8"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install --no-deps -e .
+      - name: Mutation run (changed targets)
+        run: |
+          python tests/tools/mutate.py --changed "origin/${{ github.base_ref }}" \
+            --budget 30 --wall 480 --floor "$PR_FLOOR"
+
+  mutate:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FLOOR: ""  # 0.8 from 2026-10-08
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install --no-deps -e .
+      - name: Mutation run
+        run: |
+          floor="${{ github.event.inputs.floor }}"
+          floor="${floor:-$FLOOR}"
+          python tests/tools/mutate.py --budget "${{ github.event.inputs.budget || '60' }}" \
+            --wall 600 ${floor:+--floor "$floor"}

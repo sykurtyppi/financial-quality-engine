@@ -34,7 +34,6 @@ from datetime import date
 from math import isclose
 
 from app.schemas.financials import CompanyDataset, PeriodFinancials, PeriodType
-from app.services.backtesting.pit import filter_as_of
 from app.services.brief.assumptions import MAX_ASSUMPTION_CHARS
 from app.services.formulas.ttm import MAX_GAP_DAYS, MIN_GAP_DAYS
 from app.services.ingestion.companyfacts_mapper import build_dataset
@@ -431,6 +430,7 @@ def derive_for_ticker(
     would turn the current result into its own standing assumption.
     """
     snapshot = fetch_dataset_snapshot(ticker, n_quarters=DERIVE_QUARTERS, client=client)
-    facts = filter_as_of(snapshot.company_facts, as_of)
-    dataset, _ = build_dataset(facts, ticker=ticker, n_quarters=DERIVE_QUARTERS)
+    dataset, _ = build_dataset(
+        snapshot.company_facts, ticker=ticker, n_quarters=DERIVE_QUARTERS, as_of=as_of
+    )
     return derive_assumptions(dataset)

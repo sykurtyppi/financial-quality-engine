@@ -1,0 +1,48 @@
+{
+ "name": "aapl_comparative_rounding",
+ "ticker": "AAPL",
+ "cik": 320193,
+ "as_of": "2026-05-01",
+ "since": "2024-01-01",
+ "why": "Fourth quarters derived as the 10-K fiscal year minus the 10-Q nine months (ytd_diff), and real comparatives re-filed at a different rounding (LongTermDebt 90,678m in the 10-K, 90,700m in later 10-Qs) on a tag the engine does not score: nothing scored moves, so the case must stay clean.",
+ "synthetic": false,
+ "reviewed": null,
+ "expected": {
+  "tier1": false,
+  "footprints": [],
+  "non_reliance": [],
+  "selections": {
+   "accounts_payable": "us-gaap:AccountsPayableCurrent",
+   "buybacks": "us-gaap:PaymentsForRepurchaseOfCommonStock",
+   "capex": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+   "cash_and_equivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+   "cfo": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+   "cost_of_revenue": "us-gaap:CostOfGoodsAndServicesSold",
+   "current_assets": "us-gaap:AssetsCurrent",
+   "current_liabilities": "us-gaap:LiabilitiesCurrent",
+   "deferred_revenue": "us-gaap:ContractWithCustomerLiabilityCurrent",
+   "depreciation_amortization": "us-gaap:DepreciationDepletionAndAmortization",
+   "ebit": "us-gaap:OperatingIncomeLoss",
+   "intangible_assets": "us-gaap:IntangibleAssetsNetExcludingGoodwill",
+   "interest_expense": "us-gaap:InterestExpense",
+   "inventory": "us-gaap:InventoryNet",
+   "net_income": "us-gaap:NetIncomeLoss",
+   "operating_income": "us-gaap:OperatingIncomeLoss",
+   "ppe_net": "us-gaap:PropertyPlantAndEquipmentNet",
+   "receivables": "us-gaap:AccountsReceivableNetCurrent",
+   "revenue": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+   "sga_expense": "us-gaap:SellingGeneralAndAdministrativeExpense",
+   "shares_diluted": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+   "shares_outstanding": "dei:EntityCommonStockSharesOutstanding",
+   "stock_based_compensation": "us-gaap:AllocatedShareBasedCompensationExpense",
+   "total_assets": "us-gaap:Assets",
+   "total_debt": "LongTermDebtNoncurrent+LongTermDebtCurrent+CommercialPaper"
+  },
+  "coverage_min": 0.88,
+  "uninspected": [
+   "goodwill",
+   "interest_expense",
+   "share_issuance_proceeds"
+  ]
+ }
+}

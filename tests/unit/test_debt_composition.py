@@ -32,10 +32,10 @@ from app.services.ingestion.composition import (
     compose_total_debt,
 )
 from app.services.ingestion.restatements import (
-    _COMPOSERS,
     _composite_vintages,
-    _parse_selection,
+    composer_of,
 )
+from app.services.ingestion.selection import SeriesSelection
 from tests.fixtures import selection_cases
 
 # --- the rule ---------------------------------------------------------------
@@ -173,14 +173,13 @@ DEBT_CASES = [name for name in selection_cases.CASES if name.startswith("debt_")
 def test_the_detector_rebuilds_exactly_the_value_the_mapper_scored(case):
     facts = selection_cases.CASES[case]()
     ds, diag = build_dataset(facts, "X")
-    selected = diag.field_by_name("total_debt").tag_used
-    if selected is None:
+    selection = diag.field_by_name("total_debt").selection
+    if selection is None:
         assert all(p.total_debt is None for p in ds.periods)
         return
-    series = _parse_selection(selected)
     # (A single component is compared tag by tag by the detector; the
     # rebuild below reduces to that tag's latest value, so it is checked too.)
-    rebuilt = _composite_vintages(facts, series, "USD", None, compose=_COMPOSERS["total_debt"])
+    rebuilt = _composite_vintages(facts, selection.concepts, "USD", None, compose=composer_of(selection))
     for p in ds.periods:
         vintages = rebuilt.get((None, p.period_end))
         if p.total_debt is None:
@@ -196,7 +195,8 @@ def test_summing_instead_of_composing_would_double_count():
     series = [("us-gaap", t) for t in ("LongTermDebtNoncurrent", "LongTermDebtCurrent", "DebtCurrent")]
     q = selection_cases.QUARTER_ENDS[-1]
     summed = _composite_vintages(facts, series, "USD", None)[(None, q)][-1][1]
-    composed = _composite_vintages(facts, series, "USD", None, compose=_COMPOSERS["total_debt"])[(None, q)][-1][1]
+    debt = composer_of(SeriesSelection.of("total_debt", ()))
+    composed = _composite_vintages(facts, series, "USD", None, compose=debt)[(None, q)][-1][1]
     assert (summed, composed) == (1_050.0, 950.0)
 
 

@@ -35,14 +35,19 @@ them if it is ever lost.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import gzip
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 import time
-from contextlib import contextmanager
+import uuid
+from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -50,6 +55,7 @@ from pathlib import Path
 from app.services.ingestion.companyfacts_mapper import (
     FLOW_FIELDS,
     INSTANT_FIELDS,
+    IngestionDiagnostics,
     _parse_date,
     _unit_for,
     build_dataset,
@@ -63,6 +69,9 @@ from app.services.ingestion.restatements import (
     _active_tag,
     _rows,
 )
+from app.services.reporting.report_files import own_dir
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[3]
 VINTAGES = ROOT / "data" / "vintages"
@@ -79,6 +88,25 @@ _NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([0-9a-f]{6,64}))?(?:-\d+)?\.jso
 # OSError nor ValueError, so it escapes the obvious handler and would reach
 # the CLI as a traceback and the sweep as a lost pass.
 UNREADABLE = (OSError, ValueError, EOFError)
+# What reading AND mapping a stored snapshot can raise when it is not usable
+# as a state: unreadable, or read but built from a shape the mapper does not
+# expect. The SEC shape check passes `{"facts": {"us-gaap": []}}` or a null
+# `units`, and the mapper's `.get` chain then raises AttributeError, not the
+# ValueError `_mapped` absorbs. Only where a stored state is being CHOSEN
+# (the report's legacy walk and thesis-lock capture, the replay's pick) and
+# nothing says a report scored it (a raw or legacy state). A SCORED payload
+# was built by the mapper already: a TypeError there is a mapper defect and
+# must surface, so it catches UNREADABLE alone (review of c131583, finding
+# 3). Wherever a state is passed over, the reason is logged.
+UNUSABLE = (*UNREADABLE, TypeError, AttributeError, KeyError)
+# What wrote an observation (Hermes audit of 424b0b4, finding 2). SCORED: the
+# payload a report scored (`store_snapshot`, reached only after the mapper
+# built it). RAW: a fetch archived as it came (`capture` — the watch sweep,
+# `scripts/vintage.py capture`), never mapped and possibly partial: a bare
+# `{"cik", "entityName"}` passes the SEC shape check. The report's
+# silent-revision baseline is a scored state; a raw one is kept for the CLI.
+SCORED = "scored"
+RAW = "raw"
 
 
 def cik_dir(cik: int, root: Path | None = None) -> Path:
@@ -87,6 +115,18 @@ def cik_dir(cik: int, root: Path | None = None) -> Path:
 
 def _manifest_path(cik: int, root: Path | None = None) -> Path:
     return cik_dir(cik, root) / MANIFEST
+
+
+def _unlinked(path: Path) -> Path:
+    """``path``, the manifest, refused when a symlink is there: the index is
+    read and written only where the store keeps it. A link planted at it had
+    its target read as the store's history (a count there that was not a
+    number raised out of `_store` before any problem day was recorded) and
+    was then replaced without a word (review of the finding 5 fix)."""
+    if path.is_symlink():
+        raise OSError(errno.ELOOP, f"{path} is a symlink, not the index this store wrote; "
+                      "it is never read, followed or replaced — remove it")
+    return path
 
 
 def canonical_bytes(facts: dict) -> bytes:
@@ -123,6 +163,14 @@ def _sweep_orphans(d: Path, older_than_s: float = 3600.0) -> None:
             pass
 
 
+def _root_markers(cik: int, root: Path | None = None) -> str:
+    """The name prefix of this company's problem-day markers in the store's
+    ROOT (``.busy-CIK##########-<day>``), where they go while its directory
+    is a symlink: refused, it archives nothing, and a marker inside it would
+    be written wherever it points."""
+    return f"{BUSY_PREFIX}{cik_dir(cik, root).name}-"
+
+
 def _record_problem_day(cik: int, day: date, root: Path | None = None) -> None:
     """Record that this DAY archived nothing, without touching lock-protected
     state.
@@ -132,24 +180,49 @@ def _record_problem_day(cik: int, day: date, root: Path | None = None) -> None:
     report twenty-four "problem days" before lunch, and two problem days of
     different kinds — a failed write, then a lock timeout — would report as
     one if each kind kept its own tally.
+
+    A company directory that is a symlink is itself the problem (`_cik_lock`
+    refuses it): the day is recorded beside it, in the store's root, so the
+    VINTAGE_STALE_DAYS alert still fires (review of the finding 5 fix).
     """
     try:
         d = cik_dir(cik, root)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{BUSY_PREFIX}{day.isoformat()}").touch(exist_ok=True)
+        if d.is_symlink():
+            d.parent.mkdir(parents=True, exist_ok=True)
+            marker = d.parent / f"{_root_markers(cik, root)}{day.isoformat()}"
+        else:
+            d.mkdir(parents=True, exist_ok=True)
+            marker = d / f"{BUSY_PREFIX}{day.isoformat()}"
+        # Created if absent, never followed: `touch` created a dangling
+        # link's target (and re-dated a live one's) outside the store.
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o666))
     except OSError:
         pass
 
 
+def _problem_day_markers(cik: int, root: Path | None = None) -> dict[Path, str]:
+    """Each problem-day marker and the day it records: those in the
+    company's directory (unless it is a symlink, never followed) and those
+    recorded in the root while it was one."""
+    d = cik_dir(cik, root)
+    prefix = _root_markers(cik, root)
+    found = {p: p.name.removeprefix(prefix) for p in d.parent.glob(f"{prefix}*")}
+    if not d.is_symlink():
+        found |= {p: p.name.removeprefix(BUSY_PREFIX) for p in d.glob(f"{BUSY_PREFIX}*")}
+    return found
+
+
 def _problem_days(cik: int, root: Path | None = None) -> int:
+    """Distinct problem days: a day recorded in the root while the directory
+    was a link, and again inside once it was not, is one day."""
     try:
-        return sum(1 for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*") if path.is_file())
+        return len({day for p, day in _problem_day_markers(cik, root).items() if p.is_file()})
     except OSError:
         return 0
 
 
 def _clear_problem_days(cik: int, root: Path | None = None) -> None:
-    for path in cik_dir(cik, root).glob(f"{BUSY_PREFIX}*"):
+    for path in _problem_day_markers(cik, root):
         try:
             path.unlink()
         except OSError:
@@ -185,13 +258,22 @@ def _cik_lock(cik: int, root: Path | None = None, timeout: float | None = None):
     # Read at call time, never bound as a default: a default freezes the
     # module constant at import and cannot be tuned or tested.
     timeout = LOCK_TIMEOUT_S if timeout is None else timeout
-    d = cik_dir(cik, root)
+    # The company's directory is the engine's own, beneath the operator's
+    # store: a symlink there had the lock, the manifest and every snapshot
+    # written wherever it pointed, and is refused (`own_dir`; Hermes audit of
+    # 424b0b4, finding 5).
+    d = own_dir(cik_dir(cik, root))
     d.mkdir(parents=True, exist_ok=True)
     give_up = time.monotonic() + max(timeout, 0.0)
-    with (d / LOCK).open("w") as fh:
+    # Neither truncated nor followed: `open("w")` emptied the file a symlink
+    # planted at this name pointed to. A link now raises (ELOOP), as any
+    # other failure to open the lock does, and nothing is written (Hermes
+    # audit of 424b0b4, finding 5).
+    fd = os.open(d / LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
         while True:
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except OSError:
                 if time.monotonic() >= give_up:
@@ -201,7 +283,9 @@ def _cik_lock(cik: int, root: Path | None = None, timeout: float | None = None):
         try:
             yield True
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _entry_for(path: Path) -> dict:
@@ -242,9 +326,16 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
 
     A missing or unreadable manifest is rebuilt from the snapshots on disk, so
     a corrupt index can never erase the history that capture compares against.
+    So is one behind a link, at the company's directory (`own_dir`) or at the
+    manifest's own name (O_NOFOLLOW): nothing another principal wrote there is
+    taken as this store's snapshots, observations, last check or count
+    (review of the finding 5 fix). `_store` refuses to capture past a linked
+    manifest; the directory's link it already refuses at the lock.
     """
     try:
-        data = json.loads(_manifest_path(cik, root).read_text())
+        fd = os.open(own_dir(cik_dir(cik, root)) / MANIFEST, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as fh:
+            data = json.loads(fh.read())
     except (OSError, ValueError):
         data = None
     if not isinstance(data, dict) or not isinstance(data.get("snapshots"), list):
@@ -252,14 +343,15 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
                 "observations": [],
                 "snapshots": reconcile_manifest(cik, root)}
     data.setdefault("last_checked", None)
-    data.setdefault("problem_days", 0)
     data.setdefault("observations", [])
     # The markers are the source of truth — one per distinct bad day. `max`
     # only honours a count stored before markers existed; both are cleared
     # together by any success, so a legacy value cannot outlive its store.
-    data["problem_days"] = max(
-        int(data.get("problem_days") or 0), _problem_days(cik, root)
-    )
+    # Anything but an integer there is no count at all: `int()` of it raised,
+    # and a raise here read as "no problem days" to the sweep's alert.
+    stored = data.get("problem_days")
+    data["problem_days"] = max(stored if isinstance(stored, int) else 0,
+                               _problem_days(cik, root))
     # An entry with no digest is kept: it records a file we hold but cannot
     # read, which is exactly the thing an operator needs to see.
     data["snapshots"] = [s for s in data["snapshots"]
@@ -270,23 +362,52 @@ def read_manifest(cik: int, root: Path | None = None) -> dict:
     return data
 
 
-def _observe(man: dict, day: date, sha: str) -> None:
-    """Record WHICH document was live on which day.
+def _observe(man: dict, day: date, sha: str, kind: str) -> None:
+    """Record WHICH document was live on which day, and what wrote it.
 
     Content is stored once, so a document that goes A, then B, then back to A
     leaves two files and no way to tell B was ever live — the archive would
     imply A had stood the whole time. The snapshots are the data; this is the
     order they were seen in, and it cannot be reconstructed later.
+
+    `kind` is SCORED or RAW. A repeat of the last observation records nothing
+    new but may upgrade it: the sweep fetched the document, then a report
+    scored the identical payload. Never the other way — content a report
+    scored stays scored however often the sweep fetches it again
+    (`observed_vintages` reads the kind per content).
     """
     obs = man.setdefault("observations", [])
     if obs and obs[-1].get("sha256") == sha and obs[-1].get("date") == day.isoformat():
+        if kind == SCORED:
+            obs[-1]["kind"] = SCORED
         return
-    obs.append({"date": day.isoformat(), "sha256": sha})
+    obs.append({"date": day.isoformat(), "sha256": sha, "kind": kind})
+
+
+def _last_seen(man: dict) -> str:
+    """The document as it stood at the last check: the last observation.
+    Not the manifest's last snapshot, which is ordered by (captured, file):
+    two snapshots taken on one day sort by content hash, not by when they
+    were seen. A store older than observations falls back to that order,
+    the only one it has."""
+    observed = man.get("observations") or []
+    if observed and observed[-1].get("sha256"):
+        return str(observed[-1]["sha256"])
+    return man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
+
+
+def _tmp_beside(path: Path) -> Path:
+    """A temporary name beside ``path``: the pid, as before, and a random
+    part. The pid and the content digest alone made it predictable, and
+    ``open("w")`` truncated and filled the target of a symlink planted there,
+    outside the store (Hermes audit of 424b0b4, finding 5). Still ``.*.tmp``,
+    which ``_sweep_orphans`` clears."""
+    return path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = _tmp_beside(_unlinked(path))
     try:
         with tmp.open("w") as fh:
             fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -359,7 +480,8 @@ def capture(
     no request. Callers that already hold the payload use `store_snapshot`.
     """
     cik = client.resolve_cik(ticker)
-    return _store(cik, lambda: client.company_facts_by_cik(cik), now=now, root=root, force=force)
+    return _store(cik, lambda: client.company_facts_by_cik(cik), now=now, root=root,
+                  force=force, kind=RAW)
 
 
 def store_snapshot(
@@ -387,8 +509,11 @@ def store_snapshot(
     two older snapshots and said nothing had changed. Content addressing
     still stores an identical payload only once. (`force` is kept for API
     compatibility; it has nothing left to override.)
+
+    Recorded as SCORED: this is the state the report's silent-revision
+    baseline may be taken from; a `capture` of the same content is upgraded.
     """
-    return _store(cik, lambda: facts, now=now, root=root, force=True)
+    return _store(cik, lambda: facts, now=now, root=root, force=True, kind=SCORED)
 
 
 def _store(
@@ -398,10 +523,11 @@ def _store(
     now: datetime | None,
     root: Path | None,
     force: bool,
+    kind: str,
 ) -> Capture:
     """The lock / daily-gate / dedupe / atomic-write core shared by `capture`
     and `store_snapshot`. `load` is invoked only once the gate has decided a
-    document is actually needed."""
+    document is actually needed; `kind` is what the observation records."""
     # The LOCAL calendar day, however the instant is expressed. Reports date
     # themselves with the local `date.today()` and read the store "as of"
     # that day; stamping snapshots in UTC put an evening (US) capture on
@@ -409,7 +535,19 @@ def _store(
     # instant (the watch sweep passes UTC) is converted; a naive one is
     # taken as local.
     today = (now or datetime.now(UTC)).astimezone().date()
-    with _cik_lock(cik, root) as held:
+    with ExitStack() as stack:
+        try:
+            held = stack.enter_context(_cik_lock(cik, root))
+        except OSError as e:
+            # The lock could not even be opened: a link planted at it or at
+            # the company's directory (refused), a directory that cannot be
+            # made. A day that archived nothing like any other, recorded as
+            # one; raised, it escaped the marker, the count stayed 0 and the
+            # VINTAGE_STALE_DAYS alert never fired (review of the finding 5
+            # fix).
+            _record_problem_day(cik, today, root)
+            return Capture(cik, today, None, "", "failed",
+                           f"the capture lock could not be taken: {type(e).__name__}: {e}")
         if not held:
             # Never touch the manifest without its lock. The process holding
             # the lock may be between its own read and atomic replace; even a
@@ -417,10 +555,21 @@ def _store(
             _record_problem_day(cik, today, root)
             return Capture(cik, today, None, "", "busy",
                            f"another capture holds the lock ({cik_dir(cik, root) / LOCK})")
+        try:
+            # A link at the manifest is refused, not read around and replaced:
+            # it archives nothing and is a problem day, so the stale alert
+            # names the store until someone removes it. Any other failure to
+            # read the index is one too; raised, it escaped the marker as the
+            # lock's did (review of the finding 5 fix).
+            _unlinked(_manifest_path(cik, root))
+            man = read_manifest(cik, root)
+        except Exception as e:  # noqa: BLE001 — every way this archives nothing is counted
+            _record_problem_day(cik, today, root)
+            return Capture(cik, today, None, "", "failed",
+                           f"the manifest could not be used: {type(e).__name__}: {e}")
         _sweep_orphans(cik_dir(cik, root))
-        man = read_manifest(cik, root)
         if not force and man.get("last_checked") == today.isoformat():
-            newest = man["snapshots"][-1]["sha256"] if man["snapshots"] else ""
+            newest = _last_seen(man)
             if _problem_days(cik, root):
                 # Today's attempt archived nothing (any success today would
                 # have cleared the marker). The gate stays closed — a broken
@@ -440,7 +589,7 @@ def _store(
         known = {s.get("sha256") for s in man["snapshots"]}
         observed = man.get("observations") or []
         last_seen = observed[-1].get("sha256") if observed else None
-        _observe(man, today, sha)
+        _observe(man, today, sha, kind)
         if sha in known:
             man["problem_days"] = 0
             _write_json_atomic(_manifest_path(cik, root), man)
@@ -465,7 +614,7 @@ def _store(
             pass  # the write below will fail too and is the one that matters
 
         out = _free_path(cik_dir(cik, root), today, sha)
-        tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+        tmp = _tmp_beside(out)
         try:
             # mtime=0: the archive bytes depend only on the content, so an
             # unchanged document cannot look changed to anything comparing files.
@@ -506,18 +655,26 @@ def list_vintages(cik: int, root: Path | None = None) -> list[Path]:
     """Snapshots oldest first, taken from disk rather than the manifest so a
     lost index never hides data that is still there."""
     d = cik_dir(cik, root)
-    if not d.is_dir():
+    if d.is_symlink() or not d.is_dir():
+        # A link at the company's directory is refused, never read through:
+        # its "snapshots" would be taken as what was knowable on a day.
         return []
     return sorted(p for p in d.glob("*.json.gz") if not p.name.startswith("."))
 
 
 @dataclass(frozen=True)
 class VintageObservation:
-    """One distinct content state in the order it was observed."""
+    """One distinct content state in the order it was observed.
+
+    `kind`: SCORED when a report scored this content (on any observation of
+    it), RAW when only `capture` ever recorded it, None when the store
+    predates kinds (or lost its manifest) and nothing says — `report_diff`
+    then decides by whether the snapshot maps."""
 
     captured: str
     sha256: str
     path: Path
+    kind: str | None = None
 
 
 def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObservation]:
@@ -539,6 +696,21 @@ def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObserva
     man = read_manifest(cik, root)
     by_sha: dict[str, Path] = {}
     sha_by_name: dict[str, str] = {}
+    # Kind is a property of the CONTENT: a document a report scored is
+    # scored on every day it was observed, and a sweep fetching it again
+    # never downgrades it. An observation written before kinds existed
+    # leaves its content unknown rather than raw — it may well have been a
+    # report's payload.
+    seen: dict[str | None, set[str | None]] = {}
+    for observation in man.get("observations", []):
+        seen.setdefault(observation.get("sha256"), set()).add(observation.get("kind"))
+
+    def kind_of(sha: str | None) -> str | None:
+        kinds = seen.get(sha, set())
+        if SCORED in kinds:
+            return SCORED
+        return RAW if kinds == {RAW} else None
+
     for entry in man.get("snapshots", []):
         sha, name = entry.get("sha256"), entry.get("file")
         if name:
@@ -555,11 +727,12 @@ def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObserva
         captured = observation.get("date")
         if not path or not captured or (out and out[-1].sha256 == sha):
             continue
-        out.append(VintageObservation(captured, sha, path))
+        out.append(VintageObservation(captured, sha, path, kind_of(sha)))
 
     if not out:
         return [
-            VintageObservation(snapshot_day(path), sha_by_name.get(path.name, ""), path)
+            VintageObservation(snapshot_day(path), sha_by_name.get(path.name, ""), path,
+                               kind_of(sha_by_name.get(path.name)))
             for path in paths
         ]
 
@@ -570,7 +743,8 @@ def observed_vintages(cik: int, root: Path | None = None) -> list[VintageObserva
     for path in paths:
         if path not in represented:
             out.append(VintageObservation(
-                snapshot_day(path), sha_by_name.get(path.name, ""), path
+                snapshot_day(path), sha_by_name.get(path.name, ""), path,
+                kind_of(sha_by_name.get(path.name)),
             ))
     out.sort(key=lambda item: item.captured)  # stable: observed same-day order is preserved
     return out
@@ -605,6 +779,12 @@ class VintageChange:
     `kind` is `revised` (the scored value changed) or `withdrawn` (the fact is
     gone from the later document). Both are invisible to the within-snapshot
     detector when the filer does not re-present the original.
+
+    `original_retained`: the newer snapshot still carries the fact the older
+    value was read from (same accession, period and value) beside the later
+    filing the value now comes from. The within-snapshot detector reads that
+    pair from filing history, so the move is not silent
+    (`explained_by_filing`): an amendment landing is the ordinary case.
     """
 
     kind: str
@@ -623,11 +803,41 @@ class VintageChange:
     # "scored": a figure the engine scores, compared as it scores it.
     # "context": a raw fact of a scored tag for a period older than the
     # reported window — shown, never promoted.
+    # "raw": a raw fact row returned because a snapshot could not be mapped
+    # (`diff_scored`'s fallback) — not a change to a scored figure; shown,
+    # never promoted or validated.
     scope: str = "scored"
+    original_retained: bool = False
 
     @property
     def moved_tag(self) -> bool:
         return bool(self.new_tag) and self.new_tag != self.key.tag
+
+    @property
+    def explained_by_filing(self) -> bool:
+        """Moved with a later filing that the newer snapshot carries beside
+        the original — visible in filing history, so not a silent revision."""
+        return (self.kind == "revised" and self.original_retained
+                and bool(self.new_accession) and self.new_accession != self.old_accession)
+
+
+def _retains(older: dict, newer: dict, key: FactKey, accession: str) -> bool:
+    """Whether `newer` still carries the fact `older` holds under `accession`
+    for `key`'s concept and period, at the same value."""
+    def values(facts: dict) -> set[float]:
+        out: set[float] = set()
+        for row in _rows(facts, key.taxonomy, key.tag, key.unit):
+            try:
+                if row.get("accn") != accession or _parse_date(row["end"]) != key.end:
+                    continue
+                if (_parse_date(row["start"]) if row.get("start") else None) != key.start:
+                    continue
+                out.add(float(row["val"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    return bool(accession) and bool(values(older) & values(newer))
 
 
 def _scored_tags(include_split_adjusted: bool = False) -> dict[str, tuple]:
@@ -661,7 +871,10 @@ def _series(facts: dict, scored_only: bool,
     `_active_tag`, best coverage — so a revision reported here is a revision
     to the number a report would show, not to some abandoned candidate tag
     carrying stale data. The unit is the field's unit, with the same
-    mis-filed-share-count fallback the sibling detector uses.
+    mis-filed-share-count fallback the sibling detector uses. One concept
+    per field: a quarter the mapper fills from another concept after a tag
+    switch is not followed here (`raw_diff_blind_spots` names it;
+    `diff_scored` compares it as scored).
 
     Same-day ties resolve as the mapper's `_dedupe_latest_filed` does, by
     the shared `precedence` order (an amendment over an original, then the
@@ -680,6 +893,11 @@ def _series(facts: dict, scored_only: bool,
                 val = float(row["val"])
                 start = _parse_date(row["start"]) if row.get("start") else None
             except (KeyError, TypeError, ValueError):
+                continue
+            if not math.isfinite(val):
+                # Not a reported number: the mapper drops it (`_collect`), so
+                # no report shows it and it is no revision here (review of
+                # deb6364, finding 1).
                 continue
             k = (field, start, end)
             prev = out.get(k)
@@ -726,6 +944,10 @@ def diff_vintages(
 
     Share counts are excluded unless `include_split_adjusted`: a split is not
     a restatement.
+
+    Raw facts, one concept per field (`_series`): a quarter the mapper
+    filled from another concept is not inspected. A caller that shows this
+    diff on its own must print `raw_diff_blind_spots` beside it.
     """
     a = _series(older, scored_only, include_split_adjusted)
     b = _series(newer, scored_only, include_split_adjusted)
@@ -745,12 +967,51 @@ def diff_vintages(
         pct = None if old["val"] == 0 else abs(new["val"] - old["val"]) / abs(old["val"])
         if pct is not None and pct < materiality_pct:
             continue
+        old_accn = old.get("accn", "")
         changes.append(VintageChange(
             "revised", field_name, old["key"], old["val"], old["filed"],
-            old.get("accn", ""), old.get("form", ""), new["val"], new["filed"],
-            new.get("accn", ""), new.get("form", ""), pct, new["key"].tag))
+            old_accn, old.get("form", ""), new["val"], new["filed"],
+            new.get("accn", ""), new.get("form", ""), pct, new["key"].tag,
+            original_retained=(new.get("accn", "") != old_accn
+                               and _retains(older, newer, old["key"], old_accn))))
     changes.sort(key=lambda c: (c.key.end, c.field_name, c.key.tag), reverse=True)
     return changes
+
+
+def raw_diff_blind_spots(*snapshots: dict) -> list[str]:
+    """The reported quarters the raw fact diff cannot see, one line each.
+
+    `diff_vintages` follows ONE concept per field (`_active_tag`). The
+    mapper can fill a quarter the selected concept does not report from
+    another candidate proven equal to it (a filer's tag switch), and that
+    quarter's value is then read from a concept the raw diff never
+    follows: a revision of it would pass unseen, and "nothing changed"
+    would claim coverage it does not have. `diff_scored` compares those
+    quarters as the engine builds them; a caller showing the raw diff alone
+    prints these lines beside it. A snapshot the mapper cannot build has no
+    such quarters."""
+    out: list[str] = []
+    for facts in snapshots:
+        mapped = _mapped_diagnostics(facts)
+        if mapped is None:
+            continue
+        for d in mapped.fields:
+            for period_end, concept in sorted(d.fallbacks.items()):
+                line = (
+                    f"{d.field_name} at {period_end} is read from {concept} (the selected "
+                    f"concept, {d.tag_used}, does not report it); the raw fact diff follows "
+                    "one concept per field and did not inspect it"
+                )
+                if line not in out:
+                    out.append(line)
+    return out
+
+
+def _mapped_diagnostics(facts: dict) -> IngestionDiagnostics | None:
+    try:
+        return build_dataset(facts, "SNAPSHOT")[1]
+    except ValueError:
+        return None
 
 
 # `FactKey.taxonomy` of a change to a figure no single fact carries (total
@@ -771,9 +1032,12 @@ class _Mapped:
     window: list[date]
 
 
-def _mapped(facts: dict) -> _Mapped | None:
+def _mapped(facts: dict, as_of: date | None = None) -> _Mapped | None:
+    """`facts` as the engine scores it, or None when the mapper cannot build
+    it. `as_of`: as a reader on that day could have built it (the mapper's
+    one point-in-time path)."""
     try:
-        ds, diag = build_dataset(facts, "SNAPSHOT")
+        ds, diag = build_dataset(facts, "SNAPSHOT", as_of=as_of)
     except ValueError:
         return None
     values = {
@@ -792,6 +1056,39 @@ def _mapped(facts: dict) -> _Mapped | None:
     return _Mapped(values, sources, [p.period_end for p in ds.periods])
 
 
+def _coverage_gaps(capture: _Mapped, reference: _Mapped, since: date | None = None) -> list[str]:
+    """What `reference` maps that `capture` does not hold as the engine builds
+    it, one "field (N quarter(s) missing, M built from other concepts)" per
+    field; empty when `capture` covers it.
+
+    Every scored, non-split field `reference` maps, at every reported quarter
+    from `capture`'s first on (an older one is outside anything the lock
+    diff reads) and from `since`: `capture` must hold it, built by the same
+    strategy from the same concepts — the per-quarter composition
+    `diff_scored` compares, which names a fallback concept too. A capture
+    that maps but lacks a field or the latest quarters hid a real revision
+    (additions are never reported), and one lacking a component read as a
+    recomposed "change" of every quarter (review of 626ca1b, finding 1)."""
+    start = min(capture.window, default=None)
+    gaps: list[str] = []
+    for name, by_q in reference.values.items():
+        if name in SPLIT_ADJUSTED_FIELDS:
+            continue
+        missing = recomposed = 0
+        for end in by_q:
+            if (start is not None and end < start) or (since is not None and end < since):
+                continue
+            if end not in capture.values.get(name, {}):
+                missing += 1
+            elif capture.sources.get(name, {}).get(end) != reference.sources.get(name, {}).get(end):
+                recomposed += 1
+        parts = [f"{missing} quarter(s) missing" if missing else "",
+                 f"{recomposed} built from other concepts" if recomposed else ""]
+        if missing or recomposed:
+            gaps.append(f"{name} ({', '.join(p for p in parts if p)})")
+    return gaps
+
+
 def _bare(components: tuple[str, ...]) -> str:
     return "+".join(c.split(":", 1)[-1] for c in components)
 
@@ -805,6 +1102,19 @@ class ScoredDiff:
 
     changes: list[VintageChange]
     canonical_unavailable: str | None = None
+
+
+# `diff_scored`'s reason when a side cannot be mapped is built from these, so
+# the report can say the short "why" where the window is already named
+# (`_why_not_scored`) without restating the prefix.
+_NOT_SCORED = "scored values not compared as the engine builds them: "
+_RAW_ONLY = " (raw fact rows only, not scored changes)"
+
+
+def _why_not_scored(reason: str) -> str:
+    """The short reason a window was not compared as scored: `diff_scored`'s
+    message without its frame ("the older snapshot could not be mapped")."""
+    return reason.removeprefix(_NOT_SCORED).removesuffix(_RAW_ONLY)
 
 
 def diff_scored(
@@ -830,22 +1140,29 @@ def diff_scored(
     A quarter whose value was built differently in the two snapshots
     (another strategy or other components) is a change of composition:
     reported with the new composition, never promoted.
+
+    When either snapshot cannot be mapped the raw fact rows are all there
+    is, and they are returned with `scope="raw"`: still listed, never a
+    scored change. Left `"scored"`, a partial fetch's missing concepts read
+    as scored withdrawals and a raw tag the engine does not score reached
+    Tier 1 and the ledger's VALIDATED (Hermes audit of 424b0b4, finding 2).
     """
     raw = diff_vintages(older, newer, materiality_pct=materiality_pct, since=since)
     a, b = _mapped(older), _mapped(newer)
     if a is None or b is None:
         which = "older" if a is None else "newer"
         return ScoredDiff(
-            raw,
-            f"scored values not compared as the engine builds them: the {which} snapshot "
-            "could not be mapped (raw facts only)",
+            [replace(c, scope="raw") for c in raw],
+            f"{_NOT_SCORED}the {which} snapshot could not be mapped{_RAW_ONLY}",
         )
     window_start = min(b.window, default=None)
 
     changes: list[VintageChange] = []
     for spec in FIELDS:
         name = spec.name
-        if name in SPLIT_ADJUSTED_FIELDS:
+        # Unscored (the valuation plane's inputs): mapped in both snapshots,
+        # never a scored change.
+        if name in SPLIT_ADJUSTED_FIELDS or not spec.scored:
             continue
         unit = _unit_for(name)
         old_series, new_series = a.values.get(name, {}), b.values.get(name, {})
@@ -874,9 +1191,12 @@ def diff_scored(
             after = _filing(newer, old_src[1][0], unit, end) if single else None
             if before is not None and after is not None:
                 taxonomy, _sep, tag = old_src[1][0].partition(":")
+                key = FactKey(taxonomy, tag, unit, before[3], end)
                 changes.append(VintageChange(
-                    "revised", name, FactKey(taxonomy, tag, unit, before[3], end), old,
+                    "revised", name, key, old,
                     before[0], before[1], before[2], new, after[0], after[1], after[2], pct,
+                    original_retained=(after[1] != before[1]
+                                       and _retains(older, newer, key, before[1])),
                 ))
             else:
                 label = _bare(old_src[1]) + (" (partial)" if old_src[0] == "partial" else "")
@@ -924,38 +1244,85 @@ def _filing(facts: dict, component: str, unit: str, end: date) -> tuple | None:
     return None if best is None else best[1]
 
 
-def render_changes(changes: list[VintageChange], older: str, newer: str) -> str:
+def _change_row(c: VintageChange) -> tuple[str, str, str]:
+    """(now, change, originally filed) cells of one change's row."""
+    composed = c.key.taxonomy == COMPOSED
+    now = "withdrawn" if c.kind == "withdrawn" else f"{c.new_value:,.0f}"
+    if c.scope == "context":
+        now += " (before the scored window)"
+    elif c.scope == "raw":
+        # The raw fallback reads only the tags the engine scores a field
+        # from, so the row IS about a scored field — just not compared as
+        # the mapper builds it (review of 224b896, finding 2).
+        now += " (raw fact of a scored field's tag; not compared as the engine builds it)"
+    if c.moved_tag:
+        now += f" (now {'built from' if composed else 'tagged'} {c.new_tag})"
+    pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
+    if composed:
+        # No single filing carries this figure: say what it was built from.
+        filed = f"built from {c.key.tag}"
+    else:
+        filed = f"{c.old_filed} {c.old_form} {c.old_accession}".strip()
+    return now, pct, filed
+
+
+def render_changes(
+    changes: list[VintageChange], older: str, newer: str, *, unavailable: str | None = None
+) -> str:
     """One markdown section. Says plainly when nothing moved — an empty diff
-    is the expected result most of the time and is worth stating."""
+    is the expected result most of the time and is worth stating.
+
+    `unavailable`: why this window was not compared as scored. It is said
+    first, and no "nothing changed" sentence follows: an empty or raw-only
+    diff there is a comparison never made, not a clean one (review of
+    c131583, finding 2). Any raw rows are listed after it.
+
+    A figure that moved with a later filing the newer snapshot carries beside
+    the original (`explained_by_filing`) is listed apart, never under the
+    "no amended filing behind it" framing: the within-snapshot detector reads
+    it from filing history, and an amendment is the ordinary case."""
     head = f"### Vintage diff — {older} → {newer}\n"
+    lead = [f"Not compared as scored: {_why_not_scored(unavailable)}."] if unavailable else []
     if not changes:
+        if lead:
+            return head + "\n" + lead[0] + "\n"
         return head + "\nNo prior-period figure changed or disappeared between these snapshots.\n"
-    lines = [
-        head, "",
-        "_Context, not an alarm._ Nothing found here has an amended filing "
-        "behind it — that is what makes it invisible to the within-snapshot "
-        "detector, and it also means the ordinary explanations come first: a "
-        "discontinued operation or a spinoff re-presented, a segment "
-        "reclassification, a taxonomy migration. Read the filing before "
-        "calling any of it a restatement.",
-        "",
-        "| Field | Period | Was | Now | Change | Originally filed |",
-        "|---|---|---|---|---|---|"]
-    for c in changes:
-        composed = c.key.taxonomy == COMPOSED
-        now = "withdrawn" if c.kind == "withdrawn" else f"{c.new_value:,.0f}"
-        if c.scope == "context":
-            now += " (before the scored window)"
-        if c.moved_tag:
-            now += f" (now {'built from' if composed else 'tagged'} {c.new_tag})"
-        pct = f"{c.pct_change:.1%}" if c.pct_change is not None else "—"
-        if composed:
-            # No single filing carries this figure: say what it was built from.
-            filed = f"built from {c.key.tag}"
-        else:
-            filed = f"{c.old_filed} {c.old_form} {c.old_accession}".strip()
-        lines.append(
-            f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} | {filed} |")
+    silent = [c for c in changes if not c.explained_by_filing]
+    filed = [c for c in changes if c.explained_by_filing]
+    lines = [head, lead[0], ""] if lead else [head, ""]
+    if silent:
+        lines += [
+            "_Context, not an alarm._ Nothing found here has an amended filing "
+            "behind it — that is what makes it invisible to the within-snapshot "
+            "detector, and it also means the ordinary explanations come first: a "
+            "discontinued operation or a spinoff re-presented, a segment "
+            "reclassification, a taxonomy migration. Read the filing before "
+            "calling any of it a restatement.",
+            "",
+            "| Field | Period | Was | Now | Change | Originally filed |",
+            "|---|---|---|---|---|---|"]
+        for c in silent:
+            now, pct, orig = _change_row(c)
+            lines.append(
+                f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} | {orig} |")
+    elif not lead:
+        lines.append("No prior-period figure changed silently between these snapshots.")
+    if filed:
+        lines += [
+            "",
+            "**Moved with a later filing (not silent).** The newer snapshot carries "
+            "the original fact beside the filing that revised it, so the restatement "
+            "scan reads these from filing history; listed so the snapshot trail is "
+            "complete.",
+            "",
+            "| Field | Period | Was | Now | Change | Originally filed | Revised by |",
+            "|---|---|---|---|---|---|---|"]
+        for c in filed:
+            now, pct, orig = _change_row(c)
+            by = f"{c.new_filed} {c.new_form} {c.new_accession}".strip()
+            lines.append(
+                f"| {c.field_name} | {c.key.period} | {c.old_value:,.0f} | {now} | {pct} "
+                f"| {orig} | {by} |")
     return "\n".join(lines) + "\n"
 
 
@@ -1010,32 +1377,111 @@ class VintageDiffReport:
     no_baseline_reason: str | None = None
     baseline_note: str | None = None
     # Why scored values were not compared as the engine builds them (a
-    # snapshot the mapper cannot build), when they were not.
+    # snapshot the mapper cannot build), when they were not: the previous ->
+    # newest window, and the thesis-lock window apart. One window compared
+    # as scored says nothing about the other (review of 224b896, finding 2).
     canonical_unavailable: str | None = None
+    baseline_unavailable: str | None = None
+    # Raw captures passed over for the baseline (`report_diff`), when any were.
+    raw_note: str | None = None
+    # The report named its payload and the store does not hold it: nothing
+    # was compared, and "no baseline yet" would be the wrong reason.
+    payload_missing: bool = False
+    # What the thesis-lock baseline is when it is not a state a report
+    # scored: `SWEEP_BASELINE` (review of c131583, finding 1), or
+    # `UNRECORDED_BASELINE` (cross-branch review of e0525c4).
+    baseline_source: str | None = None
+    # Why no state before the thesis day could stand as the lock baseline,
+    # short, for the card and the ledger (with `baseline_unavailable` and
+    # no `baseline`).
+    lock_gap: str | None = None
 
     @property
     def compared(self) -> bool:
         return self.no_baseline_reason is None
+
+    @property
+    def tier1_gap(self) -> str | None:
+        """Why the decision card must list silent revisions as not checked
+        this run, or None when every window was compared as the engine
+        scores it. A window that fell back to raw fact rows promotes nothing
+        (`scope="raw"`), so without this the card read clean over a
+        comparison never made (review of 224b896, finding 2)."""
+        if not self.compared:
+            if self.payload_missing:
+                return "the report's payload is not in the vintage store"
+            return "no vintage baseline yet"
+        # Which window, when only one was not compared as scored: "not
+        # compared as scored" alone left the reader to guess whether the
+        # other was checked (review of c131583, nit).
+        if self.canonical_unavailable and self.baseline_unavailable:
+            return "not compared as scored in either window: a snapshot could not be mapped"
+        if self.canonical_unavailable:
+            return "since the previous report: not compared as scored, a snapshot could not be mapped"
+        if self.baseline_unavailable:
+            if self.baseline is None:
+                # No state before the thesis day could stand as the baseline
+                # (`report_diff`): none maps, or the captures that do are
+                # incomplete (review of 626ca1b, finding 1).
+                return ("since the pinned thesis: not compared as scored, "
+                        f"{self.lock_gap or 'no snapshot before the thesis day could be mapped'}")
+            return "since the pinned thesis: not compared as scored, a snapshot could not be mapped"
+        return None
 
     def status_line(self) -> str:
         """One line for the data-quality section: exactly what was compared."""
         if not self.compared:
             return self.no_baseline_reason or "not compared"
         assert self.newest is not None and self.previous is not None
+        # A window not compared as scored says so where it is named, with
+        # its reason: "compared X → Y: not compared as scored" contradicted
+        # itself (review of c131583, nit).
+        window = f"{self.previous.captured} → {self.newest.captured}"
         line = (
-            f"compared {self.previous.captured} → {self.newest.captured}: "
-            f"{len(self.changes_since_previous)} change(s)"
+            f"{window} {_count(self.changes_since_previous, self.canonical_unavailable)}"
+            if self.canonical_unavailable
+            else f"compared {window}: {_count(self.changes_since_previous)}"
         )
         if self.changes_since_baseline is not None and self.baseline is not None:
+            lock = f"since pinned thesis {self.baseline.captured}"
+            if self.baseline_source:
+                lock += f", {self.baseline_source}"
             line += (
-                f"; since pinned thesis {self.baseline.captured}: "
-                f"{len(self.changes_since_baseline)} change(s)"
+                f"; {lock} {_count(self.changes_since_baseline, self.baseline_unavailable)}"
+                if self.baseline_unavailable
+                else f"; {lock}: {_count(self.changes_since_baseline)}"
             )
+        elif self.baseline_unavailable:
+            line += f"; since the pinned thesis not compared as scored: {self.baseline_unavailable}"
         if self.baseline_note:
             line += f"; {self.baseline_note}"
-        if self.canonical_unavailable:
-            line += f"; {self.canonical_unavailable}"
+        if self.raw_note:
+            line += f"; {self.raw_note}"
         return line
+
+
+def _count(changes: list[VintageChange], unavailable: str | None = None) -> str:
+    """"N change(s)" counts the silent ones; moves a later filing explains
+    are counted apart, so an amendment never reads as a silent change, and
+    so are raw fact rows (a snapshot that could not be mapped), which are not
+    changes to a scored figure at all, and figures now built from other
+    concepts (`moved_tag`: a change of composition, which Tier 1 and the
+    card's revised-input notes skip too — counted as "changes" it read as
+    silent revisions; review of 626ca1b, finding 1). A window that was not
+    compared as scored (`unavailable`) says so, with the reason, instead of
+    "0 change(s)": its raw rows are never promoted, so a zero there was a
+    count of nothing checked."""
+    raw = sum(c.scope == "raw" for c in changes)
+    filed = sum(c.explained_by_filing for c in changes if c.scope != "raw")
+    moved = sum(c.moved_tag and not c.explained_by_filing for c in changes if c.scope != "raw")
+    text = (
+        f"not compared as scored: {_why_not_scored(unavailable)}" if unavailable
+        else f"{len(changes) - raw - filed - moved} change(s)"
+    )
+    text += f" (+{filed} moved with a later filing, not silent)" if filed else ""
+    text += (f" (+{moved} built from other concepts: a change of composition, not a revision)"
+             if moved else "")
+    return text + (f" (+{raw} raw fact row(s), not scored changes)" if raw else "")
 
 
 def _load_for_diff(obs: VintageObservation) -> dict:
@@ -1050,6 +1496,48 @@ def _load_for_diff(obs: VintageObservation) -> dict:
         ) from e
 
 
+def _newest_scored(
+    states: list[VintageObservation], is_scored: Callable[[VintageObservation], bool]
+) -> int | None:
+    """Index of the newest state in `states` (observation order) that
+    `is_scored` accepts. An index, not the state: one content observed twice
+    on one day is two equal observations."""
+    for i in range(len(states) - 1, -1, -1):
+        if is_scored(states[i]):
+            return i
+    return None
+
+
+def _passed_over(obs: VintageObservation, e: BaseException) -> None:
+    """Log a stored state passed over while choosing one: the status line
+    counts them, the log says which and why (review of c131583, finding 3)."""
+    logger.warning("vintage snapshot %s (captured %s, kind %s) passed over: %s: %s",
+                   obs.path.name, obs.captured, obs.kind or "unrecorded", type(e).__name__, e)
+
+
+# The thesis-lock walk maps at most this many captures before the thesis
+# day (a capture whose content was already built costs nothing and is still
+# examined); older ones are counted as not examined. A covering capture is
+# normally the newest, and each costs up to two mapper builds (review of
+# 626ca1b, finding 4). Hand-set.
+LOCK_CAPTURES_EXAMINED = 8
+# `baseline_source` of a lock baseline that is a watch-sweep capture.
+SWEEP_BASELINE = "a sweep capture (mapped, complete)"
+# ... and of one whose kind the manifest does not record (cross-branch
+# review of e0525c4): held to the same coverage rule as a capture.
+UNRECORDED_BASELINE = "a stored snapshot of unrecorded kind (mapped, complete)"
+
+
+def _passed_over_for_lock(obs: VintageObservation, why: str,
+                          baseline: str = "the thesis-lock baseline") -> None:
+    """Log a capture the thesis-lock walk passed over: the status line counts
+    them, the log says which and why (review of 626ca1b, finding 5). A state
+    of unrecorded kind the previous-report walk passes over is logged the
+    same way, naming that baseline."""
+    logger.warning("vintage snapshot %s (captured %s, kind %s) passed over for %s: %s",
+                   obs.path.name, obs.captured, obs.kind or "unrecorded", baseline, why)
+
+
 def report_diff(
     cik: int,
     *,
@@ -1057,21 +1545,70 @@ def report_diff(
     baseline_day: date | None = None,
     since: date | None = None,
     root: Path | None = None,
+    scored_sha: str | None = None,
 ) -> VintageDiffReport:
     """The silent-revision check for a report dated `as_of`.
 
     Only observations captured on or before `as_of` are visible — the one
     place the report's date bounds this store, so a historical replay passes
-    a past date and gets the trail as it stood. The newest visible state is
-    diffed against the previous one; with a `baseline_day` (the pinned
-    thesis day on the journal track) the newest is also diffed against the
-    last observation captured BEFORE that day, unless that is already one of
-    the two. Strictly before: snapshots are dated by day, so one captured on
-    the lock day may postdate the lock, and a revision it carried would be
-    absorbed into the baseline and never reported. Erring the other way
-    re-reports at most one day of pre-lock changes. An unreadable snapshot raises `ExternalPayloadError`: that is a
-    data failure for the caller's stream containment, not a "no baseline"
-    state.
+    a past date and gets the trail as it stood. The newest visible SCORED
+    state is diffed against the newest earlier scored one of different
+    content; with a `baseline_day` (the pinned thesis day on the journal
+    track) the newest is also diffed against the last scored observation
+    captured BEFORE that day, unless that is already one of the two.
+    Strictly before: snapshots are dated by day, so one captured on the lock
+    day may postdate the lock, and a revision it carried would be absorbed
+    into the baseline and never reported. Erring the other way re-reports at
+    most one day of pre-lock changes. An unreadable snapshot raises
+    `ExternalPayloadError`: that is a data failure for the caller's stream
+    containment, not a "no baseline" state.
+
+    Scored states only (Hermes audit of 424b0b4, finding 2). A raw capture
+    — the watch sweep's fetch, never mapped, possibly partial — replaced the
+    state a report scored: taken as the baseline, an unmappable one turned
+    the comparison into raw fact rows promoted to Tier 1 though nothing
+    scored had moved, and a bare one hid a real revision (additions are
+    never reported); taken as the newest, a partial fetch read as scored
+    withdrawals. Raw captures passed over are counted in the status line
+    and stay in the store for `scripts/vintage.py diff`.
+
+    `scored_sha` is the digest of the payload the report scored. That
+    content is scored for this comparison whatever wrote it, and it IS the
+    newest state compared: the report's own `store_snapshot` may not have
+    landed (busy, failed, `--no-vintage`) after the sweep captured the same
+    content as raw, and a replay scores whichever stored state it chose.
+    Left to "the newest scored state", the first compared an older pair and
+    promoted a stale line; the second dropped the replayed payload as raw
+    (review of 224b896, finding 1). When the store does not hold that
+    payload, nothing is compared and the reason says so — never some other
+    pair. Without it (a caller that holds no payload) the newest scored
+    state stands in, as before.
+
+    The thesis-lock baseline is the NEAREST state before the thesis day
+    that is either scored or a watch-sweep capture that covers the scored
+    comparison (`_coverage_gaps`: every field and quarter the scored state
+    nearest after the thesis day held when the capture was fetched, built
+    the same way), a capture labelled `baseline_source` (review of c131583,
+    finding 1). A capture that merely maps was taken before: one missing a
+    field or the latest quarters hid a real revision and read clean, and
+    one missing a component read as recomposed "changes"; and an old scored
+    state beat a covering capture from the day before the lock, so a
+    revision public before the lock read as one since (review of 626ca1b,
+    findings 1 and 3). Captures passed over are logged and counted; each
+    content is mapped once per report, and at most
+    `LOCK_CAPTURES_EXAMINED` captures are mapped (finding 4). When nothing
+    before the day qualifies, `baseline_unavailable` says the lock window
+    was not compared as scored.
+
+    A state whose kind the manifest does not record (written before kinds
+    existed, or rebuilt from disk after the manifest was lost) stands in for
+    a scored one as a baseline — the previous report's or the thesis lock's
+    — only if it covers the comparison, like a raw capture: taken whenever
+    it mapped, a partial one hid a real revision ("since pinned thesis ...:
+    0 change(s)"). Only the payload this report scored and a state recorded
+    as scored are a baseline, or the lock's reference, as they are; the
+    status line says how many stored states are of unrecorded kind
+    (cross-branch review of e0525c4).
     """
     visible = [
         s for s in observed_vintages(cik, root) if date.fromisoformat(s.captured) <= as_of
@@ -1084,6 +1621,19 @@ def report_diff(
                 "see the Vintage snapshot line)"
             ),
         )
+    top: int | None = None
+    if scored_sha is not None:
+        top = next((i for i in range(len(visible) - 1, -1, -1)
+                    if visible[i].sha256 == scored_sha), None)
+        if top is None:
+            return VintageDiffReport(
+                as_of, None, None, [],
+                no_baseline_reason=(
+                    f"the payload this report scored is not in the vintage store at or "
+                    f"before {as_of} (see the Vintage snapshot line); not compared"
+                ),
+                payload_missing=True,
+            )
     if len(visible) == 1:
         return VintageDiffReport(
             as_of, visible[-1], None, [],
@@ -1092,23 +1642,268 @@ def report_diff(
                 "to diff against yet"
             ),
         )
-    newest, previous = visible[-1], visible[-2]
-    new_facts = _load_for_diff(newest)
-    scored = diff_scored(_load_for_diff(previous), new_facts, since=since)
+    # Each content is built once per report, whichever walk asks — the
+    # legacy classification or the thesis-lock walk (review of 626ca1b,
+    # finding 4); one the mapper trips on is kept as its exception.
+    built: dict[str, _Mapped | BaseException | None] = {}
+    unusable: set[str] = set()
+
+    def content(obs: VintageObservation) -> str:
+        return obs.sha256 or str(obs.path)
+
+    def build(obs: VintageObservation) -> _Mapped | BaseException | None:
+        key = content(obs)
+        if key not in built:
+            try:
+                built[key] = _mapped(_load_for_diff(obs))
+            except UNUSABLE as e:
+                built[key] = e
+        return built[key]
+
+    def trusted(obs: VintageObservation) -> bool:
+        # Known to be scored: the payload this report scored, or a state the
+        # manifest records a report scored. Only these stand as a baseline
+        # as they are; a state of unrecorded kind that maps may be a partial
+        # sweep capture, and must cover the comparison like a raw one
+        # (cross-branch review of e0525c4).
+        return (scored_sha is not None and obs.sha256 == scored_sha) or obs.kind == SCORED
+
+    def is_scored(obs: VintageObservation) -> bool:
+        # A store written before kinds existed (or one whose manifest was
+        # rebuilt from disk) does not say what wrote a state, so decide by
+        # whether the mapper builds it — the test `diff_scored` applies
+        # anyway. Treating unknown as raw would leave every existing store
+        # without a baseline until two new reports had been scored; the walk
+        # stops at the first mappable state, normally the first looked at,
+        # so this costs about one extra build per report. A legacy partial
+        # capture that still maps cannot be told apart: as the newest state
+        # it is used, as before; as a baseline it must also cover the
+        # comparison (`coverage_gaps`) — taken as it was, one missing Assets
+        # hid a real +20% revision (cross-branch review of e0525c4).
+        # One that cannot be read, or whose odd shape the mapper trips on,
+        # is not a usable state: passed over and counted, not a stream
+        # failure over a snapshot no comparison needed (review of 224b896,
+        # finding 4).
+        if trusted(obs):
+            return True
+        if obs.kind is not None:
+            return False
+        got = build(obs)
+        if isinstance(got, BaseException):
+            # Legacy only: SCORED and RAW returned above. Nothing says a
+            # report scored it, so it is passed over — and said so, once
+            # (review of c131583, finding 3).
+            if content(obs) not in unusable:
+                _passed_over(obs, got)
+                unusable.add(content(obs))
+            return False
+        return got is not None
+
+    notes: list[str] = []
+    # Stored snapshots of unrecorded kind, by file: every mappable one stood
+    # in for a scored state before, so the reader is told the kinds are
+    # unknown, not only which were passed over.
+    unrecorded = len({s.path for s in visible if s.kind is None})
+
+    def raw_note() -> str | None:
+        extra = (
+            [f"{len(unusable)} snapshot(s) passed over were unreadable or malformed"]
+            if unusable else []
+        )
+        if unrecorded:
+            extra.append(f"{unrecorded} stored snapshot(s) of unrecorded kind (manifest "
+                         "rebuilt or written before kinds)")
+        return "; ".join([*notes, *extra]) or None
+
+    loaded: dict[str, dict] = {}
+
+    def facts_of(obs: VintageObservation) -> dict:
+        if content(obs) not in loaded:
+            loaded[content(obs)] = _load_for_diff(obs)
+        return loaded[content(obs)]
+
+    # A mapped state stands in for a scored one only if it covers the
+    # comparison: checked against a reference state (the scored side it
+    # will be compared with, or the one nearest after the thesis day) as it
+    # stood when the state was fetched — a quarter filed later is not a
+    # gap. The fetch time is known only to the day, and on a filing day it
+    # may precede or follow that day's filing (one after it can also move a
+    # selection), so the state must match the reference as of the day
+    # before or as of the day itself.
+    ref_as_of: dict[tuple[str, date], _Mapped | BaseException | None] = {}
+
+    def gaps_as_of(capture_map: _Mapped, ref_obs: VintageObservation, day: date) -> list[str]:
+        key = (content(ref_obs), day)
+        if key not in ref_as_of:
+            try:
+                ref_as_of[key] = _mapped(facts_of(ref_obs), as_of=day)
+            except UNUSABLE as e:
+                ref_as_of[key] = e
+        ref = ref_as_of[key]
+        if isinstance(ref, _Mapped):
+            return _coverage_gaps(capture_map, ref, since)
+        return ["it cannot be built as of that day"
+                + (f" ({type(ref).__name__}: {ref})" if ref is not None else "")]
+
+    def coverage_gaps(obs: VintageObservation, capture_map: _Mapped,
+                      ref_obs: VintageObservation) -> list[str]:
+        """The gaps as of the day before `obs` was fetched, or none when it
+        covers as of either day."""
+        day = date.fromisoformat(obs.captured)
+        gaps = gaps_as_of(capture_map, ref_obs, day - timedelta(days=1))
+        return gaps if gaps and gaps_as_of(capture_map, ref_obs, day) else []
+
+    if top is None:
+        top = _newest_scored(visible, is_scored)
+        if top is None:
+            reason = (f"no scored snapshot at or before {as_of}; {len(visible)} raw "
+                      "capture(s) not used")
+            return VintageDiffReport(as_of, visible[-1], None, [],
+                                     no_baseline_reason="; ".join(filter(None, [reason, raw_note()])))
+        if top < len(visible) - 1:
+            notes.append(f"{len(visible) - 1 - top} raw capture(s) after "
+                         f"{visible[top].captured} not compared")
+    elif top < len(visible) - 1:
+        notes.append(f"{len(visible) - 1 - top} later snapshot(s) after {visible[top].captured} "
+                     "not compared (not the payload this report scored)")
+    newest = visible[top]
+    # Not the newest's own content: a state that went S -> raw -> S has not
+    # changed as scored, and comparing it with itself would say "0 changes"
+    # about a comparison never made.
+    earlier = [s for s in visible[:top] if not (s.sha256 and s.sha256 == newest.sha256)]
+    # Nearest first: a state known to be scored is the baseline as it is; one
+    # of unrecorded kind that maps only if it covers the newest.
+    at: int | None = None
+    passed = 0  # of unrecorded kind: mapped, but incomplete against the newest
+    for i in range(len(earlier) - 1, -1, -1):
+        if trusted(earlier[i]):
+            at = i
+            break
+        if not is_scored(earlier[i]):
+            continue  # raw, or a legacy state that does not map
+        got = build(earlier[i])
+        assert isinstance(got, _Mapped)  # `is_scored` built it
+        gaps = coverage_gaps(earlier[i], got, newest)
+        if not gaps:
+            at = i
+            break
+        _passed_over_for_lock(earlier[i], f"incomplete against the newest ({newest.captured}): "
+                                          f"{'; '.join(gaps)}", "the previous-report baseline")
+        passed += 1
+    if at is None:
+        reason = f"no earlier scored snapshot to diff the newest ({newest.captured}) against"
+        if len(earlier) > passed:
+            notes.insert(0, f"{len(earlier) - passed} raw capture(s) not used as the baseline")
+        if passed:
+            notes.insert(0, f"{passed} snapshot(s) of unrecorded kind not used as the baseline "
+                            "(incomplete)")
+        return VintageDiffReport(as_of, newest, None, [],
+                                 no_baseline_reason="; ".join(filter(None, [reason, raw_note()])))
+    previous = earlier[at]
+    if at < len(earlier) - 1 - passed:
+        notes.insert(0, f"{len(earlier) - 1 - at - passed} raw capture(s) since "
+                        f"{previous.captured} not used as the baseline")
+    if passed:
+        notes.insert(0, f"{passed} snapshot(s) of unrecorded kind since {previous.captured} "
+                        "not used as the baseline (incomplete)")
+    new_facts = facts_of(newest)
+    scored = diff_scored(facts_of(previous), new_facts, since=since)
     changes, unavailable = scored.changes, scored.canonical_unavailable
     if baseline_day is None:
         return VintageDiffReport(as_of, newest, previous, changes,
-                                 canonical_unavailable=unavailable)
+                                 canonical_unavailable=unavailable, raw_note=raw_note())
 
-    baseline = observation_at_or_before(visible, baseline_day - timedelta(days=1))
-    if baseline is None:
+    lock_day = baseline_day - timedelta(days=1)
+    before_lock = [s for s in visible if date.fromisoformat(s.captured) <= lock_day]
+    if not before_lock:
+        # Nothing at all was stored before the thesis day: nothing can be
+        # back-filled, so this is a note, not a window left unchecked.
         return VintageDiffReport(
             as_of, newest, previous, changes,
             baseline_note=(
                 f"no snapshot before the pinned thesis day {baseline_day}; "
                 f"earliest is {visible[0].captured}"
             ),
-            canonical_unavailable=unavailable,
+            canonical_unavailable=unavailable, raw_note=raw_note(),
+        )
+    # A capture is checked against the scored state nearest after the
+    # thesis day (the newest when none is nearer): the least time for the
+    # filer to have legitimately changed how a figure is built. A state of
+    # unrecorded kind is not a reference: a partial one would let a capture
+    # missing the same field cover it (cross-branch review of e0525c4).
+    reference = visible[next((i for i in range(top + 1) if date.fromisoformat(visible[i].captured)
+                              > lock_day and trusted(visible[i])), top)]
+
+    baseline: VintageObservation | None = None
+    source = None
+    unmappable = incomplete = mapped_here = untried = 0
+    legacy = raw = 0  # which kinds were passed over, for the wording
+    # Nearest first: a state known to be scored qualifies as it is; a raw
+    # capture, or a state of unrecorded kind, only if it maps and covers the
+    # comparison.
+    for obs in reversed(before_lock):
+        if trusted(obs):
+            baseline = obs
+            break
+        day = date.fromisoformat(obs.captured)
+        got_before = built.get(content(obs))
+        if obs.kind is None and content(obs) in unusable:
+            continue  # the previous-report walk passed it over: logged and counted
+        costly = content(obs) not in built or (
+            isinstance(got_before, _Mapped)
+            and (content(reference), day - timedelta(days=1)) not in ref_as_of)
+        if costly and mapped_here >= LOCK_CAPTURES_EXAMINED:
+            untried += 1
+            continue
+        mapped_here += costly
+        got = build(obs)
+        if not isinstance(got, _Mapped):
+            _passed_over_for_lock(obs, f"{type(got).__name__}: {got}" if got is not None
+                                  else "does not map (the mapper cannot build it)")
+            unmappable += 1
+        elif gaps := coverage_gaps(obs, got, reference):
+            _passed_over_for_lock(obs, f"incomplete against the scored state of "
+                                       f"{reference.captured} as of {day - timedelta(days=1)}: "
+                                       f"{'; '.join(gaps)}")
+            incomplete += 1
+        else:
+            baseline, source = obs, SWEEP_BASELINE if obs.kind == RAW else UNRECORDED_BASELINE
+            break
+        legacy += obs.kind is None
+        raw += obs.kind == RAW
+    what = ("sweep capture(s)" if not legacy
+            else "stored snapshot(s) of unrecorded kind" if not raw
+            else "sweep capture(s) or stored snapshot(s) of unrecorded kind")
+    if unmappable or incomplete:
+        kinds = [f"{unmappable} unmappable" if unmappable else "",
+                 f"{incomplete} incomplete" if incomplete else ""]
+        noun = ("capture(s)" if not legacy else "snapshot(s) of unrecorded kind" if not raw
+                else "capture(s) or snapshot(s) of unrecorded kind")
+        notes.append(f"{unmappable + incomplete} {noun} before the thesis day not usable as "
+                     f"the lock baseline ({', '.join(k for k in kinds if k)})")
+    if untried:
+        notes.append(f"{untried} older capture(s) before the thesis day not examined (at most "
+                     f"{LOCK_CAPTURES_EXAMINED} per report)")
+    if baseline is None:
+        # States predate the thesis day and none qualifies: the lock window
+        # is not compared as scored, and the card says so.
+        if untried:
+            why = (f"no snapshot before the pinned thesis day {baseline_day} was usable among "
+                   f"the {unmappable + incomplete} examined")
+            gap: str | None = "no snapshot examined before the thesis day could be used"
+        elif incomplete:
+            gap = (f"incomplete {what} only" if not unmappable
+                   else f"incomplete or unmappable {what} only")
+            why = f"no snapshot before the pinned thesis day {baseline_day} covers the scored comparison: {gap}"
+        else:
+            why, gap = f"no snapshot before the pinned thesis day {baseline_day} can be mapped", None
+        scored_by = ("none recorded as scored by a report"
+                     if any(s.kind is None for s in before_lock) else "none scored by a report")
+        return VintageDiffReport(
+            as_of, newest, previous, changes,
+            canonical_unavailable=unavailable, raw_note=raw_note(),
+            baseline_unavailable=f"{why} ({len(before_lock)} stored before it, {scored_by})",
+            lock_gap=gap,
         )
     # By content, not identity: a revert (A -> B -> A) is a third observation
     # that reuses A's bytes, and diffing it against the newest A finds nothing.
@@ -1118,17 +1913,65 @@ def report_diff(
             "snapshot; nothing to compare since the lock"
         )
         return VintageDiffReport(as_of, newest, previous, changes, baseline,
-                                 baseline_note=note, canonical_unavailable=unavailable)
+                                 baseline_note=note, canonical_unavailable=unavailable,
+                                 raw_note=raw_note(), baseline_source=source)
     if baseline.sha256 == previous.sha256:
         note = (
             f"the pinned thesis snapshot ({baseline.captured}) is the previous "
             "snapshot; one comparison covers both"
         )
         return VintageDiffReport(as_of, newest, previous, changes, baseline,
-                                 baseline_note=note, canonical_unavailable=unavailable)
-    lock = diff_scored(_load_for_diff(baseline), new_facts, since=since)
+                                 baseline_note=note, canonical_unavailable=unavailable,
+                                 raw_note=raw_note(), baseline_source=source)
+    lock = diff_scored(facts_of(baseline), new_facts, since=since)
     return VintageDiffReport(as_of, newest, previous, changes, baseline, lock.changes,
-                             canonical_unavailable=unavailable or lock.canonical_unavailable)
+                             canonical_unavailable=unavailable,
+                             baseline_unavailable=lock.canonical_unavailable,
+                             raw_note=raw_note(), baseline_source=source)
+
+
+def tier1_promotions(
+    rep: VintageDiffReport, *, period_since: date
+) -> list[tuple[VintageChange, VintageObservation, VintageObservation, str]]:
+    """The decision card's silent-revision lines, each fact — (field,
+    period start, period end) — once: `(change, older, newer, line)`, with
+    `older -> newer` the window whose `change` put it on the card.
+
+    Promote from BOTH windows, each fact once. The lock-to-now window
+    catches a revision that landed in an intermediate state (invisible to
+    previous -> newest); previous -> newest catches a revision to a period
+    the lock snapshot did not yet contain (a quarter added after the lock,
+    then quietly revised), which the lock-to-now diff cannot see because it
+    only walks facts present in the older snapshot.
+
+    A fact is "promoted" once a window actually put it on the card. Every
+    key the lock window listed used to count — a raw row (never promoted)
+    or a move below the threshold since the lock suppressed a real Tier-1
+    revision in previous -> newest while the ledger marked it VALIDATED
+    (review of 224b896, finding 3). The ledger reads this same list, so a
+    fact both windows promote is one card line and one VALIDATED item
+    (review of c131583, finding 4)."""
+    newest, previous, baseline = rep.newest, rep.previous, rep.baseline
+    # `compared` (and a lock window) imply both snapshots exist; the explicit
+    # None checks only let the type checker see it.
+    windows: list[tuple[list[VintageChange], VintageObservation, VintageObservation]] = []
+    if rep.changes_since_baseline is not None and baseline is not None and newest is not None:
+        windows.append((rep.changes_since_baseline, baseline, newest))
+    if rep.compared and previous is not None and newest is not None:
+        windows.append((rep.changes_since_previous, previous, newest))
+    out: list[tuple[VintageChange, VintageObservation, VintageObservation, str]] = []
+    promoted: set[tuple] = set()
+    for changes, older, newer in windows:
+        for c in changes:
+            key = (c.field_name, c.key.start, c.key.end)
+            if key in promoted:
+                continue
+            lines = silent_revision_tier1_lines(
+                [c], older.captured, newer.captured, period_since=period_since)
+            if lines:
+                out += [(c, older, newer, line) for line in lines]
+                promoted.add(key)
+    return out
 
 
 def silent_revision_tier1_lines(
@@ -1137,8 +1980,10 @@ def silent_revision_tier1_lines(
     """Tier-1 lines for the decision card, one per promoted change.
 
     Promoted: a `revised` scored, non-split field, for a period ending on or
-    after `period_since`, moved by at least SILENT_REVISION_TIER1_PCT, and
-    not a tag migration. A figure revised away from zero (an impairment of 0
+    after `period_since`, moved by at least SILENT_REVISION_TIER1_PCT, not a
+    tag migration, and not explained by a later filing the newer snapshot
+    carries beside the original (the restatement scan's line covers that one:
+    promoting it too put an amendment on the card twice, once as "silent"). A figure revised away from zero (an impairment of 0
     restated to 500M) has no percentage and is promoted too: it cannot be
     immaterial. Withdrawn facts and tag moves stay in the appendix section: a
     withdrawal has no ratio to threshold, and a move is a filer re-tagging
@@ -1146,7 +1991,7 @@ def silent_revision_tier1_lines(
     descending)."""
     # Every field the engine scores — including total debt, which no
     # single-tag table lists and whose changes come from `diff_scored`.
-    scored = {f.name for f in FIELDS}
+    scored = {f.name for f in FIELDS if f.scored}
     out: list[str] = []
     for c in changes:
         if c.kind != "revised" or c.new_value is None or c.scope != "scored":
@@ -1158,7 +2003,7 @@ def silent_revision_tier1_lines(
         from_zero = c.old_value == 0 and c.new_value != 0
         if not from_zero and (c.pct_change is None or c.pct_change < SILENT_REVISION_TIER1_PCT):
             continue
-        if c.moved_tag:
+        if c.moved_tag or c.explained_by_filing:
             continue
         move = (
             "from zero" if from_zero

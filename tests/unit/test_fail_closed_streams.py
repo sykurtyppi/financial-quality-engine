@@ -199,8 +199,9 @@ class TestStreamsAreTransactional:
             {"end": "2026-03-31", "val": v, "filed": "2026-05-01", "form": "10-Q", "accn": "a"}]}}}}}
         vintages_mod.store_snapshot(CIK, facts(100.0), now=datetime(2026, 9, 1, 12, tzinfo=UTC), root=tmp_path)
         vintages_mod.store_snapshot(CIK, facts(200.0), now=datetime(2026, 9, 2, 12, tzinfo=UTC), root=tmp_path)
+        # The newest snapshot is the payload the report scored.
         body, _l, _t, errors, _tk, _s, diff = _collect_streams(
-            _Client(_index()), "AAPL", DAY, company_facts={"facts": {}}, submissions=_index(),
+            _Client(_index()), "AAPL", DAY, company_facts=facts(200.0), submissions=_index(),
             vintage_root=tmp_path,
         )
         assert staged, "the section was built before the failure"
@@ -253,3 +254,16 @@ def test_documents_degrade_when_the_filing_index_cannot_be_fetched():
         (line,) = result.diagnostics
         assert line.startswith("filing index unavailable (SEC request failed")
         assert "UNAVAILABLE, not clean" in line
+
+
+def test_a_failed_stream_leaves_no_ledger_evidence(monkeypatch):
+    """The ledger reads what `_collect_streams` hands back in `evidence`: a
+    stream that failed after staging its scan must not reach it either."""
+    _break_after_first_write(monkeypatch, report_builder, "_restatement_tier1_lines")
+    evidence: dict = {}
+    _collect_streams(
+        _Client(_index()), "AAPL", DAY, company_facts={"facts": {}}, submissions=_index(),
+        evidence=evidence,
+    )
+    assert "restatements" not in evidence
+    assert "offerings" in evidence and "events" in evidence  # the others committed

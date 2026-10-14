@@ -22,6 +22,7 @@ from hypothesis import strategies as st
 
 from app.services.backtesting.events import fetch_entity_events
 from app.services.ingestion import vintages
+from app.services.ingestion.filing_events import filing_events
 from app.services.ingestion.offerings import fetch_offerings
 from app.services.ingestion.payloads import ExternalPayloadError
 from app.services.ingestion.restatements import scan_restatements
@@ -149,6 +150,27 @@ def test_events_reject_a_malformed_filing_row_only_as_a_payload_error(payload):
 @given(payload=mutated(_submissions()))
 def test_events_reject_malformed_submissions_only_as_payload_errors(payload):
     _check("fetch_entity_events", lambda: fetch_entity_events(_Client(), "T", submissions=payload))
+
+
+def _with_periods(subs: dict) -> dict:
+    """The base index with period dates, so the filing-lag path is fuzzed too."""
+    recent = subs["filings"]["recent"]
+    recent["reportDate"] = ["2026-06-30" if f.startswith("10-") else "" for f in recent["form"]]
+    return subs
+
+
+@settings(max_examples=150)
+@given(payload=mutated(_with_periods(_submissions())))
+def test_filing_events_reject_malformed_submissions_only_as_payload_errors(payload):
+    _check("filing_events", lambda: filing_events(
+        payload, since=date(2024, 9, 21), as_of=date(2026, 9, 21)))
+
+
+@settings(max_examples=150)
+@given(payload=mutated_column_element(_with_periods(_submissions())))
+def test_filing_events_reject_a_malformed_filing_row_only_as_a_payload_error(payload):
+    _check("filing_events", lambda: filing_events(
+        payload, since=date(2024, 9, 21), as_of=date(2026, 9, 21)))
 
 
 @settings(max_examples=150)

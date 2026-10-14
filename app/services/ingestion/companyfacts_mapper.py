@@ -21,7 +21,14 @@ docs/real_data_validation.md — and covered by tests):
    mapper computes over a buffered window and trims.
 6. TAG SWITCHES — filers change tags over time (e.g. XOM receivables); each
    candidate tag is scored and the one covering the most REPORTED quarters
-   wins (tags are never mixed within one series). Total debt is the
+   wins. Tags are never mixed where the selected tag has a value. A
+   reported quarter it has NO value for — the newest quarter, after a
+   filer moved the figure to a new concept (CRM's FY2027Q1 interest) — is
+   filled from another candidate only when that candidate is proven equal
+   to the selected tag on every quarter both report, one of them a non-zero
+   reported quarter (`_fill_gaps`), and
+   the field notes, per-quarter provenance and `SeriesSelection.fallbacks`
+   say so; a candidate not proven equal is named, never used. Total debt is the
    exception: it is composed per balance-sheet date from what was reported
    at that date (composition.compose_total_debt), because a debt role's tag
    can change without the series changing meaning (KO's migration to the
@@ -40,17 +47,24 @@ IngestionDiagnostics.
 
 from __future__ import annotations
 
+import logging
+import math
+import re
 from collections import Counter
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from datetime import date, datetime, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.financials import (
     CompanyDataset,
     CompanyProfile,
+    FactRef,
     PeriodFinancials,
     PeriodType,
+    Sign,
+    SourcedValue,
 )
 from app.services.ingestion.composition import (
     COMPOSITE,
@@ -65,18 +79,23 @@ from app.services.ingestion.composition import (
     resolve_by_strategy,
 )
 from app.services.ingestion.fields import (
-    COVER_DATE_TOLERANCE_DAYS,
+    COVER_DATE_TOLERANCE_DAYS,  # noqa: F401  (re-exported view)
     CRITICAL_FIELDS,
     FIELDS,
+    FieldSpec,
     Kind,
     candidate_table,
     composite_components,
+    is_scored,
     role_tags,
     unit_for,
 )
 from app.services.ingestion.fields import field as field_spec
 from app.services.ingestion.precedence import Rank, current_conflict, latest
 from app.services.ingestion.precedence import rank as fact_rank
+from app.services.ingestion.selection import Composer, SeriesSelection, composer_for
+
+logger = logging.getLogger(__name__)
 
 QTD_DAYS = (70, 100)
 ANNUAL_DAYS = (330, 380)
@@ -121,6 +140,7 @@ class RawFact:
     filed: date
     form: str
     accn: str = ""
+    concept: str = ""  # qualified, e.g. "us-gaap:Revenues"
 
     @property
     def days(self) -> int | None:
@@ -153,6 +173,36 @@ class FieldDiagnostic(BaseModel):
     # series-level `tag_used` cannot say this once a field can be built
     # differently from one quarter to the next.
     period_sources: dict[str, PeriodSource] = Field(default_factory=dict)
+    # What was selected, as an object: the qualified components and the rule
+    # that composes them. `tag_used` is its legacy rendering.
+    selection: SeriesSelection | None = None
+
+    @model_validator(mode="after")
+    def _tag_used_is_the_selection(self) -> FieldDiagnostic:
+        if self.selection is not None and self.tag_used != self.selection.tag_used:
+            raise ValueError(
+                f"{self.field_name}: tag_used {self.tag_used!r} is not the selection's "
+                f"{self.selection.tag_used!r}"
+            )
+        # A quarter filled from another concept is a claim the per-quarter
+        # provenance must make too: the two records name one concept or the
+        # diagnostic is refused.
+        for period_end, concept in self.fallbacks.items():
+            src = self.period_sources.get(period_end)
+            if src is None or src.components != [concept]:
+                raise ValueError(
+                    f"{self.field_name}: fallback {concept} at {period_end} is not the "
+                    "concept its period source names"
+                )
+        return self
+
+    @property
+    def fallbacks(self) -> dict[str, str]:
+        """Reported quarter end (ISO) -> the concept a gap in the selected
+        concept was filled from (`SeriesSelection.fallbacks`). `tag_used`
+        stays the selected concept; these are the quarters it did not
+        supply."""
+        return dict(self.selection.fallbacks) if self.selection is not None else {}
 
 
 class IngestionDiagnostics(BaseModel):
@@ -164,8 +214,12 @@ class IngestionDiagnostics(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
     def coverage(self) -> float:
-        total = sum(f.periods_total for f in self.fields)
-        filled = sum(f.periods_filled for f in self.fields)
+        """Filled over possible quarter-fields, scored fields only: the
+        valuation plane's unscored inputs are mapped beside them but must
+        not move the figure the card and the sweep gate read."""
+        scored = [f for f in self.fields if is_scored(f.field_name)]
+        total = sum(f.periods_total for f in scored)
+        filled = sum(f.periods_filled for f in scored)
         return filled / total if total else 0.0
 
     def field_by_name(self, name: str) -> FieldDiagnostic:
@@ -179,6 +233,30 @@ class IngestionDiagnostics(BaseModel):
         re-deriving it from the payload and hoping the two agree."""
         return {f.field_name: f.tag_used for f in self.fields}
 
+    def selections_digest(self) -> str:
+        """A short fingerprint of which concepts backed which field: two runs
+        with the same digest mapped every field from the same concepts. A
+        backtest row carries it so a moved score can be told apart from a
+        moved tag choice without re-running the mapper. A quarter filled
+        from another concept is part of the fingerprint (appended only when
+        there is one, so a field without fallbacks hashes as it always has)."""
+        import hashlib
+
+        def pair(f: FieldDiagnostic) -> str:
+            # The suffix is `SeriesSelection.label`'s, so a digest and the
+            # ledger's `selections` spell a fallback the same way.
+            filled = "".join(f"|{q}:{c}" for q, c in sorted(f.fallbacks.items()))
+            return f"{f.field_name}={f.tag_used or ''}{filled}"
+
+        pairs = "\n".join(pair(f) for f in sorted(self.fields, key=lambda f: f.field_name))
+        return hashlib.sha256(pairs.encode()).hexdigest()[:12]
+
+    def selected_series(self) -> dict[str, SeriesSelection | None]:
+        """What backed each canonical field, as objects: the components with
+        their taxonomy and the composer the mapper used. Pass this, not
+        `selected_tags()`, to anything that must rebuild the scored figure."""
+        return {f.field_name: f.selection for f in self.fields}
+
     def field_notes(self) -> list[str]:
         """Every per-field mapping note, prefixed with its field, in mapper
         order. These record how a figure was BUILT — "total debt may
@@ -190,6 +268,43 @@ class IngestionDiagnostics(BaseModel):
 
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _filed_by(entry: object, as_of: date) -> bool:
+    """Whether a companyfacts entry was filed on or before `as_of`. An entry
+    that cannot be dated cannot be placed before the date: it is not
+    visible (including it would leak whatever it reports)."""
+    if not isinstance(entry, dict):
+        return False
+    filed = entry.get("filed")
+    if not isinstance(filed, str) or not _ISO_DATE.fullmatch(filed):
+        return False
+    try:
+        return date.fromisoformat(filed) <= as_of
+    except ValueError:
+        return False
+
+
+def _visible_as_of(facts_json: dict, as_of: date) -> dict:
+    """The payload as a reader on `as_of` could have seen it: only entries
+    filed on or before that day, and no unit or concept left empty — so the
+    mis-filed share-count fallback in `_collect` sees exactly what it would
+    have seen then. Every read the mapper makes goes through this view,
+    quarter-end selection and the fiscal calendar included."""
+    out: dict = {"entityName": facts_json.get("entityName"), "facts": {}}
+    for taxonomy, tags in facts_json.get("facts", {}).items():
+        for tag, concept in tags.items():
+            units = {
+                unit: kept
+                for unit, entries in concept.get("units", {}).items()
+                if (kept := [e for e in entries if _filed_by(e, as_of)])
+            }
+            if units:
+                out["facts"].setdefault(taxonomy, {})[tag] = {"units": units}
+    return out
 
 
 def _collect(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[RawFact]:
@@ -205,18 +320,35 @@ def _collect(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[RawFa
     out: list[RawFact] = []
     for e in entries:
         try:
-            out.append(
-                RawFact(
-                    start=_parse_date(e["start"]) if "start" in e else None,
-                    end=_parse_date(e["end"]),
-                    val=float(e["val"]),
-                    filed=_parse_date(e.get("filed", "1900-01-01")),
-                    form=e.get("form", ""),
-                    accn=str(e.get("accn", "")),
-                )
+            f = RawFact(
+                start=_parse_date(e["start"]) if "start" in e else None,
+                end=_parse_date(e["end"]),
+                val=float(e["val"]),
+                filed=_parse_date(e.get("filed", "1900-01-01")),
+                form=e.get("form", ""),
+                accn=str(e.get("accn", "")),
+                concept=f"{taxonomy}:{tag}",
             )
         except (KeyError, ValueError, TypeError):
             continue
+        if not math.isfinite(f.val):
+            # `float()` takes "NaN" and "inf", and `json.loads` the bare NaN
+            # and Infinity literals, so a payload can carry a value that is
+            # not a number. It is not a report of one: dropped here, the
+            # field is missing like any unreported one (MISSING_DATA
+            # downstream, `pending` in the journal resolver), and a later
+            # such fact does not supersede an earlier real one. Kept, a NaN
+            # revenue made DSO NOT_MEANINGFUL, which the resolver commits as
+            # a final `unresolvable` (review of deb6364, finding 1).
+            # `restatements._trail` and `vintages._series` drop it the same
+            # way, so they stand on the figure scored here.
+            logger.warning(
+                "dropping %s %s%s (accession %s, filed %s): value %r is not a finite number",
+                f.concept, "" if f.start is None else f"{f.start}..", f.end,
+                f.accn or "none", f.filed, f.val,
+            )
+            continue
+        out.append(f)
     return out
 
 
@@ -311,6 +443,29 @@ def _fiscal_label(qend: date, fye_month: int | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _ref(f: RawFact, sign: Sign = 1) -> FactRef:
+    return FactRef(concept=f.concept, accession=f.accn, filed=f.filed, form=f.form,
+                   start=f.start, end=f.end, value=f.val, sign=sign)
+
+
+def _negated(refs: tuple[FactRef, ...]) -> tuple[FactRef, ...]:
+    return tuple(r.model_copy(update={"sign": -r.sign}) for r in refs)
+
+
+@dataclass
+class _Series:
+    """One concept's quarterly series: values, how each was derived, and the
+    signed facts behind each (value == Σ sign·fact)."""
+
+    values: dict[date, float] = dc_field(default_factory=dict)
+    methods: dict[date, str] = dc_field(default_factory=dict)
+    refs: dict[date, tuple[FactRef, ...]] = dc_field(default_factory=dict)
+    # Derived quarters that could not be rebuilt as of the filing of the
+    # figure they subtract from (an earlier period did not exist yet then):
+    # the latest values were used, so the quarter mixes filing dates.
+    mixed: set[date] = dc_field(default_factory=set)
+
+
 class _FlowSeries:
     """Quarterly value extraction for one duration-based concept.
 
@@ -330,7 +485,6 @@ class _FlowSeries:
         self.facts = [f for f in facts if f.start is not None]
         self.by_key = _dedupe_latest_filed(self.facts)
         self.allow_derivation = allow_derivation
-        self.mixed: set[date] = set()
         self._cuts: dict[date, _FlowSeries] = {}
 
     def _as_of(self, cutoff: date) -> _FlowSeries:
@@ -349,15 +503,16 @@ class _FlowSeries:
         ]
         return latest(matches, key=_rank) if matches else None
 
-    def quarterly(self, quarter_ends: list[date]) -> tuple[dict[date, float], dict[date, str]]:
-        values: dict[date, float] = {}
-        methods: dict[date, str] = {}
-        self.mixed = set()
+    def quarterly(self, quarter_ends: list[date]) -> _Series:
+        out = _Series()
+        values = out.values
+        methods = out.methods
         for i, qend in enumerate(quarter_ends):
             direct = self._find(qend, *QTD_DAYS)
             if direct is not None:
                 values[qend] = direct.val
                 methods[qend] = "direct"
+                out.refs[qend] = (_ref(direct),)
                 continue
             if not self.allow_derivation:
                 continue
@@ -375,13 +530,14 @@ class _FlowSeries:
                         # The earlier period as it stood when this
                         # year-to-date figure was filed (class docstring):
                         # a Q1 restated after H1 was filed is not what H1
-                        # embeds.
+                        # embeds. The refs name the fact subtracted.
                         then = self._as_of(f2.filed).by_key.get((f2.start, prev_end))
                         if then is None:
                             then = f1
-                            self.mixed.add(qend)
+                            out.mixed.add(qend)
                         values[qend] = f2.val - then.val
                         methods[qend] = "ytd_diff"
+                        out.refs[qend] = (_ref(f2), _ref(then, -1))
                         break
             if qend in values:
                 continue
@@ -391,33 +547,35 @@ class _FlowSeries:
                 if all(p in values and annual.start <= p for p in prior):
                     # The three quarters as they stood when the annual figure
                     # was filed (class docstring).
-                    then, _ = self._as_of(annual.filed).quarterly(quarter_ends[:i])
-                    if all(p in then for p in prior):
-                        values[qend] = annual.val - sum(then[p] for p in prior)
-                    else:
-                        values[qend] = annual.val - sum(values[p] for p in prior)
-                        self.mixed.add(qend)
+                    then = self._as_of(annual.filed).quarterly(quarter_ends[:i])
+                    if not all(p in then.values for p in prior):
+                        then = out
+                        out.mixed.add(qend)
+                    values[qend] = annual.val - sum(then.values[p] for p in prior)
                     methods[qend] = "fy_minus_3q"
-        return values, methods
+                    out.refs[qend] = (_ref(annual),) + tuple(
+                        r for p in prior for r in _negated(then.refs[p])
+                    )
+        return out
 
 
 def _instant_series(
     facts: list[RawFact],
     quarter_ends: list[date],
     tolerance_days: int = 0,
-) -> tuple[dict[date, float], dict[date, str]]:
+) -> _Series:
     by_end: dict[date, RawFact] = {}
     for f in facts:
         if f.start is not None:
             continue
         if f.end not in by_end or _rank(f) > _rank(by_end[f.end]):
             by_end[f.end] = f
-    values: dict[date, float] = {}
-    methods: dict[date, str] = {}
+    out = _Series()
     for q in quarter_ends:
         if q in by_end:
-            values[q] = by_end[q].val
-            methods[q] = "direct"
+            out.values[q] = by_end[q].val
+            out.methods[q] = "direct"
+            out.refs[q] = (_ref(by_end[q]),)
         elif tolerance_days:
             # Cover-page dates trail the quarter end by days-to-weeks.
             window = [
@@ -425,13 +583,36 @@ def _instant_series(
             ]
             if window:
                 nearest = min(window)
-                values[q] = by_end[nearest].val
-                methods[q] = "nearest"
-    return values, methods
+                out.values[q] = by_end[nearest].val
+                out.methods[q] = "nearest"
+                out.refs[q] = (_ref(by_end[nearest]),)
+    return out
 
 
 def _score(values: dict[date, float], quarter_ends: list[date]) -> int:
     return sum(1 for q in quarter_ends if q in values)
+
+
+def _candidate_series(
+    facts_json: dict,
+    taxonomy: str,
+    tag: str,
+    unit: str,
+    quarter_ends: list[date],
+    kind: str,
+    allow_derivation: bool = True,
+    tolerance_days: int = 0,
+) -> _Series | None:
+    """One candidate concept's quarterly series, or None when the payload
+    has no fact for it. The one builder for a single concept: the selected
+    tag and any fallback for it go through here, so a fallback quarter is
+    derived exactly as the selected tag's would be."""
+    facts = _collect(facts_json, taxonomy, tag, unit)
+    if not facts:
+        return None
+    if kind == "instant":
+        return _instant_series(facts, quarter_ends, tolerance_days)
+    return _FlowSeries(facts, allow_derivation).quarterly(quarter_ends)
 
 
 def _best_series(
@@ -443,41 +624,154 @@ def _best_series(
     allow_derivation: bool = True,
     tolerance_days: int = 0,
     window_ends: list[date] | None = None,
-    mixed_out: set[date] | None = None,
-) -> tuple[dict[date, float], dict[date, str], str | None]:
+) -> tuple[_Series, str | None]:
     """Evaluate every candidate tag; the one covering the most REPORTED
     quarters (`window_ends`) wins, then the most buffered quarters
-    (`quarter_ends`, which derivations draw on), then candidate order. Tags
-    are never mixed within a series — that would fabricate
-    period-over-period jumps.
+    (`quarter_ends`, which derivations draw on), then candidate order. The
+    series returned is that one tag's: where it has a value, no other tag is
+    ever used — mixing tags there would fabricate period-over-period jumps.
+    A reported quarter it has NO value for may afterwards be filled from
+    another candidate proven equal to it (`_fill_gaps`); this function
+    never does that.
 
     Coverage used to be counted over the buffered window alone, so a tag a
     filer had abandoned could outrank the one it files today by covering
-    more OLD quarters, leaving reported quarters empty.
-
-    `mixed_out`, when given, receives the winning flow series' quarters that
-    could not be derived from one filing date (`_FlowSeries.mixed`)."""
+    more OLD quarters, leaving reported quarters empty."""
     window = window_ends if window_ends is not None else quarter_ends
     best_key: tuple[int, int, int] | None = None
-    best: tuple[dict[date, float], dict[date, str], str | None] = ({}, {}, None)
-    best_mixed: set[date] = set()
+    best: tuple[_Series, str | None] = (_Series(), None)
     for rank, (taxonomy, tag) in enumerate(candidates):
-        facts = _collect(facts_json, taxonomy, tag, unit)
-        if not facts:
+        series = _candidate_series(
+            facts_json, taxonomy, tag, unit, quarter_ends, kind, allow_derivation, tolerance_days
+        )
+        if series is None:
             continue
-        mixed: set[date] = set()
-        if kind == "instant":
-            values, methods = _instant_series(facts, quarter_ends, tolerance_days)
-        else:
-            series = _FlowSeries(facts, allow_derivation)
-            values, methods = series.quarterly(quarter_ends)
-            mixed = series.mixed
-        key = (_score(values, window), _score(values, quarter_ends), -rank)
+        key = (_score(series.values, window), _score(series.values, quarter_ends), -rank)
         if key[1] > 0 and (best_key is None or key > best_key):
-            best_key, best, best_mixed = key, (values, methods, f"{taxonomy}:{tag}"), mixed
-    if mixed_out is not None:
-        mixed_out |= best_mixed
+            best_key, best = key, (series, f"{taxonomy}:{tag}")
     return best
+
+
+# Relative difference, to the selected concept's value, within which another
+# concept's value for the same quarter counts as the SAME figure — the proof
+# a tag-switch fallback needs. Not the restatement detector's 1% materiality:
+# that floor separates a revision from rounding within ONE concept, and is
+# too loose to prove two concepts measure one thing. Half a percent absorbs
+# the rounding two presentations of one figure carry (a total rounded to
+# millions in one filing, to thousands in another); an alternative that
+# differs by more on any shared quarter is a different measure (interest on
+# debt alone vs all nonoperating interest) and is never used.
+FALLBACK_AGREEMENT_PCT = 0.005
+
+
+def _agrees(alternative: float, selected: float) -> bool:
+    return abs(alternative - selected) <= FALLBACK_AGREEMENT_PCT * abs(selected)
+
+
+def _amount(v: float) -> str:
+    return f"{v:,.0f}" if v.is_integer() else f"{v:,}"
+
+
+def _fill_gaps(
+    facts_json: dict,
+    spec: FieldSpec,
+    selected: tuple[_Series, str | None],
+    quarter_ends: list[date],
+    window_ends: list[date],
+    labels: dict[date, str],
+) -> tuple[_Series, dict[date, str], list[str]]:
+    """Fill the reported quarters the selected concept has no value for,
+    each from the first other candidate (in registry order) that is proven
+    equal to the selected concept: agreement within FALLBACK_AGREEMENT_PCT
+    on EVERY quarter both report (buffer included), at least one of them a
+    reported-window quarter where the selected value is not zero.
+
+    A filer that switches concepts leaves the newest quarters under the new
+    tag only, while coverage keeps the old one selected (CRM's FY2027Q1
+    interest under `InterestExpenseNonoperating`, KO's FY2024Q1 under
+    `InterestExpense` at 2025-03-31): the quarter used to go missing. Where
+    the selected concept HAS a value it is never replaced — that was the
+    no-mixing rule's point, and it still holds. Only a gap is filled, and
+    only from a concept shown to report the same figure where both exist.
+
+    Candidates are built by `_candidate_series` from the same payload the
+    selected one was — the point-in-time view when `as_of` is set, so a fact
+    filed after it can neither fill a quarter nor prove agreement — with the
+    same derivation rules, so a year-to-date difference is taken exactly as
+    it would be for the selected concept. The value's refs, method and
+    mixed-vintage flag travel with it. Returns the filled series, the
+    concept used per filled quarter, and one note per filled quarter and per
+    candidate that could have filled a gap but was not proven equal."""
+    series, used = selected
+    gaps = [q for q in window_ends if q not in series.values]
+    if used is None or not gaps:
+        return series, {}, []
+    spec_kind = "instant" if spec.kind is Kind.INSTANT else "flow"
+    out = _Series(dict(series.values), dict(series.methods), dict(series.refs), set(series.mixed))
+    filled: dict[date, str] = {}
+    notes: list[str] = []
+    others = [(t, c) for t, c in spec.strategies[0].tags if f"{t}:{c}" != used]
+    for taxonomy, tag in others:
+        if len(filled) == len(gaps):
+            break  # every gap filled: later candidates are not read
+        concept = f"{taxonomy}:{tag}"
+        open_gaps = [q for q in gaps if q not in filled]
+        alt = _candidate_series(
+            facts_json, taxonomy, tag, spec.unit, quarter_ends, spec_kind,
+            spec.additive, spec.cover_date_tolerance_days,
+        )
+        offered = [q for q in open_gaps if alt is not None and q in alt.values]
+        if alt is None or not offered:
+            continue
+        # Disagreement is looked for on EVERY quarter both report, buffer
+        # included (conservative). Proof needs more than the absence of
+        # disagreement: a reported-window quarter where the selected value
+        # is not zero. Two tags that are both 0 agree on nothing about the
+        # figure, and a match only in the derivation buffer is not shown on
+        # any quarter the report uses (independent review of 7a65130).
+        shared = [q for q in quarter_ends if q in series.values and q in alt.values]
+        differ = [q for q in shared if not _agrees(alt.values[q], series.values[q])]
+        in_window = [q for q in shared if q in window_ends]
+        proven = [q for q in in_window if series.values[q] != 0]
+        if proven and not differ:
+            proof = ", ".join(labels[q] for q in shared)
+            for q in offered:
+                out.values[q] = alt.values[q]
+                out.methods[q] = alt.methods[q]
+                out.refs[q] = alt.refs[q]
+                if q in alt.mixed:
+                    out.mixed.add(q)
+                filled[q] = concept
+                notes.append(
+                    f"{labels[q]} from {concept}: the filer switched concepts; it agrees "
+                    f"with {used} on {proof}."
+                )
+            continue
+        if not shared:
+            why = f"it shares no quarter with {used}, so agreement cannot be checked"
+        elif differ:
+            q0 = differ[0]
+            why = (
+                f"it disagrees with {used} at {labels[q0]} "
+                f"({_amount(alt.values[q0])} vs {_amount(series.values[q0])})"
+            )
+        elif not in_window:
+            why = (
+                f"it agrees with {used} only before the reported window "
+                f"({', '.join(labels[q] for q in shared)}), so agreement is not shown on a "
+                "quarter the report uses"
+            )
+        else:
+            why = (
+                f"it agrees with {used} only where both report zero "
+                f"({', '.join(labels[q] for q in in_window)}), which does not show they "
+                "measure the same figure"
+            )
+        for q in offered:
+            notes.append(
+                f"{labels[q]}: {concept} reports {_amount(alt.values[q])} but was not used: {why}."
+            )
+    return out, filled, notes
 
 
 def _where(quarters: list[date], among: list[date], labels: dict[date, str]) -> str:
@@ -499,59 +793,55 @@ def _resolved_flow(
     quarter_ends: list[date],
     window_ends: list[date],
     labels: dict[date, str],
-    single: tuple[dict[date, float], dict[date, str], str | None],
-    mixed: set[date] | None = None,
-) -> tuple[dict[date, float], dict[date, str], str | None, list[str], dict[date, PeriodSource]]:
+    single: tuple[_Series, str | None],
+) -> tuple[_Series, tuple[str, ...], list[str], dict[date, PeriodSource]]:
     """A flow field with alternative strategies (SG&A, D&A), resolved per
     quarter by `composition.resolve_by_strategy` — the rule the restatement
     detector applies too. `single` is the field's own concept as
-    `_best_series` selected it (tags are never mixed within it). `mixed`
-    holds the single concept's quarters that could not be derived from one
-    filing date; on return it holds the resolved field's."""
-    single_values, single_methods, single_used = single
+    `_best_series` selected it, without `_fill_gaps`: that is for
+    single-concept fields, and here a quarter the concept misses is
+    resolved from the field's other strategies instead. A resolved quarter
+    is `mixed` when any series it used is."""
+    single_series, single_used = single
     single_tag = single_used.split(":", 1)[1] if single_used else None
-    mixed_by: dict[str | None, set[date]] = {single_tag: set(mixed or ())}
-    component_series: dict[str, tuple[dict[date, float], dict[date, str]]] = {}
+    by_tag: dict[str, _Series] = {}
+    if single_tag is not None:
+        by_tag[single_tag] = single_series
+    component_series: dict[str, _Series] = {}
     for taxonomy, tag in composite_components(name):
-        series = _FlowSeries(_collect(facts_json, taxonomy, tag, "USD"))
-        component_series[tag] = series.quarterly(quarter_ends)
-        mixed_by[tag] = series.mixed
+        component_series[tag] = _FlowSeries(_collect(facts_json, taxonomy, tag, "USD")).quarterly(
+            quarter_ends
+        )
+        by_tag.setdefault(tag, component_series[tag])
 
-    values: dict[date, float] = {}
-    methods: dict[date, str] = {}
+    out = _Series()
     resolved: dict[date, Resolved] = {}
     for q in quarter_ends:
         present: dict[str, float] = {}
-        if single_tag is not None and q in single_values:
-            present[single_tag] = single_values[q]
-        for tag, (series, _m) in component_series.items():
-            if q in series:
-                present[tag] = series[q]
+        if single_tag is not None and q in single_series.values:
+            present[single_tag] = single_series.values[q]
+        for tag, series in component_series.items():
+            if q in series.values:
+                present[tag] = series.values[q]
         r = resolve_by_strategy(name, present)
         if r is None:
             continue
-        values[q] = r.total
+        out.values[q] = r.total
         resolved[q] = r
-        if mixed is not None and any(q in mixed_by.get(t, ()) for t in r.used):
-            mixed.add(q)
-        elif mixed is not None:
-            mixed.discard(q)
         if r.strategy == COMPOSITE:
-            methods[q] = "composite"
-        elif r.used == (single_tag,):
-            methods[q] = single_methods[q]
+            out.methods[q] = "composite"
         else:
-            methods[q] = component_series[r.used[0]][1][q]
+            out.methods[q] = by_tag[r.used[0]].methods[q]
+        out.refs[q] = tuple(ref for tag in r.used for ref in by_tag[tag].refs[q])
+        if any(q in by_tag[tag].mixed for tag in r.used):
+            out.mixed.add(q)
+    methods = out.methods
 
     reported = [q for q in window_ends if q in resolved]
-    used = [t for t in ([single_tag] if single_tag else []) + list(component_series)
-            if any(t in resolved[q].used for q in reported)]
-    if not used:
-        tag_used = None
-    elif len(used) == 1:
-        tag_used = _qualified(used[0])
-    else:
-        tag_used = "+".join(used)
+    used = tuple(
+        _qualified(t) for t in ([single_tag] if single_tag else []) + list(component_series)
+        if any(t in resolved[q].used for q in reported)
+    )
     sources = {
         q: PeriodSource(
             strategy=resolved[q].strategy,
@@ -577,7 +867,7 @@ def _resolved_flow(
                 f"Partial D&A{_where(partial_q, reported, labels)}: only a depreciation tag is "
                 "reported; amortization is not included (capex/D&A can overstate)."
             )
-    return values, methods, tag_used, notes, sources
+    return out, used, notes, sources
 
 
 def _total_debt_series(
@@ -585,31 +875,33 @@ def _total_debt_series(
     quarter_ends: list[date],
     window_ends: list[date],
     labels: dict[date, str],
-) -> tuple[dict[date, float], str | None, list[str], dict[date, PeriodSource]]:
+) -> tuple[_Series, tuple[str, ...], list[str], dict[date, PeriodSource]]:
     """Total debt at each quarter end, composed from the concepts reported
     AT THAT DATE by `composition.compose_total_debt` — the one rule the
     restatement detector applies too. Notes name the reported quarters where
     a role was missing (counted as zero) or a fallback was used."""
-    by_tag: dict[str, dict[date, float]] = {}
+    by_tag: dict[str, _Series] = {}
     for tag in DEBT_TAGS:
-        values, _ = _instant_series(_collect(facts_json, "us-gaap", tag, "USD"), quarter_ends)
-        if values:
-            by_tag[tag] = values
+        series = _instant_series(_collect(facts_json, "us-gaap", tag, "USD"), quarter_ends)
+        if series.values:
+            by_tag[tag] = series
 
-    out: dict[date, float] = {}
+    out = _Series()
     composed: dict[date, DebtComposition] = {}
     for q in quarter_ends:
-        present = {tag: values[q] for tag, values in by_tag.items() if q in values}
+        present = {tag: series.values[q] for tag, series in by_tag.items() if q in series.values}
         comp = compose_total_debt(present)
         if comp is not None:
-            out[q] = comp.total
+            out.values[q] = comp.total
+            out.methods[q] = "composite"
+            out.refs[q] = tuple(ref for tag in comp.used for ref in by_tag[tag].refs[q])
             composed[q] = comp
 
     reported = [q for q in window_ends if q in composed]
     if not reported:
-        return out, None, ["No debt concepts found; company may be debt-free or use custom tags."], {}
+        return out, (), ["No debt concepts found; company may be debt-free or use custom tags."], {}
     used = {tag for q in reported for tag in composed[q].used}
-    tag_used = "+".join(tag for tag in DEBT_TAGS if tag in used)
+    components = tuple(_qualified(tag) for tag in DEBT_TAGS if tag in used)
 
     def where(quarters: list[date], among: list[date]) -> str:
         return _where(quarters, among, labels)
@@ -653,7 +945,93 @@ def _total_debt_series(
         )
         for q in reported
     }
-    return out, tag_used, notes, sources
+    return out, components, notes, sources
+
+
+def _select_series(
+    facts_json: dict,
+    spec: FieldSpec,
+    quarter_ends: list[date],
+    window_ends: list[date],
+    labels: dict[date, str],
+) -> tuple[_Series, SeriesSelection | None, list[str], dict[date, PeriodSource]]:
+    """One field's series, however the registry says it is built — the one
+    place a field is selected. A single concept by reported-window coverage
+    (`_best_series`); a field with alternative strategies resolved per
+    quarter (`_resolved_flow`); total debt composed per balance-sheet date
+    (`_total_debt_series`). Returns the series over the buffered window
+    (values, derivation methods, the signed facts behind each value), the
+    selection, the notes, and per-quarter provenance over the reported
+    window."""
+    composer = composer_for(spec.name)
+    notes: list[str] = []
+    sources: dict[date, PeriodSource] | None = None
+    fallbacks: dict[date, str] = {}
+    if composer is Composer.DEBT:
+        series, components, notes, sources = _total_debt_series(
+            facts_json, quarter_ends, window_ends, labels
+        )
+    else:
+        series, used = _best_series(
+            facts_json,
+            spec.strategies[0].tags,
+            spec.unit,
+            quarter_ends,
+            "instant" if spec.kind is Kind.INSTANT else "flow",
+            allow_derivation=spec.additive,
+            tolerance_days=spec.cover_date_tolerance_days,
+            window_ends=window_ends,
+        )
+        components = (used,) if used else ()
+        if composer is Composer.SINGLE:
+            # A reported quarter the selected concept does not report may be
+            # filled from a candidate proven equal to it (a tag switch).
+            # Strategy fields are not: their quarters are resolved from the
+            # registry's alternative strategies instead.
+            series, fallbacks, notes = _fill_gaps(
+                facts_json, spec, (series, used), quarter_ends, window_ends, labels
+            )
+        if composer is Composer.STRATEGY:
+            series, components, notes, sources = _resolved_flow(
+                facts_json, spec.name, quarter_ends, window_ends, labels, (series, used)
+            )
+        mixed = [q for q in window_ends if q in series.mixed and q in series.values]
+        if mixed:
+            where = ", ".join(labels[q] for q in mixed)
+            notes.append(
+                f"Derived from filings of different dates at {where}: an earlier period "
+                "did not exist yet when the year-to-date or annual figure it is subtracted "
+                "from was filed, so the latest values were used."
+            )
+        if spec.cover_date_tolerance_days and "nearest" in series.methods.values():
+            notes.append(
+                "Share counts matched from cover-page dates within "
+                f"{spec.cover_date_tolerance_days} days after quarter end."
+            )
+        if not spec.additive and _score(series.values, window_ends) < len(window_ends):
+            notes.append(
+                "Weighted-average share counts are not additive; quarters without a "
+                "directly reported value stay missing (no Q4 derivation)."
+            )
+    selection = (
+        SeriesSelection.of(
+            spec.name, components,
+            tuple((q.isoformat(), c) for q, c in sorted(fallbacks.items())),
+        )
+        if components else None
+    )
+    if sources is None:
+        # One concept per quarter: the selected one, or the concept a gap
+        # was filled from — provenance names the concept actually read.
+        sources = {
+            q: PeriodSource(
+                strategy="single",
+                components=[fallbacks[q]] if q in fallbacks else list(components),
+                method=series.methods[q],
+            )
+            for q in window_ends if q in series.values and selection is not None
+        }
+    return series, selection, notes, sources
 
 
 def _same_day_conflict_notes(
@@ -706,7 +1084,18 @@ def build_dataset(
     ticker: str,
     n_quarters: int = 8,
     sector: str | None = None,
+    *,
+    as_of: date | None = None,
 ) -> tuple[CompanyDataset, IngestionDiagnostics]:
+    """Map a companyfacts payload to quarterly periods plus diagnostics.
+
+    `as_of` builds the dataset a reader on that day could have built: only
+    facts filed on or before it (undated facts excluded), so latest-filed-wins
+    resolves among what was then known. It is the one point-in-time path —
+    `pit.build_pit_dataset` is a wrapper of it.
+    """
+    if as_of is not None:
+        facts_json = _visible_as_of(facts_json, as_of)
     # Extended window: edge quarters need earlier history for YTD differencing
     # and FY-minus-3Q derivation; the output is trimmed back afterwards.
     extended_ends = select_quarter_ends(facts_json, n_quarters + WINDOW_BUFFER_QUARTERS)
@@ -728,94 +1117,43 @@ def build_dataset(
             "period labels fall back to raw dates."
         )
 
-    def record(
-        name: str,
-        values: dict[date, float],
-        methods: dict[date, str],
-        tag: str | None,
-        notes: list[str],
-        sources: dict[date, PeriodSource] | None = None,
-    ) -> None:
-        field_values[name] = values
-        if sources is None:
-            # One concept for the whole series.
-            sources = {
-                q: PeriodSource(strategy="single", components=[tag], method=methods[q])
-                for q in window_ends if q in values and tag is not None
-            }
-        notes = notes + _same_day_conflict_notes(facts_json, name, sources, labels)
-        in_window = {q: m for q, m in methods.items() if q in window_ends}
+    sourced: dict[str, dict[date, SourcedValue]] = {}
+    for spec in FIELDS:
+        series, selection, notes, sources = _select_series(
+            facts_json, spec, extended_ends, window_ends, labels
+        )
+        values, methods = series.values, series.methods
+        notes = notes + _same_day_conflict_notes(facts_json, spec.name, sources, labels)
+        field_values[spec.name] = values
+        sourced[spec.name] = {
+            q: SourcedValue(
+                field=spec.name, value=values[q], strategy=src.strategy, method=src.method,
+                partial=src.partial, inputs=series.refs.get(q, ()),
+                note=(
+                    "derived from filings of different dates: an earlier period did not "
+                    "exist yet when the figure it is subtracted from was filed"
+                    if q in series.mixed else None
+                ),
+            )
+            for q, src in sources.items()
+        }
         method_counts: dict[str, int] = {}
-        for m in in_window.values():
-            method_counts[m] = method_counts.get(m, 0) + 1
+        for q, m in methods.items():
+            if q in window_ends:
+                method_counts[m] = method_counts.get(m, 0) + 1
         diagnostics.append(
             FieldDiagnostic(
-                field_name=name,
-                tag_used=tag,
+                field_name=spec.name,
+                tag_used=selection.tag_used if selection is not None else None,
                 periods_filled=sum(1 for q in window_ends if q in values),
                 periods_total=len(window_ends),
                 methods=method_counts,
                 missing_periods=[labels[q] for q in window_ends if q not in values],
                 notes=notes,
                 period_sources={q.isoformat(): src for q, src in sources.items()},
+                selection=selection,
             )
         )
-
-    for name, tags in INSTANT_FIELDS.items():
-        tolerance = COVER_DATE_TOLERANCE_DAYS if name == "shares_outstanding" else 0
-        values, methods, used = _best_series(
-            facts_json, tags, _unit_for(name), extended_ends, "instant",
-            tolerance_days=tolerance, window_ends=window_ends,
-        )
-        notes = []
-        if name == "shares_outstanding" and "nearest" in methods.values():
-            notes.append(
-                "Share counts matched from cover-page dates within "
-                f"{COVER_DATE_TOLERANCE_DAYS} days after quarter end."
-            )
-        record(name, values, methods, used, notes)
-
-    for name, tags in FLOW_FIELDS.items():
-        mixed: set[date] = set()
-        values, methods, used = _best_series(
-            facts_json,
-            tags,
-            _unit_for(name),
-            extended_ends,
-            "flow",
-            allow_derivation=name not in NON_ADDITIVE_FLOWS,
-            window_ends=window_ends,
-            mixed_out=mixed,
-        )
-        notes: list[str] = []
-        sources: dict[date, PeriodSource] | None = None
-        if name in ("sga_expense", "depreciation_amortization"):
-            values, methods, used, notes, sources = _resolved_flow(
-                facts_json, name, extended_ends, window_ends, labels, (values, methods, used),
-                mixed,
-            )
-        mixed_q = [q for q in window_ends if q in mixed and q in values]
-        if mixed_q:
-            where = ", ".join(labels[q] for q in mixed_q)
-            notes.append(
-                f"Derived from filings of different dates at {where}: an earlier period "
-                "did not exist yet when the year-to-date or annual figure it is subtracted "
-                "from was filed, so the latest values were used."
-            )
-        if name in NON_ADDITIVE_FLOWS and _score(values, window_ends) < len(window_ends):
-            notes.append(
-                "Weighted-average share counts are not additive; quarters without a "
-                "directly reported value stay missing (no Q4 derivation)."
-            )
-        record(name, values, methods, used, notes, sources)
-
-    debt_values, debt_tag, debt_notes, debt_sources = _total_debt_series(
-        facts_json, extended_ends, window_ends, labels
-    )
-    record(
-        "total_debt", debt_values, {q: "composite" for q in debt_values}, debt_tag, debt_notes,
-        debt_sources,
-    )
 
     coverage_by_field = {d.field_name: d.periods_filled for d in diagnostics}
     for critical in CRITICAL_FIELDS:
@@ -832,6 +1170,7 @@ def build_dataset(
             period_type=PeriodType.QUARTER,
             fiscal_label=labels[q],
             **{name: values.get(q) for name, values in field_values.items()},
+            sources={name: by_q[q] for name, by_q in sourced.items() if q in by_q},
         )
         for q in window_ends
     ]

@@ -32,6 +32,14 @@ from typing import Any
 
 Tag = tuple[str, str]  # (taxonomy, concept), e.g. ("us-gaap", "Assets")
 
+# The currency every monetary field is read in: the companyfacts unit the
+# mapper collects (a fact reported only in another currency is not read).
+# The valuation plane bridges a price to these figures only when the price
+# is in it too: there is no FX conversion anywhere in the engine (Hermes
+# audit of PR #118, finding 2: a price in EUR was multiplied by the share
+# count and added to USD debt).
+FILING_CURRENCY = "USD"
+
 
 class Kind(str, Enum):
     INSTANT = "instant"
@@ -39,7 +47,11 @@ class Kind(str, Enum):
 
 
 class Composition(str, Enum):
-    SINGLE = "single"  # one tag, never mixed within a series
+    # One tag. Never mixed where the selected tag has a value; a quarter it
+    # does not report is filled only from another candidate proven equal to
+    # it on every shared quarter (one of them a non-zero reported quarter), and the diagnostics say so (the mapper's
+    # `_fill_gaps`: a filer's tag switch).
+    SINGLE = "single"
     SUM_ALL_REQUIRED = "sum_all_required"  # sum only where every component exists
     DEBT_BREAKDOWN = "debt_breakdown"  # required role + optional roles, missing -> 0
 
@@ -77,13 +89,19 @@ class FieldSpec:
     name: str
     kind: Kind
     strategies: tuple[SeriesStrategy, ...]
-    unit: str = "USD"
+    unit: str = FILING_CURRENCY
     split_adjusted: bool = False  # a stock split rewrites history: not a revision
     additive: bool = True  # False: no Q4 derivation, no TTM sum
     cover_date_tolerance_days: int = 0
     # Debt tags that already embed finance-lease obligations; adding the
     # separately reported finance-lease liability on top would double-count.
     lease_inclusive_tags: frozenset[str] = frozenset()
+    # False: mapped with provenance like any field, read by no metric. The
+    # valuation plane's balance-sheet inputs (Hermes review of 02c2aac):
+    # outside the candidate tables the scans iterate, outside the coverage
+    # figure, never a silent revision on the card — a filer that reports no
+    # preferred stock must read exactly as it did before these existed.
+    scored: bool = True
 
 
 def _g(*concepts: str) -> tuple[Tag, ...]:
@@ -319,6 +337,40 @@ FIELDS: tuple[FieldSpec, ...] = (
     ),
 )
 
+# --- valuation-plane inputs: mapped, never scored ---------------------------
+# Read only by `app/services/valuation` (the EV bridge). Single concepts:
+# the per-quarter strategy resolver and the debt composer are flow- and
+# debt-specific, so a filer reporting only the operating-lease split
+# (current + noncurrent) maps nothing here and the bridge line says so.
+# Candidate order is the taxonomy's own aggregate first, then the concepts
+# large filers use for the same line; the committed fixtures were trimmed
+# to the registry before these existed and carry none of them.
+_VALUATION_FIELDS: tuple[FieldSpec, ...] = (
+    _instant(
+        "short_term_investments",
+        *_g(
+            "ShortTermInvestments",
+            "MarketableSecuritiesCurrent",
+            "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
+        ),
+        scored=False,
+    ),
+    # The aggregate lessee liability only: shown beside EV, never in it.
+    _instant("operating_lease_liabilities", *_g("OperatingLeaseLiability"), scored=False),
+    _instant("minority_interest", *_g("MinorityInterest"), scored=False),
+    _instant("preferred_stock", *_g("PreferredStockValue"), scored=False),
+    # Parent-only equity first; the selection's label says which was read.
+    _instant(
+        "stockholders_equity",
+        *_g(
+            "StockholdersEquity",
+            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        ),
+        scored=False,
+    ),
+)
+FIELDS = FIELDS + _VALUATION_FIELDS
+
 # Ordered: this is the order the "critical field missing" warnings render in.
 CRITICAL_FIELDS: tuple[str, ...] = ("revenue", "net_income", "cfo", "total_assets")
 
@@ -330,18 +382,32 @@ def field(name: str) -> FieldSpec:
 
 
 def unit_for(name: str) -> str:
-    """A field's unit; names outside the registry are USD."""
+    """A field's unit; names outside the registry are in `FILING_CURRENCY`."""
     spec = _BY_NAME.get(name)
-    return spec.unit if spec is not None else "USD"
+    return spec.unit if spec is not None else FILING_CURRENCY
+
+
+def is_scored(name: str) -> bool:
+    """Whether a metric may read the field. A name outside the registry is
+    held to the scored rules (inspected, counted), never waved through."""
+    spec = _BY_NAME.get(name)
+    return spec.scored if spec is not None else True
+
+
+def scored_fields() -> tuple[str, ...]:
+    """The fields the engine scores, in registry order."""
+    return tuple(spec.name for spec in FIELDS if spec.scored)
 
 
 def candidate_table(kind: Kind) -> dict[str, tuple[Tag, ...]]:
-    """name -> single-tag candidates, for every field of `kind` that has a
-    single-tag strategy, in registry order. Fields composed only from roles
-    (total_debt) have no candidate list and are absent."""
+    """name -> single-tag candidates, for every SCORED field of `kind` that
+    has a single-tag strategy, in registry order. Fields composed only from
+    roles (total_debt) have no candidate list and are absent; so are the
+    valuation plane's unscored fields, which the restatement scan and the
+    vintage diff (the tables' readers) must not inspect."""
     out: dict[str, tuple[Tag, ...]] = {}
     for spec in FIELDS:
-        if spec.kind is not kind:
+        if spec.kind is not kind or not spec.scored:
             continue
         for strategy in spec.strategies:
             if strategy.composition is Composition.SINGLE:
@@ -376,8 +442,19 @@ def role_tags(name: str, role: str) -> tuple[str, ...]:
 
 
 def all_tags() -> frozenset[Tag]:
-    """Every (taxonomy, concept) any field may be built from: each strategy's
-    tags and every role's candidates. The single answer to "which concepts
-    does the mapper read" — trimming a payload to anything less makes the
-    trimmed dataset diverge from the live one."""
+    """Every (taxonomy, concept) a SCORED field may be built from: each
+    strategy's tags and every role's candidates. The single answer to "which
+    concepts does the score read" — trimming a payload to anything less makes
+    the trimmed dataset's scored figures diverge from the live one. The
+    point-in-time path (`backtesting/pit.py`, flag-only) trims to exactly
+    this set, which the valuation plane's unscored fields do not move; a
+    payload trimmed to it maps those fields as missing (`every_tag`)."""
+    return frozenset(
+        t for spec in FIELDS if spec.scored for s in spec.strategies for t in s.all_tags()
+    )
+
+
+def every_tag() -> frozenset[Tag]:
+    """`all_tags` plus the unscored (valuation-plane) fields' concepts: what a
+    fixture must keep for the EV bridge to find its balance-sheet lines."""
     return frozenset(t for spec in FIELDS for s in spec.strategies for t in s.all_tags())

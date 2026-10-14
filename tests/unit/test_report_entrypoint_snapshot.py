@@ -13,6 +13,7 @@ from app.services.ingestion.sec_client import SecClientError
 from app.services.journal import reporting as journal_reporting
 from scripts import generate_report
 from tests.fixtures.companies import stretch_dataset
+from tests.fixtures.staged import without_generation, write_ledger
 
 
 class _NoRefetchClient:
@@ -37,7 +38,7 @@ class _NoRefetchClient:
 
 
 def _snapshot(company_facts: dict) -> SimpleNamespace:
-    diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_tags=lambda: {}, field_notes=lambda: [])
+    diagnostics = SimpleNamespace(coverage=lambda: 1.0, warnings=[], selected_tags=lambda: {}, selected_series=lambda: {}, field_notes=lambda: [])
     return SimpleNamespace(
         dataset=stretch_dataset(),
         diagnostics=diagnostics,
@@ -80,6 +81,7 @@ def test_cli_reuses_snapshots_for_documents_and_report(monkeypatch, tmp_path):
         return _documents()
 
     def fake_build_report(*args, **kwargs):
+        write_ledger(kwargs)
         observed["report_facts"] = kwargs["company_facts"]
         observed["report_submissions"] = kwargs["submissions"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
@@ -111,6 +113,7 @@ def test_cli_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path):
                         lambda *a, **k: _documents())
 
     def fake_build_report(*args, **kwargs):
+        write_ledger(kwargs)
         observed["degraded"] = kwargs["index_degraded"]
         observed["report_submissions"] = kwargs["submissions"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
@@ -138,6 +141,7 @@ def test_journal_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path
     monkeypatch.setattr(journal_reporting, "fetch_documents", lambda *a, **k: _documents())
 
     def fake_build_report(*args, **kwargs):
+        write_ledger(kwargs)
         observed["degraded"] = kwargs["index_degraded"]
         observed["report_submissions"] = kwargs["submissions"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
@@ -161,13 +165,16 @@ def test_journal_reuses_snapshots_for_documents_and_report(monkeypatch, tmp_path
     monkeypatch.setattr(journal_reporting, "fetch_dataset_snapshot", lambda *a, **k: snapshot)
     monkeypatch.setattr(journal_reporting, "analyze", real_analyze)
 
-    def fake_fetch_documents(actual_client, ticker, facts, *, n_filings, submissions=None):
+    def fake_fetch_documents(actual_client, ticker, facts, *, n_filings, submissions=None,
+                             before=None):
+        assert before is None  # a report of today is not cut; only a replay is
         observed["document_client"] = actual_client
         observed["document_facts"] = facts
         observed["document_submissions"] = submissions
         return _documents()
 
     def fake_build_report(*args, **kwargs):
+        write_ledger(kwargs)
         observed["report_facts"] = kwargs["company_facts"]
         observed["report_submissions"] = kwargs["submissions"]
         return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
@@ -177,7 +184,7 @@ def test_journal_reuses_snapshots_for_documents_and_report(monkeypatch, tmp_path
 
     output, _ = journal_reporting.build_report("aapl")
 
-    assert output.read_text() == "report"
+    assert without_generation(output.read_text()) == "report"
     assert observed["document_client"] is client
     assert observed["document_facts"] is company_facts
     assert observed["report_facts"] is company_facts

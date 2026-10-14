@@ -56,3 +56,17 @@ def test_every_referenced_template_resolves_via_importlib_resources():
             f"template {name!r} not resolvable via importlib.resources — the "
             "wheel would install without it, breaking the web UI."
         )
+
+
+def test_the_workbench_templates_and_static_files_ship():
+    """r36: the workbench's pages and its one stylesheet and script are
+    package data too; a wheel without them serves unstyled pages and a
+    status box that never updates."""
+    cfg = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pkg_data = cfg["tool"]["setuptools"]["package-data"]
+    assert {"*.css", "*.js"} <= set(pkg_data.get("app.static", ()))
+    for name in ("workbench_home.html", "ticker.html", "workbench_run.html",
+                 "workbench_message.html", "_job_status.html", "_run_body.html"):
+        assert (files("app.templates") / name).is_file(), name
+    for name in ("app.css", "app.js"):
+        assert (files("app.static") / name).is_file(), name

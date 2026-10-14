@@ -311,7 +311,7 @@ def test_build_report_hands_the_detector_the_mappers_selection(monkeypatch):
 
 
 def test_both_entry_points_supply_the_selection():
-    """`diag.selected_tags()` must reach `build_report` from the CLI and the
+    """`diag.selected_series()` must reach `build_report` from the CLI and the
     journal alike — the two paths that actually produce reports."""
     import inspect
     from pathlib import Path
@@ -319,7 +319,7 @@ def test_both_entry_points_supply_the_selection():
     root = Path(__file__).resolve().parents[2]
     for rel in ("scripts/generate_report.py", "app/services/journal/reporting.py"):
         src = (root / rel).read_text()
-        assert "field_tags=diag.selected_tags()" in src, f"{rel} does not supply field_tags"
+        assert "field_tags=diag.selected_series()" in src, f"{rel} does not supply field_tags"
     # and the parameter still exists to receive it
     from app.services.reporting.report_builder import build_report
     assert "field_tags" in inspect.signature(build_report).parameters

@@ -17,15 +17,21 @@ reported quarter's value was built (strategy, components, method, partial).
         instead of writing (exit 1 on any difference).
 
     python scripts/selection_snapshot.py vintages --out F [--as-of D] [--root DIR]
+        [--allow-empty]
         Dump every filer in the vintage store from its newest snapshot taken
         on or before D (default: today). The input is pinned by the store,
         so two runs with the same --as-of differ only by code. This is the
         archive-rerun gate for PR 1.4: run it on main and on the branch, then
-        `diff` the two files; an empty diff is the gate.
+        `diff` the two files; an empty diff is the gate. A store with no
+        snapshot at or before D is refused (exit 1, nothing written) unless
+        --allow-empty: two empty dumps would compare `identical` having
+        compared nothing (Hermes, release review). --require-nonempty, the
+        flag that first added the refusal, is still accepted and is now the
+        default.
 
     python scripts/selection_snapshot.py diff A B
         Per case and per field, what changed between two dumps. Exit 1 on
-        any difference.
+        any difference, and on two empty dumps (nothing was compared).
 
 Values are written as JSON floats, which round-trip exactly (repr), so the
 comparison is exact equality, not a tolerance.
@@ -42,7 +48,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.services.backtesting.pit import filter_as_of
 from app.services.ingestion import vintages
 from app.services.ingestion.companyfacts_mapper import build_dataset
 
@@ -55,12 +60,14 @@ PIT_CUTS = (date(2024, 6, 30), date(2025, 3, 31))
 N_QUARTERS = 8
 
 
-def dump(facts: dict, ticker: str, *, n_quarters: int = N_QUARTERS) -> dict:
+def dump(
+    facts: dict, ticker: str, *, n_quarters: int = N_QUARTERS, as_of: date | None = None
+) -> dict:
     """One mapper run, as plain JSON data. A payload the mapper refuses
     (fewer than two quarter ends) is recorded as its error, so a change in
     what is refused shows up too."""
     try:
-        ds, diag = build_dataset(facts, ticker, n_quarters=n_quarters)
+        ds, diag = build_dataset(facts, ticker, n_quarters=n_quarters, as_of=as_of)
     except ValueError as e:
         return {"error": str(e)}
     fields = []
@@ -127,8 +134,8 @@ def golden_cases() -> dict[str, dict]:
         facts = json.loads((FIXTURES / f"companyfacts_{ticker}_trimmed.json").read_text())
         cases[f"real/{ticker}"] = dump(facts, ticker)
         for cut in PIT_CUTS:
-            # Exactly what `pit.build_pit_dataset` feeds the mapper.
-            cases[f"pit/{ticker}@{cut}"] = dump(filter_as_of(facts, cut), ticker)
+            # The mapper's own cut, as `pit.build_pit_dataset` asks for it.
+            cases[f"pit/{ticker}@{cut}"] = dump(facts, ticker, as_of=cut)
     for name, build in CASES.items():
         cases[f"synthetic/{name}"] = dump(build(), name.upper())
     return cases
@@ -212,6 +219,14 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--out", type=Path, required=True)
     v.add_argument("--as-of", type=date.fromisoformat, default=None)
     v.add_argument("--root", type=Path, default=None)
+    v.add_argument(
+        "--require-nonempty", action="store_true",
+        help="refuse an empty dump (the default; kept for the commands already written down)",
+    )
+    v.add_argument(
+        "--allow-empty", action="store_true",
+        help="write an empty dump instead of refusing it (never for a release archive gate)",
+    )
     d = sub.add_parser("diff", help="compare two dumps")
     d.add_argument("a", type=Path)
     d.add_argument("b", type=Path)
@@ -235,10 +250,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "vintages":
         as_of = args.as_of or date.today()
         cases = vintage_cases(as_of, args.root)
+        if not cases and not args.allow_empty:
+            print(f"no vintage snapshots at or before {as_of}", file=sys.stderr)
+            return 1
         args.out.write_text(render(cases))
         print(f"Wrote {args.out}: {len(cases)} filer(s) as of {as_of}")
         return 0
-    lines = diff_cases(_load(args.a), _load(args.b))
+    a, b = _load(args.a), _load(args.b)
+    if not a and not b:
+        print(f"both dumps are empty: nothing was compared ({args.a}, {args.b})", file=sys.stderr)
+        return 1
+    lines = diff_cases(a, b)
     for line in lines:
         print(line)
     if lines:

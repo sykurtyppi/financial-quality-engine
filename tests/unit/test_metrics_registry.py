@@ -107,7 +107,7 @@ def test_flag_phrases_name_only_weighted_scored_metrics():
 
 def test_change_list_reads_financial_metrics():
     """`_what_changed` reads the financial bundle's history."""
-    assert {name for name, _, _ in pipeline._CHANGE_METRICS} <= FINANCIAL_METRICS
+    assert {name for name, _, _, _ in pipeline._CHANGE_METRICS} <= FINANCIAL_METRICS
 
 
 def test_distress_clusters_name_scored_metrics():

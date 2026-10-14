@@ -77,8 +77,8 @@ Documented deviations:
 |---|---|---|
 | `sbc_to_revenue` | SBC / Revenue | revenue ≤ 0 |
 | `sbc_to_cfo` | SBC / CFO | CFO ≤ 0 |
-| `diluted_share_growth` | ΔDiluted shares / prior | prior ≤ 0 |
-| `net_share_count_change` | ΔShares outstanding / prior | prior ≤ 0 |
+| `diluted_share_growth` | ΔDiluted shares / prior | prior ≤ 0 or current ≤ 0 |
+| `net_share_count_change` | ΔShares outstanding / prior | prior ≤ 0 or current ≤ 0 |
 | `buyback_offset_ratio` | Buybacks / SBC | SBC = 0 |
 | `issuance_pressure` | Issuance proceeds / CFO | CFO ≤ 0 |
 

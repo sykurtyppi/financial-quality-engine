@@ -6,8 +6,8 @@
   single value. Checked on generated payloads and on the real fixtures.
 - Point-in-time: after `filter_as_of(f, d)`, no mapped value can come from a
   fact filed after `d` — every value the dataset holds exists among the
-  facts filed by then. (The metamorphic `build_dataset(as_of=)` equality is
-  plan item 2.2; this is its precondition.)
+  facts filed by then. (`build_dataset(as_of=)` is proven equal to this
+  composition in test_build_dataset_as_of.py.)
 """
 
 from __future__ import annotations

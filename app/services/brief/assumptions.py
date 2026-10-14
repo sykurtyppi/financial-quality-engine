@@ -15,6 +15,7 @@ are ignored. Hand-edit it, or `scripts/earnings_brief.py assume TICKER "..."`.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -60,6 +61,16 @@ def load_assumptions(ticker: str, root: Path | None = None) -> list[str]:
     return parse_assumptions(p.read_text(errors="replace"))
 
 
+def _append(p: Path, text: str) -> None:
+    """Append ``text`` to ``p``, creating it, never through a symlink planted
+    at its name: ``open("a")`` appended to the link's target, and created a
+    dangling one's, outside the journal (Hermes audit of 424b0b4, finding 5).
+    A link fails with ELOOP and nothing is written."""
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    with os.fdopen(fd, "a") as fh:
+        fh.write(text)
+
+
 def add_assumption(ticker: str, text: str, root: Path | None = None) -> Path:
     """Append one assumption; creates the file with a header the first time."""
     item = " ".join(text.replace("|", "/").split())
@@ -71,15 +82,14 @@ def add_assumption(ticker: str, text: str, root: Path | None = None) -> Path:
     p = assumptions_path(ticker, root)
     p.parent.mkdir(parents=True, exist_ok=True)
     if not p.exists():
-        p.write_text(f"# {safe_ticker(ticker)} — standing assumptions\n"
-                     "# One per bullet. Each brief reports held / challenged / no news.\n\n")
+        _append(p, f"# {safe_ticker(ticker)} — standing assumptions\n"
+                "# One per bullet. Each brief reports held / challenged / no news.\n\n")
     existing = load_assumptions(ticker, root)
     if item in existing:
         return p
     if len(existing) >= MAX_ASSUMPTIONS:
         raise ValueError(f"{p.name} already holds {MAX_ASSUMPTIONS} assumptions — retire one first")
-    with p.open("a") as fh:
-        fh.write(f"- {item}\n")
+    _append(p, f"- {item}\n")
     return p
 
 
