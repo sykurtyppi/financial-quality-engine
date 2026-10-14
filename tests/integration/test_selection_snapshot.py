@@ -330,10 +330,11 @@ def test_vintages_dumps_the_newest_snapshot_at_or_before_as_of(tmp_path):
     assert len(obs) == 2
     d1, d2 = (date.fromisoformat(o.captured) for o in obs)
 
-    def run(as_of: date) -> dict:
+    def run(as_of: date, *extra: str) -> dict:
         out = tmp_path / f"dump-{as_of}.json"
         assert snap.main(
-            ["vintages", "--out", str(out), "--as-of", as_of.isoformat(), "--root", str(root)]
+            ["vintages", "--out", str(out), "--as-of", as_of.isoformat(), "--root", str(root),
+             *extra]
         ) == 0
         return json.loads(out.read_text())
 
@@ -346,7 +347,9 @@ def test_vintages_dumps_the_newest_snapshot_at_or_before_as_of(tmp_path):
     at_second = run(d2)
     assert at_second[name]["snapshot"]["sha256"] == obs[1].sha256
     assert at_second[name]["entity_name"] == "Tag Choice Co"
-    assert run(d1 - timedelta(days=1)) == {}
+    # Before the first snapshot nothing is visible: empty only when allowed
+    # (an empty dump is refused by default; see the test below).
+    assert run(d1 - timedelta(days=1), "--allow-empty") == {}
 
 
 def test_vintages_release_gate_refuses_an_empty_store(tmp_path, capsys):
@@ -362,12 +365,35 @@ def test_vintages_release_gate_refuses_an_empty_store(tmp_path, capsys):
     assert "no vintage snapshots" in capsys.readouterr().err
 
 
-def test_vintages_on_a_missing_store_is_empty(tmp_path):
+def test_vintages_refuses_an_empty_store_by_default(tmp_path, capsys):
+    """An empty dump compared with another empty dump would print
+    `identical`: a vacuous archive gate (Hermes, release review). Refused
+    unless asked for, not only behind --require-nonempty."""
     out = tmp_path / "dump.json"
     assert snap.main(
         ["vintages", "--out", str(out), "--as-of", "2026-09-01", "--root", str(tmp_path / "none")]
+    ) == 1
+    assert not out.exists()
+    assert "no vintage snapshots" in capsys.readouterr().err
+
+
+def test_vintages_on_a_missing_store_is_empty_when_allowed(tmp_path):
+    out = tmp_path / "dump.json"
+    assert snap.main(
+        ["vintages", "--out", str(out), "--as-of", "2026-09-01", "--root", str(tmp_path / "none"),
+         "--allow-empty"]
     ) == 0
     assert json.loads(out.read_text()) == {}
+
+
+def test_diff_of_two_empty_dumps_is_not_identical(tmp_path, capsys):
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    a.write_text("{}\n")
+    b.write_text("{}\n")
+    assert snap.main(["diff", str(a), str(b)]) == 1
+    out = capsys.readouterr()
+    assert "identical" not in out.out
+    assert "both dumps are empty" in out.err
 
 
 def test_golden_check_passes_on_the_committed_file():
