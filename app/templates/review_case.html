@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}{{ case.ticker }} {{ case.day }} review · FQE Workbench{% endblock %}
+{% block body %}
+<div class="toolbar">
+  <div>
+    <h2>{{ case.ticker }} {{ case.day }} · shadow-run review</h2>
+    <p class="sub" style="margin:0">Reconcile each fact to its filing before relying on it. Ticks are bound to this run.</p>
+  </div>
+  <div class="actions" style="margin:0">
+    {% if case.run.ledger %}
+    <a class="btn ghost small" href="/review/{{ case.ticker }}/export?date={{ case.day }}">Export CSV</a>
+    <a class="btn ghost small" href="/review/{{ case.ticker }}/export?date={{ case.day }}&amp;format=md">Export Markdown</a>
+    {% endif %}
+    <a class="btn ghost small" href="/review">Board</a>
+  </div>
+</div>
+
+<section class="panel">
+  <h3>This run</h3>
+  <p style="margin:0">Generation <code>{{ case.generation_id or "none" }}</code> · built {{ case.run.built }}</p>
+  <p class="note">Engine: {{ case.engine }}</p>
+  <p class="note">The report, its evidence ledger and its audit below are read from this one generation.</p>
+  {% if case.run.audit == "matches" %}
+  <p class="note"><span class="pill ok">audit of this run</span> present (below the report)</p>
+  {% elif case.run.audit == "stale" %}
+  <div class="err" role="alert">A stale audit is beside this report: it names run {{ case.run.stale_audit }}, not this run's {{ case.generation_id }}. It is not shown.</div>
+  {% else %}
+  <p class="note"><span class="pill wait">no audit yet</span></p>
+  {% endif %}
+</section>
+
+{% for p in case.run.problems %}<div class="err" role="alert">{{ p }}</div>{% endfor %}
+{% if case.ticks_error %}<div class="err" role="alert">{{ case.ticks_error }}</div>{% endif %}
+{% if case.why_not_tickable and case.run.ledger %}<div class="err" role="alert">Ticks cannot be recorded: {{ case.why_not_tickable }}</div>{% endif %}
+{% for g, n in case.earlier %}
+<div class="err" role="alert">{{ n }} tick{{ "s" if n != 1 }} recorded for an earlier run {{ g }}: they are that run's, not this one's, and are not shown as applying here.</div>
+{% endfor %}
+
+{% if case.run.ledger %}
+<section class="panel">
+  <div class="case-title">
+    <b>Reconciliation</b>
+    <span class="note" style="margin:0">{{ case.count("reconciled") }} of {{ case.rows|length }} rows reconciled · {{ case.count("disputed") }} disputed</span>
+  </div>
+  {% if case.cik_note %}<p class="note">{{ case.cik_note }}</p>{% endif %}
+  <table>
+    <thead><tr><th>Row</th><th>Claim</th><th>Filings</th><th>State</th></tr></thead>
+    <tbody>
+      {% for r in case.rows %}
+      <tr id="{{ r.key }}">
+        <td><code>{{ r.key }}</code><br><b>{{ r.subject }}</b><br><span class="note">{{ r.kind }} · {{ r.period }}</span></td>
+        <td>
+          <span style="font-family:var(--mono)">{{ r.value }}{% if r.unit and r.value != "—" %} {{ r.unit }}{% endif %}</span><br>
+          <span class="note">{{ r.claim }}</span>
+          {% if r.change_state %}<br><span class="pill need">{{ r.change_state }}</span>{% endif %}
+          {% if r.note %}<div class="note">{{ r.note }}</div>{% endif %}
+        </td>
+        <td>
+          <ul class="sources">
+            {% for s in r.sources %}
+            <li>{% if s.url %}<a href="{{ s.url }}" rel="noopener noreferrer" target="_blank">{{ s.accession }}</a>{% elif s.accession %}{{ s.accession }}{% endif %} {{ s.text }}</li>
+            {% endfor %}
+          </ul>
+        </td>
+        <td>
+          {% set st = r.tick.state if r.tick else "unchecked" %}
+          <span class="pill {{ 'ok' if st == 'reconciled' else 'bad' if st == 'disputed' else 'wait' }}">{{ st }}</span>
+          {% if r.tick and r.tick.note %}<div class="note">{{ r.tick.note }}</div>{% endif %}
+          {% if r.tick %}<div class="note">{{ r.tick.at }}</div>{% endif %}
+          {% if case.tickable %}
+          <form class="tick-form" method="post" action="/review/{{ case.ticker }}/reconcile">
+            <input type="hidden" name="date" value="{{ case.day }}">
+            <input type="hidden" name="generation" value="{{ case.generation_id }}">
+            <input type="hidden" name="key" value="{{ r.key }}">
+            <select name="state" aria-label="State of {{ r.key }}">
+              {% for s in states %}<option value="{{ s }}"{% if s == st %} selected{% endif %}>{{ s }}</option>{% endfor %}
+            </select>
+            <input name="note" maxlength="{{ note_max }}" placeholder="note" aria-label="Note on {{ r.key }}" value="{{ r.tick.note if r.tick else '' }}">
+            <button class="btn small" type="submit" aria-label="Save the tick of {{ r.key }}">Save</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% if case.derived %}
+<section class="panel">
+  <h3>Derived from other rows ({{ case.derived|length }})</h3>
+  <p class="note">These rest on rows above, not on a filing of their own: reconcile those.</p>
+  <ul>
+    {% for i in case.derived %}
+    <li><code>{{ i.id }}</code> <b>{{ i.subject }}</b>: {{ i.claim }} <span class="note">rests on {{ i.derived_from|join(", ") }}</span></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if case.valuation or case.valuation_derived %}
+<section class="panel" id="valuation">
+  <h3>Valuation (shadow) ({{ case.valuation|length }} rows)</h3>
+  <p class="note">The valuation shadow card's rows: not scored and never validated. The price rests on the operator's market observation, which no filing can confirm, so it carries no tick; the bridge rows rest on filings and are reconciled like any other.</p>
+  <table>
+    <thead><tr><th>Row</th><th>Claim</th><th>Source</th><th>State</th></tr></thead>
+    <tbody>
+      {% for r in case.valuation %}
+      <tr id="{{ r.key }}">
+        <td><code>{{ r.key }}</code><br><b>{{ r.subject }}</b><br><span class="note">{{ r.kind }} · {{ r.period }}</span></td>
+        <td>
+          <span style="font-family:var(--mono)">{{ r.value }}{% if r.unit and r.value != "—" %} {{ r.unit }}{% endif %}</span><br>
+          <span class="note">{{ r.claim }}</span>
+          {% if r.note %}<div class="note">{{ r.note }}</div>{% endif %}
+        </td>
+        <td>
+          <ul class="sources">
+            {% for s in r.sources %}
+            <li>{% if s.url %}<a href="{{ s.url }}" rel="noopener noreferrer" target="_blank">{{ s.accession }}</a>{% elif s.accession %}{{ s.accession }}{% endif %} {{ s.text }}</li>
+            {% endfor %}
+          </ul>
+        </td>
+        <td>
+          {% if not r.reconcilable %}
+          <span class="note">not reconcilable to a filing (market observation)</span>
+          {% else %}
+          {% set st = r.tick.state if r.tick else "unchecked" %}
+          <span class="pill {{ 'ok' if st == 'reconciled' else 'bad' if st == 'disputed' else 'wait' }}">{{ st }}</span>
+          {% if r.tick and r.tick.note %}<div class="note">{{ r.tick.note }}</div>{% endif %}
+          {% if r.tick %}<div class="note">{{ r.tick.at }}</div>{% endif %}
+          {% if case.tickable %}
+          <form class="tick-form" method="post" action="/review/{{ case.ticker }}/reconcile">
+            <input type="hidden" name="date" value="{{ case.day }}">
+            <input type="hidden" name="generation" value="{{ case.generation_id }}">
+            <input type="hidden" name="key" value="{{ r.key }}">
+            <select name="state" aria-label="State of {{ r.key }}">
+              {% for s in states %}<option value="{{ s }}"{% if s == st %} selected{% endif %}>{{ s }}</option>{% endfor %}
+            </select>
+            <input name="note" maxlength="{{ note_max }}" placeholder="note" aria-label="Note on {{ r.key }}" value="{{ r.tick.note if r.tick else '' }}">
+            <button class="btn small" type="submit" aria-label="Save the tick of {{ r.key }}">Save</button>
+          </form>
+          {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if case.valuation_derived %}
+  <p class="note">Derived from the rows above ({{ case.valuation_derived|length }}):</p>
+  <ul>
+    {% for i in case.valuation_derived %}
+    <li><code>{{ i.id }}</code> <b>{{ i.subject }}</b>: {{ i.claim }} <span class="note">rests on {{ i.derived_from|join(", ") }}</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="panel" id="unsourced">
+  <h3>Unsourced: no document to check against ({{ case.unsourced|length }})</h3>
+  {% if case.unsourced %}
+  <ul>
+    {% for u in case.unsourced %}
+    <li><b>{{ u.kind }} {{ u.subject }}</b>: {{ u.claim }} <span class="note">{{ u.reason }}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="empty">none</p>{% endif %}
+</section>
+{% endif %}
+
+<div class="panel report">{{ report_html | safe }}</div>
+{% if audit_html %}<div class="panel report"><h3>Audit of this run</h3>{{ audit_html | safe }}</div>{% endif %}
+{% endblock %}

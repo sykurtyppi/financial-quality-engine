@@ -6,7 +6,16 @@
  "since": "2023-01-01",
  "why": "A real 10-Q/A (0000021344-24-000019, filed 2024-05-30) that re-files only the cover share count: an amendment with no scored impact must not reach Tier 1.",
  "synthetic": false,
- "reviewed": null,
+ "reviewed": {
+  "by": "Hermes Agent (reviewed against SEC EDGAR filings)",
+  "on": "2026-10-14",
+  "filings_read": [
+   "0000021344-23-000060",
+   "0000021344-24-000009",
+   "0000021344-24-000017",
+   "0000021344-24-000019"
+  ]
+ },
  "expected": {
   "tier1": false,
   "footprints": [],

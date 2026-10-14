@@ -19,6 +19,17 @@ from app.services.ingestion import sec_client as sc
 @pytest.fixture(autouse=True)
 def _no_real_sleeping(monkeypatch):
     monkeypatch.setattr(sc.time, "sleep", lambda _s: None)
+    # With sleeps returning at once, every reservation pushes the shared
+    # process-wide schedule an interval further into the future; restored on
+    # teardown so a later test that really sleeps does not inherit the queue.
+    monkeypatch.setattr(sc, "_last_start", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _own_cache_dir(monkeypatch, tmp_path):
+    # The pacing schedule is shared through a state file in the cache
+    # directory; the default `data/cache` would be the developer's own.
+    monkeypatch.chdir(tmp_path)
 
 
 def _client(monkeypatch):
@@ -89,9 +100,12 @@ class TestRetries:
     def test_pacing_is_kept_even_when_a_request_fails(self, monkeypatch):
         # A refused request still cost the SEC a connection; fair access is an
         # obligation, not an optimisation.
+        # Every attempt reserves a slot on the process-wide schedule, so three
+        # failed attempts push it at least two intervals past the first.
         client = _client(monkeypatch)
         _urlopen(monkeypatch, [urllib.error.URLError("down")] * sc._MAX_ATTEMPTS)
-        client._last_request = 0.0
+        monkeypatch.setattr(sc, "_last_start", 0.0)
+        t0 = sc.time.monotonic()
         with pytest.raises(sc.SecClientError):
             client._get("http://x")
-        assert client._last_request > 0.0
+        assert sc._last_start >= t0 + (sc._MAX_ATTEMPTS - 1) * sc._REQUEST_INTERVAL_S

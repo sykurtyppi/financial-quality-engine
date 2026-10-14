@@ -145,7 +145,12 @@ TICKERS = ["AAPL", "KO", "CRM"]
 def test_every_claim_is_sourced_and_every_source_exists(ticker, tmp_path):
     doc, _report, result, ds, diag, facts, root = _run(ticker, tmp_path)
     assert doc.unsourced == []
-    assert set(doc.streams.values()) == {"checked"}
+    # Every stream ran. The restatement scan of these trimmed fixtures is
+    # incomplete (fields with no mapped series), and the ledger says so as
+    # the report does, rather than a bare "checked" (review of #106).
+    assert {k: v for k, v in doc.streams.items() if k != "restatements"} == dict.fromkeys(
+        ("offerings", "events", "filing_events", "vintage"), "checked")
+    assert doc.streams["restatements"].startswith("checked (incomplete: inspected ")
     kinds = {(i.plane.value, i.kind) for i in doc.items}
     assert {
         ("accounting", "metric"), ("accounting", "restatement_footprint"),
@@ -215,27 +220,35 @@ def test_the_ledger_is_stable_and_the_report_does_not_depend_on_it(tmp_path):
     assert report == report_again == without
 
 
-def test_a_ledger_failure_costs_the_ledger_not_the_report(monkeypatch, tmp_path, caplog):
+def test_a_ledger_failure_publishes_nothing(monkeypatch, tmp_path, caplog):
+    """Hermes deep audit, finding 2: a ledger that could not be built was
+    logged, and the report went live without it (the earlier complete run
+    archived). The build now fails, strict or not, and a publish of it
+    leaves the earlier run live, byte for byte."""
     import app.services.reporting.ledger as ledger_mod
+    from app.services.reporting.report_files import NotPublished, replacing
 
     def boom(**kw):
         raise RuntimeError("ledger defect")
 
     monkeypatch.setattr(ledger_mod, "build_ledger", boom)
-    with pytest.raises(RuntimeError, match="ledger defect"):  # strict in tests
+    with pytest.raises(NotPublished, match="ledger defect"):  # strict in tests
         _run("AAPL", tmp_path)
 
     monkeypatch.setattr(report_builder, "STRICT_STREAMS", False)
-    stale = tmp_path / f"AAPL_{DAY}.ledger.json"
-    stale.write_text("{}")  # an earlier run's ledger
-    with caplog.at_level(logging.ERROR):
-        _doc, report, *_ = _run("AAPL", tmp_path, ledger=False)
-        ds = stretch_dataset()
-        path = report_builder.write_ledger(
-            stale, result=analyze(ds), dataset=ds, ticker="AAPL", report_date=DAY,
-        )
-    assert path is None and not stale.exists()
-    assert "evidence ledger" in caplog.text and report
+    live = tmp_path / f"AAPL_{DAY}.md"
+    live.write_text("# the earlier run")
+    ledger_path(live).write_text("{}")  # its ledger
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+    ds = stretch_dataset()
+    with caplog.at_level(logging.ERROR), pytest.raises(NotPublished, match="ledger defect"):
+        with replacing(live) as staged:
+            report, _ = report_builder.build_report(
+                analyze(ds), ds, generated_on=DAY.isoformat(), ledger_out=staged.ledger)
+            staged.report.write_text(report)
+    assert "evidence ledger" in caplog.text
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+    assert not (tmp_path / "archive").exists()
 
 
 def test_ledger_path_sits_beside_the_report():

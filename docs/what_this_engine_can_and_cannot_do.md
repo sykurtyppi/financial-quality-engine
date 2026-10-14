@@ -120,6 +120,17 @@ Essentially nobody credible claims it can.
   those two signals changes a real decision. That is a human-workflow question for
   the decision-impact journal ([evaluation_protocol.md](evaluation_protocol.md)),
   not a modeling question.
+- **The investment question is a separate plane, kept above the engine.** "What
+  expectations are embedded in the price, and are they reasonable?" is not a
+  quality question, and the engine does not answer it. The valuation shadow
+  card ([valuation_spec.md](valuation_spec.md)) is an optional, non-scoring
+  appendix fed by one price the operator records (`scripts/market.py`): an EV
+  bridge over the filing facts available at that moment, multiples where they
+  mean something with the reason where they do not, and the growth the price
+  implies under assumptions it names. Nothing in it reaches a score, a flag or
+  the decision card; its rows are ledgered as unvalidated. It is a lens, not a
+  verdict, and it inherits every caveat above about what the filing facts
+  themselves can and cannot say.
 
 ---
 

@@ -1,14 +1,15 @@
 {% extends "base.html" %}
+{% block title %}Journal · FQE Workbench{% endblock %}
 {% block body %}
 <div class="toolbar">
   <div>
     <h2>Dashboard</h2>
-    <p class="sub" style="margin:0">Log the prior view, read the report, record what changed, then close the outcome.</p>
+    <p class="sub" style="margin:0">The decision-impact journal (a dogfooding tool, not the product). Log the prior view, read the report, record what changed, then close the outcome.</p>
   </div>
   <a class="btn ghost" href="/open">New case</a>
 </div>
 
-{% if error %}<div class="err">{{ error }}</div>{% endif %}
+{% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
 
 <section class="panel">
   <div class="case-title">
@@ -25,7 +26,7 @@
         <td><b>{{ e.ticker }}</b></td>
         <td colspan="4"><span class="pill bad">unreadable</span> <span class="note">{{ e.unreadable }}</span></td>
         {% else %}
-        <td><b>{{ e.ticker }}</b><br><span class="note">{{ e.day }}</span></td>
+        <td><b>{{ e.ticker }}</b><br><span class="note">{{ e.day }}</span>{% if e.contamination %}<br><span class="note">contamination declared: {{ e.contamination }}</span>{% endif %}</td>
         <td>
           {% if e.lock_broken %}<span class="pill bad">lock broken</span>
           {% elif e.locked %}<span class="pill ok">locked</span>
@@ -89,7 +90,10 @@
               <div class="case-title"><b>{{ e.ticker }}</b><span class="muted">{{ e.day }}</span><span class="pill wait">report pending</span></div>
               <div class="note">{{ e.thesis or "No thesis captured" }}</div>
             </div>
-            <a class="btn small js-gen" data-loading-text="Generating…" href="/report/{{ e.ticker }}?date={{ e.day }}">Generate</a>
+            <form method="post" action="/report/{{ e.ticker }}">
+              <input type="hidden" name="date" value="{{ e.day }}">
+              <button class="btn small js-busy" type="submit" data-loading-text="Generating…">Generate</button>
+            </form>
           </div>
           {% elif not e.impact %}
           {% set queued.count = queued.count + 1 %}
@@ -142,7 +146,7 @@
           </td>
           <td>{{ e.conviction or "—" }}{% if e.conviction_after %} → {{ e.conviction_after }}{% endif %}</td>
           <td style="white-space:nowrap">
-            <a {% if not e.is_reported %}class="js-gen" data-loading-text="Generating…"{% endif %} href="/report/{{ e.ticker }}?date={{ e.day }}">Report</a> ·
+            <a href="/report/{{ e.ticker }}?date={{ e.day }}">Report</a> ·
             <a href="/impact/{{ e.ticker }}?date={{ e.day }}">Impact</a>
           </td>
         </tr>

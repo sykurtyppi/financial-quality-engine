@@ -24,6 +24,7 @@ from app.services.ingestion.companyfacts_mapper import (
     build_dataset,
 )
 from app.services.reporting.report_builder import build_report, data_quality_section
+from tests.fixtures.staged import write_ledger
 
 REAL = Path(__file__).resolve().parents[1] / "fixtures" / "real"
 
@@ -139,6 +140,7 @@ def test_both_entry_points_thread_the_notes(monkeypatch, tmp_path):
         company_facts = {"facts": {}}
 
     def fake_build(result, dataset, **kw):
+        write_ledger(kw)
         seen[kw["ticker"]] = kw.get("field_notes")
         from app.services.scoring.thermometer import compute_thermometer
         return "report", compute_thermometer(result.block_scores, dataset.periods)

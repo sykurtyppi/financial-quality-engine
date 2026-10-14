@@ -11,15 +11,22 @@ Endpoints used:
 
 from __future__ import annotations
 
+import email.utils
+import errno
 import fcntl
 import json
 import logging
+import math
 import os
+import stat
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.services.ingestion.payloads import (
@@ -33,6 +40,396 @@ TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{doc}"
 _REQUEST_INTERVAL_S = 0.15  # stay far under SEC's 10 req/s limit
+# The longest Retry-After honoured (see `_retry_after_s`). Here because the
+# shared schedule's credibility cap below is derived from it.
+_RETRY_AFTER_CAP_S = 60.0
+
+# --- fair-access pacing ---------------------------------------------------------
+#
+# SEC's limit is 10 requests/s from one MACHINE, so the interval above is a
+# budget every request on the machine shares. It used to live on the
+# `SecClient` instance, read and written with no lock: twelve threads on one
+# client all read the same stamp before any wrote it and started within
+# 0.8 ms, and separate clients did not pace each other at all. That is the web
+# UI's real shape — `report_view` is a sync handler run in FastAPI's
+# threadpool and builds a new client per request — and the hourly sweep, the
+# web UI and CLI scripts can be separate processes running at the same time.
+#
+# Two layers, both reservations of START times (SEC counts requests begun,
+# not finished — the old end-to-start spacing was stricter than the limit for
+# slow responses and no guarantee at all under concurrency):
+#
+# - process-wide: `_last_start` under `_pace_lock`, on the monotonic clock.
+#   Every client in the process shares it whatever its cache directory.
+# - cross-process: a tiny state file in the cache directory (`_RATE_STATE`),
+#   guarded by `fcntl.flock` on a sidecar, holding the last reserved start
+#   in WALL-CLOCK time. Monotonic stamps do not compare across reboots and
+#   are not promised to share an epoch across processes on every platform,
+#   and the file outlives the processes that wrote it; wall time is the only
+#   clock every reader of the file agrees on. Its weakness — a clock stepped
+#   backwards makes the stored start look far in the future — is bounded by
+#   `_SHARED_AHEAD_CAP_S`. Clients share it when they share a cache dir.
+#   Its files (and the hold-off's, below) are opened O_NOFOLLOW: a symlink
+#   planted at any of their names must not have its target overwritten (or
+#   created); pacing then falls back to process-wide like any other failure
+#   to use the file. So is anything there that is not a regular file (a
+#   FIFO's read would block holding both locks).
+#
+# A caller RESERVES its slot under the locks (`start = max(now, last + i)`,
+# then `last = start`) and sleeps until it OUTSIDE them, so waiters queue in
+# reservation order and no lock is ever held across a sleep.
+#
+# A 429/503 with Retry-After pushes the SAME schedule (`_hold_off`): SEC
+# throttles by IP, so the wait it asks for binds every thread, client and
+# process on the machine, not only the call that was refused.
+#
+# Pushing the schedule moves only the slots reserved AFTER the refusal. A
+# request that had already reserved an earlier one used to sleep to it and
+# send inside the cooldown (Hermes audit of 424b0b4, finding 6: a second
+# client's request ~0.3 s after a `Retry-After: 2`). So the hold-off is also
+# recorded on its own, as a BLOCKED-UNTIL instant — process-wide
+# `_blocked_until` (monotonic) and a file of its own beside the schedule,
+# `_HOLD_STATE` (wall clock) — that no reservation may land before and that
+# `_get` re-checks after its sleep, immediately before sending: a request
+# still inside the cooldown reserves again and sleeps again. It is kept apart
+# from the schedule because the schedule is "the last start", which a
+# re-reservation moves on; the block is when the cooldown ends, which only
+# another Retry-After moves, and only later.
+#
+# `_RATE_STATE` stays exactly ONE number, the schedule, in every state. The
+# previous module reads it as one number and rewrites anything else as a
+# schedule starting now; when the block was a second field there, a single
+# request from a process still running that module (a long-lived web UI
+# across an upgrade) erased the pushed schedule AND the block for every
+# process sharing the directory, and a bystander on this module sent 0.06 s
+# into a 5 s hold-off (review of 2025f74). Kept one number, the schedule
+# still carries the hold-off in the form that module honours; it never reads
+# `_HOLD_STATE`. Both files are read and written under the same sidecar
+# flock and opened the same no-follow way. A hold file that cannot be used
+# costs only the shared hold-off — the schedule is still shared, and this
+# process's own hold-off still binds it (review of deb6364, finding 3). The
+# hold file holds an end only while it binds, and is empty otherwise.
+_pace_lock = threading.Lock()
+_last_start = 0.0  # time.monotonic() of the last reserved request start
+_blocked_until = 0.0  # time.monotonic() before which no request may start
+_RATE_STATE = ".sec_rate"
+_HOLD_STATE = ".sec_rate_hold"
+# How far ahead of now a stored reservation may legitimately be: a Retry-After
+# hold-off (at most `_RETRY_AFTER_CAP_S`) plus the queue of waiters behind it
+# (a 40-thread web pool plus a sweep is ~7 s at the interval). A value further
+# out is a wall clock that stepped backwards or a corrupted file; honouring it
+# would park every request on the machine behind it, so it is discarded and
+# the schedule restarts from now. The price is that a clock stepped back by
+# less than the cap can delay the next request by up to that step, once.
+_SHARED_QUEUE_S = 15.0
+_SHARED_AHEAD_CAP_S = _RETRY_AFTER_CAP_S + _SHARED_QUEUE_S
+# The stored blocked-until has the same weakness and the same guard, with
+# the same cap. It is written as now + a Retry-After already capped at
+# `_RETRY_AFTER_CAP_S`; judged on that cap itself, a maximal hold-off sat
+# exactly ON the bound and a wall clock stepped back by 1 ms made every other
+# process discard it (review of 2025f74). The schedule's slack keeps it, at
+# the schedule's price. Each value is judged on its own: a discarded one
+# leaves the other standing.
+_shared_pacing_warned: set[str] = set()
+# The sidecar descriptor while a reservation holds its flock (always under
+# `_pace_lock`), so a forked child can drop its inherited copy; see below.
+_held_rate_fd: int | None = None
+
+
+def _reinit_after_fork() -> None:
+    """A child forked while another thread held `_pace_lock` inherits it
+    LOCKED with no thread left to release it, and would deadlock on its first
+    request. The inherited `_last_start` and `_blocked_until` are kept:
+    CLOCK_MONOTONIC is system-wide, so the parent's reservation and hold-off
+    still mean the same instants.
+
+    The same fork also duplicates the sidecar descriptor if that thread held
+    the flock at the moment. A flock is released only when EVERY descriptor
+    for it is closed, so the child's copy — which no thread in the child will
+    ever close — would hold the lock for the child's whole life and block
+    every other process's next request. Closed here (never LOCK_UN, which
+    would release the parent's lock under it). Descriptors from `os.open`
+    are close-on-exec already, so fork+exec children never had the problem."""
+    global _pace_lock, _held_rate_fd
+    _pace_lock = threading.Lock()
+    if _held_rate_fd is not None:
+        try:
+            os.close(_held_rate_fd)
+        except OSError:
+            pass
+        _held_rate_fd = None
+
+
+os.register_at_fork(after_in_child=_reinit_after_fork)
+
+
+def _open_state(path: Path) -> int:
+    """Open one of the pacing files read-write, creating it, WITHOUT following
+    a symlink at `path` (ELOOP, an OSError, if one is there). Where the
+    platform has no O_NOFOLLOW the file is not opened at all — the caller
+    falls back to process-wide pacing rather than risk writing through a
+    link.
+
+    Anything at `path` that is not a regular file is refused the same way
+    (review of deb6364, finding 3): a FIFO there opened fine and then hung
+    `os.read` with `_pace_lock` and the flock held, stalling every request in
+    the process and every process sharing the directory. O_NONBLOCK keeps the
+    open itself from waiting on one (POSIX leaves O_RDWR on a FIFO
+    undefined); it changes nothing for a regular file."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError(errno.ENOTSUP, "no O_NOFOLLOW: cannot open the pacing state safely",
+                      str(path))
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | nofollow, 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file: cannot hold the pacing state",
+                          str(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextmanager
+def _locked_state(cache_dir: Path):
+    """The shared state's descriptors, `(schedule, hold)`, under their
+    flock. Raises OSError when the lock or the schedule cannot be used
+    (read-only cache, no lock support, a symlink or a non-file at either
+    name). A hold file that cannot be opened is `None`: the schedule is
+    still shared and only the hold-off falls back to this process's own
+    (`_warn_unshared`); dropping both, as it did, sent the whole schedule
+    process-wide over the newer, lesser file (review of deb6364, finding 3).
+    Called under `_pace_lock`, like every use of the state.
+
+    The lock is a sidecar, following `watch/watchlist.py` `_write_lock` and
+    `reporting/report_files.py` `publish_lock`, and carries the same
+    assumption: `fcntl.flock` is advisory and NOT reliable over NFS, so a
+    cache directory on a network mount paces only within each process. It is
+    held for a read and at most a write of a few bytes per file, never
+    across a sleep."""
+    global _held_rate_fd
+    fd = _open_state(cache_dir / f"{_RATE_STATE}.lock")
+    _held_rate_fd = fd
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        state = _open_state(cache_dir / _RATE_STATE)
+        try:
+            hold: int | None
+            try:
+                hold = _open_state(cache_dir / _HOLD_STATE)
+            except OSError as e:
+                _warn_unshared(cache_dir, e, hold_only=True)
+                hold = None
+            try:
+                yield state, hold
+            finally:
+                if hold is not None:
+                    os.close(hold)
+        finally:
+            os.close(state)
+    finally:
+        _held_rate_fd = None
+        os.close(fd)  # closing releases the lock
+
+
+def _read_number(fd: int) -> float | None:
+    """The one number a pacing file holds; None when it is empty (first use,
+    no hold-off) or garbled (a torn write), which restarts that value."""
+    try:
+        return float(os.read(fd, 64).decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def _read_state(state: int, hold: int | None) -> tuple[float | None, float | None, float, float]:
+    """`(last_w, blocked_w, now_m, now_w)` from the locked state: the stored
+    start and hold-off end, each None when absent, garbled or not credible
+    (past the cap, or a hold-off already over) — the end also when there is
+    no usable hold file — and the clocks.
+
+    The clocks are read AFTER the file I/O: a slot dated before a slow read
+    (a loaded disk, a first-use create) would already be in the past when
+    the request went out, starting it late and leaving the next caller less
+    than an interval behind it."""
+    last_w = _read_number(state)
+    blocked_w = None if hold is None else _read_number(hold)
+    now_m, now_w = time.monotonic(), time.time()
+    if last_w is not None and not (math.isfinite(last_w)
+                                   and last_w - now_w <= _SHARED_AHEAD_CAP_S):
+        last_w = None
+    if blocked_w is not None and not (math.isfinite(blocked_w)
+                                      and now_w < blocked_w <= now_w + _SHARED_AHEAD_CAP_S):
+        blocked_w = None
+    return last_w, blocked_w, now_m, now_w
+
+
+def _update_shared(
+    cache_dir: Path,
+    step: Callable[[float | None, float | None, float, float], tuple[float, float | None]],
+) -> tuple[float, float, float]:
+    """Read-modify-write the shared state under its flock: `step(last_w,
+    blocked_w, now_m, now_w)` returns the new stored start and hold-off end
+    from the stored ones (see `_read_state`) and the clocks. Returns
+    `(new_w, now_m, now_w)`. OSError as `_locked_state`, or when a write
+    fails.
+
+    The hold-off's end is written only while it is still ahead, and the file
+    emptied otherwise (see the pacing notes above) — and it is written
+    FIRST: a failure after it leaves a hold-off recorded with the schedule
+    unpushed, which still binds every reservation (`_reserve_shared` starts
+    none before it); the other way round, requests that had already reserved
+    were never told (review of deb6364, finding 2). How each file is
+    rewritten: `_store`."""
+    with _locked_state(cache_dir) as (state, hold):
+        last_w, blocked_w, now_m, now_w = _read_state(state, hold)
+        new_w, blocked_w = step(last_w, blocked_w, now_m, now_w)
+        if hold is not None:
+            _store(hold, repr(blocked_w) if blocked_w is not None and blocked_w > now_w else "")
+        _store(state, repr(new_w))
+        return new_w, now_m, now_w
+
+
+def _store(fd: int, text: str) -> None:
+    """Rewrite one pacing file in place, through the descriptor of its own
+    no-follow open (never a path-based write, which would follow a link
+    swapped in after the open), so that no crash, full disk or short write
+    can leave it EMPTY. Truncating first and writing second did, on every
+    reservation: a SIGKILL or ENOSPC between the two erased a live hold-off
+    for every other process (review of deb6364, finding 2).
+
+    A value already stored is not rewritten at all, so a reservation, which
+    moves only the schedule, never touches the hold file. A new value is
+    written over the old from offset 0 and only then cut to its length. The
+    values are `repr`s of epoch seconds — same integer width, then a
+    fraction — and a hold-off's end only ever moves later, so an
+    interruption between the two leaves the new digits followed by the
+    old's tail (a value at or just past the new end), and a short write,
+    reported and NOT cut to length (cut, a file shorter than the new text
+    would be padded with NULs), leaves the new digits over the old's tail
+    (a value no earlier than the old end). Either way the file reads as a
+    number no earlier than the old one — for the hold file, a hold-off that
+    still binds — where an empty or garbled one restarts that value (every
+    reader holds the lock; garbage never fails a fetch). Emptying the hold
+    file (a hold-off over) is the truncate alone."""
+    data = text.encode("ascii")
+    if os.pread(fd, len(data) + 1, 0) == data:
+        return
+    if os.pwrite(fd, data, 0) != len(data):
+        raise OSError(errno.EIO, "short write to the pacing state")
+    os.ftruncate(fd, len(data))
+
+
+def _reserve_shared(
+    cache_dir: Path, interval: float, local_last_m: float, local_blocked_m: float,
+) -> float:
+    """Reserve a start against every process sharing `cache_dir`, no earlier
+    than this process's own next slot (`local_last_m + interval`) or hold-off
+    (`local_blocked_m`), nor the shared hold-off; return it on the monotonic
+    clock. OSError as `_update_shared`."""
+
+    def step(last_w: float | None, blocked_w: float | None,
+             now_m: float, now_w: float) -> tuple[float, float | None]:
+        earliest_w = now_w + max(0.0, local_last_m + interval - now_m, local_blocked_m - now_m)
+        if last_w is not None:
+            earliest_w = max(earliest_w, last_w + interval)
+        if blocked_w is not None:
+            earliest_w = max(earliest_w, blocked_w)
+        return earliest_w, blocked_w
+
+    start_w, now_m, now_w = _update_shared(cache_dir, step)
+    return now_m + (start_w - now_w)
+
+
+def _warn_unshared(cache_dir: Path, e: OSError, hold_only: bool = False) -> None:
+    """Never fail a fetch over pacing: the caller falls back to this
+    process's schedule — or, `hold_only`, to this process's hold-off alone,
+    the schedule still shared. Each said once per directory, not per
+    request. Called under `_pace_lock`, which guards the set."""
+    key = f"{cache_dir}\0{_HOLD_STATE}" if hold_only else str(cache_dir)
+    if key in _shared_pacing_warned:
+        return
+    _shared_pacing_warned.add(key)
+    if hold_only:
+        logger.warning(
+            "SEC Retry-After hold-offs are process-wide only for cache %s: cannot "
+            "share them with other processes (%s); the request schedule is still shared",
+            cache_dir, e,
+        )
+    else:
+        logger.warning(
+            "SEC request pacing is process-wide only for cache %s: "
+            "cannot share its schedule with other processes (%s)", cache_dir, e,
+        )
+
+
+def _reserve_slot(cache_dir: Path) -> float:
+    """Reserve this request's start and return it on the monotonic clock.
+
+    The flock is taken while `_pace_lock` is held, always in that order, so
+    the two cannot deadlock; the flock is only ever held for a tiny file read
+    and write, so the thread lock is never held across a sleep either."""
+    global _last_start
+    interval = _REQUEST_INTERVAL_S
+    with _pace_lock:
+        try:
+            start = _reserve_shared(cache_dir, interval, _last_start, _blocked_until)
+        except OSError as e:
+            _warn_unshared(cache_dir, e)
+            # The clock is read after the failed attempt and the log line,
+            # for the same reason `_read_state` reads it last.
+            start = max(time.monotonic(), _last_start + interval, _blocked_until)
+        _last_start = start
+    return start
+
+
+def _held_off(cache_dir: Path) -> bool:
+    """Whether a Retry-After hold-off still binds now — this process's, or
+    one another process recorded in `cache_dir`'s state. Asked by a request
+    immediately before it sends: its slot may have been reserved before the
+    429 that set the hold-off. Read-only; a failure to read the shared state
+    falls back to this process's hold-off, like every other use of it."""
+    with _pace_lock:
+        try:
+            with _locked_state(cache_dir) as (state, hold):
+                shared = _read_state(state, hold)[1] is not None
+        except OSError as e:
+            _warn_unshared(cache_dir, e)
+            shared = False
+        return shared or time.monotonic() < _blocked_until
+
+
+def _hold_off(cache_dir: Path, seconds: float) -> None:
+    """Keep EVERY request on the machine out for `seconds` from now, as a
+    429/503's Retry-After asks. The schedule is pushed so that its next slot
+    (`last + interval`) is no earlier than now + `seconds` — in this process
+    and, through the shared state, in every process using `cache_dir`. Never
+    pulls a schedule already further out back in. Same locks, same order and
+    same fallback as `_reserve_slot`; nothing sleeps here.
+
+    Also records when the hold-off ENDS (`_blocked_until`, and the shared
+    `_HOLD_STATE`), never pulling a later end in: a request that had
+    already reserved a slot inside the window finds it there before sending
+    (`_held_off`) and waits too."""
+    global _last_start, _blocked_until
+    interval = _REQUEST_INTERVAL_S
+    with _pace_lock:
+        now = time.monotonic()
+        _last_start = max(_last_start, now + seconds - interval)
+        _blocked_until = max(_blocked_until, now + seconds)
+
+        def step(last_w: float | None, blocked_w: float | None,
+                 now_m: float, now_w: float) -> tuple[float, float | None]:
+            held_w = now_w + seconds - interval
+            until_w = now_w + seconds
+            return (held_w if last_w is None else max(last_w, held_w),
+                    until_w if blocked_w is None else max(blocked_w, until_w))
+
+        try:
+            _update_shared(cache_dir, step)
+        except OSError as e:
+            _warn_unshared(cache_dir, e)
+
 
 # A single transport failure used to end a whole unattended sweep pass. Three
 # days of the hourly job logged 162 of them across 73 passes, and 154 were one
@@ -49,6 +446,32 @@ _REQUEST_INTERVAL_S = 0.15  # stay far under SEC's 10 req/s limit
 _MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_S = (2.0, 5.0)
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+# 429 and 503 are the statuses that carry SEC's own "come back in N seconds".
+# Retrying sooner than asked is exactly what fair access forbids; waiting
+# longer than a minute would stall an unattended pass on one bad header.
+_RETRY_AFTER_STATUSES = frozenset({429, 503})
+
+
+def _retry_after_s(err: urllib.error.HTTPError) -> float | None:
+    """The wait a 429/503 asks for, in seconds, capped; None if it asks for
+    none we can read. RFC 9110 allows delta-seconds (a non-negative integer)
+    or an HTTP-date; anything else is ignored rather than guessed at."""
+    headers = err.headers
+    raw = headers.get("Retry-After") if headers is not None else None
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if raw.isdecimal():  # not isdigit(): "²" is a digit that float() refuses
+        seconds = float(raw)
+    else:
+        try:
+            when = email.utils.parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:  # "-0000": UTC with no claim about the source zone
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    return min(max(seconds, 0.0), _RETRY_AFTER_CAP_S)
 
 
 class SecClientError(RuntimeError):
@@ -127,11 +550,74 @@ def _is_fresh(mtime_s: float, max_age_s: float) -> bool:
     return 0 <= age < max_age_s
 
 
-def _is_readable_json(path: Path) -> bool:
-    """Whether `path` currently holds parseable JSON. Re-checked before any
-    corrective unlink so recovery never discards a replacement."""
+# A cache entry's shape check. It raises ExternalPayloadError — a ValueError —
+# so a parseable entry of the wrong shape takes exactly the path an
+# unparseable one does, in every `except ValueError` below.
+Validator = Callable[[object], None]
+
+
+def _object(payload: object, what: str) -> dict:
+    if not isinstance(payload, dict):
+        raise ExternalPayloadError(f"{what} is {type(payload).__name__}, expected an object")
+    return payload
+
+
+def _companyfacts_shape(payload: object) -> None:
+    """What `companyfacts_mapper` walks: `payload["facts"][taxonomy]`. `[]`
+    or `{"facts": null}` parse, and used to fail later as an AttributeError
+    that looked like a defect in the mapper.
+
+    Agrees with the reader contract in `payloads.concept_rows`: a MISSING
+    `facts` is "no rows" — the payload was acquired and is then reported as
+    unmappable — so only a present `facts` of the wrong type is refused.
+    Refusing the missing case too made a bare payload read as "could not be
+    acquired; check the network", which sends an operator the wrong way."""
+    obj = _object(payload, "companyfacts payload")
+    if "facts" in obj:
+        _object(obj["facts"], "companyfacts.facts")
+
+
+def _submissions_shape(payload: object) -> None:
+    """What `edgar_documents._merged_filings` walks: `filings.recent` and
+    `filings.files` under an OBJECT `filings`; its columns are checked where
+    they are read (`payloads.recent_filings`, `edgar_documents._aligned_arrays`).
+
+    A MISSING `filings` is a new filer with none (`payloads.recent_filings`),
+    not an unavailable index, so only a present one of the wrong type (`[]`,
+    `null`) is refused."""
+    obj = _object(payload, "submissions payload")
+    if "filings" in obj:
+        _object(obj["filings"], "submissions.filings")
+
+
+def _submissions_page_shape(payload: object) -> None:
+    """An older submissions page (`filings.files[].name`) is ONE flat block
+    of filing columns — no `filings` wrapper, and older pages omit columns
+    (`items`, `primaryDocument`) — so the object is all that can be required
+    here; `_aligned_arrays` checks the columns it reads."""
+    _object(payload, "submissions page")
+
+
+def _tickers_shape(payload: object) -> None:
+    """`company_tickers.json` is an object of row objects. An EMPTY table
+    parses and is the worst case of all: `resolve_cik` would answer "not in
+    the SEC registry" for every ticker for a day, `--fresh` included (the
+    table deliberately ignores it)."""
+    table = _object(payload, "ticker table")
+    if not table:
+        raise ExternalPayloadError("ticker table is empty")
+    for key, row in table.items():
+        _object(row, f"ticker table row {key!r}")
+
+
+def _is_readable_json(path: Path, validate: Validator | None = None) -> bool:
+    """Whether `path` currently holds parseable JSON of the required shape.
+    Re-checked before any corrective unlink so recovery never discards a
+    replacement."""
     try:
-        json.loads(path.read_text())
+        parsed = json.loads(path.read_text())
+        if validate is not None:
+            validate(parsed)
     except (OSError, ValueError):
         return False
     return True
@@ -152,12 +638,27 @@ def _publication_lock(path: Path):
     is not reliable over NFS, and there is no Windows implementation.
     """
     lock_path = path.with_name(f".{path.name}.lock")
-    with open(lock_path, "a+b") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    # Not followed: a link planted at the lock's name fails (ELOOP) rather
+    # than create its target outside the cache (Hermes audit of 424b0b4,
+    # finding 5), as the pacing state's `_open_state` already does.
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _archive_has_text(path: Path) -> bool:
+    """Whether an archive entry currently holds a non-blank document; the
+    re-check before an empty entry is unlinked."""
+    try:
+        return bool(path.read_text(errors="replace").strip())
+    except OSError:
+        return False
 
 
 def _published_generation_ns(path: Path) -> int | None:
@@ -194,7 +695,6 @@ class SecClient:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.identity = _identity(identity)
         self.fresh = fresh
-        self._last_request = 0.0
         # Filing-document traffic, so the report's data-quality line can say
         # exactly what this run served from disk instead of "caches bypassed".
         self.archives_fetched = 0
@@ -206,9 +706,23 @@ class SecClient:
         tried = 0
         for attempt in range(_MAX_ATTEMPTS):
             tried += 1
-            wait = _REQUEST_INTERVAL_S - (time.monotonic() - self._last_request)
-            if wait > 0:
-                time.sleep(wait)
+            # Every attempt, retries included, takes a slot: a refused request
+            # still cost SEC a connection, and pacing is a fair-access
+            # obligation. Reserved under the lock, slept outside it.
+            slot = _reserve_slot(self.cache_dir)
+            while True:
+                wait = slot - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                # A 429 elsewhere on the machine may have asked for a
+                # hold-off while this call slept to a slot reserved before
+                # it (Hermes audit of 424b0b4, finding 6). Still inside it:
+                # reserve again — no slot is granted before the hold-off
+                # ends — and sleep again, until none binds.
+                if not _held_off(self.cache_dir):
+                    break
+                slot = _reserve_slot(self.cache_dir)
+            backoff = _RETRY_BACKOFF_S[attempt] if attempt + 1 < _MAX_ATTEMPTS else 0.0
             try:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     return resp.read()
@@ -217,21 +731,33 @@ class SecClient:
                 last = e
                 if e.code not in _RETRY_STATUSES:
                     break
+                if e.code in _RETRY_AFTER_STATUSES:
+                    # Never sooner than SEC asked, and never sooner than our
+                    # own back-off either: a `Retry-After: 0` is not a reason
+                    # to hammer a server that just said it is overloaded.
+                    # The ask binds the whole machine, not this call: push the
+                    # shared schedule so every other thread and process waits
+                    # it out too (this call does, by the sleep below).
+                    asked = _retry_after_s(e)
+                    if asked is not None:
+                        _hold_off(self.cache_dir, asked)
+                        backoff = max(backoff, asked)
             except Exception as e:  # noqa: BLE001 - every transport failure is retryable
                 last = e
-            finally:
-                # Set even on failure: a refused request still cost the SEC a
-                # connection, and the pacing is a fair-access obligation.
-                self._last_request = time.monotonic()
             if attempt + 1 < _MAX_ATTEMPTS:
-                time.sleep(_RETRY_BACKOFF_S[attempt])
+                time.sleep(backoff)
         # Says what actually happened: a 404 stops after one try, and a
         # message claiming three would send the reader hunting a flaky network.
         tries = "" if tried == 1 else f" after {tried} attempts"
         raise SecClientError(f"SEC request failed for {url}{tries}: {last}") from last
 
     def _cached_json(self, cache_name: str, url: str, max_age_s: float = 86400.0,
-                     *, honor_fresh: bool = True) -> dict:
+                     *, honor_fresh: bool = True, validate: Validator | None = None) -> dict:
+        """`validate` is the shape the caller will walk. Parseable-but-wrong
+        (`[]` for companyfacts) used to be served from disk for the whole TTL
+        and then fail as an AttributeError deep in a parser; now a cached
+        entry of the wrong shape is quarantined exactly like an unparseable
+        one, and a fetched one is refused and never written."""
         path = self.cache_dir / cache_name
         use_cache = not (self.fresh and honor_fresh)
         if use_cache:
@@ -243,20 +769,24 @@ class SecClient:
                 # the cache. A disappearance is a miss, not a failure — the
                 # whole read is one attempt, and OSError means "not usable".
                 if _is_fresh(path.stat().st_mtime, max_age_s):
-                    return json.loads(path.read_text())
+                    cached = json.loads(path.read_text())
+                    if validate is not None:
+                        validate(cached)
+                    return cached
             except OSError:
                 pass
-            except ValueError:
-                # A poisoned entry (truncated write, partial download) must
-                # not fail every read for a day: drop it and refetch. Under
-                # the publication lock, and only after confirming the entry is
-                # STILL unreadable — between our failed parse and this unlink
-                # a concurrent writer may have published a perfectly good one
-                # at the same pathname, and deleting that would turn one bad
-                # response into a discarded good one.
+            except ValueError as e:
+                # A poisoned entry (truncated write, partial download, or
+                # valid JSON of the wrong shape) must not fail every read for
+                # a day: drop it and refetch. Under the publication lock, and
+                # only after confirming the entry is STILL unusable — between
+                # our failed check and this unlink a concurrent writer may
+                # have published a perfectly good one at the same pathname,
+                # and deleting that would turn one bad response into a
+                # discarded good one.
                 with _publication_lock(path):
-                    if not _is_readable_json(path):
-                        logger.warning("discarding unreadable cache entry %s", path)
+                    if not _is_readable_json(path, validate):
+                        logger.warning("discarding unusable cache entry %s: %s", path, e)
                         path.unlink(missing_ok=True)
         # Generation stamp, taken BEFORE the request goes out. A request that
         # started later asked SEC later, so its answer is at least as recent;
@@ -271,6 +801,13 @@ class SecClient:
             # then parse) left a truncated response on disk to be served
             # as-is until it aged out.
             raise SecClientError(f"SEC response for {url} is not valid JSON: {e}") from e
+        if validate is not None:
+            # Same rule for shape: what the reader cannot walk is refused here,
+            # in SEC's name, and never lands on disk to be served tomorrow.
+            try:
+                validate(parsed)
+            except ValueError as e:
+                raise SecClientError(f"SEC response for {url} is unusable: {e}") from e
         # Unique per call, not per process: the web UI serves concurrent
         # report views from threads of one process, and they all resolve
         # CIKs through the same company_tickers.json entry.
@@ -329,10 +866,31 @@ class SecClient:
             except OSError:
                 pass  # a miss, whether absent or unreadable
             else:
-                self.archives_from_cache += 1
-                return text
+                if text.strip():
+                    self.archives_from_cache += 1
+                    return text
+                # No filed document is empty, and with no TTL an empty entry
+                # was served — and counted as "served from cache" — forever.
+                # A miss: removed under the entry's lock after re-checking,
+                # the same discipline as `_cached_json`'s corrupt-entry
+                # recovery, so a document a concurrent fetch published since
+                # our read is kept. (Archive publishers do not take that lock
+                # — it would add a sidecar file per document — so a publish
+                # landing in the instant between re-check and unlink can
+                # still be removed; the cost is one refetch later, never a
+                # wrong document served.) Removed even though the refetch
+                # below would replace it: if SEC is down, the next read must
+                # not find the empty entry either.
+                with _publication_lock(path):
+                    if not _archive_has_text(path):
+                        logger.warning("discarding empty archive cache entry %s", path)
+                        path.unlink(missing_ok=True)
         url = ARCHIVES_URL.format(cik=cik, accession=accession.replace("-", ""), doc=doc)
         text = self._get(url).decode("utf-8", errors="replace")
+        if not text.strip():
+            # An empty answer is a transport or server failure, not a filed
+            # document; caching it would make the document permanently empty.
+            raise SecClientError(f"SEC returned an empty document for {url}")
         # Atomic publication: a reader never sees half a document. No
         # generation ordering is needed here — every writer holds the same
         # immutable bytes.
@@ -363,7 +921,8 @@ class SecClient:
         # does not change when it files. Re-downloading this ~1 MB table for
         # every name on every pass of an hourly job is pure waste and one
         # more chance for a transient failure to cost a name.
-        table = self._cached_json("company_tickers.json", TICKERS_URL, honor_fresh=False)
+        table = self._cached_json("company_tickers.json", TICKERS_URL, honor_fresh=False,
+                                  validate=_tickers_shape)
         want = ticker.upper()
         for entry in table.values():
             if entry.get("ticker", "").upper() == want:
@@ -390,12 +949,14 @@ class SecClient:
         return self._cached_json(
             f"companyfacts_CIK{cik:010d}.json",
             COMPANYFACTS_URL.format(cik=cik),
+            validate=_companyfacts_shape,
         )
 
     def submissions_by_cik(self, cik: int) -> dict:
         return self._cached_json(
             f"submissions_CIK{cik:010d}.json",
             f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
+            validate=_submissions_shape,
         )
 
     def submissions(self, ticker: str) -> dict:
@@ -413,4 +974,5 @@ class SecClient:
     def submissions_page(self, name: str) -> dict:
         """Fetch an older submissions page (referenced in filings.files) for
         high-volume filers whose 'recent' block does not reach far enough back."""
-        return self._cached_json(name, f"https://data.sec.gov/submissions/{name}")
+        return self._cached_json(name, f"https://data.sec.gov/submissions/{name}",
+                                 validate=_submissions_page_shape)

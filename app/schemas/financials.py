@@ -118,7 +118,20 @@ class PeriodFinancials(BaseModel):
     accounts_payable: float | None = None
     deferred_revenue: float | None = None
 
-    # Shares
+    # Balance sheet, valuation-plane inputs: read by the EV bridge
+    # (`app/services/valuation`) and by no metric (registry `scored=False`).
+    short_term_investments: float | None = None
+    operating_lease_liabilities: float | None = Field(
+        default=None, description="Aggregate lessee operating-lease liability; never in EV"
+    )
+    minority_interest: float | None = None
+    preferred_stock: float | None = None
+    stockholders_equity: float | None = None
+
+    # Shares. No gt=0 here (r17; review of #119): one filed count of 0 or
+    # below made the mapper raise and every caller catching ValueError skip
+    # the firm. Refused where used: the share-change formulas' prior-count
+    # guard, and the valuation bridge's INVALID_SHARE_COUNT.
     shares_diluted: float | None = None
     shares_outstanding: float | None = None
 

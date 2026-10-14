@@ -90,7 +90,7 @@ def is_resolvable_metric(name: str) -> bool:
 
 
 def is_wellformed_window(window: str) -> bool:
-    """`resolver._find_period` matches `window` against `fiscal_label` by exact
+    """`resolver._find_periods` matches `window` against `fiscal_label` by exact
     (case-insensitive) string equality. A window in any other shape does not
     raise — it simply matches no period and resolves `pending` forever, which
     is indistinguishable from `the filing has not landed yet`.

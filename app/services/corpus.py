@@ -61,7 +61,7 @@ class Expected(BaseModel):
     tier1: bool  # the card must show at least one Tier-1 event
     footprints: list[ExpectedFootprint] = Field(default_factory=list)
     non_reliance: list[str] = Field(default_factory=list)  # 8-K 4.02 accessions
-    selections: dict[str, str] = Field(default_factory=dict)  # field -> tag_used
+    selections: dict[str, str] = Field(default_factory=dict)  # field -> SeriesSelection.label
     coverage_min: float = Field(default=0.0, ge=0.0, le=1.0)
     uninspected: list[str] = Field(default_factory=list)  # must be named as not inspected
 
@@ -87,8 +87,9 @@ class ObservedFootprint:
     amended: bool
     accession: str  # the amendment's accession when amended, else the current value's
     # A derived quarter (a year-to-date or fiscal-year difference, or a sum)
-    # that moved between the filings behind it while no raw fact moved
-    # materially (`RestatementScan.derived`). Pinned like any footprint.
+    # that moved between the filings behind it (`RestatementScan.derived`):
+    # below materiality in every fact behind it, or beside a revised
+    # year-to-date or annual figure. Pinned like any footprint.
     derived: bool = False
 
 
@@ -144,7 +145,8 @@ def observe(
     scan = scan_restatements(
         facts, period_since=since, as_of=as_of, selected_tags=diag.selected_series()
     )
-    tier1 = list(_restatement_tier1_lines(scan.footprints)) + _derived_tier1_lines(scan.derived)
+    tier1 = list(_restatement_tier1_lines(scan.footprints)) + _derived_tier1_lines(
+        scan.derived, scan.footprints)
     non_reliance: list[str] = []
     if submissions is not None:
         events = fetch_entity_events(None, ticker, submissions=submissions)  # type: ignore[arg-type]
@@ -155,7 +157,9 @@ def observe(
                 non_reliance.append(accession)
                 tier1.append(f"8-K Item 4.02 non-reliance (restatement announced) filed {filed}")
     return Observation(
-        selections={f.field_name: f.tag_used for f in diag.fields if f.tag_used},
+        # `label`, not `tag_used`: a quarter filled from another concept
+        # after a tag switch is part of what was selected.
+        selections={f.field_name: f.selection.label for f in diag.fields if f.selection is not None},
         footprints=tuple(
             ObservedFootprint(
                 fp.field_name, fp.period_end, fp.is_amendment,
@@ -196,6 +200,36 @@ class CaseResult:
         return not self.problems
 
 
+def _footprint_matches(want: ExpectedFootprint, observed: ObservedFootprint) -> bool:
+    return (
+        observed.field == want.field
+        and observed.period_end == want.period_end
+        and (observed.amended or not want.amended)
+    )
+
+
+def _matched_expectation_indexes(
+    wants: list[ExpectedFootprint], observed: list[ObservedFootprint]
+) -> set[int]:
+    """Maximum one-to-one matching, so duplicate pins require duplicate evidence."""
+    want_for_observed: list[int | None] = [None] * len(observed)
+
+    def assign(want_index: int, seen: set[int]) -> bool:
+        for observed_index, footprint in enumerate(observed):
+            if observed_index in seen or not _footprint_matches(wants[want_index], footprint):
+                continue
+            seen.add(observed_index)
+            previous = want_for_observed[observed_index]
+            if previous is None or assign(previous, seen):
+                want_for_observed[observed_index] = want_index
+                return True
+        return False
+
+    for want_index in range(len(wants)):
+        assign(want_index, set())
+    return {index for index in want_for_observed if index is not None}
+
+
 def evaluate(case: CorpusCase, obs: Observation) -> CaseResult:
     """Score one observation against its pinned expectations."""
     exp = case.expected
@@ -210,24 +244,19 @@ def evaluate(case: CorpusCase, obs: Observation) -> CaseResult:
     if exp.tier1 and not obs.tier1:
         problems.append("no Tier-1 event, but the case pins one")
 
-    found = 0
-    for want in exp.footprints:
-        hit = any(
-            o.field == want.field and o.period_end == want.period_end
-            and (o.amended or not want.amended)
-            for o in obs.footprints
-        )
-        if hit:
-            found += 1
-        else:
+    observed_footprints = list(obs.footprints)
+    matched_expected = _matched_expectation_indexes(exp.footprints, observed_footprints)
+    for index, want in enumerate(exp.footprints):
+        if index not in matched_expected:
             problems.append(f"missed footprint: {want.field} {want.period_end}"
                             + (" (amended)" if want.amended else ""))
 
-    pinned_amended = {(w.field, w.period_end) for w in exp.footprints if w.amended}
+    pinned_amended = [want for want in exp.footprints if want.amended]
     observed_amended = [o for o in obs.footprints if o.amended]
-    matched = sum(1 for o in observed_amended if (o.field, o.period_end) in pinned_amended)
+    matched = len(_matched_expectation_indexes(pinned_amended, observed_amended))
+    pinned_keys = {(w.field, w.period_end) for w in pinned_amended}
     for o in observed_amended:
-        if (o.field, o.period_end) not in pinned_amended:
+        if (o.field, o.period_end) not in pinned_keys:
             problems.append(f"unpinned amended {'derived ' if o.derived else ''}footprint: "
                             f"{o.field} {o.period_end} ({o.accession})")
 
@@ -243,8 +272,8 @@ def evaluate(case: CorpusCase, obs: Observation) -> CaseResult:
         if name not in obs.uninspected:
             problems.append(f"{name} is pinned as not inspectable but was not named as such")
 
-    return CaseResult(case, obs, false_clean, false_alarm, found, len(exp.footprints),
-                      matched, len(observed_amended), problems)
+    return CaseResult(case, obs, false_clean, false_alarm, len(matched_expected),
+                      len(exp.footprints), matched, len(observed_amended), problems)
 
 
 @dataclass(frozen=True)

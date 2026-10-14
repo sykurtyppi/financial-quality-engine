@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ run.ref.ticker }} {{ run.day }} run · FQE Workbench{% endblock %}
+{% block body %}
+<div class="toolbar">
+  <div>
+    <h2><a href="/t/{{ run.ref.ticker }}" class="ticker-title">{{ run.ref.ticker }}</a> · run of {{ run.day }}</h2>
+    <p class="sub" style="margin:0">Published {{ run.ref.built|utc }}</p>
+  </div>
+  <div class="actions" style="margin:0">
+    <a class="btn ghost small" href="/t/{{ run.ref.ticker }}">Back to {{ run.ref.ticker }}</a>
+  </div>
+</div>
+{% if run.live %}
+<p class="note">This is the live run of {{ run.ref.ticker }} {{ run.day }}.</p>
+{% else %}
+<div class="panel past-banner"><b>A past run, not the live run.</b> <span class="note">Kept as it was published; a later run of the same day replaced it as the live one.</span></div>
+{% endif %}
+{% include "_run_body.html" %}
+{% endblock %}

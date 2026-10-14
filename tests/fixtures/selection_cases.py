@@ -520,6 +520,25 @@ def mixed_vintages() -> dict:
     return p.data
 
 
+def tag_switch_fallback() -> dict:
+    """A filer switched concepts (CRM's FY2027Q1 interest, KO's FY2024Q1).
+
+    Interest: `InterestExpenseDebt` covers eleven quarters and is selected;
+    the newest quarter is reported only as `InterestExpenseNonoperating`,
+    which agrees on the two quarters both report — the gap is filled from it
+    and noted. Receivables: the selected tag misses the newest quarter; one
+    candidate reports it but shares no quarter with the selected tag,
+    another shares a quarter and disagrees — both named, neither used."""
+    p = _base("Tag Switch Co")
+    q = QUARTER_ENDS
+    p.add("InterestExpenseDebt", [quarter(e, 50.0 + i) for i, e in enumerate(q[:11])])
+    p.add("InterestExpenseNonoperating", [quarter(e, 50.0 + i) for i, e in enumerate(q) if i >= 9])
+    p.add("AccountsReceivableNetCurrent", [instant(e, 300.0 + i) for i, e in enumerate(q[:11])])
+    p.add("ReceivablesNetCurrent", [instant(q[11], 411.0)])
+    p.add("AccountsAndOtherReceivablesNetCurrent", [instant(q[10], 999.0), instant(q[11], 412.0)])
+    return p.data
+
+
 CASES: dict[str, Callable[[], dict]] = {
     "flows": flows,
     "mixed_vintages": mixed_vintages,
@@ -544,4 +563,5 @@ CASES: dict[str, Callable[[], dict]] = {
     "quarter_ends_from_revenue": quarter_ends_from_revenue,
     "unknown_fiscal_year_end": unknown_fiscal_year_end,
     "fifty_two_week": fifty_two_week,
+    "tag_switch_fallback": tag_switch_fallback,
 }

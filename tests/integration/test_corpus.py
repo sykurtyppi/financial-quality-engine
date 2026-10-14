@@ -130,6 +130,14 @@ def test_a_revised_but_unamended_footprint_does_not_satisfy_a_pinned_amendment()
     assert r.expected_found == 0 and "missed footprint" in "; ".join(r.problems)
 
 
+def test_duplicate_expectations_require_distinct_observed_footprints():
+    r = evaluate(_case(tier1=True, footprints=[REV, REV]),
+                 _obs(tier1=["x"], footprints=[REV_OBS]))
+    assert r.expected_found == 1 and r.expected_total == 2
+    assert not r.passed and "missed footprint" in "; ".join(r.problems)
+    assert metrics([r]).restatement_recall == 0.5
+
+
 def test_coverage_uninspected_selection_and_402_checks():
     case = _case(tier1=True, non_reliance=["acc-402"], coverage_min=0.75,
                  uninspected=["goodwill"], selections={"revenue": "us-gaap:Revenues"})

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -94,6 +95,43 @@ class TestCapture:
         assert _run(["capture", "NVDA", "AAPL"], monkeypatch) == 1
         assert capsys.readouterr().err.count("OSError") == 2
 
+    def test_a_capture_that_archived_nothing_says_why_and_fails(self, monkeypatch, capsys):
+        """A failure `capture` returns rather than raises (the lock cannot be
+        opened, the snapshot cannot be written) printed "NVDA: failed" and
+        exited 0; when it raised, as on 424b0b4, the error was printed and
+        the batch exited 1 (review of b17cc08, finding 2)."""
+        (v.cik_dir(1045810) / v.LOCK).mkdir(parents=True)  # not a lock file at all
+        assert _run(["capture", "NVDA"], monkeypatch) == 1
+        out = capsys.readouterr()
+        assert "NVDA: NOT captured (failed)" in out.err and "IsADirectoryError" in out.err
+        assert "NVDA" not in out.out
+        assert v.list_vintages(1045810) == []
+
+    def test_a_failure_does_not_end_the_batch_either(self, monkeypatch, capsys):
+        results = iter([v.Capture(1045810, date(2026, 9, 29), None, "", "failed", "disk full"),
+                        v.Capture(1045810, date(2026, 9, 29), None, "ab", "unchanged")])
+        monkeypatch.setattr(cli, "capture", lambda *a, **k: next(results))
+        assert _run(["capture", "NVDA", "AAPL"], monkeypatch) == 1
+        out = capsys.readouterr()
+        assert "NVDA: NOT captured (failed): disk full" in out.err
+        assert "AAPL: unchanged" in out.out
+
+    def test_busy_names_the_lock_and_is_not_a_failure(self, monkeypatch, capsys):
+        """Another capture (the sweep) holds the lock: it says which, and
+        exits 0 — the holder is archiving the same document, and a lock that
+        stays wedged is a problem day the sweep's stale alert counts."""
+        import fcntl
+
+        monkeypatch.setattr(v, "LOCK_TIMEOUT_S", 0)
+        lock = v.cik_dir(1045810) / v.LOCK
+        lock.parent.mkdir(parents=True)
+        with lock.open("w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            assert _run(["capture", "NVDA"], monkeypatch) == 0
+        out = capsys.readouterr()
+        assert "NVDA: NOT captured (busy): another capture holds the lock" in out.err
+        assert str(lock) in out.err
+
 
 class TestListAndDiff:
     def test_list_reports_an_empty_store_without_failing(self, monkeypatch, capsys):
@@ -137,6 +175,29 @@ class TestListAndDiff:
     def test_a_bad_since_date_is_an_error_not_a_traceback(self, monkeypatch, capsys):
         _two_vintages(monkeypatch)
         assert _run(["diff", "NVDA", "--since", "not-a-date"], monkeypatch) == 1
+
+    def test_the_raw_diff_names_the_filled_quarters_it_did_not_inspect(self, monkeypatch, capsys):
+        """`--splits` shows the raw fact diff, one concept per field. A quarter
+        the mapper filled from another concept after a tag switch is not in
+        it, and an empty table must not read as covering it."""
+        from tests.unit.test_tag_switch_fallback import GAP, _payload, _q, _selected
+
+        def snap(val, filed):
+            return _payload(InterestExpenseDebt=_selected(),
+                            InterestExpenseNonoperating=[_q(6, 100.0), _q(7, val, filed=filed)])
+
+        client = _Client(snap(130.0, "2026-02-01"), snap(160.0, "2026-04-01"))
+        monkeypatch.setattr(cli, "SecClient", lambda *a, **k: client)
+        _run(["capture", "NVDA"], monkeypatch)
+        _run(["capture", "NVDA", "--force"], monkeypatch)
+        assert _run(["diff", "NVDA", "--splits"], monkeypatch) == 0
+        out = capsys.readouterr()
+        assert "130" not in out.out  # the raw diff did not see the move ...
+        assert (f"Note: interest_expense at {GAP} is read from "
+                "us-gaap:InterestExpenseNonoperating") in out.err  # ... and says so
+        assert _run(["diff", "NVDA"], monkeypatch) == 0  # the scored diff sees it
+        out = capsys.readouterr()
+        assert "130" in out.out and "Note:" not in out.err
 
     def test_an_unreadable_snapshot_is_reported_and_kept(self, monkeypatch, capsys):
         _two_vintages(monkeypatch)

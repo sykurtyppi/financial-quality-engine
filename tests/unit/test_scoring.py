@@ -156,3 +156,70 @@ class TestScoreAll:
         _, overall = score_all([ok_metric("total_accruals", 0.05)])
         assert overall.block_weights == cfg.BLOCK_WEIGHTS
         assert sum(cfg.BLOCK_WEIGHTS.values()) == pytest.approx(1.0)
+
+
+_NON_FINITE = pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+
+
+class TestNonFiniteMetricValues:
+    """Hermes audit of 424b0b4, finding 7, at the metric contract: an OK
+    result carrying NaN or +/-inf is not a measurement. NaN reached
+    `interpolate_concern`, matched no anchor segment and raised
+    AssertionError("unreachable"); +/-inf was clamped to an extreme concern
+    as if it were an extreme ratio. It is NOT_MEANINGFUL, with no value."""
+
+    @_NON_FINITE
+    def test_ok_with_a_non_finite_value_is_not_meaningful(self, value):
+        m = ok_metric("a", value)
+        assert m.status is MetricStatus.NOT_MEANINGFUL
+        assert m.value is None
+        assert m.note == f"value is not a finite number ({value!r})"
+        assert m.distress_signal is False
+        assert not m.is_ok
+
+    def test_an_existing_note_is_kept(self):
+        m = MetricResult(name="a", formula="test", fiscal_label="Q4", status=MetricStatus.OK,
+                         value=float("nan"), note="TTM basis")
+        assert m.note == "TTM basis; value is not a finite number (nan)"
+
+    def test_distress_signal_is_left_as_given(self):
+        m = MetricResult(name="a", formula="test", fiscal_label="Q4", status=MetricStatus.OK,
+                         value=float("inf"), distress_signal=True)
+        assert m.distress_signal is True
+
+    @pytest.mark.parametrize("value", [1.0, 0.0, -2.5, 1e308])
+    def test_a_finite_value_is_untouched(self, value):
+        m = ok_metric("a", value)
+        assert (m.status, m.value, m.note) == (MetricStatus.OK, value, None)
+
+    @_NON_FINITE
+    @pytest.mark.parametrize("status", [MetricStatus.MISSING_DATA, MetricStatus.NOT_MEANINGFUL])
+    def test_a_non_ok_result_drops_the_value_and_keeps_its_status(self, value, status):
+        m = MetricResult(name="a", formula="test", fiscal_label="Q4", status=status,
+                         value=value, note="denominator is zero")
+        assert (m.status, m.value, m.note) == (status, None, "denominator is zero")
+
+    def test_the_contract_holds_when_parsed_from_json(self):
+        m = MetricResult.model_validate_json(
+            '{"name": "a", "formula": "t", "fiscal_label": "Q4", "status": "ok", "value": NaN}')
+        assert (m.status, m.value) == (MetricStatus.NOT_MEANINGFUL, None)
+
+    @_NON_FINITE
+    def test_the_engine_scores_it_as_absent_not_as_nan(self, value):
+        """Every block's metrics OK at a mid-anchor value, then the first
+        one's value made non-finite: the scores are those of the same bundle
+        without it, never NaN and never an exception."""
+        spec = cfg.BLOCKS[0]
+        base = [ok_metric(ms.metric_name, (ms.anchors[0][0] + ms.anchors[-1][0]) / 2)
+                for s in cfg.BLOCKS for ms in s.metrics]
+        target = spec.metrics[0].metric_name
+        with_bad = [ok_metric(m.name, value) if m.name == target else m for m in base]
+        without = [m for m in base if m.name != target]
+        blocks, overall = score_all(with_bad)
+        ref_blocks, ref_overall = score_all(without)
+        assert overall.score is not None and overall.score == overall.score  # not NaN
+        assert overall.score == ref_overall.score
+        assert [b.score for b in blocks] == [b.score for b in ref_blocks]
+        (comp,) = [c for c in blocks[0].components if c.metric_name == target]
+        assert comp.concern_score is None and comp.status == "not_meaningful"

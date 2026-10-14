@@ -20,6 +20,7 @@ import pytest
 
 from app.services.ingestion import restatements as mod
 from app.services.ingestion.companyfacts_mapper import build_dataset
+from app.services.ingestion.fields import is_scored
 from app.services.ingestion.restatements import (
     SPLIT_ADJUSTED_FIELDS,
     RestatementScan,
@@ -266,7 +267,9 @@ def test_the_real_report_carries_the_scan_on_card_and_appendix():
         fetched_at="2026-09-22 09:00 UTC",
         company_facts=facts,
     )
-    gaps = sorted(f for f, t in tags.items() if t is None)
+    # Over the scored fields: the valuation plane's unscored inputs are in
+    # the selection too and, absent from the trimmed fixture, map nothing.
+    gaps = sorted(f for f, t in tags.items() if t is None and is_scored(f))
     assert gaps == ["goodwill", "share_issuance_proceeds"], "fixture drifted; re-read the gap set"
     assert f"## Checked and clean (incomplete: {len(gaps)} field(s) not inspectable" in report
     assert report.count("Restatement scan: inspected 23 of 27 fields") == 2, "card + appendix"

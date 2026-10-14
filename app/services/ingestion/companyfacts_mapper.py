@@ -21,7 +21,14 @@ docs/real_data_validation.md — and covered by tests):
    mapper computes over a buffered window and trims.
 6. TAG SWITCHES — filers change tags over time (e.g. XOM receivables); each
    candidate tag is scored and the one covering the most REPORTED quarters
-   wins (tags are never mixed within one series). Total debt is the
+   wins. Tags are never mixed where the selected tag has a value. A
+   reported quarter it has NO value for — the newest quarter, after a
+   filer moved the figure to a new concept (CRM's FY2027Q1 interest) — is
+   filled from another candidate only when that candidate is proven equal
+   to the selected tag on every quarter both report, one of them a non-zero
+   reported quarter (`_fill_gaps`), and
+   the field notes, per-quarter provenance and `SeriesSelection.fallbacks`
+   say so; a candidate not proven equal is named, never used. Total debt is the
    exception: it is composed per balance-sheet date from what was reported
    at that date (composition.compose_total_debt), because a debt role's tag
    can change without the series changing meaning (KO's migration to the
@@ -40,6 +47,8 @@ IngestionDiagnostics.
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -77,6 +86,7 @@ from app.services.ingestion.fields import (
     Kind,
     candidate_table,
     composite_components,
+    is_scored,
     role_tags,
     unit_for,
 )
@@ -84,6 +94,8 @@ from app.services.ingestion.fields import field as field_spec
 from app.services.ingestion.precedence import Rank, current_conflict, latest
 from app.services.ingestion.precedence import rank as fact_rank
 from app.services.ingestion.selection import Composer, SeriesSelection, composer_for
+
+logger = logging.getLogger(__name__)
 
 QTD_DAYS = (70, 100)
 ANNUAL_DAYS = (330, 380)
@@ -172,7 +184,25 @@ class FieldDiagnostic(BaseModel):
                 f"{self.field_name}: tag_used {self.tag_used!r} is not the selection's "
                 f"{self.selection.tag_used!r}"
             )
+        # A quarter filled from another concept is a claim the per-quarter
+        # provenance must make too: the two records name one concept or the
+        # diagnostic is refused.
+        for period_end, concept in self.fallbacks.items():
+            src = self.period_sources.get(period_end)
+            if src is None or src.components != [concept]:
+                raise ValueError(
+                    f"{self.field_name}: fallback {concept} at {period_end} is not the "
+                    "concept its period source names"
+                )
         return self
+
+    @property
+    def fallbacks(self) -> dict[str, str]:
+        """Reported quarter end (ISO) -> the concept a gap in the selected
+        concept was filled from (`SeriesSelection.fallbacks`). `tag_used`
+        stays the selected concept; these are the quarters it did not
+        supply."""
+        return dict(self.selection.fallbacks) if self.selection is not None else {}
 
 
 class IngestionDiagnostics(BaseModel):
@@ -184,8 +214,12 @@ class IngestionDiagnostics(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
     def coverage(self) -> float:
-        total = sum(f.periods_total for f in self.fields)
-        filled = sum(f.periods_filled for f in self.fields)
+        """Filled over possible quarter-fields, scored fields only: the
+        valuation plane's unscored inputs are mapped beside them but must
+        not move the figure the card and the sweep gate read."""
+        scored = [f for f in self.fields if is_scored(f.field_name)]
+        total = sum(f.periods_total for f in scored)
+        filled = sum(f.periods_filled for f in scored)
         return filled / total if total else 0.0
 
     def field_by_name(self, name: str) -> FieldDiagnostic:
@@ -203,11 +237,18 @@ class IngestionDiagnostics(BaseModel):
         """A short fingerprint of which concepts backed which field: two runs
         with the same digest mapped every field from the same concepts. A
         backtest row carries it so a moved score can be told apart from a
-        moved tag choice without re-running the mapper."""
+        moved tag choice without re-running the mapper. A quarter filled
+        from another concept is part of the fingerprint (appended only when
+        there is one, so a field without fallbacks hashes as it always has)."""
         import hashlib
 
-        pairs = "\n".join(f"{f.field_name}={f.tag_used or ''}"
-                          for f in sorted(self.fields, key=lambda f: f.field_name))
+        def pair(f: FieldDiagnostic) -> str:
+            # The suffix is `SeriesSelection.label`'s, so a digest and the
+            # ledger's `selections` spell a fallback the same way.
+            filled = "".join(f"|{q}:{c}" for q, c in sorted(f.fallbacks.items()))
+            return f"{f.field_name}={f.tag_used or ''}{filled}"
+
+        pairs = "\n".join(pair(f) for f in sorted(self.fields, key=lambda f: f.field_name))
         return hashlib.sha256(pairs.encode()).hexdigest()[:12]
 
     def selected_series(self) -> dict[str, SeriesSelection | None]:
@@ -279,19 +320,35 @@ def _collect(facts_json: dict, taxonomy: str, tag: str, unit: str) -> list[RawFa
     out: list[RawFact] = []
     for e in entries:
         try:
-            out.append(
-                RawFact(
-                    start=_parse_date(e["start"]) if "start" in e else None,
-                    end=_parse_date(e["end"]),
-                    val=float(e["val"]),
-                    filed=_parse_date(e.get("filed", "1900-01-01")),
-                    form=e.get("form", ""),
-                    accn=str(e.get("accn", "")),
-                    concept=f"{taxonomy}:{tag}",
-                )
+            f = RawFact(
+                start=_parse_date(e["start"]) if "start" in e else None,
+                end=_parse_date(e["end"]),
+                val=float(e["val"]),
+                filed=_parse_date(e.get("filed", "1900-01-01")),
+                form=e.get("form", ""),
+                accn=str(e.get("accn", "")),
+                concept=f"{taxonomy}:{tag}",
             )
         except (KeyError, ValueError, TypeError):
             continue
+        if not math.isfinite(f.val):
+            # `float()` takes "NaN" and "inf", and `json.loads` the bare NaN
+            # and Infinity literals, so a payload can carry a value that is
+            # not a number. It is not a report of one: dropped here, the
+            # field is missing like any unreported one (MISSING_DATA
+            # downstream, `pending` in the journal resolver), and a later
+            # such fact does not supersede an earlier real one. Kept, a NaN
+            # revenue made DSO NOT_MEANINGFUL, which the resolver commits as
+            # a final `unresolvable` (review of deb6364, finding 1).
+            # `restatements._trail` and `vintages._series` drop it the same
+            # way, so they stand on the figure scored here.
+            logger.warning(
+                "dropping %s %s%s (accession %s, filed %s): value %r is not a finite number",
+                f.concept, "" if f.start is None else f"{f.start}..", f.end,
+                f.accn or "none", f.filed, f.val,
+            )
+            continue
+        out.append(f)
     return out
 
 
@@ -536,6 +593,28 @@ def _score(values: dict[date, float], quarter_ends: list[date]) -> int:
     return sum(1 for q in quarter_ends if q in values)
 
 
+def _candidate_series(
+    facts_json: dict,
+    taxonomy: str,
+    tag: str,
+    unit: str,
+    quarter_ends: list[date],
+    kind: str,
+    allow_derivation: bool = True,
+    tolerance_days: int = 0,
+) -> _Series | None:
+    """One candidate concept's quarterly series, or None when the payload
+    has no fact for it. The one builder for a single concept: the selected
+    tag and any fallback for it go through here, so a fallback quarter is
+    derived exactly as the selected tag's would be."""
+    facts = _collect(facts_json, taxonomy, tag, unit)
+    if not facts:
+        return None
+    if kind == "instant":
+        return _instant_series(facts, quarter_ends, tolerance_days)
+    return _FlowSeries(facts, allow_derivation).quarterly(quarter_ends)
+
+
 def _best_series(
     facts_json: dict,
     candidates: tuple[tuple[str, str], ...],
@@ -548,9 +627,12 @@ def _best_series(
 ) -> tuple[_Series, str | None]:
     """Evaluate every candidate tag; the one covering the most REPORTED
     quarters (`window_ends`) wins, then the most buffered quarters
-    (`quarter_ends`, which derivations draw on), then candidate order. Tags
-    are never mixed within a series — that would fabricate
-    period-over-period jumps.
+    (`quarter_ends`, which derivations draw on), then candidate order. The
+    series returned is that one tag's: where it has a value, no other tag is
+    ever used — mixing tags there would fabricate period-over-period jumps.
+    A reported quarter it has NO value for may afterwards be filled from
+    another candidate proven equal to it (`_fill_gaps`); this function
+    never does that.
 
     Coverage used to be counted over the buffered window alone, so a tag a
     filer had abandoned could outrank the one it files today by covering
@@ -559,17 +641,137 @@ def _best_series(
     best_key: tuple[int, int, int] | None = None
     best: tuple[_Series, str | None] = (_Series(), None)
     for rank, (taxonomy, tag) in enumerate(candidates):
-        facts = _collect(facts_json, taxonomy, tag, unit)
-        if not facts:
+        series = _candidate_series(
+            facts_json, taxonomy, tag, unit, quarter_ends, kind, allow_derivation, tolerance_days
+        )
+        if series is None:
             continue
-        if kind == "instant":
-            series = _instant_series(facts, quarter_ends, tolerance_days)
-        else:
-            series = _FlowSeries(facts, allow_derivation).quarterly(quarter_ends)
         key = (_score(series.values, window), _score(series.values, quarter_ends), -rank)
         if key[1] > 0 and (best_key is None or key > best_key):
             best_key, best = key, (series, f"{taxonomy}:{tag}")
     return best
+
+
+# Relative difference, to the selected concept's value, within which another
+# concept's value for the same quarter counts as the SAME figure — the proof
+# a tag-switch fallback needs. Not the restatement detector's 1% materiality:
+# that floor separates a revision from rounding within ONE concept, and is
+# too loose to prove two concepts measure one thing. Half a percent absorbs
+# the rounding two presentations of one figure carry (a total rounded to
+# millions in one filing, to thousands in another); an alternative that
+# differs by more on any shared quarter is a different measure (interest on
+# debt alone vs all nonoperating interest) and is never used.
+FALLBACK_AGREEMENT_PCT = 0.005
+
+
+def _agrees(alternative: float, selected: float) -> bool:
+    return abs(alternative - selected) <= FALLBACK_AGREEMENT_PCT * abs(selected)
+
+
+def _amount(v: float) -> str:
+    return f"{v:,.0f}" if v.is_integer() else f"{v:,}"
+
+
+def _fill_gaps(
+    facts_json: dict,
+    spec: FieldSpec,
+    selected: tuple[_Series, str | None],
+    quarter_ends: list[date],
+    window_ends: list[date],
+    labels: dict[date, str],
+) -> tuple[_Series, dict[date, str], list[str]]:
+    """Fill the reported quarters the selected concept has no value for,
+    each from the first other candidate (in registry order) that is proven
+    equal to the selected concept: agreement within FALLBACK_AGREEMENT_PCT
+    on EVERY quarter both report (buffer included), at least one of them a
+    reported-window quarter where the selected value is not zero.
+
+    A filer that switches concepts leaves the newest quarters under the new
+    tag only, while coverage keeps the old one selected (CRM's FY2027Q1
+    interest under `InterestExpenseNonoperating`, KO's FY2024Q1 under
+    `InterestExpense` at 2025-03-31): the quarter used to go missing. Where
+    the selected concept HAS a value it is never replaced — that was the
+    no-mixing rule's point, and it still holds. Only a gap is filled, and
+    only from a concept shown to report the same figure where both exist.
+
+    Candidates are built by `_candidate_series` from the same payload the
+    selected one was — the point-in-time view when `as_of` is set, so a fact
+    filed after it can neither fill a quarter nor prove agreement — with the
+    same derivation rules, so a year-to-date difference is taken exactly as
+    it would be for the selected concept. The value's refs, method and
+    mixed-vintage flag travel with it. Returns the filled series, the
+    concept used per filled quarter, and one note per filled quarter and per
+    candidate that could have filled a gap but was not proven equal."""
+    series, used = selected
+    gaps = [q for q in window_ends if q not in series.values]
+    if used is None or not gaps:
+        return series, {}, []
+    spec_kind = "instant" if spec.kind is Kind.INSTANT else "flow"
+    out = _Series(dict(series.values), dict(series.methods), dict(series.refs), set(series.mixed))
+    filled: dict[date, str] = {}
+    notes: list[str] = []
+    others = [(t, c) for t, c in spec.strategies[0].tags if f"{t}:{c}" != used]
+    for taxonomy, tag in others:
+        if len(filled) == len(gaps):
+            break  # every gap filled: later candidates are not read
+        concept = f"{taxonomy}:{tag}"
+        open_gaps = [q for q in gaps if q not in filled]
+        alt = _candidate_series(
+            facts_json, taxonomy, tag, spec.unit, quarter_ends, spec_kind,
+            spec.additive, spec.cover_date_tolerance_days,
+        )
+        offered = [q for q in open_gaps if alt is not None and q in alt.values]
+        if alt is None or not offered:
+            continue
+        # Disagreement is looked for on EVERY quarter both report, buffer
+        # included (conservative). Proof needs more than the absence of
+        # disagreement: a reported-window quarter where the selected value
+        # is not zero. Two tags that are both 0 agree on nothing about the
+        # figure, and a match only in the derivation buffer is not shown on
+        # any quarter the report uses (independent review of 7a65130).
+        shared = [q for q in quarter_ends if q in series.values and q in alt.values]
+        differ = [q for q in shared if not _agrees(alt.values[q], series.values[q])]
+        in_window = [q for q in shared if q in window_ends]
+        proven = [q for q in in_window if series.values[q] != 0]
+        if proven and not differ:
+            proof = ", ".join(labels[q] for q in shared)
+            for q in offered:
+                out.values[q] = alt.values[q]
+                out.methods[q] = alt.methods[q]
+                out.refs[q] = alt.refs[q]
+                if q in alt.mixed:
+                    out.mixed.add(q)
+                filled[q] = concept
+                notes.append(
+                    f"{labels[q]} from {concept}: the filer switched concepts; it agrees "
+                    f"with {used} on {proof}."
+                )
+            continue
+        if not shared:
+            why = f"it shares no quarter with {used}, so agreement cannot be checked"
+        elif differ:
+            q0 = differ[0]
+            why = (
+                f"it disagrees with {used} at {labels[q0]} "
+                f"({_amount(alt.values[q0])} vs {_amount(series.values[q0])})"
+            )
+        elif not in_window:
+            why = (
+                f"it agrees with {used} only before the reported window "
+                f"({', '.join(labels[q] for q in shared)}), so agreement is not shown on a "
+                "quarter the report uses"
+            )
+        else:
+            why = (
+                f"it agrees with {used} only where both report zero "
+                f"({', '.join(labels[q] for q in in_window)}), which does not show they "
+                "measure the same figure"
+            )
+        for q in offered:
+            notes.append(
+                f"{labels[q]}: {concept} reports {_amount(alt.values[q])} but was not used: {why}."
+            )
+    return out, filled, notes
 
 
 def _where(quarters: list[date], among: list[date], labels: dict[date, str]) -> str:
@@ -596,8 +798,10 @@ def _resolved_flow(
     """A flow field with alternative strategies (SG&A, D&A), resolved per
     quarter by `composition.resolve_by_strategy` — the rule the restatement
     detector applies too. `single` is the field's own concept as
-    `_best_series` selected it (tags are never mixed within it). A resolved
-    quarter is `mixed` when any series it used is."""
+    `_best_series` selected it, without `_fill_gaps`: that is for
+    single-concept fields, and here a quarter the concept misses is
+    resolved from the field's other strategies instead. A resolved quarter
+    is `mixed` when any series it used is."""
     single_series, single_used = single
     single_tag = single_used.split(":", 1)[1] if single_used else None
     by_tag: dict[str, _Series] = {}
@@ -762,6 +966,7 @@ def _select_series(
     composer = composer_for(spec.name)
     notes: list[str] = []
     sources: dict[date, PeriodSource] | None = None
+    fallbacks: dict[date, str] = {}
     if composer is Composer.DEBT:
         series, components, notes, sources = _total_debt_series(
             facts_json, quarter_ends, window_ends, labels
@@ -778,6 +983,14 @@ def _select_series(
             window_ends=window_ends,
         )
         components = (used,) if used else ()
+        if composer is Composer.SINGLE:
+            # A reported quarter the selected concept does not report may be
+            # filled from a candidate proven equal to it (a tag switch).
+            # Strategy fields are not: their quarters are resolved from the
+            # registry's alternative strategies instead.
+            series, fallbacks, notes = _fill_gaps(
+                facts_json, spec, (series, used), quarter_ends, window_ends, labels
+            )
         if composer is Composer.STRATEGY:
             series, components, notes, sources = _resolved_flow(
                 facts_json, spec.name, quarter_ends, window_ends, labels, (series, used)
@@ -800,11 +1013,22 @@ def _select_series(
                 "Weighted-average share counts are not additive; quarters without a "
                 "directly reported value stay missing (no Q4 derivation)."
             )
-    selection = SeriesSelection.of(spec.name, components) if components else None
+    selection = (
+        SeriesSelection.of(
+            spec.name, components,
+            tuple((q.isoformat(), c) for q, c in sorted(fallbacks.items())),
+        )
+        if components else None
+    )
     if sources is None:
-        # One concept for the whole series.
+        # One concept per quarter: the selected one, or the concept a gap
+        # was filled from — provenance names the concept actually read.
         sources = {
-            q: PeriodSource(strategy="single", components=list(components), method=series.methods[q])
+            q: PeriodSource(
+                strategy="single",
+                components=[fallbacks[q]] if q in fallbacks else list(components),
+                method=series.methods[q],
+            )
             for q in window_ends if q in series.values and selection is not None
         }
     return series, selection, notes, sources

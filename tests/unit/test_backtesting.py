@@ -170,3 +170,60 @@ class TestPriceSeries:
         ps = PriceSeries(dates, [100.0, 110.0, 121.0])
         # Jan 3 (non-trading) snaps to Jan 5
         assert ps.forward_return(date(2024, 1, 3), 1) == pytest.approx(0.10)
+
+
+class TestPriceClient:
+    """`PriceClient.fetch` on a fake clock and a fake network: requests are
+    paced, a missing close is skipped, and the cache is read back."""
+
+    BODY = {"chart": {"result": [{
+        "timestamp": [1704205800, 1704292200, 1704378600],
+        "indicators": {"adjclose": [{"adjclose": [185.0, None, 184.0]}]},
+    }]}}
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        import io
+        import json
+        from types import SimpleNamespace
+
+        from app.services.backtesting import prices
+
+        clock, naps = [100.0], []
+
+        def sleep(s):
+            naps.append(s)
+            clock[0] += s
+
+        def urlopen(req, timeout):
+            return _Ctx(io.BytesIO(json.dumps(self.BODY).encode()))
+
+        monkeypatch.setattr(prices, "_INTERVAL_S", 0.5)
+        monkeypatch.setattr(prices, "time", SimpleNamespace(monotonic=lambda: clock[0],
+                                                            sleep=sleep))
+        monkeypatch.setattr(prices.urllib.request, "urlopen", urlopen)
+        c = prices.PriceClient(tmp_path / "prices")
+        c._last = 99.5  # the last request exactly one interval ago
+        return c, naps
+
+    def test_paced_and_a_missing_close_is_skipped(self, client):
+        c, naps = client
+        s = c.fetch("AAPL", date(2024, 1, 1), date(2024, 2, 1))
+        assert s.dates == [date(2024, 1, 2), date(2024, 1, 4)] and s.closes == [185.0, 184.0]
+        assert naps == []  # the interval has passed: no wait, not even a zero one
+        c.fetch("MSFT", date(2024, 1, 1), date(2024, 2, 1))
+        assert naps == [0.5]  # straight after a request: the whole interval
+        # Cached: read back, no request, no wait.
+        assert c.fetch("AAPL", date(2024, 1, 1), date(2024, 2, 1)).closes == [185.0, 184.0]
+        assert naps == [0.5]
+
+
+class _Ctx:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def __enter__(self):
+        return self.resp
+
+    def __exit__(self, *a):
+        return False

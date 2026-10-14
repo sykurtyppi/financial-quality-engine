@@ -10,8 +10,10 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import os
 import time
 import urllib.request
+import uuid
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -78,7 +80,15 @@ class PriceClient:
             except Exception as e:  # noqa: BLE001 - one bad ticker must not kill the run
                 logger.warning("price fetch failed for %s: %s", ticker, e)
                 return None
-            cache.write_text(json.dumps(raw))
+            # Through a temporary name renamed over it: a symlink planted at
+            # the cache name is replaced, never written through (Hermes audit
+            # of 424b0b4, finding 5).
+            tmp = cache.with_name(f".{cache.name}.{uuid.uuid4().hex[:8]}.tmp")
+            try:
+                tmp.write_text(json.dumps(raw))
+                os.replace(tmp, cache)
+            finally:
+                tmp.unlink(missing_ok=True)
         try:
             result = raw["chart"]["result"][0]
             ts = result["timestamp"]

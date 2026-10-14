@@ -25,7 +25,15 @@ from app.services.ingestion.restatements import (
     scan_restatements,
 )
 from app.services.reporting.report_builder import _derived_tier1_lines
-from tests.fixtures.selection_cases import QUARTER_ENDS, _base, duration, quarter, ytd
+from tests.fixtures.selection_cases import (
+    QUARTER_ENDS,
+    _base,
+    _instants,
+    duration,
+    instant,
+    quarter,
+    ytd,
+)
 
 Q1, Q2 = QUARTER_ENDS[8], QUARTER_ENDS[9]  # 2024-03-31, 2024-06-30
 SINCE, AS_OF = date(2024, 1, 1), date(2025, 6, 30)
@@ -479,3 +487,225 @@ def test_a_tag_migration_at_unchanged_values_starts_the_run_a_revision_is_measur
     assert diag.field_by_name("revenue").tag_used == f"us-gaap:{new_tag}"
     (d,) = [x for x in _scan(p.data).derived if x.field_name == "revenue"]
     assert (d.original_value, d.current_value, d.is_amendment) == (500.0, 509.0, True)
+
+
+class TestALongerRevisedFigureDoesNotHideTheQuarter:
+    """Round-10 audit: a revised year-to-date or annual figure ending on a
+    derived quarter hid that quarter's own move. Only a footprint of the
+    quarter's own figure makes its derived row a repeat."""
+
+    def test_a_material_h1_revision_reports_the_q2_it_moved(self):
+        scan = _scan(_ytd_filer(110.0))  # H1 101 -> 110: +8.9%, material
+        (fp,) = [f for f in scan.footprints if f.field_name == "operating_income"]
+        assert (fp.period_end - fp.period_start).days > 100
+        (d,) = [d for d in scan.derived if d.field_name == "operating_income"]
+        assert d.period_end == Q2 and d.original_value == 1.0 and abs(d.current_value - 10.0) < 1e-9
+        text = render_restatements_section(scan)
+        assert "### Derived quarters that moved" in text and "| 2024-06-30 | operating_income |" in text
+
+    def test_tier_1_carries_the_event_once(self):
+        scan = _scan(_ytd_filer(110.0))
+        (fp,) = [f for f in scan.footprints if f.field_name == "operating_income"]
+        assert fp.is_amendment and scan.derived
+        assert _derived_tier1_lines(scan.derived, scan.footprints) == []
+        # Without the footprint that names the event, the derived move is it.
+        (line,) = _derived_tier1_lines(scan.derived)
+        assert line.startswith("Restatement (10-Q/A) moved derived operating_income for 2024-06-30")
+
+    def test_the_quarters_own_revised_figure_still_stands_for_it(self):
+        """A composite quarter is a sum of quarter facts: its footprint is the
+        quarter's own figure, and the derived row would repeat it."""
+        p = _base("Sum Co")
+        p.add("SellingGeneralAndAdministrativeExpense", [])
+        p.add("SellingAndMarketingExpense", [quarter(e, 60.0) for e in QUARTER_ENDS])
+        p.add("GeneralAndAdministrativeExpense", [
+            *[quarter(e, 40.0) for e in QUARTER_ENDS],
+            quarter(Q2, 60.0, filed=date(2024, 10, 1), form="10-Q/A"),
+        ])
+        scan = _scan(p.data)
+        own = [f for f in scan.footprints if f.field_name == "sga_expense" and f.period_end == Q2]
+        assert own and (own[0].period_end - own[0].period_start).days <= 100
+        assert not [d for d in scan.derived if d.field_name == "sga_expense" and d.period_end == Q2]
+
+
+def test_a_real_annual_amendment_reports_the_derived_q4():
+    """CRM, full-year revenue +2% by a 10-K/A: the derived Q4 moved +7.4%."""
+    import copy
+
+    facts = json.loads((FIXTURES / "companyfacts_CRM_trimmed.json").read_text())
+    ds, _ = build_dataset(facts, "CRM")
+    q = [p for p in ds.sorted_periods() if p.sources["revenue"].method != "direct"][-1]
+    fy = next(r for r in q.sources["revenue"].inputs if r.sign == 1)
+    newer = copy.deepcopy(facts)
+    rows = newer["facts"]["us-gaap"][fy.concept.split(":", 1)[1]]["units"]["USD"]
+    row = next(r for r in rows if r["accn"] == fy.accession and r["end"] == fy.end.isoformat()
+               and r.get("start") == fy.start.isoformat())
+    rows.append({**{k: v for k, v in row.items() if k != "frame"},
+                 "val": round(row["val"] * 1.02), "form": "10-K/A", "filed": "2026-09-26",
+                 "accn": "0001108524-26-990010"})
+    _ds2, diag = build_dataset(newer, "CRM")
+    scan = scan_restatements(newer, period_since=date(2023, 1, 1), as_of=date(2026, 9, 26),
+                             selected_tags=diag.selected_series(), n_quarters=8)
+    assert [(f.field_name, f.period_start, f.period_end) for f in scan.footprints] == [
+        ("revenue", fy.start, fy.end)]
+    (d,) = scan.derived
+    assert (d.field_name, d.period_end, d.method) == (
+        "revenue", q.period_end, q.sources["revenue"].method)
+    assert d.original_value == q.revenue and d.pct_change > 0.07
+    assert d.moved_by == (("10-K/A", "0001108524-26-990010"),)
+
+
+def test_a_quarters_own_figure_is_what_the_mapper_reads_as_one():
+    """70 to 100 days (`QTD_DAYS`), or an instant; a year-to-date or annual
+    figure is longer, a stub shorter."""
+    from datetime import timedelta
+
+    from app.services.ingestion.companyfacts_mapper import QTD_DAYS
+    from app.services.ingestion.restatements import longer_than_a_quarter, quarters_own
+
+    assert QTD_DAYS == (70, 100)  # a 13-week quarter is 91 days, a 14-week one 98
+    end = date(2026, 1, 31)
+
+    def span(days):
+        return end - timedelta(days=days)
+
+    assert [quarters_own(span(d), end) for d in (69, 70, 91, 100, 101, 181)] == [
+        False, True, True, True, False, False]
+    assert quarters_own(None, end)  # an instant
+    assert [longer_than_a_quarter(span(d), end) for d in (60, 100, 101, 181)] == [
+        False, False, True, True]
+    assert not longer_than_a_quarter(None, end)
+
+
+class TestRoundElevenReview:
+    """The review of the fix above: each reproduced before it was fixed."""
+
+    def test_a_later_amendment_re_filing_the_value_does_not_repeat_the_event(self):
+        """10-Q/A No.1 moves H1 101 -> 110; No.2 re-files 110. The footprint
+        names No.2, the derived Q2 the No.1 that moved it: one restatement,
+        one Tier-1 line."""
+        facts = _ytd_filer(110.0)
+        facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["USD"].append(
+            ytd(Q2, 110.0, filed=date(2024, 11, 15), form="10-Q/A"))
+        scan = _scan(facts)
+        (fp,) = [f for f in scan.footprints if f.field_name == "operating_income"]
+        (d,) = [d for d in scan.derived if d.field_name == "operating_income"]
+        assert fp.amendment_accession not in {a for _f, a in d.moved_by}
+        assert _derived_tier1_lines(scan.derived, scan.footprints) == []
+
+    def test_another_fields_amendment_does_not_hide_a_derived_move(self):
+        """The 10-Q/A that amends total assets also moves derived Q2
+        operating income +90% (H1 +0.9%, below materiality). Both reach the
+        card, as before the fix."""
+        facts = _ytd_filer(101.9)
+        rows = facts["facts"]["us-gaap"]["Assets"]["units"]["USD"]
+        base = next(r for r in rows if r["end"] == Q2.isoformat())
+        rows.append(instant(Q2, base["val"] * 1.05, filed=date(2024, 10, 1), form="10-Q/A"))
+        scan = _scan(facts)
+        assert [f.field_name for f in scan.footprints] == ["total_assets"]
+        (line,) = _derived_tier1_lines(scan.derived, scan.footprints)
+        assert "moved derived operating_income for 2024-06-30 +90.0%" in line
+
+    def test_a_revised_stub_does_not_stand_for_the_quarter(self):
+        """A 61-day fact ending on Q2 is no quarter the mapper reads: the
+        derived Q2 (H1 less Q1) it hid moved +90%."""
+        facts = _ytd_filer(101.9)
+        rows = facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["USD"]
+        rows.append(duration(date(2024, 5, 1), Q2, 50.0))
+        rows.append(duration(date(2024, 5, 1), Q2, 60.0, filed=date(2024, 10, 1), form="10-Q/A"))
+        scan = _scan(facts)
+        assert [(f.field_name, (f.period_end - f.period_start).days) for f in scan.footprints] == [
+            ("operating_income", 60)]
+        (d,) = [d for d in scan.derived if d.field_name == "operating_income"]
+        assert d.period_end == Q2 and abs(d.current_value - 1.9) < 1e-9
+
+    def test_a_summed_balance_is_reported_once(self):
+        """Total debt is a sum of instants: its footprint and its derived
+        composite row are one figure, listed once."""
+        p = _base("Debt Co")
+        p.add("LongTermDebtNoncurrent", _instants(2000.0) + [
+            instant(Q2, 2300.0, filed=date(2024, 10, 1), form="10-Q/A")])
+        p.add("LongTermDebtCurrent", _instants(150.0))
+        scan = _scan(p.data)
+        (fp,) = [f for f in scan.footprints if f.field_name == "total_debt"]
+        assert fp.period_start is None and fp.is_amendment
+        assert not [d for d in scan.derived if d.field_name == "total_debt"]
+
+
+# Formerly `accepted` mutation survivors (Hermes audit item 8): each boundary
+# is now pinned by a test that fails under its mutant.
+
+
+def test_a_fact_400_days_before_a_derived_quarter_is_a_rebuild_date(monkeypatch):
+    """`(end - row_end).days <= 400` -> `< 400`. The derived Q2 is rebuilt as
+    of every date a fact of its concept, ending up to 400 days before it, was
+    filed. A fact ending exactly 400 days before Q2 adds its filing date as a
+    rebuild date; one ending 401 days before does not. The rebuild dates are
+    read off the cutoffs `derived_revisions` re-reads the payload at."""
+    from datetime import timedelta
+
+    from app.services.ingestion import restatements
+    from app.services.ingestion.restatements import derived_revisions
+
+    at_400, at_401 = date(2024, 1, 17), date(2024, 1, 18)
+    facts = _ytd_filer(None)
+    filed_before = {
+        row["filed"] for concept in facts["facts"]["us-gaap"].values()
+        for rows in concept["units"].values() for row in rows
+    }
+    assert {at_400.isoformat(), at_401.isoformat()}.isdisjoint(filed_before)
+    rows = facts["facts"]["us-gaap"]["OperatingIncomeLoss"]["units"]["USD"]
+    for days, filed in ((400, at_400), (401, at_401)):
+        end = Q2 - timedelta(days=days)
+        rows.append(duration(end - timedelta(days=90), end, 7.0, filed=filed))
+
+    cutoffs: list[date | None] = []
+    real = restatements._dated_copy
+
+    def spy(facts_json, cutoff):
+        cutoffs.append(cutoff)
+        return real(facts_json, cutoff)
+
+    monkeypatch.setattr(restatements, "_dated_copy", spy)
+    assert derived_revisions(facts, as_of=AS_OF, period_since=None) == []
+    assert cutoffs[0] == AS_OF  # the payload as of the scan; the rest are rebuilds
+    rebuilds = set(cutoffs[1:])
+    assert date(2024, 8, 9) in rebuilds  # the H1 year-to-date figure Q2 is derived from
+    assert at_400 in rebuilds
+    assert at_401 not in rebuilds
+
+
+def test_long_tables_show_exactly_20_rows_and_count_the_rest():
+    """`_MAX_ROWS = 20` -> 21. `test_long_tables_say_how_many_rows_were_left_out`
+    pins the cap by the constant, whatever its value; this pins the value:
+    20 rows render all 20 and no "more" line, 21 render 20 and "+1 more"."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from app.services.ingestion.restatements import (
+        _conflict_lines,
+        _derived_lines,
+        _table,
+    )
+
+    fp = SimpleNamespace(period_end=Q2, field_name="revenue", original_value=1.0,
+                         current_value=2.0, pct_change=1.0, amendment_value=None)
+    header = 2
+    twenty = _table([fp] * 20)
+    assert len(twenty) == header + 20
+    assert not any("more |" in row for row in twenty)
+    twenty_one = _table([fp] * 21)
+    assert len(twenty_one) == header + 20 + 1
+    assert sum(row.startswith("| 2024-06-30 | revenue |") for row in twenty_one) == 20
+    assert twenty_one[-1] == "| … | +1 more | | | | |"
+
+    c = SimpleNamespace(period_start=None, period_end=Q2, field_name="revenue",
+                        tag="us-gaap:Revenues", filed=Q2, amended=False, values=(1.0, 2.0),
+                        accessions=("a", "b"))
+    assert not any("more |" in line for line in _conflict_lines((c,) * 20))
+    assert _conflict_lines((c,) * 21)[-1].startswith("| … | 1 more |")
+
+    (d,) = [x for x in _scan(_ytd_filer(101.9)).derived if x.field_name == "operating_income"]
+    full = tuple(replace(d, field_name=f"f{i}") for i in range(20))
+    assert not any("more |" in line for line in _derived_lines(full))
+    assert any("| 1 more |" in line for line in _derived_lines(full + (d,)))
