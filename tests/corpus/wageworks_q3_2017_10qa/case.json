@@ -1,0 +1,139 @@
+{
+ "name": "wageworks_q3_2017_10qa",
+ "ticker": "WAGE",
+ "cik": 1158863,
+ "as_of": "2019-04-26",
+ "since": "2017-09-30",
+ "why": "The Q3 2017 10-Q/A moved scored figures and must reach Tier 1",
+ "synthetic": false,
+ "reviewed": {
+  "by": "Hermes Agent (reviewed against SEC EDGAR filings)",
+  "on": "2026-10-14",
+  "filings_read": [
+   "0001158863-17-000026",
+   "0001193125-18-108845",
+   "0001158863-19-000010",
+   "0001158863-19-000044"
+  ]
+ },
+ "expected": {
+  "tier1": true,
+  "footprints": [
+   {
+    "field": "total_assets",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "stock_based_compensation",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "sga_expense",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "receivables",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "ppe_net",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "operating_income",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "operating_income",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "net_income",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "net_income",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "interest_expense",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "interest_expense",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "deferred_revenue",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "current_liabilities",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "current_assets",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "cfo",
+    "period_end": "2017-09-30",
+    "amended": true
+   },
+   {
+    "field": "stock_based_compensation",
+    "period_end": "2017-09-30",
+    "amended": true
+   }
+  ],
+  "non_reliance": [
+   "0001193125-18-108845"
+  ],
+  "selections": {
+   "accounts_payable": "us-gaap:AccountsPayableAndAccruedLiabilitiesCurrent",
+   "buybacks": "us-gaap:PaymentsForRepurchaseOfCommonStock",
+   "capex": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+   "cash_and_equivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+   "cfo": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+   "current_assets": "us-gaap:AssetsCurrent",
+   "current_liabilities": "us-gaap:LiabilitiesCurrent",
+   "deferred_revenue": "us-gaap:DeferredRevenueCurrent",
+   "depreciation_amortization": "Depreciation+AmortizationOfIntangibleAssets",
+   "ebit": "us-gaap:OperatingIncomeLoss",
+   "goodwill": "us-gaap:Goodwill",
+   "intangible_assets": "us-gaap:FiniteLivedIntangibleAssetsNet",
+   "interest_expense": "us-gaap:InterestExpense",
+   "net_income": "us-gaap:NetIncomeLoss",
+   "operating_income": "us-gaap:OperatingIncomeLoss",
+   "ppe_net": "us-gaap:PropertyPlantAndEquipmentNet",
+   "receivables": "us-gaap:AccountsReceivableNetCurrent",
+   "revenue": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax|2016-12-31:us-gaap:Revenues|2017-12-31:us-gaap:Revenues",
+   "sga_expense": "SellingAndMarketingExpense+GeneralAndAdministrativeExpense",
+   "share_issuance_proceeds": "us-gaap:ProceedsFromIssuanceOfCommonStock",
+   "shares_diluted": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+   "shares_outstanding": "us-gaap:CommonStockSharesOutstanding",
+   "stock_based_compensation": "us-gaap:ShareBasedCompensation",
+   "total_assets": "us-gaap:Assets",
+   "total_debt": "LongTermDebtNoncurrent"
+  },
+  "coverage_min": 0.92,
+  "uninspected": [
+   "cost_of_revenue",
+   "inventory"
+  ]
+ }
+}

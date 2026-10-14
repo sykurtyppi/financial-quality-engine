@@ -2,8 +2,8 @@
 """Build a validation-corpus case: fetch, trim, observe, and write a DRAFT.
 
     EDGAR_IDENTITY="Name email" .venv/bin/python scripts/make_corpus_case.py \\
-        wageworks_10qa WAGE --cik 1366649 --as-of 2018-06-30 --since 2016-01-01 \\
-        --why "10-Q/A that moved scored revenue"
+        wageworks_q3_2017_10qa WAGE --cik 1158863 --as-of 2019-04-26 --since 2017-09-30 \\
+        --why "Q3 2017 10-Q/A moved scored figures and must reach Tier 1"
 
 Writes `tests/corpus/<name>/companyfacts.json` and `submissions.json` (trimmed)
 and a `case.json` whose expectations are COPIED FROM WHAT THE ENGINE
