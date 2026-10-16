@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from app.core.pipeline import analyze as real_analyze
 from app.services.ingestion.sec_client import SecClientError
 from app.services.journal import reporting as journal_reporting
+from app.services.market_data import MarketDataError, MarketSnapshot
 from scripts import generate_report
 from tests.fixtures.companies import stretch_dataset
 
@@ -34,6 +35,11 @@ class _NoRefetchClient:
 
     def _cached_json(self, name: str, url: str) -> dict:
         raise AssertionError(f"unexpected uncoordinated fetch of {name}")
+
+
+class _UnavailableMarketDataProvider:
+    def get_snapshot(self, ticker: str) -> MarketSnapshot:
+        raise MarketDataError(f"market data unavailable for {ticker}")
 
 
 def _snapshot(company_facts: dict) -> SimpleNamespace:
@@ -175,7 +181,9 @@ def test_journal_reuses_snapshots_for_documents_and_report(monkeypatch, tmp_path
     monkeypatch.setattr(journal_reporting, "fetch_documents", fake_fetch_documents)
     monkeypatch.setattr(journal_reporting, "build_full_report", fake_build_report)
 
-    output, _ = journal_reporting.build_report("aapl")
+    output, _ = journal_reporting.build_report(
+        "aapl", market_data_provider=_UnavailableMarketDataProvider()
+    )
 
     assert output.read_text() == "report"
     assert observed["document_client"] is client

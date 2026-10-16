@@ -23,8 +23,14 @@ from app.services.ingestion.edgar_adapter import (
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
+from app.services.market_data import (
+    MarketDataError,
+    MarketDataProvider,
+    YahooMarketDataProvider,
+)
 from app.services.reporting.report_builder import build_report as build_full_report
 from app.services.scoring.thermometer import describe
+from app.services.valuation import compute_trailing_valuation
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
@@ -43,6 +49,7 @@ def build_report(
     out_dir: Path | None = None,
     banner: str | None = None,
     vintage: bool = True,
+    market_data_provider: MarketDataProvider | None = None,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -85,6 +92,16 @@ def build_report(
     # which this regeneration does not do.
     generated_on = date.today().isoformat()
     fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    warnings = list(diag.warnings)
+    valuation = None
+    provider = market_data_provider if market_data_provider is not None else YahooMarketDataProvider()
+    try:
+        market_snapshot = provider.get_snapshot(ticker)
+        valuation = compute_trailing_valuation(dataset, market_snapshot)
+    except (MarketDataError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        # Market valuation is optional enrichment; provider failure or incomplete
+        # normalized fundamentals must not suppress the SEC-based report.
+        warnings.append(f"Trailing valuation unavailable: {type(exc).__name__}: {exc}")
     report, thermometer = build_full_report(
         result, dataset,
         generated_on=generated_on,
@@ -94,7 +111,7 @@ def build_report(
         client=client,
         ticker=ticker,
         fetched_at=fetched_at,
-        warnings=diag.warnings,
+        warnings=warnings,
         field_notes=diag.field_notes(),
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
@@ -103,6 +120,7 @@ def build_report(
         fresh=fresh,  # the data-quality line must not call a fresh fetch cache-eligible
         vintage_note=vintage_note,
         baseline_day=date.fromisoformat(report_day) if report_day else None,
+        valuation=valuation,
     )
     if banner:
         report = f"{banner}\n\n{report}"

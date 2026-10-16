@@ -26,6 +26,7 @@ from typing import Any
 
 from app.schemas.financials import CompanyDataset
 from app.schemas.report import AnalysisResult
+from app.schemas.valuation import ValuationAnalysis
 from app.services.ingestion.payloads import ExternalPayloadError
 from app.services.ingestion.sec_client import SecClientError
 from app.services.reporting.decision_card import render_decision_card
@@ -45,6 +46,59 @@ ANALYSIS_SCOPE_NOTICE = (
     "geopolitical exposure. This list is not exhaustive; review the filing and its "
     "notes directly before making an investment decision."
 )
+
+_VALUATION_LABELS = {
+    "market_cap": "Market capitalization",
+    "trailing_pe": "Trailing P/E",
+    "price_to_sales": "Price / sales",
+    "enterprise_value": "Enterprise value",
+    "ev_to_ebitda": "EV / EBITDA",
+    "price_to_fcf": "Price / free cash flow",
+    "fcf_yield": "Free-cash-flow yield",
+    "earnings_yield": "Earnings yield",
+    "net_debt_to_ebitda": "Net debt / EBITDA",
+}
+
+
+def render_valuation_section(valuation: ValuationAnalysis) -> str:
+    """Render valuation with definitions and mixed-source provenance visible."""
+    snapshot = valuation.market_snapshot
+    observed = snapshot.observed_at.strftime("%Y-%m-%d %H:%M UTC")
+    retrieved = snapshot.retrieved_at.strftime("%Y-%m-%d %H:%M UTC")
+    delay = "unknown" if snapshot.delay_seconds is None else f"{snapshot.delay_seconds}s"
+    lines = [
+        "## Trailing Valuation",
+        "",
+        (
+            f"Market price from {snapshot.provider}; financial statements from "
+            f"{valuation.fundamentals_source}; ratios calculated by Financial Quality "
+            "Engine, not provider-computed ratios."
+        ),
+        "",
+        f"- Price: {snapshot.price:,.2f} {snapshot.currency}",
+        f"- Market observed: {observed}; retrieved: {retrieved}; provider delay: {delay}",
+        f"- Exchange/session: {snapshot.exchange or 'unknown'} / {snapshot.market_session or 'unknown'}",
+        f"- Financial period end: {valuation.financial_period_end}; basis: {valuation.period_basis}",
+        f"- Shares basis: {valuation.shares_basis}",
+        "",
+        "| Metric | Value | Status | Definition |",
+        "|---|---:|---|---|",
+    ]
+    for name, metric in valuation.metrics.items():
+        label = _VALUATION_LABELS.get(name, name.replace("_", " ").title())
+        if metric.value is None:
+            value = "—"
+        elif name in {"market_cap", "enterprise_value"}:
+            value = f"{metric.value:,.2f} {snapshot.currency}"
+        elif name in {"fcf_yield", "earnings_yield"}:
+            value = f"{metric.value:.2%}"
+        else:
+            value = f"{metric.value:.2f}x"
+        status = metric.status.value.replace("_", " ")
+        if metric.note:
+            status += f" — {metric.note}"
+        lines.append(f"| {label} | {value} | {status} | {metric.formula} |")
+    return "\n".join(lines)
 
 
 def data_quality_section(
@@ -497,6 +551,7 @@ def build_report(
     field_notes: list[str] | None = None,
     baseline_day: date | None = None,
     vintage_root: Path | None = None,
+    valuation: ValuationAnalysis | None = None,
 ) -> tuple[str, DistressThermometer]:
     """Assemble the decision card (headline) + full report appendix. Returns
     (markdown, thermometer). Evidence streams are included only when a client is
@@ -615,6 +670,7 @@ def build_report(
     report = (
         card
         + "\n\n"
+        + (render_valuation_section(valuation) + "\n\n" if valuation is not None else "")
         + ANALYSIS_SCOPE_NOTICE
         + "\n\n---\n\n# Full report (appendix)\n\n"
         + body

@@ -1,9 +1,19 @@
 """Repo-wide test guards."""
 
 import os
+import urllib.request
 
 import pytest
 from hypothesis import HealthCheck, settings
+
+
+@pytest.fixture(autouse=True)
+def _never_use_network(monkeypatch):
+    """Block every unmocked external HTTP endpoint during tests."""
+    def blocked_urlopen(*args, **kwargs):
+        raise OSError("tests must inject or mock external network providers")
+
+    monkeypatch.setattr(urllib.request, "urlopen", blocked_urlopen)
 
 
 @pytest.fixture(autouse=True)

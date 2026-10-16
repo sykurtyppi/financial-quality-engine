@@ -1,17 +1,23 @@
 """Shared report builder tests (review findings 1, 4, 6, and round-5 outage)."""
 
-from datetime import date
+from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING
 
 from app.core.pipeline import analyze
 from app.schemas.scoring import BlockScore, Confidence, Direction
 from app.services.ingestion.restatements import RestatementFootprint
 from app.services.ingestion.sec_client import SecClientError
+from app.services.market_data import MarketSnapshot
 from app.services.reporting.report_builder import (
     _restatement_tier1_lines,
     build_report,
     data_quality_section,
 )
+from app.services.valuation import compute_trailing_valuation
 from tests.fixtures.companies import stretch_dataset
+
+if TYPE_CHECKING:
+    from app.schemas.scoring import BlockScore
 
 
 class _OutageClient:
@@ -315,3 +321,37 @@ class TestFundingContextNote:
         # metric must not intersect.
         other = SimpleNamespace(evidence_metrics=["dso_trend"])
         assert not (set(other.evidence_metrics) & FUNDING_CONTEXT_METRICS)
+
+
+def test_report_discloses_trailing_valuation_sources_and_timestamps():
+    ds = stretch_dataset()
+    result = analyze(ds)
+    valuation = compute_trailing_valuation(
+        ds,
+        MarketSnapshot(
+            ticker="STRETCHCO",
+            price=30.0,
+            currency="USD",
+            exchange="NMS",
+            observed_at=datetime(2026, 10, 13, 20, 0, tzinfo=UTC),
+            retrieved_at=datetime(2026, 10, 14, 12, 0, tzinfo=UTC),
+            market_session="CLOSED",
+            provider="Yahoo Finance",
+            delay_seconds=0,
+            is_delayed=False,
+        ),
+    )
+
+    report, _ = build_report(
+        result,
+        ds,
+        generated_on="2026-10-14",
+        valuation=valuation,
+    )
+
+    assert "## Trailing Valuation" in report
+    assert "Yahoo Finance" in report
+    assert "SEC filings (normalized Companyfacts)" in report
+    assert "2026-10-13 20:00 UTC" in report
+    assert "Market cap ÷ TTM net income" in report
+    assert "not provider-computed ratios" in report
