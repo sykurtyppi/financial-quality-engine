@@ -11,7 +11,7 @@ CLI — not the bare appendix.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.core.pipeline import analyze
@@ -19,8 +19,14 @@ from app.services.ingestion.edgar_adapter import fetch_dataset_snapshot
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient
 from app.services.journal.store import safe_ticker
+from app.services.market_data import (
+    MarketDataError,
+    MarketDataProvider,
+    YahooMarketDataProvider,
+)
 from app.services.reporting.report_builder import build_report as build_full_report
 from app.services.scoring.thermometer import describe
+from app.services.valuation import compute_trailing_valuation
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
@@ -38,6 +44,7 @@ def build_report(
     fresh: bool = False,
     out_dir: Path | None = None,
     banner: str | None = None,
+    market_data_provider: MarketDataProvider | None = None,
 ) -> tuple[Path, str]:
     """Generate and write the markdown report for ``ticker``.
 
@@ -68,7 +75,21 @@ def build_report(
     # PIT fundamentals + `filed <= as_of` across every stream (the pit.py path),
     # which this regeneration does not do.
     generated_on = date.today().isoformat()
-    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    warnings = list(diag.warnings)
+    valuation = None
+    provider = (
+        market_data_provider
+        if market_data_provider is not None
+        else YahooMarketDataProvider()
+    )
+    try:
+        market_snapshot = provider.get_snapshot(ticker)
+        valuation = compute_trailing_valuation(dataset, market_snapshot)
+    except (MarketDataError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        # Market valuation is optional enrichment; a malformed provider or
+        # incomplete normalized dataset must not suppress the SEC report.
+        warnings.append(f"Trailing valuation unavailable: {type(exc).__name__}: {exc}")
     report, thermometer = build_full_report(
         result, dataset,
         generated_on=generated_on,
@@ -76,9 +97,10 @@ def build_report(
         client=client,
         ticker=ticker,
         fetched_at=fetched_at,
-        warnings=diag.warnings,
+        warnings=warnings,
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
+        valuation=valuation,
     )
     if banner:
         report = f"{banner}\n\n{report}"

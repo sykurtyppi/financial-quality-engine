@@ -38,7 +38,32 @@ breaks the snapshot and must cite this protocol in the diff).
 Bug fixes that change *computation correctness* (not scoring judgment) are
 allowed but must be logged in the "Mid-window changes" section below.
 
-Mid-window changes (0.4.0 window): (none yet)
+Mid-window changes (0.4.0 window):
+
+- **2026-10-14 — non-scoring trailing valuation module.** Added timestamped
+  market snapshots behind a provider-neutral boundary (initial internal-MVP
+  adapter: Yahoo Finance chart metadata) and deterministic valuation formulas.
+  SEC-normalized filings remain authoritative for all statement inputs; market
+  data is separately attributed and never represented as filing data. This
+  presentation-only module does not alter quality scores, flags, thresholds, or
+  calibration snapshots.
+
+  Definitions: market capitalization = observed price × latest reported
+  point-in-time shares outstanding; trailing P/E = market capitalization ÷ TTM
+  net income; P/S = market capitalization ÷ TTM revenue; enterprise value =
+  market capitalization + latest total debt − latest cash and equivalents;
+  EBITDA = TTM EBIT + TTM depreciation/amortization; EV/EBITDA = enterprise
+  value ÷ TTM EBITDA; free cash flow = TTM CFO − TTM capex; P/FCF = market
+  capitalization ÷ TTM FCF; FCF yield = TTM FCF ÷ market capitalization;
+  earnings yield = TTM net income ÷ market capitalization; net debt/EBITDA =
+  (latest debt − latest cash) ÷ TTM EBITDA. P/E and earnings yield are not
+  meaningful for non-positive earnings; valuation multiples requiring a
+  positive denominator are likewise marked not meaningful rather than treated
+  as affirmative evidence. Missing inputs propagate as unavailable.
+
+  Yahoo is accepted only as a replaceable internal-MVP market-data source;
+  forward P/E, PEG, analyst targets, and ratings remain deferred until a
+  documented estimate provider is selected and reviewed.
 
 Mid-window changes (0.3.0 window, closed): the window ended with the P0
 correction program (PR #2) rather than by reaching its planned sample size —

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.market_data import MarketDataError, MarketSnapshot
 from app.services.watch.poller import Decision
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,11 +25,23 @@ watch_cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(watch_cli)
 
 
+class _UnavailableMarketDataProvider:
+    def get_snapshot(self, ticker: str) -> MarketSnapshot:
+        raise MarketDataError(f"market data unavailable for {ticker}")
+
+
 def _poll_args(**over) -> Namespace:
-    base = dict(
-        ticker="NVDA", since=None, interval=0.01, max_wait=1.0, once=True,
-        dry_run=False, no_docs=False, no_auto=False, no_audit=False,
-    )
+    base = {
+        "ticker": "NVDA",
+        "since": None,
+        "interval": 0.01,
+        "max_wait": 1.0,
+        "once": True,
+        "dry_run": False,
+        "no_docs": False,
+        "no_auto": False,
+        "no_audit": False,
+    }
     base.update(over)
     return Namespace(**base)
 
@@ -163,6 +176,7 @@ class TestFreshPropagation:
         out, distress = reporting.build_report(
             "nvda", with_docs=False, fresh=True,
             out_dir=tmp_path / "auto", banner="> BANNER LINE",
+            market_data_provider=_UnavailableMarketDataProvider(),
         )
         assert client_kwargs.get("fresh") is True
         assert out.parent == tmp_path / "auto"
@@ -193,7 +207,11 @@ class TestFreshPropagation:
         monkeypatch.setattr(reporting, "build_full_report", lambda *a, **k: ("BODY", None))
         monkeypatch.setattr(reporting, "REPORTS", tmp_path)
 
-        out, _ = reporting.build_report("nvda", with_docs=False)
+        out, _ = reporting.build_report(
+            "nvda",
+            with_docs=False,
+            market_data_provider=_UnavailableMarketDataProvider(),
+        )
         assert client_kwargs.get("fresh") is False
         assert out.parent == tmp_path
         assert out.read_text() == "BODY"
