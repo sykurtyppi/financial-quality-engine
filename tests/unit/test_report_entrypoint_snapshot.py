@@ -6,6 +6,7 @@ consumer. These tests drive the real entry-point bodies and fail if either
 payload stops being passed through.
 """
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from app.core.pipeline import analyze as real_analyze
@@ -40,6 +41,24 @@ class _NoRefetchClient:
 class _UnavailableMarketDataProvider:
     def get_snapshot(self, ticker: str) -> MarketSnapshot:
         raise MarketDataError(f"market data unavailable for {ticker}")
+
+
+class _StaticMarketDataProvider:
+    def __init__(self) -> None:
+        self.requested_tickers: list[str] = []
+
+    def get_snapshot(self, ticker: str) -> MarketSnapshot:
+        self.requested_tickers.append(ticker)
+        observed_at = datetime(2026, 10, 16, 20, 0, tzinfo=UTC)
+        return MarketSnapshot(
+            ticker=ticker,
+            price=100.0,
+            currency="USD",
+            exchange="TEST",
+            observed_at=observed_at,
+            retrieved_at=observed_at,
+            provider="Test provider",
+        )
 
 
 def _snapshot(company_facts: dict) -> SimpleNamespace:
@@ -101,6 +120,60 @@ def test_cli_reuses_snapshots_for_documents_and_report(monkeypatch, tmp_path):
     assert observed["document_submissions"] is submissions
     assert observed["report_submissions"] is submissions
     assert client.submissions_calls == 1
+
+
+def test_cli_passes_trailing_valuation_to_shared_report_builder(monkeypatch, tmp_path):
+    company_facts, submissions = _payloads()
+    snapshot = _snapshot(company_facts)
+    snapshot.dataset.profile.ticker = "AAPL"
+    snapshot.dataset.profile.reporting_currency = "USD"
+    client = _NoRefetchClient(submissions)
+    provider = _StaticMarketDataProvider()
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(generate_report, "ROOT", tmp_path)
+    monkeypatch.setattr(generate_report, "SecClient", lambda fresh=False: client)
+    monkeypatch.setattr(generate_report, "fetch_dataset_snapshot", lambda *a, **k: snapshot)
+    monkeypatch.setattr(generate_report, "fetch_documents", lambda *a, **k: _documents())
+    monkeypatch.setattr(generate_report, "analyze", real_analyze)
+
+    def fake_build_report(*args, **kwargs):
+        observed["valuation"] = kwargs["valuation"]
+        return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
+
+    monkeypatch.setattr(generate_report, "build_report", fake_build_report)
+    monkeypatch.setattr(generate_report.sys, "argv", ["generate_report.py", "aapl"])
+
+    assert generate_report.main(market_data_provider=provider) == 0
+    assert provider.requested_tickers == ["AAPL"]
+    assert observed["valuation"] is not None
+
+
+def test_cli_reports_market_failure_as_optional_warning(monkeypatch, tmp_path):
+    company_facts, submissions = _payloads()
+    snapshot = _snapshot(company_facts)
+    client = _NoRefetchClient(submissions)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(generate_report, "ROOT", tmp_path)
+    monkeypatch.setattr(generate_report, "SecClient", lambda fresh=False: client)
+    monkeypatch.setattr(generate_report, "fetch_dataset_snapshot", lambda *a, **k: snapshot)
+    monkeypatch.setattr(generate_report, "fetch_documents", lambda *a, **k: _documents())
+    monkeypatch.setattr(generate_report, "analyze", real_analyze)
+
+    def fake_build_report(*args, **kwargs):
+        observed["valuation"] = kwargs["valuation"]
+        observed["warnings"] = kwargs["warnings"]
+        return "report", SimpleNamespace(reading=None, regime_flags=[], hottest_cluster=None)
+
+    monkeypatch.setattr(generate_report, "build_report", fake_build_report)
+    monkeypatch.setattr(generate_report.sys, "argv", ["generate_report.py", "aapl"])
+
+    assert generate_report.main(market_data_provider=_UnavailableMarketDataProvider()) == 0
+    assert observed["valuation"] is None
+    assert observed["warnings"] == [
+        "Trailing valuation unavailable: MarketDataError: market data unavailable for AAPL"
+    ]
 
 
 def test_cli_discloses_an_index_it_could_not_read_once(monkeypatch, tmp_path):

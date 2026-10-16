@@ -331,7 +331,10 @@ Mid-window changes (0.4.0 window):
     (latest debt − latest cash) ÷ TTM EBITDA. P/E and earnings yield are not
     meaningful for non-positive earnings; valuation multiples requiring a
     positive denominator are likewise marked not meaningful rather than treated
-    as affirmative evidence. Missing inputs propagate as unavailable.
+    as affirmative evidence. Missing inputs propagate as unavailable. Monetary
+    valuation is calculated only when the market quote currency exactly matches
+    the recorded currency of normalized filing inputs; unknown or mismatched
+    currencies make valuation unavailable rather than silently mixing units.
 
     Yahoo is accepted only as a replaceable internal-MVP market-data source;
     forward P/E, PEG, analyst targets, and ratings remain deferred until a

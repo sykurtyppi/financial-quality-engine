@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from math import inf
 
 import pytest
 
+from app.services import market_data
 from app.services.market_data import MarketDataError, YahooMarketDataProvider
+
+
+class _Response:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> _Response:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
 
 
 def test_yahoo_provider_normalizes_market_snapshot_metadata() -> None:
@@ -60,3 +76,82 @@ def test_yahoo_provider_rejects_unusable_payload_without_leaking_shape_errors() 
 
     with pytest.raises(MarketDataError, match="payload unusable"):
         provider.get_snapshot("AAPL")
+
+
+def test_yahoo_provider_rejects_non_mapping_chart_without_leaking_attribute_error() -> None:
+    provider = YahooMarketDataProvider(fetch_json=lambda _url: {"chart": []})
+
+    with pytest.raises(MarketDataError, match="payload unusable"):
+        provider.get_snapshot("AAPL")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("regularMarketTime", 10**100),
+        ("regularMarketTime", 2**63 - 1),
+        ("regularMarketTime", True),
+        ("regularMarketPrice", inf),
+        ("regularMarketPrice", True),
+        ("chartPreviousClose", inf),
+        ("exchangeDataDelayedBy", inf),
+        ("exchangeDataDelayedBy", True),
+    ],
+)
+def test_yahoo_provider_normalizes_invalid_numeric_metadata(
+    field: str,
+    value: float | int,
+) -> None:
+    meta = {
+        "symbol": "AAPL",
+        "regularMarketPrice": 247.77,
+        "chartPreviousClose": 245.50,
+        "currency": "USD",
+        "regularMarketTime": 1_700_000_000,
+    }
+    meta[field] = value
+    provider = YahooMarketDataProvider(
+        fetch_json=lambda _url: {"chart": {"result": [{"meta": meta}], "error": None}}
+    )
+
+    with pytest.raises(MarketDataError, match="payload unusable"):
+        provider.get_snapshot("AAPL")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'"\xff"',
+        (b"[" * 2_000) + b"0" + (b"]" * 2_000),
+    ],
+)
+def test_default_fetcher_normalizes_malformed_json_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    monkeypatch.setattr(
+        market_data.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(payload),
+    )
+
+    with pytest.raises(MarketDataError):
+        market_data._fetch_json("https://example.invalid")
+
+
+def test_default_fetcher_normalizes_json_parser_recursion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        market_data.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(b"{}"),
+    )
+    monkeypatch.setattr(
+        market_data.json,
+        "loads",
+        lambda _payload: (_ for _ in ()).throw(RecursionError("too deeply nested")),
+    )
+
+    with pytest.raises(MarketDataError, match="request failed"):
+        market_data._fetch_json("https://example.invalid")

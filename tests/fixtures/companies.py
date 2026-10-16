@@ -141,7 +141,12 @@ _STRETCH_DOC_LATE = (
 
 def clean_dataset() -> CompanyDataset:
     return CompanyDataset(
-        profile=CompanyProfile(ticker="CLEANCO", name="Clean Co", sector="Industrials"),
+        profile=CompanyProfile(
+            ticker="CLEANCO",
+            name="Clean Co",
+            sector="Industrials",
+            reporting_currency="USD",
+        ),
         periods=[clean_period(i) for i in range(8)],
         documents=[
             DocumentRecord(
@@ -172,7 +177,12 @@ def stretch_dataset() -> CompanyDataset:
         )
     )
     return CompanyDataset(
-        profile=CompanyProfile(ticker="STRETCHCO", name="Stretch Co", sector="Technology"),
+        profile=CompanyProfile(
+            ticker="STRETCHCO",
+            name="Stretch Co",
+            sector="Technology",
+            reporting_currency="USD",
+        ),
         periods=[stretch_period(i) for i in range(8)],
         documents=docs,
     )

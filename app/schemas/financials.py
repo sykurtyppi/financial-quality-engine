@@ -23,6 +23,10 @@ class CompanyProfile(BaseModel):
     name: str | None = None
     sector: str | None = None
     industry: str | None = None
+    reporting_currency: str | None = Field(
+        default=None,
+        description="Currency of normalized monetary filing fields, when known.",
+    )
     is_financial_institution: bool = Field(
         default=False,
         description=(

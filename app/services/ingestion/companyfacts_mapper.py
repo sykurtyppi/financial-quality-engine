@@ -841,6 +841,9 @@ def build_dataset(
             ticker=ticker.upper(),
             name=facts_json.get("entityName"),
             sector=sector,
+            # This mapper currently selects SEC companyfacts monetary units from
+            # the USD bucket; preserve that provenance for currency-safe valuation.
+            reporting_currency="USD",
         ),
         periods=periods,
     )

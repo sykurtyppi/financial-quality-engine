@@ -26,8 +26,8 @@ class MarketDataError(RuntimeError):
 
 class MarketSnapshot(BaseModel):
     ticker: str
-    price: float = Field(gt=0)
-    previous_close: float | None = Field(default=None, gt=0)
+    price: float = Field(gt=0, allow_inf_nan=False)
+    previous_close: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     currency: str
     exchange: str | None = None
     observed_at: datetime
@@ -46,12 +46,18 @@ JsonFetcher = Callable[[str], dict[str, Any]]
 Clock = Callable[[], datetime]
 
 
+def _reject_boolean(value: Any) -> Any:
+    if isinstance(value, bool):
+        raise TypeError("boolean is not valid numeric metadata")
+    return value
+
+
 def _fetch_json(url: str) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, RecursionError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MarketDataError("Market-data request failed") from exc
     if not isinstance(payload, dict):
         raise MarketDataError("Market-data response was not an object")
@@ -81,24 +87,36 @@ class YahooMarketDataProvider:
             if chart.get("error") is not None:
                 raise MarketDataError(f"Yahoo Finance returned an error for {symbol}")
             meta = chart["result"][0]["meta"]
-            price = float(meta["regularMarketPrice"])
+            price = float(_reject_boolean(meta["regularMarketPrice"]))
             currency = str(meta["currency"])
             observed_at = datetime.fromtimestamp(
-                int(meta["regularMarketTime"]), tz=UTC
+                int(_reject_boolean(meta["regularMarketTime"])), tz=UTC
             )
         except MarketDataError:
             raise
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+        except (
+            AttributeError,
+            KeyError,
+            IndexError,
+            OSError,
+            OverflowError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise MarketDataError(f"Yahoo Finance payload unusable for {symbol}") from exc
 
         try:
             delay = meta.get("exchangeDataDelayedBy")
-            delay_seconds = int(delay) if delay is not None else None
+            delay_seconds = int(_reject_boolean(delay)) if delay is not None else None
             previous_close = meta.get("chartPreviousClose", meta.get("previousClose"))
             return MarketSnapshot(
                 ticker=str(meta.get("symbol") or symbol).upper(),
                 price=price,
-                previous_close=float(previous_close) if previous_close is not None else None,
+                previous_close=(
+                    float(_reject_boolean(previous_close))
+                    if previous_close is not None
+                    else None
+                ),
                 currency=currency,
                 exchange=meta.get("exchangeName") or meta.get("fullExchangeName"),
                 observed_at=observed_at,
@@ -108,5 +126,5 @@ class YahooMarketDataProvider:
                 delay_seconds=delay_seconds,
                 is_delayed=(delay_seconds > 0) if delay_seconds is not None else None,
             )
-        except (TypeError, ValueError, ValidationError) as exc:
+        except (OSError, OverflowError, TypeError, ValueError, ValidationError) as exc:
             raise MarketDataError(f"Yahoo Finance payload unusable for {symbol}") from exc

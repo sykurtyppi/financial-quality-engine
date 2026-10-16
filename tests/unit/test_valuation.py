@@ -34,7 +34,9 @@ def _dataset(*, net_income: float = 10.0, cfo: float = 20.0) -> CompanyDataset:
         for quarter, month in enumerate((3, 6, 9, 12), start=1)
     ]
     return CompanyDataset(
-        profile=CompanyProfile(ticker="TEST", name="Test Co"),
+        profile=CompanyProfile(
+            ticker="TEST", name="Test Co", reporting_currency="USD"
+        ),
         periods=periods,
     )
 
@@ -105,6 +107,28 @@ def test_market_snapshot_must_match_fundamentals_ticker() -> None:
     snapshot = _snapshot().model_copy(update={"ticker": "OTHER"})
 
     with pytest.raises(ValueError, match="ticker mismatch"):
+        compute_trailing_valuation(_dataset(), snapshot)
+
+
+def test_market_snapshot_currency_must_match_filing_currency() -> None:
+    snapshot = _snapshot().model_copy(update={"currency": "EUR"})
+
+    with pytest.raises(ValueError, match="currency mismatch"):
+        compute_trailing_valuation(_dataset(), snapshot)
+
+
+def test_filing_currency_must_be_known() -> None:
+    dataset = _dataset()
+    dataset.profile.reporting_currency = None
+
+    with pytest.raises(ValueError, match="filing currency unavailable"):
+        compute_trailing_valuation(dataset, _snapshot())
+
+
+def test_non_finite_derived_valuation_is_rejected() -> None:
+    snapshot = _snapshot().model_copy(update={"price": 1e308})
+
+    with pytest.raises(ValueError, match="non-finite valuation metric"):
         compute_trailing_valuation(_dataset(), snapshot)
 
 

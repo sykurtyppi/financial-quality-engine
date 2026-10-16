@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 
 from app.schemas.financials import CompanyDataset, PeriodFinancials
 from app.schemas.metrics import MetricResult, MetricStatus
@@ -43,6 +44,8 @@ def _metric(
             inputs=dict(inputs),
             note=not_meaningful,
         )
+    if value is None or not isfinite(value):
+        raise ValueError(f"non-finite valuation metric: {name}")
     return MetricResult(
         name=name,
         formula=formula,
@@ -111,6 +114,16 @@ def compute_trailing_valuation(
     if fundamentals_ticker != market_ticker:
         raise ValueError(
             f"ticker mismatch: fundamentals={fundamentals_ticker}, market={market_ticker}"
+        )
+    filing_currency = dataset.profile.reporting_currency
+    if filing_currency is None or not filing_currency.strip():
+        raise ValueError("filing currency unavailable; cross-currency valuation is disabled")
+    normalized_filing_currency = filing_currency.strip().upper()
+    normalized_market_currency = market_snapshot.currency.strip().upper()
+    if normalized_filing_currency != normalized_market_currency:
+        raise ValueError(
+            "currency mismatch: "
+            f"fundamentals={normalized_filing_currency}, market={normalized_market_currency}"
         )
     latest, ttm = _latest_ttm(dataset)
     fiscal_label = ttm.fiscal_label

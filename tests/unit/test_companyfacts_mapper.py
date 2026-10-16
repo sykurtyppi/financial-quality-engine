@@ -60,6 +60,16 @@ class TestDirectAndDerivedFlows:
         assert [p.revenue for p in ds.periods] == [100.0] * 4
         assert diag.field_by_name("revenue").methods == {"direct": 4}
 
+    def test_profile_records_the_normalized_monetary_currency(self):
+        fj = facts_json({
+            "Assets": assets_instants(),
+            "Revenues": quarterly_flows([100.0] * 8),
+        })
+
+        ds, _ = build_dataset(fj, "SYN", n_quarters=4)
+
+        assert ds.profile.reporting_currency == "USD"
+
     def test_q4_derived_from_fy_minus_3_quarters(self):
         # Q1-Q3 quarterly facts + FY annual fact; no Q4 QTD fact (the Q4 problem).
         entries = []

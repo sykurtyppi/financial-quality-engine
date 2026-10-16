@@ -29,12 +29,18 @@ from app.services.ingestion.edgar_adapter import (
 )
 from app.services.ingestion.edgar_documents import fetch_documents
 from app.services.ingestion.sec_client import SecClient, SecClientError
+from app.services.market_data import (
+    MarketDataError,
+    MarketDataProvider,
+    YahooMarketDataProvider,
+)
 from app.services.reporting.report_builder import build_report
+from app.services.valuation import compute_trailing_valuation
 
 logging.basicConfig(level=logging.WARNING)
 
 
-def main() -> int:
+def main(market_data_provider: MarketDataProvider | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("ticker")
     parser.add_argument("--no-docs", action="store_true", help="skip document ingestion")
@@ -79,6 +85,16 @@ def main() -> int:
 
     result = analyze(dataset)
     generated_on = date.today().isoformat()
+    warnings = list(diag.warnings)
+    valuation = None
+    provider = market_data_provider if market_data_provider is not None else YahooMarketDataProvider()
+    try:
+        market_snapshot = provider.get_snapshot(ticker)
+        valuation = compute_trailing_valuation(dataset, market_snapshot)
+    except (MarketDataError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        # Market valuation is optional enrichment; provider failure or incomplete
+        # normalized fundamentals must not suppress the SEC-based report.
+        warnings.append(f"Trailing valuation unavailable: {type(exc).__name__}: {exc}")
     report, thermometer = build_report(
         result, dataset,
         generated_on=generated_on,
@@ -89,13 +105,14 @@ def main() -> int:
         ticker=ticker,
         fetched_at=fetched_at,
         fresh=args.fresh,
-        warnings=diag.warnings,
+        warnings=warnings,
         field_notes=diag.field_notes(),
         doc_diagnostics=doc_diagnostics,
         company_facts=snapshot.company_facts,
         submissions=submissions,
         index_degraded=submissions is None,
         vintage_note=vintage_note,
+        valuation=valuation,
         # No baseline_day: the CLI has no pinned thesis; the silent-revision
         # section compares the newest snapshot with the previous one only.
     )
